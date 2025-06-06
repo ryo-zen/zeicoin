@@ -1,0 +1,349 @@
+// serialize.zig - Zeicoin Minimal Serializer
+// Clean, simple, Zig-native serialization for ZeiCoin data structures
+
+const std = @import("std");
+const testing = std.testing;
+
+// Error types for serialization
+pub const SerializeError = error{
+    EndOfStream,
+    InvalidData,
+    UnsupportedType,
+} || std.mem.Allocator.Error;
+
+/// Serialize any value to a writer
+pub fn serialize(writer: anytype, value: anytype) SerializeError!void {
+    const T = @TypeOf(value);
+    const type_info = @typeInfo(T);
+
+    switch (type_info) {
+        // Basic integer types
+        .int => |int_info| {
+            if (int_info.bits <= 64) {
+                try serializeInt(writer, value);
+            } else {
+                return SerializeError.UnsupportedType;
+            }
+        },
+
+        // Boolean
+        .bool => try serializeBool(writer, value),
+
+        // Float types
+        .float => |float_info| {
+            if (float_info.bits == 32 or float_info.bits == 64) {
+                try serializeFloat(writer, value);
+            } else {
+                return SerializeError.UnsupportedType;
+            }
+        },
+
+        // Arrays and slices
+        .array => |array_info| {
+            if (array_info.child == u8) {
+                // Byte arrays - serialize length then data
+                try serialize(writer, @as(u32, array_info.len));
+                try writer.writeAll(&value);
+            } else {
+                // Generic arrays - serialize each element
+                try serialize(writer, @as(u32, array_info.len));
+                for (value) |item| {
+                    try serialize(writer, item);
+                }
+            }
+        },
+
+        .pointer => |ptr_info| {
+            switch (ptr_info.size) {
+                .slice => {
+                    if (ptr_info.child == u8) {
+                        // String/byte slice - serialize length then data
+                        try serialize(writer, @as(u32, @intCast(value.len)));
+                        try writer.writeAll(value);
+                    } else {
+                        // Generic slice - serialize each element
+                        try serialize(writer, @as(u32, @intCast(value.len)));
+                        for (value) |item| {
+                            try serialize(writer, item);
+                        }
+                    }
+                },
+                .one => {
+                    // Handle string literals (pointer to array)
+                    const child_info = @typeInfo(ptr_info.child);
+                    if (child_info == .array and child_info.array.child == u8) {
+                        // String literal - serialize length then data
+                        try serialize(writer, @as(u32, @intCast(value.len)));
+                        try writer.writeAll(value);
+                    } else {
+                        return SerializeError.UnsupportedType;
+                    }
+                },
+                else => return SerializeError.UnsupportedType,
+            }
+        },
+
+        // Structs - serialize each field
+        .@"struct" => |struct_info| {
+            inline for (struct_info.fields) |field| {
+                try serialize(writer, @field(value, field.name));
+            }
+        },
+
+        // Optional types
+        .optional => |_| {
+            if (value) |val| {
+                try serialize(writer, @as(u8, 1)); // Present
+                try serialize(writer, val);
+            } else {
+                try serialize(writer, @as(u8, 0)); // Null
+            }
+        },
+
+        else => return SerializeError.UnsupportedType,
+    }
+}
+
+/// Deserialize a value of type T from a reader
+pub fn deserialize(reader: anytype, comptime T: type, allocator: std.mem.Allocator) SerializeError!T {
+    const type_info = @typeInfo(T);
+
+    switch (type_info) {
+        // Basic integer types
+        .int => |int_info| {
+            if (int_info.bits <= 64) {
+                return deserializeInt(reader, T);
+            } else {
+                return SerializeError.UnsupportedType;
+            }
+        },
+
+        // Boolean
+        .bool => return deserializeBool(reader),
+
+        // Float types
+        .float => |float_info| {
+            if (float_info.bits == 32 or float_info.bits == 64) {
+                return deserializeFloat(reader, T);
+            } else {
+                return SerializeError.UnsupportedType;
+            }
+        },
+
+        // Arrays
+        .array => |array_info| {
+            var result: T = undefined;
+            const len = try deserialize(reader, u32, allocator);
+            if (len != array_info.len) {
+                return SerializeError.InvalidData;
+            }
+
+            if (array_info.child == u8) {
+                // Byte array
+                _ = try reader.readAll(&result);
+            } else {
+                // Generic array
+                for (&result) |*item| {
+                    item.* = try deserialize(reader, array_info.child, allocator);
+                }
+            }
+            return result;
+        },
+
+        .pointer => |ptr_info| {
+            switch (ptr_info.size) {
+                .slice => {
+                    const len = try deserialize(reader, u32, allocator);
+
+                    if (ptr_info.child == u8) {
+                        // String/byte slice
+                        const data = try allocator.alloc(u8, len);
+                        _ = try reader.readAll(data);
+                        return data;
+                    } else {
+                        // Generic slice
+                        const data = try allocator.alloc(ptr_info.child, len);
+                        for (data) |*item| {
+                            item.* = try deserialize(reader, ptr_info.child, allocator);
+                        }
+                        return data;
+                    }
+                },
+                else => return SerializeError.UnsupportedType,
+            }
+        },
+
+        // Structs - deserialize each field
+        .@"struct" => |struct_info| {
+            var result: T = undefined;
+            inline for (struct_info.fields) |field| {
+                @field(result, field.name) = try deserialize(reader, field.type, allocator);
+            }
+            return result;
+        },
+
+        // Optional types
+        .optional => |opt_info| {
+            const present = try deserialize(reader, u8, allocator);
+            if (present == 1) {
+                return try deserialize(reader, opt_info.child, allocator);
+            } else {
+                return null;
+            }
+        },
+
+        else => return SerializeError.UnsupportedType,
+    }
+}
+
+// Helper functions for basic types
+fn serializeInt(writer: anytype, value: anytype) !void {
+    const bytes = std.mem.toBytes(value);
+    try writer.writeAll(&bytes);
+}
+
+fn deserializeInt(reader: anytype, comptime T: type) !T {
+    var bytes: [@sizeOf(T)]u8 = undefined;
+    _ = try reader.readAll(&bytes);
+    return std.mem.bytesToValue(T, &bytes);
+}
+
+fn serializeBool(writer: anytype, value: bool) !void {
+    try writer.writeByte(if (value) 1 else 0);
+}
+
+fn deserializeBool(reader: anytype) !bool {
+    const byte = try reader.readByte();
+    return byte != 0;
+}
+
+fn serializeFloat(writer: anytype, value: anytype) !void {
+    const bytes = std.mem.toBytes(value);
+    try writer.writeAll(&bytes);
+}
+
+fn deserializeFloat(reader: anytype, comptime T: type) !T {
+    var bytes: [@sizeOf(T)]u8 = undefined;
+    _ = try reader.readAll(&bytes);
+    return std.mem.bytesToValue(T, &bytes);
+}
+
+// Convenience functions for common use cases
+pub fn serializeToBytes(allocator: std.mem.Allocator, value: anytype) ![]u8 {
+    var list = std.ArrayList(u8).init(allocator);
+    defer list.deinit();
+
+    try serialize(list.writer(), value);
+    return list.toOwnedSlice();
+}
+
+pub fn deserializeFromBytes(data: []const u8, comptime T: type, allocator: std.mem.Allocator) !T {
+    var stream = std.io.fixedBufferStream(data);
+    return deserialize(stream.reader(), T, allocator);
+}
+
+// Tests
+test "serialize basic types" {
+    var buffer = std.ArrayList(u8).init(testing.allocator);
+    defer buffer.deinit();
+
+    // Test integers
+    try serialize(buffer.writer(), @as(u32, 42));
+    try serialize(buffer.writer(), @as(i64, -123));
+
+    // Test boolean
+    try serialize(buffer.writer(), true);
+    try serialize(buffer.writer(), false);
+
+    // Test float
+    try serialize(buffer.writer(), @as(f32, 3.14));
+
+    // Verify we have data
+    try testing.expect(buffer.items.len > 0);
+}
+
+test "deserialize basic types" {
+    var buffer = std.ArrayList(u8).init(testing.allocator);
+    defer buffer.deinit();
+
+    // Serialize test data
+    try serialize(buffer.writer(), @as(u32, 42));
+    try serialize(buffer.writer(), true);
+    try serialize(buffer.writer(), @as(f32, 3.14));
+
+    // Deserialize
+    var stream = std.io.fixedBufferStream(buffer.items);
+    const reader = stream.reader();
+
+    const val1 = try deserialize(reader, u32, testing.allocator);
+    const val2 = try deserialize(reader, bool, testing.allocator);
+    const val3 = try deserialize(reader, f32, testing.allocator);
+
+    try testing.expectEqual(@as(u32, 42), val1);
+    try testing.expectEqual(true, val2);
+    try testing.expectApproxEqAbs(@as(f32, 3.14), val3, 0.001);
+}
+
+test "serialize strings" {
+    var buffer = std.ArrayList(u8).init(testing.allocator);
+    defer buffer.deinit();
+
+    const test_string = "Hello ZeiCoin!";
+    try serialize(buffer.writer(), test_string);
+
+    // Deserialize
+    var stream = std.io.fixedBufferStream(buffer.items);
+    const result = try deserialize(stream.reader(), []const u8, testing.allocator);
+    defer testing.allocator.free(result);
+
+    try testing.expectEqualStrings(test_string, result);
+}
+
+test "serialize structs" {
+    const TestStruct = struct {
+        id: u32,
+        name: []const u8,
+        active: bool,
+    };
+
+    var buffer = std.ArrayList(u8).init(testing.allocator);
+    defer buffer.deinit();
+
+    const test_data = TestStruct{
+        .id = 123,
+        .name = "test",
+        .active = true,
+    };
+
+    try serialize(buffer.writer(), test_data);
+
+    // Deserialize
+    var stream = std.io.fixedBufferStream(buffer.items);
+    const result = try deserialize(stream.reader(), TestStruct, testing.allocator);
+    defer testing.allocator.free(result.name);
+
+    try testing.expectEqual(@as(u32, 123), result.id);
+    try testing.expectEqualStrings("test", result.name);
+    try testing.expectEqual(true, result.active);
+}
+
+test "serialize optionals" {
+    var buffer = std.ArrayList(u8).init(testing.allocator);
+    defer buffer.deinit();
+
+    const some_value: ?u32 = 42;
+    const null_value: ?u32 = null;
+
+    try serialize(buffer.writer(), some_value);
+    try serialize(buffer.writer(), null_value);
+
+    // Deserialize
+    var stream = std.io.fixedBufferStream(buffer.items);
+    const reader = stream.reader();
+
+    const result1 = try deserialize(reader, ?u32, testing.allocator);
+    const result2 = try deserialize(reader, ?u32, testing.allocator);
+
+    try testing.expectEqual(@as(?u32, 42), result1);
+    try testing.expectEqual(@as(?u32, null), result2);
+}

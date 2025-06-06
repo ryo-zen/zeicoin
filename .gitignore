@@ -1,0 +1,15 @@
+# Zig build artifacts
+zig-out/
+zig-cache/
+.zig-cache/
+
+# ZeiCoin data directories
+zeicoin_data/
+
+# Claude
+.CLAUDE.md
+CLAUDE.md
+.claude
+
+# RandomX demo files
+randomx/README.md
