@@ -275,8 +275,12 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
     print("💳 Creating new ZeiCoin wallet: {s}\n", .{wallet_name});
 
-    // Initialize database
-    var database = try db.Database.init(allocator, "zeicoin_data");
+    // Initialize database with network-specific directory
+    const data_dir = switch (types.CURRENT_NETWORK) {
+        .testnet => "zeicoin_data_testnet",
+        .mainnet => "zeicoin_data_mainnet",
+    };
+    var database = try db.Database.init(allocator, data_dir);
     defer database.deinit();
 
     // Check if wallet already exists
@@ -309,8 +313,12 @@ fn loadWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
     print("🔓 Loading ZeiCoin wallet: {s}\n", .{wallet_name});
 
-    // Initialize database
-    var database = try db.Database.init(allocator, "zeicoin_data");
+    // Initialize database with network-specific directory
+    const data_dir = switch (types.CURRENT_NETWORK) {
+        .testnet => "zeicoin_data_testnet",
+        .mainnet => "zeicoin_data_mainnet",
+    };
+    var database = try db.Database.init(allocator, data_dir);
     defer database.deinit();
 
     if (!database.walletExists(wallet_name)) {
@@ -338,7 +346,13 @@ fn listWallets(allocator: std.mem.Allocator) !void {
     _ = allocator;
     print("📁 Available ZeiCoin wallets:\n", .{});
 
-    var wallets_dir = std.fs.cwd().openDir("zeicoin_data/wallets", .{ .iterate = true }) catch |err| {
+    // Use network-specific wallet directory
+    const wallets_path = switch (types.CURRENT_NETWORK) {
+        .testnet => "zeicoin_data_testnet/wallets",
+        .mainnet => "zeicoin_data_mainnet/wallets",
+    };
+
+    var wallets_dir = std.fs.cwd().openDir(wallets_path, .{ .iterate = true }) catch |err| {
         if (err == error.FileNotFound) {
             print("   No wallets found. Use 'zeicoin wallet create' to create one.\n", .{});
             return;
@@ -645,8 +659,12 @@ fn handleFundCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 // Helper functions
 
 fn loadWalletForOperation(allocator: std.mem.Allocator, wallet_name: []const u8) !*wallet.Wallet {
-    // Initialize database
-    var database = try db.Database.init(allocator, "zeicoin_data");
+    // Initialize database with network-specific directory
+    const data_dir = switch (types.CURRENT_NETWORK) {
+        .testnet => "zeicoin_data_testnet",
+        .mainnet => "zeicoin_data_mainnet",
+    };
+    var database = try db.Database.init(allocator, data_dir);
     defer database.deinit();
 
     if (!database.walletExists(wallet_name)) {

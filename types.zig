@@ -181,10 +181,44 @@ pub const Block = struct {
 };
 
 /// Genesis block configuration
+pub const GenesisConfig = struct {
+    timestamp: u64,
+    message: []const u8,
+    reward: u64,
+    nonce: u64, // Unique nonce for each network
+};
+
+/// Network-specific genesis configurations
 pub const Genesis = struct {
-    pub const timestamp: u64 = 1704067200; // January 1, 2024 00:00:00 UTC
-    pub const message: []const u8 = "Zeicoin Genesis Block";
-    pub const reward: u64 = 50 * ZEI_COIN; // 50 ZeiCoins for genesis
+    pub fn getConfig() GenesisConfig {
+        return switch (CURRENT_NETWORK) {
+            .testnet => GenesisConfig{
+                .timestamp = 1704067200, // January 1, 2024 00:00:00 UTC
+                .message = "ZeiCoin TestNet Genesis - A minimal digital currency written in ⚡Zig",
+                .reward = 50 * ZEI_COIN,
+                .nonce = 0x7E57DE7,
+            },
+            .mainnet => GenesisConfig{
+                .timestamp = 1736150400, // January 6, 2025 00:00:00 UTC (PLACEHOLDER)
+                .message = "ZeiCoin MainNet Launch - [Quote]",
+                .reward = 50 * ZEI_COIN,
+                .nonce = 0x3A1F1E7,
+            },
+        };
+    }
+
+    // Helper to get individual values for backward compatibility
+    pub fn timestamp() u64 {
+        return getConfig().timestamp;
+    }
+
+    pub fn message() []const u8 {
+        return getConfig().message;
+    }
+
+    pub fn reward() u64 {
+        return getConfig().reward;
+    }
 };
 
 /// Network configuration - TestNet vs MainNet
@@ -204,7 +238,7 @@ pub const NetworkConfig = struct {
     max_nonce: u32,
     block_reward: u64,
     min_fee: u64,
-    
+
     pub fn current() NetworkConfig {
         return switch (CURRENT_NETWORK) {
             .testnet => NetworkConfig{
@@ -218,21 +252,21 @@ pub const NetworkConfig = struct {
             .mainnet => NetworkConfig{
                 .difficulty_bytes = 2, // 2 bytes = secure mining for production
                 .randomx_mode = true, // Fast mode (2GB RAM) for better performance
-                .target_block_time = 600, // 10 minutes (Bitcoin-like)
+                .target_block_time = 120, // 2 minutes (Monero-like)
                 .max_nonce = 10_000_000, // Higher limit for production
                 .block_reward = 50 * ZEI_CENT, // 0.5 ZEI per block (deflationary)
                 .min_fee = 5000, // 0.00005 ZEI minimum fee
             },
         };
     }
-    
+
     pub fn networkName() []const u8 {
         return switch (CURRENT_NETWORK) {
             .testnet => "TestNet",
             .mainnet => "MainNet",
         };
     }
-    
+
     pub fn displayInfo() void {
         const config = current();
         std.debug.print("🌐 Network: {s}\n", .{networkName()});

@@ -5,11 +5,16 @@ zig-cache/
 
 # ZeiCoin data directories
 zeicoin_data/
+zeicoin_data_testnet/
+zeicoin_data_mainnet/
 
 # Claude
 .CLAUDE.md
 CLAUDE.md
 .claude
+README.md
 
 # RandomX demo files
+randomx/demo.zig
+randomx/demo.o
 randomx/README.md
