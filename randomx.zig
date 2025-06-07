@@ -21,10 +21,6 @@ pub const RandomXContext = struct {
     mode: RandomXMode,
 
     pub fn init(allocator: Allocator, key: []const u8, mode: RandomXMode) !RandomXContext {
-        if (mode != .light) {
-            return RandomXError.InvalidMode; // Only light mode supported for now
-        }
-
         const key_copy = try allocator.dupe(u8, key);
         return RandomXContext{
             .allocator = allocator,
@@ -46,6 +42,9 @@ pub const RandomXContext = struct {
             _ = std.fmt.bufPrint(hex_input[i*2..i*2+2], "{x:0>2}", .{byte}) catch unreachable;
         }
         
+        // Get mode string
+        const mode_str = if (self.mode == .light) "light" else "fast";
+        
         // Run RandomX helper subprocess
         const result = try std.process.Child.run(.{
             .allocator = self.allocator,
@@ -54,6 +53,7 @@ pub const RandomXContext = struct {
                 hex_input,
                 self.key,
                 "1", // difficulty bytes (will be passed from caller)
+                mode_str,
             },
         });
         defer self.allocator.free(result.stdout);

@@ -14,6 +14,9 @@ typedef struct randomx_context randomx_context;
 // Initialize RandomX in light mode
 randomx_context* randomx_init_light(const char* key, size_t key_size);
 
+// Initialize RandomX in fast mode (2GB dataset)
+randomx_context* randomx_init_fast(const char* key, size_t key_size);
+
 // Calculate hash
 int randomx_calculate_hash_wrapper(randomx_context* ctx, const void* input, size_t input_size, void* output);
 

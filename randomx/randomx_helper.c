@@ -6,14 +6,16 @@
 #include "wrapper.h"
 
 int main(int argc, char* argv[]) {
-    if (argc != 4) {
-        printf("Usage: %s <input_hex> <key> <difficulty_bytes>\n", argv[0]);
+    if (argc != 5) {
+        printf("Usage: %s <input_hex> <key> <difficulty_bytes> <mode>\n", argv[0]);
+        printf("Mode: 'light' or 'fast'\n");
         return 1;
     }
     
     const char* input_hex = argv[1];
     const char* key = argv[2];
     int difficulty_bytes = atoi(argv[3]);
+    const char* mode = argv[4];
     
     // Convert hex input to bytes
     size_t input_len = strlen(input_hex) / 2;
@@ -22,10 +24,20 @@ int main(int argc, char* argv[]) {
         sscanf(input_hex + 2*i, "%2hhx", &input[i]);
     }
     
-    // Initialize RandomX
-    randomx_context* ctx = randomx_init_light(key, strlen(key));
+    // Initialize RandomX based on mode
+    randomx_context* ctx = NULL;
+    if (strcmp(mode, "light") == 0) {
+        ctx = randomx_init_light(key, strlen(key));
+    } else if (strcmp(mode, "fast") == 0) {
+        ctx = randomx_init_fast(key, strlen(key));
+    } else {
+        printf("ERROR: Invalid mode '%s'. Use 'light' or 'fast'\n", mode);
+        free(input);
+        return 1;
+    }
+    
     if (!ctx) {
-        printf("ERROR: Failed to initialize RandomX\n");
+        printf("ERROR: Failed to initialize RandomX in %s mode\n", mode);
         free(input);
         return 1;
     }

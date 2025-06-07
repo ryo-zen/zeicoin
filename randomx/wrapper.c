@@ -65,6 +65,44 @@ void randomx_destroy_context(randomx_context* ctx) {
     free(ctx);
 }
 
+// Initialize RandomX in fast mode (with 2GB dataset)
+randomx_context* randomx_init_fast(const char* key, size_t key_size) {
+    randomx_context* ctx = malloc(sizeof(randomx_context));
+    if (!ctx) return NULL;
+    
+    // Create cache
+    ctx->cache = randomx_alloc_cache(RANDOMX_FLAG_DEFAULT);
+    if (!ctx->cache) {
+        free(ctx);
+        return NULL;
+    }
+    
+    // Initialize cache
+    randomx_init_cache(ctx->cache, key, key_size);
+    
+    // Allocate dataset (2GB)
+    ctx->dataset = randomx_alloc_dataset(RANDOMX_FLAG_DEFAULT);
+    if (!ctx->dataset) {
+        randomx_release_cache(ctx->cache);
+        free(ctx);
+        return NULL;
+    }
+    
+    // Initialize dataset from cache
+    randomx_init_dataset(ctx->dataset, ctx->cache, 0, randomx_dataset_item_count());
+    
+    // Create VM with dataset (fast mode)
+    ctx->vm = randomx_create_vm(RANDOMX_FLAG_DEFAULT, NULL, ctx->dataset);
+    if (!ctx->vm) {
+        randomx_release_dataset(ctx->dataset);
+        randomx_release_cache(ctx->cache);
+        free(ctx);
+        return NULL;
+    }
+    
+    return ctx;
+}
+
 // Test function
 int test_randomx_wrapper() {
     const char* key = "ZeiCoin Test Key";
