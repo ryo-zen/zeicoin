@@ -9,6 +9,23 @@ const util = @import("util.zig");
 pub const ZEI_COIN: u64 = 100000000; // 1 Zeicoin = 100,000,000 zei
 pub const ZEI_CENT: u64 = 1000000; // 1 cent = 1,000,000 zei
 
+// Timing constants - Common intervals used throughout the codebase
+pub const TIMING = struct {
+    pub const PEER_TIMEOUT_SECONDS: i64 = 60;
+    pub const DISCOVERY_INTERVAL_SECONDS: i64 = 300; // 5 minutes
+    pub const MAINTENANCE_CYCLE_SECONDS: u64 = 10;
+    pub const SERVER_SLEEP_MS: u64 = 10;
+    pub const CLI_TIMEOUT_SECONDS: u64 = 5;
+    pub const BACKOFF_BASE_SECONDS: i64 = 30;
+};
+
+// Progress reporting constants
+pub const PROGRESS = struct {
+    pub const RANDOMX_REPORT_INTERVAL: u32 = 10_000;
+    pub const SHA256_REPORT_INTERVAL: u32 = 100_000;
+    pub const DECIMAL_PRECISION_MULTIPLIER: u64 = 100_000;
+};
+
 // Network constants - Bootstrap nodes for peer discovery
 pub const BOOTSTRAP_NODES = [_][]const u8{
     "134.199.168.129:10801", // Primary bootstrap node
@@ -80,6 +97,7 @@ pub const Transaction = struct {
         writer.writeAll(&tx_for_hash.sender) catch unreachable;
         writer.writeAll(&tx_for_hash.recipient) catch unreachable;
         writer.writeInt(u64, tx_for_hash.amount, .little) catch unreachable;
+        writer.writeInt(u64, tx_for_hash.fee, .little) catch unreachable;
         writer.writeInt(u64, tx_for_hash.nonce, .little) catch unreachable;
         writer.writeInt(u64, tx_for_hash.timestamp, .little) catch unreachable;
         writer.writeAll(&tx_for_hash.sender_public_key) catch unreachable;
@@ -119,12 +137,92 @@ pub const Account = struct {
     }
 };
 
+/// Dynamic difficulty target for constrained adjustment
+pub const DifficultyTarget = struct {
+    base_bytes: u8,    // 1 for TestNet, 2 for MainNet (never changes)
+    threshold: u32,    // Value within the remaining bytes (0x00000000 to 0xFFFFFFFF)
+    
+    /// Create initial difficulty target for network
+    pub fn initial(network: NetworkType) DifficultyTarget {
+        return switch (network) {
+            .testnet => DifficultyTarget{
+                .base_bytes = 1,
+                .threshold = 0x80000000, // Middle of 1-byte range
+            },
+            .mainnet => DifficultyTarget{
+                .base_bytes = 2,
+                .threshold = 0x00008000, // Middle of 2-byte range
+            },
+        };
+    }
+    
+    /// Check if hash meets this difficulty target
+    pub fn meetsDifficulty(self: DifficultyTarget, hash: [32]u8) bool {
+        // First check required zero bytes
+        for (0..self.base_bytes) |i| {
+            if (hash[i] != 0) return false;
+        }
+        
+        // Then check threshold in next 4 bytes
+        if (self.base_bytes + 4 > 32) return true; // Edge case: not enough bytes
+        
+        var hash_value: u32 = 0;
+        for (0..4) |i| {
+            if (self.base_bytes + i < 32) {
+                hash_value = (hash_value << 8) | @as(u32, hash[self.base_bytes + i]);
+            }
+        }
+        
+        return hash_value < self.threshold;
+    }
+    
+    /// Adjust difficulty by factor, constrained to network limits
+    pub fn adjust(self: DifficultyTarget, factor: f64, network: NetworkType) DifficultyTarget {
+        // Clamp factor to prevent extreme changes
+        const clamped_factor = @max(0.5, @min(2.0, factor));
+        
+        // Calculate new threshold (inverse relationship: higher factor = higher threshold = easier)
+        const new_threshold_f64 = @as(f64, @floatFromInt(self.threshold)) * clamped_factor;
+        var new_threshold = @as(u32, @intFromFloat(@max(1.0, @min(0xFFFFFFFF, new_threshold_f64))));
+        
+        // Ensure we stay within network constraints
+        const min_threshold: u32 = switch (network) {
+            .testnet => 0x00010000,  // Hardest 1-byte difficulty
+            .mainnet => 0x00000001,  // Hardest 2-byte difficulty
+        };
+        const max_threshold: u32 = switch (network) {
+            .testnet => 0xFF000000,  // Easiest 1-byte difficulty
+            .mainnet => 0x00FF0000,  // Easiest 2-byte difficulty
+        };
+        
+        new_threshold = @max(min_threshold, @min(max_threshold, new_threshold));
+        
+        return DifficultyTarget{
+            .base_bytes = self.base_bytes,
+            .threshold = new_threshold,
+        };
+    }
+    
+    /// Serialize difficulty target to u64 for storage compatibility
+    pub fn toU64(self: DifficultyTarget) u64 {
+        return (@as(u64, self.base_bytes) << 32) | @as(u64, self.threshold);
+    }
+    
+    /// Deserialize difficulty target from u64
+    pub fn fromU64(value: u64) DifficultyTarget {
+        return DifficultyTarget{
+            .base_bytes = @intCast((value >> 32) & 0xFF),
+            .threshold = @intCast(value & 0xFFFFFFFF),
+        };
+    }
+};
+
 /// Block header containing essential block information
 pub const BlockHeader = struct {
     previous_hash: BlockHash,
     merkle_root: Hash, // Root of transaction merkle tree
     timestamp: u64, // Unix timestamp when block was created
-    difficulty: u32, // Proof-of-work difficulty target
+    difficulty: u64, // Dynamic difficulty target (serialized DifficultyTarget)
     nonce: u32, // Proof-of-work nonce
 
     /// Serialize block header to bytes
@@ -132,8 +230,13 @@ pub const BlockHeader = struct {
         try writer.writeAll(&self.previous_hash);
         try writer.writeAll(&self.merkle_root);
         try writer.writeInt(u64, self.timestamp, .little);
-        try writer.writeInt(u32, self.difficulty, .little);
+        try writer.writeInt(u64, self.difficulty, .little);
         try writer.writeInt(u32, self.nonce, .little);
+    }
+    
+    /// Get difficulty target from header
+    pub fn getDifficultyTarget(self: *const BlockHeader) DifficultyTarget {
+        return DifficultyTarget.fromU64(self.difficulty);
     }
 
     /// Calculate hash of this block header
@@ -232,7 +335,6 @@ pub const CURRENT_NETWORK: NetworkType = .testnet; // Change to .mainnet for pro
 
 /// Network-specific configurations
 pub const NetworkConfig = struct {
-    difficulty_bytes: u8,
     randomx_mode: bool, // false = light (256MB), true = fast (2GB)
     target_block_time: u64, // seconds
     max_nonce: u32,
@@ -242,7 +344,6 @@ pub const NetworkConfig = struct {
     pub fn current() NetworkConfig {
         return switch (CURRENT_NETWORK) {
             .testnet => NetworkConfig{
-                .difficulty_bytes = 1, // 1 byte = fast mining for development
                 .randomx_mode = false, // Light mode (256MB RAM)
                 .target_block_time = 10, // 10 seconds
                 .max_nonce = 1_000_000, // Reasonable limit for testing
@@ -250,7 +351,6 @@ pub const NetworkConfig = struct {
                 .min_fee = 1000, // 0.00001 ZEI minimum fee
             },
             .mainnet => NetworkConfig{
-                .difficulty_bytes = 2, // 2 bytes = secure mining for production
                 .randomx_mode = true, // Fast mode (2GB RAM) for better performance
                 .target_block_time = 120, // 2 minutes (Monero-like)
                 .max_nonce = 10_000_000, // Higher limit for production
@@ -269,8 +369,9 @@ pub const NetworkConfig = struct {
 
     pub fn displayInfo() void {
         const config = current();
+        const initial_difficulty = ZenMining.initialDifficultyTarget();
         std.debug.print("🌐 Network: {s}\n", .{networkName()});
-        std.debug.print("⚡ Difficulty: {} bytes\n", .{config.difficulty_bytes});
+        std.debug.print("⚡ Difficulty: {}-byte range (dynamic)\n", .{initial_difficulty.base_bytes});
         std.debug.print("🧠 RandomX Mode: {s}\n", .{if (config.randomx_mode) "Fast (2GB)" else "Light (256MB)"});
         std.debug.print("⏰ Block Time: {}s\n", .{config.target_block_time});
         std.debug.print("💰 Block Reward: {d:.8} ZEI\n", .{@as(f64, @floatFromInt(config.block_reward)) / @as(f64, @floatFromInt(ZEI_COIN))});
@@ -281,11 +382,16 @@ pub const NetworkConfig = struct {
 /// Zeicoin mining configuration - network-aware
 pub const ZenMining = struct {
     pub const BLOCK_REWARD: u64 = NetworkConfig.current().block_reward;
-    pub const INITIAL_DIFFICULTY: u32 = 0x0FFFFFFF; // Easy difficulty (not used with RandomX)
     pub const TARGET_BLOCK_TIME: u64 = NetworkConfig.current().target_block_time;
     pub const MAX_NONCE: u32 = NetworkConfig.current().max_nonce;
-    pub const DIFFICULTY_BYTES: u8 = NetworkConfig.current().difficulty_bytes;
     pub const RANDOMX_MODE: bool = NetworkConfig.current().randomx_mode;
+    pub const DIFFICULTY_ADJUSTMENT_PERIOD: u64 = 20; // Adjust every 20 blocks
+    pub const MAX_ADJUSTMENT_FACTOR: f64 = 2.0; // Maximum 2x change per adjustment
+    
+    /// Get initial difficulty target for current network
+    pub fn initialDifficultyTarget() DifficultyTarget {
+        return DifficultyTarget.initial(CURRENT_NETWORK);
+    }
 };
 
 /// 💰 Zeicoin transaction fee configuration - network-aware economic incentives
@@ -355,7 +461,7 @@ test "block validation" {
             .previous_hash = std.mem.zeroes(BlockHash),
             .merkle_root = std.mem.zeroes(Hash),
             .timestamp = 1704067200,
-            .difficulty = 0x1d00ffff,
+            .difficulty = ZenMining.initialDifficultyTarget().toU64(),
             .nonce = 0,
         },
         .transactions = &transactions,
@@ -423,11 +529,12 @@ test "transaction hash" {
 
 test "block header hash consistency" {
     // Create test block header
+    const test_difficulty = ZenMining.initialDifficultyTarget().toU64();
     const header1 = BlockHeader{
         .previous_hash = std.mem.zeroes(Hash),
         .merkle_root = [_]u8{1} ++ std.mem.zeroes([31]u8),
         .timestamp = 1704067200,
-        .difficulty = 0x1d00ffff,
+        .difficulty = test_difficulty,
         .nonce = 42,
     };
 
@@ -436,7 +543,7 @@ test "block header hash consistency" {
         .previous_hash = std.mem.zeroes(Hash),
         .merkle_root = [_]u8{1} ++ std.mem.zeroes([31]u8),
         .timestamp = 1704067200,
-        .difficulty = 0x1d00ffff,
+        .difficulty = test_difficulty,
         .nonce = 42,
     };
 
@@ -451,11 +558,12 @@ test "block header hash consistency" {
 }
 
 test "block header hash uniqueness" {
+    const test_difficulty = ZenMining.initialDifficultyTarget().toU64();
     const base_header = BlockHeader{
         .previous_hash = std.mem.zeroes(Hash),
         .merkle_root = std.mem.zeroes(Hash),
         .timestamp = 1704067200,
-        .difficulty = 0x1d00ffff,
+        .difficulty = test_difficulty,
         .nonce = 0,
     };
 
@@ -481,9 +589,9 @@ test "block header hash uniqueness" {
 
     // Different difficulty should produce different hash
     var header_diff1 = base_header;
-    header_diff1.difficulty = 0x1d00ffff;
+    header_diff1.difficulty = test_difficulty;
     var header_diff2 = base_header;
-    header_diff2.difficulty = 0x1e00ffff;
+    header_diff2.difficulty = test_difficulty + 1;
 
     const hash_diff1 = header_diff1.hash();
     const hash_diff2 = header_diff2.hash();
@@ -514,7 +622,7 @@ test "block hash delegated to header hash" {
             .previous_hash = std.mem.zeroes(BlockHash),
             .merkle_root = std.mem.zeroes(Hash),
             .timestamp = 1704067200,
-            .difficulty = 0x1d00ffff,
+            .difficulty = ZenMining.initialDifficultyTarget().toU64(),
             .nonce = 12345,
         },
         .transactions = &transactions,

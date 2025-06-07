@@ -78,7 +78,7 @@ pub const RandomXContext = struct {
     }
 };
 
-// Check if hash meets difficulty target (configurable leading zeros)
+// Check if hash meets difficulty target (configurable leading zeros) - Legacy function
 pub fn hashMeetsDifficulty(hash: [32]u8, difficulty_bytes: u8) bool {
     if (difficulty_bytes == 0 or difficulty_bytes > 32) return false;
     
@@ -88,6 +88,11 @@ pub fn hashMeetsDifficulty(hash: [32]u8, difficulty_bytes: u8) bool {
     }
     
     return true;
+}
+
+// Check if hash meets new dynamic difficulty target
+pub fn hashMeetsDifficultyTarget(hash: [32]u8, target: @import("types.zig").DifficultyTarget) bool {
+    return target.meetsDifficulty(hash);
 }
 
 // Helper to create blockchain-specific RandomX key
