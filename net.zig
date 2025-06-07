@@ -29,8 +29,9 @@ pub const MessageType = enum(u12) {
     getblocks = 5,
     tx = 6,
     block = 7,
-    ping = 8,
-    pong = 9,
+    blocks = 8, // Batch of blocks for sync
+    ping = 9,
+    pong = 10,
 };
 
 // Discovery message for UDP broadcast
@@ -98,6 +99,18 @@ pub const MessageHeader = struct {
             .checksum = 0, // TODO: Calculate checksum
         };
     }
+};
+
+// Sync protocol message structures
+pub const GetBlocksMessage = struct {
+    start_height: u32,
+    count: u32,
+};
+
+pub const BlocksMessage = struct {
+    start_height: u32,
+    count: u32,
+    // Followed by serialized blocks data
 };
 
 // Peer connection state
@@ -281,6 +294,23 @@ pub const Peer = struct {
         }
 
         std.debug.print("📤 Broadcasted block to peer\n", .{});
+    }
+
+    pub fn sendGetBlocks(self: *Peer, start_height: u32, count: u32) !void {
+        if (self.socket == null or self.state != .connected) return error.NotConnected;
+
+        const getblocks_msg = GetBlocksMessage{
+            .start_height = start_height,
+            .count = count,
+        };
+
+        const header = MessageHeader.create(.getblocks, @sizeOf(GetBlocksMessage));
+        const socket = self.socket.?;
+        
+        _ = try socket.write(std.mem.asBytes(&header));
+        _ = try socket.write(std.mem.asBytes(&getblocks_msg));
+
+        std.debug.print("📡 Requested {} blocks starting from height {}\n", .{ count, start_height });
     }
 };
 
@@ -892,6 +922,10 @@ fn processMessage(network: *NetworkManager, data: []const u8) void {
     } else if (std.mem.eql(u8, command, "block")) {
         std.debug.print("📦 Block received from network\n", .{});
         processIncomingBlock(network, data[@sizeOf(MessageHeader)..]);
+    } else if (std.mem.eql(u8, command, "getblocks")) {
+        handleGetBlocksMessage(network, data[@sizeOf(MessageHeader)..]);
+    } else if (std.mem.eql(u8, command, "blocks")) {
+        handleBlocksMessage(network, data[@sizeOf(MessageHeader)..]);
     } else if (std.mem.eql(u8, command, "ping")) {
         handlePingMessage(network);
     } else if (std.mem.eql(u8, command, "pong")) {
@@ -1007,11 +1041,34 @@ fn handleVersionMessage(network: *NetworkManager, version_data: []const u8) void
         const our_height = blockchain.getHeight() catch 0;
         std.debug.print("📊 Our height: {}, peer height: {}\n", .{ our_height, peer_version.block_height });
 
-        // Sync logic: if peer is ahead, request blocks
+        // Sync logic: if peer is ahead, start sync process
         if (peer_version.block_height > our_height) {
             const blocks_behind = peer_version.block_height - our_height;
             std.debug.print("📈 We are {} blocks behind, need to sync\n", .{blocks_behind});
-            // TODO: Request blocks from peer
+            
+            // Check if we should sync
+            const should_sync = blockchain.shouldSync(peer_version.block_height) catch false;
+            if (should_sync) {
+                // Find the peer that sent this version message
+                var sync_peer: ?*Peer = null;
+                for (network.peers.items) |*peer| {
+                    if (peer.state == .connected) {
+                        sync_peer = peer;
+                        break;
+                    }
+                }
+                
+                if (sync_peer) |peer| {
+                    std.debug.print("🔄 Starting sync with peer\n", .{});
+                    blockchain.startSync(peer, peer_version.block_height) catch |err| {
+                        std.debug.print("❌ Failed to start sync: {}\n", .{err});
+                    };
+                } else {
+                    std.debug.print("⚠️ No connected peer found for sync\n", .{});
+                }
+            } else {
+                std.debug.print("⚠️ Sync already in progress or not ready\n", .{});
+            }
         } else if (our_height > peer_version.block_height) {
             const blocks_ahead = our_height - peer_version.block_height;
             std.debug.print("📈 We are {} blocks ahead\n", .{blocks_ahead});
@@ -1036,6 +1093,211 @@ fn handlePongMessage(network: *NetworkManager) void {
     _ = network; // TODO: Update last_seen for specific peer
     std.debug.print("🏓 Pong received - peer alive\n", .{});
     // TODO: Update peer last_seen timestamp
+}
+
+// Handle getblocks request - respond with requested blocks
+fn handleGetBlocksMessage(network: *NetworkManager, message_data: []const u8) void {
+    if (message_data.len < @sizeOf(GetBlocksMessage)) {
+        std.debug.print("⚠️ GetBlocks message incomplete\n", .{});
+        return;
+    }
+
+    const getblocks_msg = std.mem.bytesToValue(GetBlocksMessage, message_data[0..@sizeOf(GetBlocksMessage)]);
+    std.debug.print("📥 GetBlocks request: {} blocks starting from height {}\n", .{ getblocks_msg.count, getblocks_msg.start_height });
+
+    // Get blockchain reference
+    if (network.blockchain == null) {
+        std.debug.print("⚠️ GetBlocks received but no blockchain connection\n", .{});
+        return;
+    }
+
+    const blockchain = network.blockchain.?;
+    const our_height = blockchain.getHeight() catch {
+        std.debug.print("❌ Failed to get blockchain height\n", .{});
+        return;
+    };
+
+    // Check if we have the requested blocks
+    if (getblocks_msg.start_height >= our_height) {
+        std.debug.print("⚠️ Requested blocks beyond our height ({} >= {})\n", .{ getblocks_msg.start_height, our_height });
+        return;
+    }
+
+    // Calculate how many blocks we can actually send
+    const available_blocks = our_height - getblocks_msg.start_height;
+    var blocks_to_send = @min(getblocks_msg.count, available_blocks);
+    
+    // Limit batch size to prevent memory exhaustion attacks
+    blocks_to_send = @min(blocks_to_send, types.SYNC.BATCH_SIZE * 2); // Allow up to 2x normal batch size
+
+    std.debug.print("📤 Sending {} blocks to peer\n", .{blocks_to_send});
+
+    // Send blocks response
+    sendBlocksResponse(network, getblocks_msg.start_height, blocks_to_send) catch |err| {
+        std.debug.print("❌ Failed to send blocks response: {}\n", .{err});
+    };
+}
+
+// Handle blocks response - process batch of blocks for sync
+fn handleBlocksMessage(network: *NetworkManager, message_data: []const u8) void {
+    if (message_data.len < @sizeOf(BlocksMessage)) {
+        std.debug.print("⚠️ Blocks message incomplete\n", .{});
+        return;
+    }
+
+    const blocks_msg = std.mem.bytesToValue(BlocksMessage, message_data[0..@sizeOf(BlocksMessage)]);
+    std.debug.print("📥 Blocks response: {} blocks starting from height {}\n", .{ blocks_msg.count, blocks_msg.start_height });
+
+    // Validate message size to prevent memory exhaustion attacks
+    if (blocks_msg.count > types.SYNC.BATCH_SIZE * 3) { // Allow up to 3x normal batch size
+        std.debug.print("⚠️ Blocks message too large: {} blocks (max {})\n", .{ blocks_msg.count, types.SYNC.BATCH_SIZE * 3 });
+        return;
+    }
+    
+    // Validate message data size
+    const blocks_data = message_data[@sizeOf(BlocksMessage)..];
+    const min_expected_size = blocks_msg.count * (@sizeOf(types.BlockHeader) + @sizeOf(u32)); // Minimum size for headers + tx counts
+    if (blocks_data.len < min_expected_size) {
+        std.debug.print("⚠️ Blocks message data too small: {} bytes (expected at least {})\n", .{ blocks_data.len, min_expected_size });
+        return;
+    }
+    
+    // Check total message size
+    if (message_data.len > MAX_MESSAGE_SIZE) {
+        std.debug.print("⚠️ Message exceeds maximum size: {} bytes (max {})\n", .{ message_data.len, MAX_MESSAGE_SIZE });
+        return;
+    }
+
+    // Get blockchain reference
+    if (network.blockchain == null) {
+        std.debug.print("⚠️ Blocks received but no blockchain connection\n", .{});
+        return;
+    }
+
+    // Process the blocks data (after the BlocksMessage header)
+    processBlocksBatch(network, blocks_msg.start_height, blocks_msg.count, blocks_data) catch |err| {
+        std.debug.print("❌ Failed to process blocks batch: {}\n", .{err});
+    };
+}
+
+// Send blocks response to peer
+fn sendBlocksResponse(network: *NetworkManager, start_height: u32, count: u32) !void {
+    // TODO: This should be sent to specific peer, but for now we'll use the first connected peer
+    // In a full implementation, we'd track which peer sent the request
+    
+    var connected_peer: ?*Peer = null;
+    for (network.peers.items) |*peer| {
+        if (peer.state == .connected) {
+            connected_peer = peer;
+            break;
+        }
+    }
+    
+    if (connected_peer == null) {
+        std.debug.print("⚠️ No connected peer to send blocks to\n", .{});
+        return;
+    }
+    
+    const peer = connected_peer.?;
+    const blockchain = network.blockchain.?;
+    
+    // Calculate message size
+    var total_size: usize = @sizeOf(BlocksMessage);
+    for (0..count) |i| {
+        const block_height = start_height + @as(u32, @intCast(i));
+        const block = blockchain.getBlock(block_height) catch continue;
+        total_size += @sizeOf(types.BlockHeader) + @sizeOf(u32) + @sizeOf(types.Transaction) * block.transactions.len;
+    }
+    
+    // Send blocks message header
+    const blocks_msg = BlocksMessage{
+        .start_height = start_height,
+        .count = count,
+    };
+    
+    const header = MessageHeader.create(.blocks, @intCast(total_size));
+    const socket = peer.socket.?;
+    
+    _ = try socket.write(std.mem.asBytes(&header));
+    _ = try socket.write(std.mem.asBytes(&blocks_msg));
+    
+    // Send each block
+    for (0..count) |i| {
+        const block_height = start_height + @as(u32, @intCast(i));
+        const block = blockchain.getBlock(block_height) catch continue;
+        
+        // Send block header
+        _ = try socket.write(std.mem.asBytes(&block.header));
+        
+        // Send transaction count
+        const tx_count: u32 = @intCast(block.transactions.len);
+        _ = try socket.write(std.mem.asBytes(&tx_count));
+        
+        // Send transactions
+        for (block.transactions) |tx| {
+            _ = try socket.write(std.mem.asBytes(&tx));
+        }
+    }
+    
+    std.debug.print("📤 Sent {} blocks to peer\n", .{count});
+}
+
+// Process batch of blocks received during sync
+fn processBlocksBatch(network: *NetworkManager, start_height: u32, count: u32, blocks_data: []const u8) !void {
+    const blockchain = network.blockchain.?;
+    var data_offset: usize = 0;
+    
+    for (0..count) |i| {
+        const block_height = start_height + @as(u32, @intCast(i));
+        
+        // Parse block header
+        if (data_offset + @sizeOf(types.BlockHeader) > blocks_data.len) {
+            std.debug.print("❌ Block {} header beyond data boundary\n", .{i});
+            return;
+        }
+        
+        const header = std.mem.bytesToValue(types.BlockHeader, blocks_data[data_offset..data_offset + @sizeOf(types.BlockHeader)]);
+        data_offset += @sizeOf(types.BlockHeader);
+        
+        // Parse transaction count
+        if (data_offset + @sizeOf(u32) > blocks_data.len) {
+            std.debug.print("❌ Block {} tx count beyond data boundary\n", .{i});
+            return;
+        }
+        
+        const tx_count = std.mem.bytesToValue(u32, blocks_data[data_offset..data_offset + @sizeOf(u32)]);
+        data_offset += @sizeOf(u32);
+        
+        // Parse transactions
+        const transactions = try network.allocator.alloc(types.Transaction, tx_count);
+        defer network.allocator.free(transactions);
+        
+        for (transactions) |*tx| {
+            if (data_offset + @sizeOf(types.Transaction) > blocks_data.len) {
+                std.debug.print("❌ Block {} transaction beyond data boundary\n", .{i});
+                return;
+            }
+            
+            tx.* = std.mem.bytesToValue(types.Transaction, blocks_data[data_offset..data_offset + @sizeOf(types.Transaction)]);
+            data_offset += @sizeOf(types.Transaction);
+        }
+        
+        // Create block and add to blockchain
+        const block = types.Block{
+            .header = header,
+            .transactions = transactions,
+        };
+        
+        try blockchain.handleSyncBlock(block_height, block);
+        std.debug.print("✅ Processed sync block at height {}\n", .{block_height});
+    }
+    
+    // After processing the batch, request the next batch if still syncing
+    if (blockchain.getSyncState() == .syncing) {
+        blockchain.requestNextSyncBatch() catch |err| {
+            std.debug.print("❌ Failed to request next sync batch: {}\n", .{err});
+        };
+    }
 }
 
 // Maintenance thread
@@ -1067,6 +1329,11 @@ fn maintainConnections(network: *NetworkManager) void {
                     // Log handled in connect function
                 };
             }
+        }
+
+        // Check for sync timeouts
+        if (network.blockchain) |blockchain| {
+            blockchain.checkSyncTimeout();
         }
 
         // Periodic discovery (every 5 minutes)
