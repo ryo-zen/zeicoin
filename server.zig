@@ -50,19 +50,6 @@ fn printCompactBanner() void {
     print("\n", .{});
 }
 
-// Helper function to format ZEI amounts with proper decimal places
-fn formatZEI(allocator: std.mem.Allocator, amount_zei: u64) ![]u8 {
-    const zei_coins = amount_zei / types.ZEI_COIN;
-    const zei_fraction = amount_zei % types.ZEI_COIN;
-
-    if (zei_fraction == 0) {
-        return std.fmt.allocPrint(allocator, "{} ZEI", .{zei_coins});
-    } else {
-        // Format with 5 decimal places for precision
-        const decimal = @as(f64, @floatFromInt(zei_fraction)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-        return std.fmt.allocPrint(allocator, "{}.{d:0>5} ZEI", .{ zei_coins, @as(u64, @intFromFloat(decimal * 100000)) });
-    }
-}
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -202,7 +189,7 @@ pub fn main() !void {
         }
 
         // Brief meditation pause for zen flow (reduced for better responsiveness)
-        std.time.sleep(10 * std.time.ns_per_ms);
+        std.time.sleep(types.TIMING.SERVER_SLEEP_MS * std.time.ns_per_ms);
 
         // Occasional network status (pure information)
         if (block_count % 10 == 0 and block_count > 0) {
@@ -450,7 +437,7 @@ fn handleBalanceCheck(allocator: std.mem.Allocator, connection: net.Server.Conne
     try connection.stream.writeAll(response);
 
     // Format display for server logs
-    const balance_display = formatZEI(allocator, account.balance) catch "? ZEI";
+    const balance_display = util.formatZEI(allocator, account.balance) catch "? ZEI";
     defer if (!std.mem.eql(u8, balance_display, "? ZEI")) allocator.free(balance_display);
     print("📤 Sent balance: {s} for {s}\n", .{ balance_display, address_hex[0..16] });
 }
@@ -621,9 +608,9 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
     };
 
     // Format amounts properly for display
-    const amount_display = formatZEI(allocator, amount) catch "? ZEI";
+    const amount_display = util.formatZEI(allocator, amount) catch "? ZEI";
     defer if (!std.mem.eql(u8, amount_display, "? ZEI")) allocator.free(amount_display);
-    const fee_display = formatZEI(allocator, fee) catch "? ZEI";
+    const fee_display = util.formatZEI(allocator, fee) catch "? ZEI";
     defer if (!std.mem.eql(u8, fee_display, "? ZEI")) allocator.free(fee_display);
 
     logMessage("📝 Client transaction: {s} + {s} fee from {s} to {s}", .{ amount_display, fee_display, std.fmt.fmtSliceHexLower(sender_address[0..8]), std.fmt.fmtSliceHexLower(recipient_address[0..8]) });

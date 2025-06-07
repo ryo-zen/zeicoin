@@ -11,19 +11,6 @@ const wallet = @import("wallet.zig");
 const db = @import("db.zig");
 const util = @import("util.zig");
 
-// Helper function to format ZEI amounts with proper decimal places
-fn formatZEI(allocator: std.mem.Allocator, amount_zei: u64) ![]u8 {
-    const zei_coins = amount_zei / types.ZEI_COIN;
-    const zei_fraction = amount_zei % types.ZEI_COIN;
-
-    if (zei_fraction == 0) {
-        return std.fmt.allocPrint(allocator, "{} ZEI", .{zei_coins});
-    } else {
-        // Format with 5 decimal places for precision
-        const decimal = @as(f64, @floatFromInt(zei_fraction)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-        return std.fmt.allocPrint(allocator, "{}.{d:0>5} ZEI", .{ zei_coins, @as(u64, @intFromFloat(decimal * 100000)) });
-    }
-}
 
 const CLIError = error{
     InvalidCommand,
@@ -412,7 +399,7 @@ fn handleBalanceCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     };
 
     // Format balance properly for display
-    const balance_display = formatZEI(allocator, balance) catch "? ZEI";
+    const balance_display = util.formatZEI(allocator, balance) catch "? ZEI";
     defer if (!std.mem.eql(u8, balance_display, "? ZEI")) allocator.free(balance_display);
 
     print("💰 Wallet '{s}' balance: {s}\n", .{ wallet_name, balance_display });

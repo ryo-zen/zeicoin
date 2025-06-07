@@ -335,6 +335,21 @@ pub fn printException(err: anyerror, thread_name: []const u8) void {
     std.log.err("EXCEPTION in {s}: {}\n", .{ thread_name, err });
 }
 
+/// Helper function to format ZEI amounts with proper decimal places
+pub fn formatZEI(allocator: std.mem.Allocator, amount_zei: u64) ![]u8 {
+    const types = @import("types.zig");
+    const zei_coins = amount_zei / types.ZEI_COIN;
+    const zei_fraction = amount_zei % types.ZEI_COIN;
+
+    if (zei_fraction == 0) {
+        return std.fmt.allocPrint(allocator, "{} ZEI", .{zei_coins});
+    } else {
+        // Format with 5 decimal places for precision
+        const decimal = @as(f64, @floatFromInt(zei_fraction)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+        return std.fmt.allocPrint(allocator, "{}.{d:0>5} ZEI", .{ zei_coins, @as(u64, @intFromFloat(decimal * types.PROGRESS.DECIMAL_PRECISION_MULTIPLIER)) });
+    }
+}
+
 /// Initialize utility module
 pub fn init() void {
     randAddSeed();

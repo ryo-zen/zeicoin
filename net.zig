@@ -1050,7 +1050,7 @@ fn maintainConnections(network: *NetworkManager) void {
             const time_since_seen = now - peer.last_seen;
 
             // Peer timeout detection
-            if (peer.state == .connected and time_since_seen > 60) { // 60 seconds silence
+            if (peer.state == .connected and time_since_seen > types.TIMING.PEER_TIMEOUT_SECONDS) { // 60 seconds silence
                 std.debug.print("⚠️ Peer silent for 60s - checking health\n", .{});
                 peer.sendPing() catch {
                     std.debug.print("❌ Peer connection lost, will reconnect\n", .{});
@@ -1070,8 +1070,7 @@ fn maintainConnections(network: *NetworkManager) void {
         }
 
         // Periodic discovery (every 5 minutes)
-        const DISCOVERY_INTERVAL = 300; // 5 minutes
-        if (now - network.last_discovery > DISCOVERY_INTERVAL) {
+        if (now - network.last_discovery > types.TIMING.DISCOVERY_INTERVAL_SECONDS) {
             std.debug.print("🔍 Starting periodic peer discovery\n", .{});
             network.discoverPeers(10801) catch |err| {
                 std.debug.print("⚠️ Discovery failed: {}\n", .{err});
@@ -1080,7 +1079,7 @@ fn maintainConnections(network: *NetworkManager) void {
         }
 
         // Monitoring cycle
-        std.time.sleep(10 * std.time.ns_per_s); // 10 second cycle
+        std.time.sleep(types.TIMING.MAINTENANCE_CYCLE_SECONDS * std.time.ns_per_s);
     }
 
     std.debug.print("🛑 Maintenance stopped\n", .{});

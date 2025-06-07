@@ -7,7 +7,6 @@
 const std = @import("std");
 const print = std.debug.print;
 const ArrayList = std.ArrayList;
-const HashMap = std.HashMap;
 
 const types = @import("types.zig");
 const util = @import("util.zig");
@@ -17,19 +16,6 @@ const key = @import("key.zig");
 const net = @import("net.zig");
 const randomx = @import("randomx.zig");
 
-// Helper function to format ZEI amounts with proper decimal places
-fn formatZEI(allocator: std.mem.Allocator, amount_zei: u64) ![]u8 {
-    const zei_coins = amount_zei / types.ZEI_COIN;
-    const zei_fraction = amount_zei % types.ZEI_COIN;
-
-    if (zei_fraction == 0) {
-        return std.fmt.allocPrint(allocator, "{} ZEI", .{zei_coins});
-    } else {
-        // Format with 5 decimal places for precision
-        const decimal = @as(f64, @floatFromInt(zei_fraction)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-        return std.fmt.allocPrint(allocator, "{}.{d:0>5} ZEI", .{ zei_coins, @as(u64, @intFromFloat(decimal * 100000)) });
-    }
-}
 
 // Type aliases for clarity
 const Transaction = types.Transaction;
@@ -121,7 +107,7 @@ pub const ZeiCoin = struct {
                 .previous_hash = std.mem.zeroes(Hash),
                 .merkle_root = message_hash, // Genesis message hash as merkle root
                 .timestamp = genesis_config.timestamp,
-                .difficulty = 0x1d00ffff, // Easy difficulty for genesis
+                .difficulty = types.ZenMining.initialDifficultyTarget().toU64(), // Use dynamic difficulty
                 .nonce = @as(u32, @truncate(genesis_config.nonce)), // Use network nonce
             },
             .transactions = genesis_transactions,
@@ -198,13 +184,13 @@ pub const ZeiCoin = struct {
         const total_cost = tx.amount + tx.fee;
         if (!sender_account.canAfford(total_cost)) {
             // Format amounts properly for error display
-            const balance_display = formatZEI(self.allocator, sender_account.balance) catch "? ZEI";
+            const balance_display = util.formatZEI(self.allocator, sender_account.balance) catch "? ZEI";
             defer if (!std.mem.eql(u8, balance_display, "? ZEI")) self.allocator.free(balance_display);
-            const amount_display = formatZEI(self.allocator, tx.amount) catch "? ZEI";
+            const amount_display = util.formatZEI(self.allocator, tx.amount) catch "? ZEI";
             defer if (!std.mem.eql(u8, amount_display, "? ZEI")) self.allocator.free(amount_display);
-            const fee_display = formatZEI(self.allocator, tx.fee) catch "? ZEI";
+            const fee_display = util.formatZEI(self.allocator, tx.fee) catch "? ZEI";
             defer if (!std.mem.eql(u8, fee_display, "? ZEI")) self.allocator.free(fee_display);
-            const total_display = formatZEI(self.allocator, total_cost) catch "? ZEI";
+            const total_display = util.formatZEI(self.allocator, total_cost) catch "? ZEI";
             defer if (!std.mem.eql(u8, total_display, "? ZEI")) self.allocator.free(total_display);
 
             print("❌ Insufficient balance: has {s}, needs {s} (amount) + {s} (fee) = {s}\n", .{ balance_display, amount_display, fee_display, total_display });
@@ -238,11 +224,11 @@ pub const ZeiCoin = struct {
         try self.database.saveAccount(tx.recipient, recipient_account);
 
         // Format amounts properly for display
-        const amount_display = formatZEI(self.allocator, tx.amount) catch "? ZEI";
+        const amount_display = util.formatZEI(self.allocator, tx.amount) catch "? ZEI";
         defer if (!std.mem.eql(u8, amount_display, "? ZEI")) self.allocator.free(amount_display);
-        const fee_display = formatZEI(self.allocator, tx.fee) catch "? ZEI";
+        const fee_display = util.formatZEI(self.allocator, tx.fee) catch "? ZEI";
         defer if (!std.mem.eql(u8, fee_display, "? ZEI")) self.allocator.free(fee_display);
-        const total_display = formatZEI(self.allocator, total_cost) catch "? ZEI";
+        const total_display = util.formatZEI(self.allocator, total_cost) catch "? ZEI";
         defer if (!std.mem.eql(u8, total_display, "? ZEI")) self.allocator.free(total_display);
 
         print("💸 Processed: {s} transferred + {s} fee = {s} total cost\n", .{ amount_display, fee_display, total_display });
@@ -277,11 +263,11 @@ pub const ZeiCoin = struct {
         };
 
         // Format miner reward display
-        const base_reward_display = formatZEI(self.allocator, types.ZenMining.BLOCK_REWARD) catch "? ZEI";
+        const base_reward_display = util.formatZEI(self.allocator, types.ZenMining.BLOCK_REWARD) catch "? ZEI";
         defer if (!std.mem.eql(u8, base_reward_display, "? ZEI")) self.allocator.free(base_reward_display);
-        const fees_display = formatZEI(self.allocator, total_fees) catch "? ZEI";
+        const fees_display = util.formatZEI(self.allocator, total_fees) catch "? ZEI";
         defer if (!std.mem.eql(u8, fees_display, "? ZEI")) self.allocator.free(fees_display);
-        const total_reward_display = formatZEI(self.allocator, miner_reward) catch "? ZEI";
+        const total_reward_display = util.formatZEI(self.allocator, miner_reward) catch "? ZEI";
         defer if (!std.mem.eql(u8, total_reward_display, "? ZEI")) self.allocator.free(total_reward_display);
 
         print("💰 Miner reward: {s} (base) + {s} (fees) = {s} total\n", .{ base_reward_display, fees_display, total_reward_display });
@@ -293,7 +279,7 @@ pub const ZeiCoin = struct {
         all_transactions[0] = coinbase_tx; // Coinbase always first
         @memcpy(all_transactions[1..], self.mempool.items);
 
-        // Get previous block hash
+        // Get previous block hash and calculate next difficulty
         const current_height = try self.getHeight();
         const previous_hash = if (current_height > 0) blk: {
             const prev_block = try self.database.getBlock(current_height - 1);
@@ -302,13 +288,16 @@ pub const ZeiCoin = struct {
             break :blk hash;
         } else std.mem.zeroes(Hash);
 
-        // Create block with zen difficulty
+        // Calculate difficulty for new block
+        const next_difficulty_target = try self.calculateNextDifficulty();
+
+        // Create block with dynamic difficulty
         var new_block = Block{
             .header = BlockHeader{
                 .previous_hash = previous_hash,
                 .merkle_root = std.mem.zeroes(Hash), // Zen simplicity
                 .timestamp = @intCast(util.getTime()),
-                .difficulty = types.ZenMining.INITIAL_DIFFICULTY,
+                .difficulty = next_difficulty_target.toU64(),
                 .nonce = 0,
             },
             .transactions = try self.allocator.dupe(Transaction, all_transactions),
@@ -394,7 +383,8 @@ pub const ZeiCoin = struct {
             };
 
             // Check if hash meets difficulty target
-            if (randomx.hashMeetsDifficulty(hash, types.ZenMining.DIFFICULTY_BYTES)) {
+            const difficulty_target = block.header.getDifficultyTarget();
+            if (randomx.hashMeetsDifficultyTarget(hash, difficulty_target)) {
                 print("✨ RandomX nonce found: {} (hash: {s})\n", .{ nonce, std.fmt.fmtSliceHexLower(hash[0..8]) });
                 return true;
             }
@@ -402,7 +392,7 @@ pub const ZeiCoin = struct {
             nonce += 1;
 
             // Progress indicator (every 10k tries due to RandomX being slower)
-            if (nonce % 10_000 == 0) {
+            if (nonce % types.PROGRESS.RANDOMX_REPORT_INTERVAL == 0) {
                 print("RandomX mining... tried {} nonces\n", .{nonce});
             }
         }
@@ -412,6 +402,7 @@ pub const ZeiCoin = struct {
 
     /// Legacy SHA256 proof-of-work for tests (faster)
     fn zenProofOfWorkSHA256(self: *ZeiCoin, block: *Block) bool {
+        _ = self; // suppress unused parameter warning
         var nonce: u32 = 0;
         while (nonce < types.ZenMining.MAX_NONCE) {
             block.header.nonce = nonce;
@@ -420,7 +411,8 @@ pub const ZeiCoin = struct {
             const hash = block.header.hash();
 
             // Check if hash meets zen difficulty
-            if (self.zenHashMeetsTarget(hash)) {
+            const difficulty_target = block.header.getDifficultyTarget();
+            if (difficulty_target.meetsDifficulty(hash)) {
                 print("✨ Zen nonce found: {} (hash: {s})\n", .{ nonce, std.fmt.fmtSliceHexLower(hash[0..8]) });
                 return true;
             }
@@ -428,7 +420,7 @@ pub const ZeiCoin = struct {
             nonce += 1;
 
             // Progress indicator (every 100k tries)
-            if (nonce % 100_000 == 0) {
+            if (nonce % types.PROGRESS.SHA256_REPORT_INTERVAL == 0) {
                 print("Zen mining... tried {} nonces\n", .{nonce});
             }
         }
@@ -436,13 +428,6 @@ pub const ZeiCoin = struct {
         return false;
     }
 
-    /// Check if hash meets zen target (now uses configurable difficulty)
-    fn zenHashMeetsTarget(self: *ZeiCoin, hash: [32]u8) bool {
-        _ = self; // zen simplicity
-
-        // Use RandomX difficulty checking
-        return randomx.hashMeetsDifficulty(hash, types.ZenMining.DIFFICULTY_BYTES);
-    }
 
     /// Validate block proof-of-work using RandomX
     fn validateBlockPoW(self: *ZeiCoin, block: Block) !bool {
@@ -473,7 +458,72 @@ pub const ZeiCoin = struct {
         };
 
         // Check if hash meets difficulty target
-        return randomx.hashMeetsDifficulty(hash, types.ZenMining.DIFFICULTY_BYTES);
+        const difficulty_target = block.header.getDifficultyTarget();
+        return randomx.hashMeetsDifficultyTarget(hash, difficulty_target);
+    }
+
+    /// Calculate next difficulty target for mining
+    fn calculateNextDifficulty(self: *ZeiCoin) !types.DifficultyTarget {
+        const current_height = try self.getHeight();
+        
+        // For first 20 blocks, use initial difficulty
+        if (current_height < types.ZenMining.DIFFICULTY_ADJUSTMENT_PERIOD) {
+            return types.ZenMining.initialDifficultyTarget();
+        }
+        
+        // Only adjust every 20 blocks
+        if (current_height % types.ZenMining.DIFFICULTY_ADJUSTMENT_PERIOD != 0) {
+            // Not an adjustment block, use previous difficulty
+            const prev_block_height: u32 = @intCast(current_height - 1);
+            const prev_block = try self.database.getBlock(prev_block_height);
+            defer self.allocator.free(prev_block.transactions);
+            return prev_block.header.getDifficultyTarget();
+        }
+        
+        // This is an adjustment block! Calculate new difficulty
+        print("📊 Difficulty adjustment at block {}\n", .{current_height});
+        
+        // Get timestamps from last 20 blocks for time calculation
+        const lookback_blocks = types.ZenMining.DIFFICULTY_ADJUSTMENT_PERIOD;
+        var oldest_timestamp: u64 = 0;
+        var newest_timestamp: u64 = 0;
+        
+        // Get timestamp from 20 blocks ago
+        if (current_height >= lookback_blocks) {
+            const old_block_height: u32 = @intCast(current_height - lookback_blocks);
+            const old_block = try self.database.getBlock(old_block_height);
+            defer self.allocator.free(old_block.transactions);
+            oldest_timestamp = old_block.header.timestamp;
+        }
+        
+        // Get timestamp from previous block
+        const prev_block_height: u32 = @intCast(current_height - 1);
+        const prev_block = try self.database.getBlock(prev_block_height);
+        defer self.allocator.free(prev_block.transactions);
+        newest_timestamp = prev_block.header.timestamp;
+        const current_difficulty = prev_block.header.getDifficultyTarget();
+        
+        // Calculate actual time for last 20 blocks
+        const actual_time = newest_timestamp - oldest_timestamp;
+        const target_time = lookback_blocks * types.ZenMining.TARGET_BLOCK_TIME;
+        
+        // Calculate adjustment factor
+        const adjustment_factor = if (actual_time > 0) 
+            @as(f64, @floatFromInt(target_time)) / @as(f64, @floatFromInt(actual_time))
+        else 
+            1.0; // Fallback if time calculation fails
+        
+        // Apply adjustment with constraints
+        const new_difficulty = current_difficulty.adjust(adjustment_factor, types.CURRENT_NETWORK);
+        
+        // Log the adjustment
+        print("📈 Difficulty adjusted: factor={d:.3}, time={}s->{}s\n", .{
+            adjustment_factor,
+            actual_time,
+            target_time
+        });
+        
+        return new_difficulty;
     }
 
     /// Process coinbase transaction (create new coins from thin air)
@@ -519,12 +569,13 @@ pub const ZeiCoin = struct {
         const current_height = try self.getHeight();
         if (expected_height != current_height) return false;
 
-        // Check proof-of-work with RandomX (simplified for tests)
+        // Check proof-of-work with dynamic difficulty
         if (@import("builtin").mode == .Debug) {
-            // In test mode, just check simple hash target for speed
-            if (!self.zenHashMeetsTarget(block.header.hash())) return false;
+            // In test mode, use dynamic difficulty with SHA256 for speed
+            const difficulty_target = block.header.getDifficultyTarget();
+            if (!difficulty_target.meetsDifficulty(block.header.hash())) return false;
         } else {
-            // In production, use full RandomX validation
+            // In production, use full RandomX validation with dynamic difficulty
             if (!try self.validateBlockPoW(block)) return false;
         }
 
@@ -732,8 +783,9 @@ pub const ZeiCoin = struct {
             }
         }
 
-        // Zen proof-of-work validation
-        if (!self.zenHashMeetsTarget(block_hash)) {
+        // Zen proof-of-work validation with dynamic difficulty
+        const difficulty_target = block.header.getDifficultyTarget();
+        if (!difficulty_target.meetsDifficulty(block_hash)) {
             print("❌ Block rejected: doesn't meet zen proof-of-work target\n", .{});
             return;
         }
@@ -783,11 +835,14 @@ test "blockchain initialization" {
     const height = try zeicoin.getHeight();
     try testing.expect(height >= 1); // May be 1 or 2 depending on auto-mining
 
-    // Should have genesis account
-    const genesis_public_key = std.mem.zeroes([32]u8);
+    // Should have genesis account (use same key generation as createGenesis)
+    const genesis_config = types.Genesis.getConfig();
+    var genesis_public_key: [32]u8 = undefined;
+    std.mem.writeInt(u64, genesis_public_key[0..8], genesis_config.nonce, .little);
+    @memset(genesis_public_key[8..], 0);
     const genesis_addr = util.hash256(&genesis_public_key);
     const balance = try zeicoin.getBalance(genesis_addr);
-    try testing.expectEqual(types.Genesis.reward, balance);
+    try testing.expectEqual(types.Genesis.reward(), balance);
 
     // Clean up test data
     std.fs.cwd().deleteTree("test_zeicoin_data_init") catch {};
@@ -879,7 +934,7 @@ test "block retrieval by height" {
     defer testing.allocator.free(genesis_block.transactions);
 
     try testing.expectEqual(@as(u32, 0), genesis_block.txCount());
-    try testing.expectEqual(@as(u64, types.Genesis.timestamp), genesis_block.header.timestamp);
+    try testing.expectEqual(@as(u64, types.Genesis.timestamp()), genesis_block.header.timestamp);
 
     // Clean up test data
     std.fs.cwd().deleteTree("test_zeicoin_data_retrieval") catch {};
@@ -918,7 +973,7 @@ test "block validation" {
             .previous_hash = prev_block.hash(),
             .merkle_root = std.mem.zeroes(types.Hash),
             .timestamp = @intCast(util.getTime()),
-            .difficulty = types.ZenMining.INITIAL_DIFFICULTY,
+            .difficulty = types.ZenMining.initialDifficultyTarget().toU64(),
             .nonce = 0,
         },
         .transactions = transactions,
@@ -929,7 +984,8 @@ test "block validation" {
     var found_valid_nonce = false;
     while (nonce < 10000) {
         valid_block.header.nonce = nonce;
-        if (zeicoin.zenHashMeetsTarget(valid_block.header.hash())) {
+        const difficulty_target = valid_block.header.getDifficultyTarget();
+        if (difficulty_target.meetsDifficulty(valid_block.header.hash())) {
             found_valid_nonce = true;
             break;
         }
@@ -1025,7 +1081,7 @@ test "block broadcasting integration" {
             .previous_hash = std.mem.zeroes(types.Hash),
             .merkle_root = std.mem.zeroes(types.Hash),
             .timestamp = @intCast(util.getTime()),
-            .difficulty = types.ZenMining.INITIAL_DIFFICULTY,
+            .difficulty = types.ZenMining.initialDifficultyTarget().toU64(),
             .nonce = 0,
         },
         .transactions = transactions,
