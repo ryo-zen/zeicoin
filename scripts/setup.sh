@@ -81,8 +81,8 @@ if [ ! -f "randomx/randomx_helper" ] || [ ! -f "randomx/randomx_install/lib/libr
     # Build RandomX helper (now back to project root)
     echo "🔗 Building RandomX helper..."
     gcc -o randomx/randomx_helper randomx/randomx_helper.c randomx/wrapper.c \
-        -Irandomx/randomx_install/include \
-        -Lrandomx/randomx_install/lib -lrandomx -lstdc++ -lm
+        -Irandomx/randomx_build/randomx_install/include \
+        -Lrandomx/randomx_build/randomx_install/lib -lrandomx -lstdc++ -lm
     
     echo "✅ RandomX built successfully!"
 else
