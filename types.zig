@@ -26,6 +26,15 @@ pub const PROGRESS = struct {
     pub const DECIMAL_PRECISION_MULTIPLIER: u64 = 100_000;
 };
 
+// Sync protocol constants - ZeiCoin blockchain synchronization
+pub const SYNC = struct {
+    pub const BATCH_SIZE: u32 = 10; // Blocks per sync request (small for responsiveness)
+    pub const SYNC_TIMEOUT_SECONDS: i64 = 30; // Timeout for sync requests
+    pub const RETRY_DELAY_SECONDS: i64 = 5; // Delay before retrying failed sync
+    pub const MAX_SYNC_RETRIES: u32 = 3; // Maximum sync retry attempts
+    pub const PROGRESS_REPORT_INTERVAL: u32 = 10; // Report progress every N blocks
+};
+
 // Network constants - Bootstrap nodes for peer discovery
 pub const BOOTSTRAP_NODES = [_][]const u8{
     "134.199.168.129:10801", // Primary bootstrap node

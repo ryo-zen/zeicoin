@@ -10,6 +10,58 @@ const HashMap = std.HashMap;
 const types = @import("types.zig");
 const util = @import("util.zig");
 
+// Helper functions for zen networking
+/// Networking logging utilities
+fn logNetError(comptime fmt: []const u8, args: anytype) void {
+    std.debug.print("❌ " ++ fmt ++ "\n", args);
+}
+
+fn logNetSuccess(comptime fmt: []const u8, args: anytype) void {
+    std.debug.print("✅ " ++ fmt ++ "\n", args);
+}
+
+fn logNetInfo(comptime fmt: []const u8, args: anytype) void {
+    std.debug.print("ℹ️  " ++ fmt ++ "\n", args);
+}
+
+fn logNetProcess(comptime fmt: []const u8, args: anytype) void {
+    std.debug.print("🔄 " ++ fmt ++ "\n", args);
+}
+
+fn logNetBroadcast(comptime fmt: []const u8, args: anytype) void {
+    std.debug.print("📡 " ++ fmt ++ "\n", args);
+}
+
+/// Send message header and payload to socket
+fn sendMessage(socket: net.Stream, header: MessageHeader, payload: anytype) !void {
+    _ = try socket.write(std.mem.asBytes(&header));
+    _ = try socket.write(std.mem.asBytes(&payload));
+}
+
+/// Send message header only to socket
+fn sendHeaderOnly(socket: net.Stream, header: MessageHeader) !void {
+    _ = try socket.write(std.mem.asBytes(&header));
+}
+
+/// Send block with header + transactions
+fn sendBlock(socket: net.Stream, header: MessageHeader, block: types.Block) !void {
+    // Send message header
+    _ = try socket.write(std.mem.asBytes(&header));
+    
+    // Send block header
+    _ = try socket.write(std.mem.asBytes(&block.header));
+    
+    // Send transaction count
+    const tx_count: u32 = @intCast(block.transactions.len);
+    _ = try socket.write(std.mem.asBytes(&tx_count));
+    
+    // Send all transactions
+    for (block.transactions) |tx| {
+        _ = try socket.write(std.mem.asBytes(&tx));
+    }
+}
+
+
 // Network constants
 pub const DEFAULT_PORT: u16 = 10801;
 pub const DISCOVERY_PORT: u16 = 10800;
@@ -29,8 +81,9 @@ pub const MessageType = enum(u12) {
     getblocks = 5,
     tx = 6,
     block = 7,
-    ping = 8,
-    pong = 9,
+    blocks = 8, // Batch of blocks for sync
+    ping = 9,
+    pong = 10,
 };
 
 // Discovery message for UDP broadcast
@@ -100,6 +153,18 @@ pub const MessageHeader = struct {
     }
 };
 
+// Sync protocol message structures
+pub const GetBlocksMessage = struct {
+    start_height: u32,
+    count: u32,
+};
+
+pub const BlocksMessage = struct {
+    start_height: u32,
+    count: u32,
+    // Followed by serialized blocks data
+};
+
 // Peer connection state
 pub const PeerState = enum {
     connecting,
@@ -109,6 +174,30 @@ pub const PeerState = enum {
     disconnected,
     reconnecting,
 };
+
+/// Check if peer connection is valid
+fn isConnectionValid(socket: ?net.Stream, state: PeerState) bool {
+    return socket != null and state == .connected;
+}
+
+/// Format peer address to string (helper for consistent address display)
+fn formatPeerAddress(address: NetworkAddress, buffer: []u8) []u8 {
+    return address.toString(buffer);
+}
+
+/// Handle peer connection errors with consistent logging
+fn handlePeerError(address: NetworkAddress, err: anyerror, action: []const u8) void {
+    var addr_buf: [32]u8 = undefined;
+    const addr_str = formatPeerAddress(address, &addr_buf);
+    logNetError("{s} failed for peer {s}: {}", .{ action, addr_str, err });
+}
+
+/// Log successful peer action
+fn logPeerSuccess(address: NetworkAddress, action: []const u8) void {
+    var addr_buf: [32]u8 = undefined;
+    const addr_str = formatPeerAddress(address, &addr_buf);
+    logNetSuccess("{s} successful for peer {s}", .{ action, addr_str });
+}
 
 // Network peer
 pub const Peer = struct {
@@ -154,7 +243,7 @@ pub const Peer = struct {
             const time_since_last = util.getTime() - self.last_seen;
 
             if (time_since_last < backoff_time) {
-                std.debug.print("Waiting {} seconds before retry\n", .{backoff_time - time_since_last});
+                logNetInfo("Waiting {} seconds before retry", .{backoff_time - time_since_last});
                 return;
             }
         }
@@ -170,10 +259,7 @@ pub const Peer = struct {
             self.consecutive_failures += 1;
             self.state = .disconnected;
             self.last_seen = util.getTime();
-
-            var addr_buf: [32]u8 = undefined;
-            const addr_str = self.address.toString(&addr_buf);
-            std.debug.print("❌ Connection failed to {s}: {}\n", .{ addr_str, err });
+            handlePeerError(self.address, err, "Connection");
             return err;
         };
 
@@ -184,10 +270,7 @@ pub const Peer = struct {
 
         // Send version message with height
         try self.sendVersion(0); // TODO: Get height from network manager
-
-        var addr_buf: [32]u8 = undefined;
-        const addr_str = self.address.toString(&addr_buf);
-        std.debug.print("strong to {s} (attempt #{})\n", .{ addr_str, self.connection_attempts });
+        logPeerSuccess(self.address, "Connection");
     }
 
     pub fn disconnect(self: *Peer) void {
@@ -196,7 +279,7 @@ pub const Peer = struct {
             self.socket = null;
         }
         self.state = .disconnected;
-        std.debug.print("❌ Disconnected from peer {any}\n", .{self.address});
+        logNetError("Disconnected from peer {any}", .{self.address});
     }
 
     pub fn sendVersion(self: *Peer, blockchain_height: u32) !void {
@@ -216,23 +299,18 @@ pub const Peer = struct {
         };
 
         const header = MessageHeader.create(.version, @sizeOf(@TypeOf(version_payload)));
-
-        // Send header + payload
-        const socket = self.socket.?;
-        _ = try socket.write(std.mem.asBytes(&header));
-        _ = try socket.write(std.mem.asBytes(&version_payload));
-
-        std.debug.print("📡 Sent version to peer\n", .{});
+        
+        try sendMessage(self.socket.?, header, version_payload);
+        logNetBroadcast("Sent version to peer", .{});
     }
 
     pub fn sendPing(self: *Peer) !void {
-        if (self.socket == null or self.state != .connected) return error.NotConnected;
+        if (!isConnectionValid(self.socket, self.state)) return error.NotConnected;
 
         const header = MessageHeader.create(.ping, 0);
-        const socket = self.socket.?;
 
         // Handle socket write failures gracefully (race condition protection)
-        _ = socket.write(std.mem.asBytes(&header)) catch |err| {
+        sendHeaderOnly(self.socket.?, header) catch |err| {
             // Socket was closed by another thread - mark as disconnected
             self.socket = null;
             self.state = .disconnected;
@@ -241,46 +319,38 @@ pub const Peer = struct {
 
         self.last_ping = util.getTime();
         self.last_seen = self.last_ping;
-        std.debug.print("🏓 Ping sent to peer\n", .{});
+        logNetInfo("Ping sent to peer", .{});
     }
 
     pub fn broadcastTransaction(self: *Peer, tx: types.Transaction) !void {
-        if (self.socket == null or self.state != .connected) return;
+        if (!isConnectionValid(self.socket, self.state)) return;
 
-        // Serialize transaction and send
         const header = MessageHeader.create(.tx, @sizeOf(types.Transaction));
-        const socket = self.socket.?;
-        _ = try socket.write(std.mem.asBytes(&header));
-        _ = try socket.write(std.mem.asBytes(&tx));
-
-        std.debug.print("📤 Broadcasted transaction to peer\n", .{});
+        try sendMessage(self.socket.?, header, tx);
+        logNetBroadcast("Broadcasted transaction to peer", .{});
     }
 
     pub fn broadcastBlock(self: *Peer, block: types.Block) !void {
-        if (self.socket == null or self.state != .connected) return;
+        if (!isConnectionValid(self.socket, self.state)) return;
 
-        // For now, send block header + transaction count + transactions
-        // In a real implementation, we'd use proper serialization
         const payload_size = @sizeOf(types.BlockHeader) + @sizeOf(u32) + @sizeOf(types.Transaction) * block.transactions.len;
         const header = MessageHeader.create(.block, @intCast(payload_size));
-        const socket = self.socket.?;
+        
+        try sendBlock(self.socket.?, header, block);
+        logNetBroadcast("Broadcasted block to peer", .{});
+    }
 
-        // Send message header
-        _ = try socket.write(std.mem.asBytes(&header));
+    pub fn sendGetBlocks(self: *Peer, start_height: u32, count: u32) !void {
+        if (!isConnectionValid(self.socket, self.state)) return error.NotConnected;
 
-        // Send block header
-        _ = try socket.write(std.mem.asBytes(&block.header));
+        const getblocks_msg = GetBlocksMessage{
+            .start_height = start_height,
+            .count = count,
+        };
 
-        // Send transaction count
-        const tx_count: u32 = @intCast(block.transactions.len);
-        _ = try socket.write(std.mem.asBytes(&tx_count));
-
-        // Send all transactions
-        for (block.transactions) |tx| {
-            _ = try socket.write(std.mem.asBytes(&tx));
-        }
-
-        std.debug.print("📤 Broadcasted block to peer\n", .{});
+        const header = MessageHeader.create(.getblocks, @sizeOf(GetBlocksMessage));
+        try sendMessage(self.socket.?, header, getblocks_msg);
+        logNetBroadcast("Requested {} blocks starting from height {}", .{ count, start_height });
     }
 };
 
@@ -329,7 +399,7 @@ pub const NetworkManager = struct {
         self.maintenance_thread = try Thread.spawn(.{}, maintainConnections, .{self});
 
         self.is_running = true;
-        std.debug.print("🌐 Network started on port {}\n", .{port});
+        logNetSuccess("Network started on port {}", .{port});
     }
 
     pub fn stop(self: *NetworkManager) void {
@@ -356,12 +426,12 @@ pub const NetworkManager = struct {
             peer.disconnect();
         }
 
-        std.debug.print("🛑 ZeiCoin network stopped\n", .{});
+        logNetInfo("ZeiCoin network stopped", .{});
     }
 
     pub fn addPeer(self: *NetworkManager, address_str: []const u8) !void {
         if (self.peers.items.len >= MAX_PEERS) {
-            std.debug.print("⚠️  Maximum peers reached\n", .{});
+            logNetInfo("Maximum peers reached", .{});
             return;
         }
 
@@ -371,25 +441,25 @@ pub const NetworkManager = struct {
         try peer.connect();
         try self.peers.append(peer);
 
-        std.debug.print("➕ Added peer: {s}\n", .{address_str});
+        logNetSuccess("Added peer: {s}", .{address_str});
     }
 
     pub fn broadcastTransaction(self: *NetworkManager, tx: types.Transaction) void {
         for (self.peers.items) |*peer| {
             peer.broadcastTransaction(tx) catch {
-                std.debug.print("⚠️  Failed to broadcast to peer\n", .{});
+                logNetError("Failed to broadcast transaction to peer", .{});
             };
         }
-        std.debug.print("📡 Transaction broadcasted to {} peers\n", .{self.peers.items.len});
+        logNetBroadcast("Transaction broadcasted to {} peers", .{self.peers.items.len});
     }
 
     pub fn broadcastBlock(self: *NetworkManager, block: types.Block) void {
         for (self.peers.items) |*peer| {
             peer.broadcastBlock(block) catch {
-                std.debug.print("⚠️  Failed to broadcast block to peer\n", .{});
+                logNetError("Failed to broadcast block to peer", .{});
             };
         }
-        std.debug.print("📡 Block broadcasted to {} peers\n", .{self.peers.items.len});
+        logNetBroadcast("Block broadcasted to {} peers", .{self.peers.items.len});
     }
 
     pub fn getConnectedPeers(self: *NetworkManager) usize {
@@ -404,7 +474,7 @@ pub const NetworkManager = struct {
     pub fn startClient(self: *NetworkManager, port: u16) !void {
         _ = port; // Client doesn't need to listen
         self.is_running = true;
-        std.debug.print("🔗 ZeiCoin client network started (outbound connections only)\n", .{});
+        logNetSuccess("ZeiCoin client network started (outbound connections only)", .{});
     }
 
     /// Connect to a specific peer
@@ -415,15 +485,10 @@ pub const NetworkManager = struct {
         // Connect in background
         const peer_ptr = &self.peers.items[self.peers.items.len - 1];
         peer_ptr.connect() catch |err| {
-            var addr_buf: [32]u8 = undefined;
-            const addr_str = address.toString(&addr_buf);
-            std.debug.print("❌ Failed to connect to peer {s}: {}\n", .{ addr_str, err });
+            handlePeerError(address, err, "Connection");
             return err;
         };
-
-        var addr_buf: [32]u8 = undefined;
-        const addr_str = address.toString(&addr_buf);
-        std.debug.print("✅ Connected to peer {s}\n", .{addr_str});
+        logPeerSuccess(address, "Connection");
     }
 
     /// Get number of connected peers
@@ -445,7 +510,7 @@ pub const NetworkManager = struct {
 
     /// Auto-discover peers on local network
     pub fn discoverPeers(self: *NetworkManager, our_port: u16) !void {
-        std.debug.print("🔍 Starting peer discovery...\n", .{});
+        logNetProcess("Starting peer discovery...", .{});
 
         // Try bootstrap nodes first
         try self.connectToBootstrapNodes();
@@ -459,13 +524,13 @@ pub const NetworkManager = struct {
 
     /// Connect to bootstrap nodes for initial peer discovery
     fn connectToBootstrapNodes(self: *NetworkManager) !void {
-        std.debug.print("🌐 Connecting to bootstrap nodes...\n", .{});
+        logNetProcess("Connecting to bootstrap nodes...", .{});
 
         // Try environment variable first
         if (std.process.getEnvVarOwned(self.allocator, "ZEICOIN_BOOTSTRAP")) |env_value| {
             defer self.allocator.free(env_value);
 
-            std.debug.print("💡 Using bootstrap nodes from ZEICOIN_BOOTSTRAP: {s}\n", .{env_value});
+            logNetInfo("Using bootstrap nodes from ZEICOIN_BOOTSTRAP: {s}", .{env_value});
 
             // Parse comma-separated list and connect to each
             var it = std.mem.splitScalar(u8, env_value, ',');
@@ -473,17 +538,17 @@ pub const NetworkManager = struct {
                 const trimmed = std.mem.trim(u8, node_addr, " \t\n");
                 if (trimmed.len > 0) {
                     self.connectToBootstrapNode(trimmed) catch |err| {
-                        std.debug.print("⚠️ Bootstrap node {s} failed: {}\n", .{ trimmed, err });
+                        logNetError("Bootstrap node {s} failed: {}", .{ trimmed, err });
                         continue;
                     };
                 }
             }
         } else |_| {
             // Fallback to hardcoded bootstrap nodes
-            std.debug.print("💡 Using default bootstrap nodes\n", .{});
+            logNetInfo("Using default bootstrap nodes", .{});
             for (types.BOOTSTRAP_NODES) |bootstrap_addr| {
                 self.connectToBootstrapNode(bootstrap_addr) catch |err| {
-                    std.debug.print("⚠️ Bootstrap node {s} failed: {}\n", .{ bootstrap_addr, err });
+                    logNetError("Bootstrap node {s} failed: {}", .{ bootstrap_addr, err });
                     continue;
                 };
             }
@@ -492,17 +557,17 @@ pub const NetworkManager = struct {
 
     /// Connect to a single bootstrap node
     fn connectToBootstrapNode(self: *NetworkManager, addr_str: []const u8) !void {
-        std.debug.print("🤝 Attempting bootstrap connection to {s}...\n", .{addr_str});
+        logNetProcess("Attempting bootstrap connection to {s}...", .{addr_str});
 
         // Use standard addPeer method instead of custom connection handling
         // This ensures proper peer lifecycle management
         try self.addPeer(addr_str);
-        std.debug.print("✅ Added bootstrap node {s} to peer list\n", .{addr_str});
+        logNetSuccess("Added bootstrap node {s} to peer list", .{addr_str});
     }
 
     /// Send UDP broadcast to discover peers
     fn broadcastDiscovery(self: *NetworkManager, our_port: u16) !void {
-        std.debug.print("📡 Broadcasting discovery message...\n", .{});
+        logNetProcess("Broadcasting discovery message...", .{});
 
         // Create UDP socket
         const socket = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
@@ -527,7 +592,7 @@ pub const NetworkManager = struct {
             const broadcast_addr = net.Address.parseIp4(addr_str, DISCOVERY_PORT) catch continue;
 
             _ = std.posix.sendto(socket, std.mem.asBytes(&discovery_msg), 0, &broadcast_addr.any, broadcast_addr.getOsSockLen()) catch |err| {
-                std.debug.print("⚠️ Broadcast to {s} failed: {}\n", .{ addr_str, err });
+                logNetError("Broadcast to {s} failed: {}", .{ addr_str, err });
                 continue;
             };
         }
@@ -540,7 +605,7 @@ pub const NetworkManager = struct {
     fn listenForDiscoveryResponses(self: *NetworkManager, our_port: u16) !void {
         // Create UDP listener
         const socket = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0) catch |err| {
-            std.debug.print("⚠️ Discovery: UDP socket creation failed: {}\n", .{err});
+            logNetError("Discovery: UDP socket creation failed: {}", .{err});
             return;
         };
         defer std.posix.close(socket);
@@ -548,17 +613,17 @@ pub const NetworkManager = struct {
         // Use socket timeout for cross-platform compatibility
         const timeout = std.posix.timeval{ .sec = 1, .usec = 0 };
         std.posix.setsockopt(socket, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |err| {
-            std.debug.print("⚠️ Discovery: timeout setup failed (continuing): {}\n", .{err});
+            logNetError("Discovery: timeout setup failed (continuing): {}", .{err});
         };
 
         // Bind to discovery port
         const bind_addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, DISCOVERY_PORT);
         std.posix.bind(socket, &bind_addr.any, bind_addr.getOsSockLen()) catch |err| {
-            std.debug.print("⚠️ Discovery: bind failed: {}\n", .{err});
+            logNetError("Discovery: bind failed: {}", .{err});
             return;
         };
 
-        std.debug.print("📡 Discovery listening on UDP port {}\n", .{DISCOVERY_PORT});
+        logNetProcess("Discovery listening on UDP port {}", .{DISCOVERY_PORT});
 
         var buffer: [256]u8 = undefined;
         var sender_addr: std.posix.sockaddr = undefined;
@@ -574,7 +639,7 @@ pub const NetworkManager = struct {
                     continue;
                 },
                 else => {
-                    std.debug.print("⚠️ Discovery: receive error: {}\n", .{err});
+                    logNetError("Discovery: receive error: {}", .{err});
                     attempts += 1;
                     std.time.sleep(200 * std.time.ns_per_ms);
                     continue;
@@ -592,23 +657,23 @@ pub const NetworkManager = struct {
                     var addr_str: [32]u8 = undefined;
                     const peer_addr_str = std.fmt.bufPrint(&addr_str, "{}.{}.{}.{}:{}", .{ ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3], discovery_msg.node_port }) catch continue;
 
-                    std.debug.print("🎯 Discovery: found peer {s}\n", .{peer_addr_str});
+                    logNetSuccess("Discovery: found peer {s}", .{peer_addr_str});
                     self.addPeer(peer_addr_str) catch {};
                 }
             }
             attempts = 0; // Reset attempts after successful receive
         }
 
-        std.debug.print("✅ Discovery session complete\n", .{});
+        logNetSuccess("Discovery session complete", .{});
     }
 
     /// Scan local network for peers (fallback method)
     fn scanLocalNetwork(self: *NetworkManager, our_port: u16) !void {
-        std.debug.print("🔍 Scanning local network...\n", .{});
+        logNetProcess("Scanning local network...", .{});
 
         // Get local IP to determine subnet
         const local_ip = try self.getLocalIP();
-        std.debug.print("🏠 Local IP: {}.{}.{}.{}\n", .{ local_ip[0], local_ip[1], local_ip[2], local_ip[3] });
+        logNetInfo("Local IP: {}.{}.{}.{}", .{ local_ip[0], local_ip[1], local_ip[2], local_ip[3] });
 
         // Scan the same subnet
         var ip: u8 = 1;
@@ -620,7 +685,7 @@ pub const NetworkManager = struct {
 
             // Quick TCP connection test
             if (self.testTCPConnection(peer_addr_str)) {
-                std.debug.print("🎯 Found peer via scan: {s}\n", .{peer_addr_str});
+                logNetSuccess("Found peer via scan: {s}", .{peer_addr_str});
                 self.addPeer(peer_addr_str) catch {};
             }
 
@@ -683,7 +748,7 @@ fn acceptConnections(network: *NetworkManager) void {
 
     // Create listening socket
     const socket = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0) catch |err| {
-        std.debug.print("❌ Failed to create socket: {}\n", .{err});
+        logNetError("Failed to create socket: {}", .{err});
         return;
     };
     defer std.posix.close(socket);
@@ -693,17 +758,17 @@ fn acceptConnections(network: *NetworkManager) void {
 
     // Bind socket
     std.posix.bind(socket, &addr.any, @sizeOf(std.posix.sockaddr.in)) catch |err| {
-        std.debug.print("❌ Failed to bind: {}\n", .{err});
+        logNetError("Failed to bind: {}", .{err});
         return;
     };
 
     // Listen for connections
     std.posix.listen(socket, 10) catch |err| {
-        std.debug.print("❌ Failed to listen: {}\n", .{err});
+        logNetError("Failed to listen: {}", .{err});
         return;
     };
 
-    std.debug.print("🎧 Server listening for connections on {}\n", .{addr});
+    logNetInfo("Server listening for connections on {}", .{addr});
 
     while (network.is_running) {
         // Accept incoming connection
@@ -717,24 +782,24 @@ fn acceptConnections(network: *NetworkManager) void {
             },
             else => {
                 if (network.is_running) {
-                    std.debug.print("⚠️  Accept error: {}\n", .{err});
+                    logNetError("Accept error: {}", .{err});
                 }
                 continue;
             },
         };
 
-        std.debug.print("🔗 New peer connected!\n", .{});
+        logNetSuccess("New peer connected!", .{});
 
         // Handle this connection in a separate thread
         const thread = Thread.spawn(.{}, handleIncomingPeer, .{ network, client_socket }) catch |err| {
-            std.debug.print("⚠️  Failed to spawn peer thread: {}\n", .{err});
+            logNetError("Failed to spawn peer thread: {}", .{err});
             std.posix.close(client_socket);
             continue;
         };
         thread.detach(); // Let it run independently
     }
 
-    std.debug.print("🛑 Accept thread stopped\n", .{});
+    logNetInfo("Accept thread stopped", .{});
 }
 
 // Handle incoming peer connection
@@ -753,7 +818,7 @@ fn handleIncomingPeer(network: *NetworkManager, client_socket: std.posix.socket_
             },
             else => {
                 if (network.is_running) {
-                    std.debug.print("⚠️  Read error from peer: {}\n", .{err});
+                    logNetError("Read error from peer: {}", .{err});
                 }
                 break;
             },
@@ -773,7 +838,7 @@ fn handleIncomingPeer(network: *NetworkManager, client_socket: std.posix.socket_
         }
     }
 
-    std.debug.print("❌ Incoming peer disconnected\n", .{});
+    logNetInfo("Incoming peer disconnected", .{});
 }
 
 // Handle individual peer connection (for outgoing connections)
@@ -792,7 +857,7 @@ fn handlePeerConnection(network: *NetworkManager, stream: net.Stream) void {
                 continue;
             },
             else => {
-                std.debug.print("⚠️  Read error: {}\n", .{err});
+                logNetError("Read error: {}", .{err});
                 break;
             },
         };
@@ -811,7 +876,7 @@ fn handlePeerConnection(network: *NetworkManager, stream: net.Stream) void {
         }
     }
 
-    std.debug.print("❌ Peer disconnected\n", .{});
+    logNetInfo("Peer disconnected", .{});
 }
 
 // Message buffer for handling TCP fragmentation
@@ -874,7 +939,7 @@ fn processMessage(network: *NetworkManager, data: []const u8) void {
 
     // Verify magic bytes
     if (!std.mem.eql(u8, &header.magic, &MAGIC_BYTES)) {
-        std.debug.print("⚠️  Invalid magic bytes\n", .{});
+        logNetError("Invalid magic bytes", .{});
         return;
     }
 
@@ -882,7 +947,7 @@ fn processMessage(network: *NetworkManager, data: []const u8) void {
     const command_end = std.mem.indexOf(u8, &header.command, "\x00") orelse header.command.len;
     const command = header.command[0..command_end];
 
-    std.debug.print("📨 Received message: {s} ({}bytes)\n", .{ command, header.length });
+    logNetInfo("Received message: {s} ({}bytes)", .{ command, header.length });
 
     // Handle different message types
     if (std.mem.eql(u8, command, "version")) {
@@ -890,8 +955,12 @@ fn processMessage(network: *NetworkManager, data: []const u8) void {
     } else if (std.mem.eql(u8, command, "tx")) {
         handleIncomingTransaction(network, data[@sizeOf(MessageHeader)..]);
     } else if (std.mem.eql(u8, command, "block")) {
-        std.debug.print("📦 Block received from network\n", .{});
+        logNetInfo("Block received from network", .{});
         processIncomingBlock(network, data[@sizeOf(MessageHeader)..]);
+    } else if (std.mem.eql(u8, command, "getblocks")) {
+        handleGetBlocksMessage(network, data[@sizeOf(MessageHeader)..]);
+    } else if (std.mem.eql(u8, command, "blocks")) {
+        handleBlocksMessage(network, data[@sizeOf(MessageHeader)..]);
     } else if (std.mem.eql(u8, command, "ping")) {
         handlePingMessage(network);
     } else if (std.mem.eql(u8, command, "pong")) {
@@ -903,13 +972,13 @@ fn processMessage(network: *NetworkManager, data: []const u8) void {
 fn processIncomingBlock(network: *NetworkManager, block_data: []const u8) void {
     // Get the blockchain reference from network manager
     if (network.blockchain == null) {
-        std.debug.print("⚠️ Block received but no blockchain connection\n", .{});
+        logNetError("Block received but no blockchain connection", .{});
         return;
     }
 
     // Parse block data
     if (block_data.len < @sizeOf(types.BlockHeader) + @sizeOf(u32)) {
-        std.debug.print("⚠️  Block too small - incomplete data\n", .{});
+        logNetError("Block too small - incomplete data", .{});
         return;
     }
 
@@ -920,11 +989,11 @@ fn processIncomingBlock(network: *NetworkManager, block_data: []const u8) void {
     const tx_count_offset = @sizeOf(types.BlockHeader);
     const tx_count = std.mem.bytesToValue(u32, block_data[tx_count_offset .. tx_count_offset + @sizeOf(u32)]);
 
-    std.debug.print("📦 Block received: {} transactions, timestamp {}\n", .{ tx_count, header.timestamp });
+    logNetInfo("Block received: {} transactions, timestamp {}", .{ tx_count, header.timestamp });
 
     // Create transaction array
     const transactions = network.allocator.alloc(types.Transaction, tx_count) catch {
-        std.debug.print("❌ Memory allocation failed - block not processed\n", .{});
+        logNetError("Memory allocation failed - block not processed", .{});
         return;
     };
     defer network.allocator.free(transactions);
@@ -933,7 +1002,7 @@ fn processIncomingBlock(network: *NetworkManager, block_data: []const u8) void {
     var tx_offset: usize = tx_count_offset + @sizeOf(u32);
     for (transactions, 0..) |*tx, i| {
         if (tx_offset + @sizeOf(types.Transaction) > block_data.len) {
-            std.debug.print("⚠️ Transaction {} beyond data boundary\n", .{i});
+            logNetError("Transaction {} beyond data boundary", .{i});
             return;
         }
         tx.* = std.mem.bytesToValue(types.Transaction, block_data[tx_offset .. tx_offset + @sizeOf(types.Transaction)]);
@@ -949,7 +1018,7 @@ fn processIncomingBlock(network: *NetworkManager, block_data: []const u8) void {
     // Send block to blockchain
     if (network.blockchain) |blockchain| {
         blockchain.handleIncomingBlock(block) catch |err| {
-            std.debug.print("❌ Block rejected by blockchain: {}\n", .{err});
+            logNetError("Block rejected by blockchain: {}", .{err});
         };
     }
 }
@@ -958,26 +1027,26 @@ fn processIncomingBlock(network: *NetworkManager, block_data: []const u8) void {
 fn handleIncomingTransaction(network: *NetworkManager, tx_data: []const u8) void {
     // Parse transaction data
     if (tx_data.len < @sizeOf(types.Transaction)) {
-        std.debug.print("⚠️ Transaction incomplete\n", .{});
+        logNetError("Transaction incomplete", .{});
         return;
     }
 
     const transaction = std.mem.bytesToValue(types.Transaction, tx_data[0..@sizeOf(types.Transaction)]);
-    std.debug.print("💸 Transaction received: {} ZEI from network peer\n", .{transaction.amount / types.ZEI_COIN});
+    logNetInfo("Transaction received: {} ZEI from network peer", .{transaction.amount / types.ZEI_COIN});
 
     // Send transaction to blockchain for validation and mempool
     if (network.blockchain) |blockchain| {
         blockchain.handleIncomingTransaction(transaction) catch |err| {
-            std.debug.print("❌ Transaction rejected by blockchain: {}\n", .{err});
+            logNetError("Transaction rejected by blockchain: {}", .{err});
             return;
         };
 
         // Relay valid transaction to other peers
-        std.debug.print("📡 Relaying valid transaction to other peers\n", .{});
+        logNetBroadcast("Relaying valid transaction to other peers", .{});
         for (network.peers.items) |*peer| {
             if (peer.state == .connected) {
                 peer.broadcastTransaction(transaction) catch |err| {
-                    std.debug.print("⚠️ Failed to relay transaction to peer: {}\n", .{err});
+                    logNetError("Failed to relay transaction to peer: {}", .{err});
                 };
             }
         }
@@ -995,23 +1064,46 @@ fn handleVersionMessage(network: *NetworkManager, version_data: []const u8) void
     };
 
     if (version_data.len < @sizeOf(version_payload)) {
-        std.debug.print("⚠️ Version message incomplete\n", .{});
+        logNetError("Version message incomplete", .{});
         return;
     }
 
     const peer_version = std.mem.bytesToValue(version_payload, version_data[0..@sizeOf(version_payload)]);
-    std.debug.print("🤝 Peer version: {}, height: {}\n", .{ peer_version.version, peer_version.block_height });
+    logNetInfo("Peer version: {}, height: {}", .{ peer_version.version, peer_version.block_height });
 
     // Get our blockchain height for comparison
     if (network.blockchain) |blockchain| {
         const our_height = blockchain.getHeight() catch 0;
         std.debug.print("📊 Our height: {}, peer height: {}\n", .{ our_height, peer_version.block_height });
 
-        // Sync logic: if peer is ahead, request blocks
+        // Sync logic: if peer is ahead, start sync process
         if (peer_version.block_height > our_height) {
             const blocks_behind = peer_version.block_height - our_height;
             std.debug.print("📈 We are {} blocks behind, need to sync\n", .{blocks_behind});
-            // TODO: Request blocks from peer
+            
+            // Check if we should sync
+            const should_sync = blockchain.shouldSync(peer_version.block_height) catch false;
+            if (should_sync) {
+                // Find the peer that sent this version message
+                var sync_peer: ?*Peer = null;
+                for (network.peers.items) |*peer| {
+                    if (peer.state == .connected) {
+                        sync_peer = peer;
+                        break;
+                    }
+                }
+                
+                if (sync_peer) |peer| {
+                    std.debug.print("🔄 Starting sync with peer\n", .{});
+                    blockchain.startSync(peer, peer_version.block_height) catch |err| {
+                        std.debug.print("❌ Failed to start sync: {}\n", .{err});
+                    };
+                } else {
+                    std.debug.print("⚠️ No connected peer found for sync\n", .{});
+                }
+            } else {
+                std.debug.print("⚠️ Sync already in progress or not ready\n", .{});
+            }
         } else if (our_height > peer_version.block_height) {
             const blocks_ahead = our_height - peer_version.block_height;
             std.debug.print("📈 We are {} blocks ahead\n", .{blocks_ahead});
@@ -1027,20 +1119,225 @@ fn handleVersionMessage(network: *NetworkManager, version_data: []const u8) void
 // Handle ping message
 fn handlePingMessage(network: *NetworkManager) void {
     _ = network; // TODO: Send pong back to specific peer
-    std.debug.print("🏓 Ping received - sending pong\n", .{});
+    logNetInfo("Ping received - sending pong", .{});
     // TODO: Send pong response to sender
 }
 
 // Handle pong message
 fn handlePongMessage(network: *NetworkManager) void {
     _ = network; // TODO: Update last_seen for specific peer
-    std.debug.print("🏓 Pong received - peer alive\n", .{});
+    logNetInfo("Pong received - peer alive", .{});
     // TODO: Update peer last_seen timestamp
+}
+
+// Handle getblocks request - respond with requested blocks
+fn handleGetBlocksMessage(network: *NetworkManager, message_data: []const u8) void {
+    if (message_data.len < @sizeOf(GetBlocksMessage)) {
+        logNetError("GetBlocks message incomplete", .{});
+        return;
+    }
+
+    const getblocks_msg = std.mem.bytesToValue(GetBlocksMessage, message_data[0..@sizeOf(GetBlocksMessage)]);
+    logNetInfo("GetBlocks request: {} blocks starting from height {}", .{ getblocks_msg.count, getblocks_msg.start_height });
+
+    // Get blockchain reference
+    if (network.blockchain == null) {
+        logNetError("GetBlocks received but no blockchain connection", .{});
+        return;
+    }
+
+    const blockchain = network.blockchain.?;
+    const our_height = blockchain.getHeight() catch {
+        logNetError("Failed to get blockchain height", .{});
+        return;
+    };
+
+    // Check if we have the requested blocks
+    if (getblocks_msg.start_height >= our_height) {
+        logNetError("Requested blocks beyond our height ({} >= {})", .{ getblocks_msg.start_height, our_height });
+        return;
+    }
+
+    // Calculate how many blocks we can actually send
+    const available_blocks = our_height - getblocks_msg.start_height;
+    var blocks_to_send = @min(getblocks_msg.count, available_blocks);
+    
+    // Limit batch size to prevent memory exhaustion attacks
+    blocks_to_send = @min(blocks_to_send, types.SYNC.BATCH_SIZE * 2); // Allow up to 2x normal batch size
+
+    logNetInfo("Sending {} blocks to peer", .{blocks_to_send});
+
+    // Send blocks response
+    sendBlocksResponse(network, getblocks_msg.start_height, blocks_to_send) catch |err| {
+        logNetError("Failed to send blocks response: {}", .{err});
+    };
+}
+
+// Handle blocks response - process batch of blocks for sync
+fn handleBlocksMessage(network: *NetworkManager, message_data: []const u8) void {
+    if (message_data.len < @sizeOf(BlocksMessage)) {
+        std.debug.print("⚠️ Blocks message incomplete\n", .{});
+        return;
+    }
+
+    const blocks_msg = std.mem.bytesToValue(BlocksMessage, message_data[0..@sizeOf(BlocksMessage)]);
+    std.debug.print("📥 Blocks response: {} blocks starting from height {}\n", .{ blocks_msg.count, blocks_msg.start_height });
+
+    // Validate message size to prevent memory exhaustion attacks
+    if (blocks_msg.count > types.SYNC.BATCH_SIZE * 3) { // Allow up to 3x normal batch size
+        std.debug.print("⚠️ Blocks message too large: {} blocks (max {})\n", .{ blocks_msg.count, types.SYNC.BATCH_SIZE * 3 });
+        return;
+    }
+    
+    // Validate message data size
+    const blocks_data = message_data[@sizeOf(BlocksMessage)..];
+    const min_expected_size = blocks_msg.count * (@sizeOf(types.BlockHeader) + @sizeOf(u32)); // Minimum size for headers + tx counts
+    if (blocks_data.len < min_expected_size) {
+        std.debug.print("⚠️ Blocks message data too small: {} bytes (expected at least {})\n", .{ blocks_data.len, min_expected_size });
+        return;
+    }
+    
+    // Check total message size
+    if (message_data.len > MAX_MESSAGE_SIZE) {
+        std.debug.print("⚠️ Message exceeds maximum size: {} bytes (max {})\n", .{ message_data.len, MAX_MESSAGE_SIZE });
+        return;
+    }
+
+    // Get blockchain reference
+    if (network.blockchain == null) {
+        std.debug.print("⚠️ Blocks received but no blockchain connection\n", .{});
+        return;
+    }
+
+    // Process the blocks data (after the BlocksMessage header)
+    processBlocksBatch(network, blocks_msg.start_height, blocks_msg.count, blocks_data) catch |err| {
+        logNetError("Failed to process blocks batch: {}", .{err});
+    };
+}
+
+// Send blocks response to peer
+fn sendBlocksResponse(network: *NetworkManager, start_height: u32, count: u32) !void {
+    // TODO: This should be sent to specific peer, but for now we'll use the first connected peer
+    // In a full implementation, we'd track which peer sent the request
+    
+    var connected_peer: ?*Peer = null;
+    for (network.peers.items) |*peer| {
+        if (peer.state == .connected) {
+            connected_peer = peer;
+            break;
+        }
+    }
+    
+    if (connected_peer == null) {
+        logNetError("No connected peer to send blocks to", .{});
+        return;
+    }
+    
+    const peer = connected_peer.?;
+    const blockchain = network.blockchain.?;
+    
+    // Calculate message size
+    var total_size: usize = @sizeOf(BlocksMessage);
+    for (0..count) |i| {
+        const block_height = start_height + @as(u32, @intCast(i));
+        const block = blockchain.getBlock(block_height) catch continue;
+        total_size += @sizeOf(types.BlockHeader) + @sizeOf(u32) + @sizeOf(types.Transaction) * block.transactions.len;
+    }
+    
+    // Send blocks message header
+    const blocks_msg = BlocksMessage{
+        .start_height = start_height,
+        .count = count,
+    };
+    
+    const header = MessageHeader.create(.blocks, @intCast(total_size));
+    const socket = peer.socket.?;
+    
+    _ = try socket.write(std.mem.asBytes(&header));
+    _ = try socket.write(std.mem.asBytes(&blocks_msg));
+    
+    // Send each block
+    for (0..count) |i| {
+        const block_height = start_height + @as(u32, @intCast(i));
+        const block = blockchain.getBlock(block_height) catch continue;
+        
+        // Send block header
+        _ = try socket.write(std.mem.asBytes(&block.header));
+        
+        // Send transaction count
+        const tx_count: u32 = @intCast(block.transactions.len);
+        _ = try socket.write(std.mem.asBytes(&tx_count));
+        
+        // Send transactions
+        for (block.transactions) |tx| {
+            _ = try socket.write(std.mem.asBytes(&tx));
+        }
+    }
+    
+    logNetSuccess("Sent {} blocks to peer", .{count});
+}
+
+// Process batch of blocks received during sync
+fn processBlocksBatch(network: *NetworkManager, start_height: u32, count: u32, blocks_data: []const u8) !void {
+    const blockchain = network.blockchain.?;
+    var data_offset: usize = 0;
+    
+    for (0..count) |i| {
+        const block_height = start_height + @as(u32, @intCast(i));
+        
+        // Parse block header
+        if (data_offset + @sizeOf(types.BlockHeader) > blocks_data.len) {
+            logNetError("Block {} header beyond data boundary", .{i});
+            return;
+        }
+        
+        const header = std.mem.bytesToValue(types.BlockHeader, blocks_data[data_offset..data_offset + @sizeOf(types.BlockHeader)]);
+        data_offset += @sizeOf(types.BlockHeader);
+        
+        // Parse transaction count
+        if (data_offset + @sizeOf(u32) > blocks_data.len) {
+            logNetError("Block {} tx count beyond data boundary", .{i});
+            return;
+        }
+        
+        const tx_count = std.mem.bytesToValue(u32, blocks_data[data_offset..data_offset + @sizeOf(u32)]);
+        data_offset += @sizeOf(u32);
+        
+        // Parse transactions
+        const transactions = try network.allocator.alloc(types.Transaction, tx_count);
+        defer network.allocator.free(transactions);
+        
+        for (transactions) |*tx| {
+            if (data_offset + @sizeOf(types.Transaction) > blocks_data.len) {
+                logNetError("Block {} transaction beyond data boundary", .{i});
+                return;
+            }
+            
+            tx.* = std.mem.bytesToValue(types.Transaction, blocks_data[data_offset..data_offset + @sizeOf(types.Transaction)]);
+            data_offset += @sizeOf(types.Transaction);
+        }
+        
+        // Create block and add to blockchain
+        const block = types.Block{
+            .header = header,
+            .transactions = transactions,
+        };
+        
+        try blockchain.handleSyncBlock(block_height, block);
+        logNetSuccess("Processed sync block at height {}", .{block_height});
+    }
+    
+    // After processing the batch, request the next batch if still syncing
+    if (blockchain.getSyncState() == .syncing) {
+        blockchain.requestNextSyncBatch() catch |err| {
+            logNetError("Failed to request next sync batch: {}", .{err});
+        };
+    }
 }
 
 // Maintenance thread
 fn maintainConnections(network: *NetworkManager) void {
-    std.debug.print("🔧 Connection maintenance active\n", .{});
+    logNetProcess("Connection maintenance active", .{});
 
     while (network.is_running) {
         const now = util.getTime();
@@ -1051,9 +1348,9 @@ fn maintainConnections(network: *NetworkManager) void {
 
             // Peer timeout detection
             if (peer.state == .connected and time_since_seen > types.TIMING.PEER_TIMEOUT_SECONDS) { // 60 seconds silence
-                std.debug.print("⚠️ Peer silent for 60s - checking health\n", .{});
+                logNetInfo("Peer silent for 60s - checking health", .{});
                 peer.sendPing() catch {
-                    std.debug.print("❌ Peer connection lost, will reconnect\n", .{});
+                    logNetError("Peer connection lost, will reconnect", .{});
                     // Only disconnect if not already disconnected (race condition protection)
                     if (peer.state != .disconnected) {
                         peer.disconnect();
@@ -1069,11 +1366,16 @@ fn maintainConnections(network: *NetworkManager) void {
             }
         }
 
+        // Check for sync timeouts
+        if (network.blockchain) |blockchain| {
+            blockchain.checkSyncTimeout();
+        }
+
         // Periodic discovery (every 5 minutes)
         if (now - network.last_discovery > types.TIMING.DISCOVERY_INTERVAL_SECONDS) {
-            std.debug.print("🔍 Starting periodic peer discovery\n", .{});
+            logNetProcess("Starting periodic peer discovery", .{});
             network.discoverPeers(10801) catch |err| {
-                std.debug.print("⚠️ Discovery failed: {}\n", .{err});
+                logNetError("Discovery failed: {}", .{err});
             };
             network.last_discovery = now;
         }
@@ -1082,7 +1384,7 @@ fn maintainConnections(network: *NetworkManager) void {
         std.time.sleep(types.TIMING.MAINTENANCE_CYCLE_SECONDS * std.time.ns_per_s);
     }
 
-    std.debug.print("🛑 Maintenance stopped\n", .{});
+    logNetInfo("Maintenance stopped", .{});
 }
 
 // Network tests

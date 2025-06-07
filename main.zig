@@ -16,7 +16,6 @@ const key = @import("key.zig");
 const net = @import("net.zig");
 const randomx = @import("randomx.zig");
 
-
 // Type aliases for clarity
 const Transaction = types.Transaction;
 const Block = types.Block;
@@ -24,6 +23,85 @@ const BlockHeader = types.BlockHeader;
 const Account = types.Account;
 const Address = types.Address;
 const Hash = types.Hash;
+
+/// Blockchain synchronization state
+pub const SyncState = enum {
+    synced, // Up to date with peers
+    syncing, // Currently downloading blocks
+    sync_complete, // Sync completed, ready to switch to synced
+    sync_failed, // Sync failed, will retry later
+};
+
+/// Sync progress tracking
+pub const SyncProgress = struct {
+    target_height: u32,
+    current_height: u32,
+    blocks_downloaded: u32,
+    start_time: i64,
+    last_progress_report: i64,
+    last_request_time: i64,
+    retry_count: u32,
+
+    pub fn init(current: u32, target: u32) SyncProgress {
+        const now = util.getTime();
+        return SyncProgress{
+            .target_height = target,
+            .current_height = current,
+            .blocks_downloaded = 0,
+            .start_time = now,
+            .last_progress_report = now,
+            .last_request_time = now,
+            .retry_count = 0,
+        };
+    }
+
+    pub fn getProgress(self: *const SyncProgress) f64 {
+        if (self.target_height <= self.current_height) return 100.0;
+        const total_blocks = self.target_height - self.current_height;
+        if (total_blocks == 0) return 100.0;
+        return (@as(f64, @floatFromInt(self.blocks_downloaded)) / @as(f64, @floatFromInt(total_blocks))) * 100.0;
+    }
+
+    pub fn getETA(self: *const SyncProgress) i64 {
+        const elapsed = util.getTime() - self.start_time;
+        if (elapsed == 0 or self.blocks_downloaded == 0) return 0;
+
+        const remaining_blocks = (self.target_height - self.current_height) - self.blocks_downloaded;
+        const blocks_per_second = @as(f64, @floatFromInt(self.blocks_downloaded)) / @as(f64, @floatFromInt(elapsed));
+        if (blocks_per_second == 0) return 0;
+
+        return @as(i64, @intFromFloat(@as(f64, @floatFromInt(remaining_blocks)) / blocks_per_second));
+    }
+
+    pub fn getBlocksPerSecond(self: *const SyncProgress) f64 {
+        const elapsed = util.getTime() - self.start_time;
+        if (elapsed == 0) return 0.0;
+        return @as(f64, @floatFromInt(self.blocks_downloaded)) / @as(f64, @floatFromInt(elapsed));
+    }
+};
+
+// Helper functions for cleaner code
+/// Check if transaction is a coinbase transaction (zero sender address)
+fn isCoinbaseTransaction(tx: Transaction) bool {
+    return std.mem.eql(u8, &tx.sender, &std.mem.zeroes(types.Address));
+}
+
+/// Logging utilities for simplicity
+fn logError(comptime fmt: []const u8, args: anytype) void {
+    print("❌ " ++ fmt ++ "\n", args);
+}
+
+fn logSuccess(comptime fmt: []const u8, args: anytype) void {
+    print("✅ " ++ fmt ++ "\n", args);
+}
+
+fn logInfo(comptime fmt: []const u8, args: anytype) void {
+    print("ℹ️  " ++ fmt ++ "\n", args);
+}
+
+fn logProcess(comptime fmt: []const u8, args: anytype) void {
+    print("🔄 " ++ fmt ++ "\n", args);
+}
 
 /// ZeiCoin blockchain state and operations
 pub const ZeiCoin = struct {
@@ -39,6 +117,12 @@ pub const ZeiCoin = struct {
     // Allocator for dynamic memory
     allocator: std.mem.Allocator,
 
+    // Sync state and progress tracking
+    sync_state: SyncState,
+    sync_progress: ?SyncProgress,
+    sync_peer: ?*net.Peer,
+    failed_peers: ArrayList(*net.Peer), // Blacklist of failed sync peers
+
     /// Initialize new ZeiCoin blockchain with persistent storage
     pub fn init(allocator: std.mem.Allocator) !ZeiCoin {
         // Use network-specific data directory
@@ -46,7 +130,7 @@ pub const ZeiCoin = struct {
             .testnet => "zeicoin_data_testnet",
             .mainnet => "zeicoin_data_mainnet",
         };
-        
+
         // Initialize database
         const database = try db.Database.init(allocator, data_dir);
 
@@ -55,6 +139,10 @@ pub const ZeiCoin = struct {
             .mempool = ArrayList(Transaction).init(allocator),
             .network = null,
             .allocator = allocator,
+            .sync_state = .synced,
+            .sync_progress = null,
+            .sync_peer = null,
+            .failed_peers = ArrayList(*net.Peer).init(allocator),
         };
 
         // Create genesis block if database is empty
@@ -69,6 +157,7 @@ pub const ZeiCoin = struct {
     pub fn deinit(self: *ZeiCoin) void {
         self.database.deinit();
         self.mempool.deinit();
+        self.failed_peers.deinit();
         // Note: network is managed externally
     }
 
@@ -76,12 +165,12 @@ pub const ZeiCoin = struct {
     fn createGenesis(self: *ZeiCoin) !void {
         // Get network-specific genesis configuration
         const genesis_config = types.Genesis.getConfig();
-        
+
         // Create unique genesis public key using network-specific nonce
         var genesis_public_key: [32]u8 = undefined;
         std.mem.writeInt(u64, genesis_public_key[0..8], genesis_config.nonce, .little);
         @memset(genesis_public_key[8..], 0);
-        
+
         const genesis_addr = util.hash256(&genesis_public_key);
 
         // Create genesis account with initial supply
@@ -152,7 +241,7 @@ pub const ZeiCoin = struct {
         }
 
         try self.mempool.append(transaction);
-        print("📝 Transaction added to mempool: {} ZEI from sender to recipient\n", .{transaction.amount / types.ZEI_COIN});
+        logInfo("Transaction added to mempool: {} ZEI from sender to recipient", .{transaction.amount / types.ZEI_COIN});
 
         // Broadcast transaction to network peers
         if (self.network) |*network| {
@@ -170,7 +259,7 @@ pub const ZeiCoin = struct {
 
         // Check nonce (must be next expected nonce)
         if (tx.nonce != sender_account.nextNonce()) {
-            print("❌ Invalid nonce: expected {}, got {}\n", .{ sender_account.nextNonce(), tx.nonce });
+            logError("Invalid nonce: expected {}, got {}", .{ sender_account.nextNonce(), tx.nonce });
             return false;
         }
 
@@ -351,7 +440,7 @@ pub const ZeiCoin = struct {
             // Use fast SHA256 mining for tests
             return self.zenProofOfWorkSHA256(block);
         }
-        
+
         // Initialize RandomX context for production
         const network_name = switch (types.CURRENT_NETWORK) {
             .testnet => "TestNet",
@@ -428,7 +517,6 @@ pub const ZeiCoin = struct {
         return false;
     }
 
-
     /// Validate block proof-of-work using RandomX
     fn validateBlockPoW(self: *ZeiCoin, block: Block) !bool {
         // Initialize RandomX context for validation
@@ -465,12 +553,12 @@ pub const ZeiCoin = struct {
     /// Calculate next difficulty target for mining
     fn calculateNextDifficulty(self: *ZeiCoin) !types.DifficultyTarget {
         const current_height = try self.getHeight();
-        
+
         // For first 20 blocks, use initial difficulty
         if (current_height < types.ZenMining.DIFFICULTY_ADJUSTMENT_PERIOD) {
             return types.ZenMining.initialDifficultyTarget();
         }
-        
+
         // Only adjust every 20 blocks
         if (current_height % types.ZenMining.DIFFICULTY_ADJUSTMENT_PERIOD != 0) {
             // Not an adjustment block, use previous difficulty
@@ -479,15 +567,15 @@ pub const ZeiCoin = struct {
             defer self.allocator.free(prev_block.transactions);
             return prev_block.header.getDifficultyTarget();
         }
-        
+
         // This is an adjustment block! Calculate new difficulty
         print("📊 Difficulty adjustment at block {}\n", .{current_height});
-        
+
         // Get timestamps from last 20 blocks for time calculation
         const lookback_blocks = types.ZenMining.DIFFICULTY_ADJUSTMENT_PERIOD;
         var oldest_timestamp: u64 = 0;
         var newest_timestamp: u64 = 0;
-        
+
         // Get timestamp from 20 blocks ago
         if (current_height >= lookback_blocks) {
             const old_block_height: u32 = @intCast(current_height - lookback_blocks);
@@ -495,34 +583,30 @@ pub const ZeiCoin = struct {
             defer self.allocator.free(old_block.transactions);
             oldest_timestamp = old_block.header.timestamp;
         }
-        
+
         // Get timestamp from previous block
         const prev_block_height: u32 = @intCast(current_height - 1);
         const prev_block = try self.database.getBlock(prev_block_height);
         defer self.allocator.free(prev_block.transactions);
         newest_timestamp = prev_block.header.timestamp;
         const current_difficulty = prev_block.header.getDifficultyTarget();
-        
+
         // Calculate actual time for last 20 blocks
         const actual_time = newest_timestamp - oldest_timestamp;
         const target_time = lookback_blocks * types.ZenMining.TARGET_BLOCK_TIME;
-        
+
         // Calculate adjustment factor
-        const adjustment_factor = if (actual_time > 0) 
+        const adjustment_factor = if (actual_time > 0)
             @as(f64, @floatFromInt(target_time)) / @as(f64, @floatFromInt(actual_time))
-        else 
+        else
             1.0; // Fallback if time calculation fails
-        
+
         // Apply adjustment with constraints
         const new_difficulty = current_difficulty.adjust(adjustment_factor, types.CURRENT_NETWORK);
-        
+
         // Log the adjustment
-        print("📈 Difficulty adjusted: factor={d:.3}, time={}s->{}s\n", .{
-            adjustment_factor,
-            actual_time,
-            target_time
-        });
-        
+        print("📈 Difficulty adjusted: factor={d:.3}, time={}s->{}s\n", .{ adjustment_factor, actual_time, target_time });
+
         return new_difficulty;
     }
 
@@ -602,14 +686,7 @@ pub const ZeiCoin = struct {
     /// Apply a valid block to the blockchain
     fn applyBlock(self: *ZeiCoin, block: Block) !void {
         // Process all transactions in the block
-        for (block.transactions) |tx| {
-            // Handle coinbase transaction
-            if (std.mem.eql(u8, &tx.sender, &std.mem.zeroes(Address))) {
-                try self.processCoinbaseTransaction(tx, tx.recipient);
-            } else {
-                try self.processTransaction(tx);
-            }
-        }
+        try self.processBlockTransactions(block.transactions);
 
         // Save block to database
         const block_height = try self.getHeight();
@@ -791,14 +868,7 @@ pub const ZeiCoin = struct {
         }
 
         // Process all transactions in the block (zen flow)
-        for (block.transactions) |tx| {
-            // Skip coinbase transaction (first one)
-            if (std.mem.eql(u8, &tx.sender, &std.mem.zeroes(types.Address))) {
-                try self.processCoinbaseTransaction(tx, tx.recipient);
-            } else {
-                try self.processTransaction(tx);
-            }
-        }
+        try self.processBlockTransactions(block.transactions);
 
         // Save block to database (zen persistence)
         try self.database.saveBlock(current_height, block);
@@ -811,19 +881,328 @@ pub const ZeiCoin = struct {
             print("🌊 Valid block flows onwards to other zen peers\n", .{});
         }
     }
+
+    /// Handle sync block from network (specifically for sync process)
+    pub fn handleSyncBlock(self: *ZeiCoin, expected_height: u32, block: types.Block) !void {
+        print("🔄 Processing sync block at height {}\n", .{expected_height});
+
+        // Validate block
+        if (!try self.validateBlock(block, expected_height)) {
+            return error.InvalidSyncBlock;
+        }
+
+        // Add block to chain
+        try self.database.saveBlock(expected_height, block);
+
+        // Process transactions
+        try self.processBlockTransactions(block.transactions);
+
+        // Update sync progress
+        if (self.sync_progress) |*progress| {
+            progress.blocks_downloaded += 1;
+
+            // Report progress periodically
+            const now = util.getTime();
+            if (now - progress.last_progress_report >= types.SYNC.PROGRESS_REPORT_INTERVAL) {
+                self.reportSyncProgress();
+                progress.last_progress_report = now;
+            }
+
+            // Check if we've reached the target height
+            const current_height = self.getHeight() catch expected_height;
+            if (current_height >= progress.target_height) {
+                self.completSync();
+                return;
+            }
+        }
+
+        print("✅ Sync block {} added to chain\n", .{expected_height});
+    }
+
+    /// Start sync process with a peer
+    pub fn startSync(self: *ZeiCoin, peer: *net.Peer, target_height: u32) !void {
+        const current_height = try self.getHeight();
+
+        if (target_height <= current_height) {
+            print("ℹ️  Already up to date (height {})\n", .{current_height});
+            return;
+        }
+
+        print("🔄 Starting sync: {} -> {} ({} blocks behind)\n", .{ current_height, target_height, target_height - current_height });
+
+        // Initialize sync state
+        self.sync_state = .syncing;
+        self.sync_progress = SyncProgress.init(current_height, target_height);
+        self.sync_peer = peer;
+
+        // Start downloading blocks in batches
+        try self.requestNextSyncBatch();
+    }
+
+    /// Request next batch of blocks for sync
+    pub fn requestNextSyncBatch(self: *ZeiCoin) !void {
+        if (self.sync_peer == null or self.sync_progress == null) {
+            return error.SyncNotInitialized;
+        }
+
+        const peer = self.sync_peer.?;
+        const progress = &self.sync_progress.?;
+        const now = util.getTime();
+
+        // Check for timeout on previous request
+        if (now - progress.last_request_time > types.SYNC.SYNC_TIMEOUT_SECONDS) {
+            logProcess("Sync timeout detected, retrying...", .{});
+            progress.retry_count += 1;
+
+            if (progress.retry_count >= types.SYNC.MAX_SYNC_RETRIES) {
+                logError("Max sync retries exceeded, switching peer", .{});
+                try self.switchSyncPeer();
+                return;
+            }
+        }
+
+        const current_height = try self.getHeight();
+        const next_height = current_height;
+        const remaining = progress.target_height - next_height;
+
+        if (remaining == 0) {
+            self.completSync();
+            return;
+        }
+
+        const batch_size = @min(types.SYNC.BATCH_SIZE, remaining);
+
+        print("📥 Requesting {} blocks starting from height {} (attempt {})\n", .{ batch_size, next_height, progress.retry_count + 1 });
+
+        // Update request time and send request
+        progress.last_request_time = now;
+        peer.sendGetBlocks(next_height, batch_size) catch |err| {
+            print("❌ Failed to send sync request: {}\n", .{err});
+            progress.retry_count += 1;
+
+            if (progress.retry_count >= types.SYNC.MAX_SYNC_RETRIES) {
+                self.switchSyncPeer() catch {
+                    self.failSync("Failed to switch sync peer");
+                    return;
+                };
+                // After switching peer, try the request again with new peer
+                if (self.sync_peer) |new_peer| {
+                    new_peer.sendGetBlocks(next_height, batch_size) catch {
+                        self.failSync("Failed to send request to new peer");
+                        return;
+                    };
+                }
+            }
+            return;
+        };
+
+        // Reset retry count on successful request
+        if (progress.retry_count > 0) {
+            self.resetSyncRetry();
+        }
+    }
+
+    /// Complete sync process
+    fn completSync(self: *ZeiCoin) void {
+        print("🎉 Sync completed! Chain is up to date\n", .{});
+
+        if (self.sync_progress) |progress| {
+            const elapsed = util.getTime() - progress.start_time;
+            const blocks_per_sec = progress.getBlocksPerSecond();
+            print("📊 Sync stats: {} blocks in {}s ({:.2} blocks/sec)\n", .{ progress.blocks_downloaded, elapsed, blocks_per_sec });
+        }
+
+        self.sync_state = .sync_complete;
+        self.sync_progress = null;
+        self.sync_peer = null;
+
+        // Transition to synced state
+        self.sync_state = .synced;
+    }
+
+    /// Report sync progress
+    fn reportSyncProgress(self: *ZeiCoin) void {
+        if (self.sync_progress) |progress| {
+            const percent = progress.getProgress();
+            const blocks_per_sec = progress.getBlocksPerSecond();
+            const eta = progress.getETA();
+
+            print("🔄 Sync progress: {:.1}% ({} blocks/sec, ETA: {}s)\n", .{ percent, blocks_per_sec, eta });
+        }
+    }
+
+    /// Check if we need to sync with a peer
+    pub fn shouldSync(self: *ZeiCoin, peer_height: u32) !bool {
+        if (self.sync_state != .synced) {
+            return false; // Already syncing or in error state
+        }
+
+        const our_height = try self.getHeight();
+        return peer_height > our_height;
+    }
+
+    /// Get sync state
+    pub fn getSyncState(self: *const ZeiCoin) SyncState {
+        return self.sync_state;
+    }
+
+    /// Get block by height (used by network layer for sending blocks)
+    pub fn getBlock(self: *ZeiCoin, height: u32) !types.Block {
+        return try self.database.getBlock(height);
+    }
+
+    // Helper methods for cleaner code
+    /// Process all transactions in a block (coinbase and regular)
+    fn processBlockTransactions(self: *ZeiCoin, transactions: []Transaction) !void {
+        for (transactions) |tx| {
+            if (isCoinbaseTransaction(tx)) {
+                try self.processCoinbaseTransaction(tx, tx.recipient);
+            } else {
+                try self.processTransaction(tx);
+            }
+        }
+    }
+
+    /// Reset sync retry count and update timestamp
+    fn resetSyncRetry(self: *ZeiCoin) void {
+        if (self.sync_progress) |*progress| {
+            progress.retry_count = 0;
+            progress.last_request_time = util.getTime();
+        }
+    }
+
+    /// Switch to a different peer for sync (peer fallback mechanism)
+    fn switchSyncPeer(self: *ZeiCoin) !void {
+        if (self.network == null) {
+            return error.NoNetworkManager;
+        }
+
+        // Add current peer to failed list
+        if (self.sync_peer) |failed_peer| {
+            try self.failed_peers.append(failed_peer);
+            print("🚫 Added peer to blacklist (total: {})\n", .{self.failed_peers.items.len});
+        }
+
+        // Find a new peer that's not in the failed list
+        const network = self.network.?;
+        var new_peer: ?*net.Peer = null;
+
+        for (network.peers.items) |*peer| {
+            if (peer.state != .connected) continue;
+
+            // Check if this peer is in the failed list
+            var is_failed = false;
+            for (self.failed_peers.items) |failed_peer| {
+                if (peer == failed_peer) {
+                    is_failed = true;
+                    break;
+                }
+            }
+
+            if (!is_failed) {
+                new_peer = peer;
+                break;
+            }
+        }
+
+        if (new_peer) |peer| {
+            print("🔄 Switching to new sync peer\n", .{});
+            self.sync_peer = peer;
+
+            // Reset retry count - caller will retry the request
+            self.resetSyncRetry();
+        } else {
+            print("❌ No more peers available for sync\n", .{});
+            self.failSync("No more peers available");
+        }
+    }
+
+    /// Fail sync process with error message
+    fn failSync(self: *ZeiCoin, reason: []const u8) void {
+        print("❌ Sync failed: {s}\n", .{reason});
+        self.sync_state = .sync_failed;
+        self.sync_progress = null;
+        self.sync_peer = null;
+
+        // Clear failed peers list for future attempts
+        self.failed_peers.clearAndFree();
+    }
+
+    /// Check if sync has timed out and needs recovery
+    pub fn checkSyncTimeout(self: *ZeiCoin) void {
+        if (self.sync_state != .syncing or self.sync_progress == null) {
+            return;
+        }
+
+        const progress = &self.sync_progress.?;
+        const now = util.getTime();
+
+        // Check for overall sync timeout (much longer than individual requests)
+        const total_timeout = types.SYNC.SYNC_TIMEOUT_SECONDS * 10; // 5 minutes total
+        if (now - progress.start_time > total_timeout) {
+            self.failSync("Sync took too long overall");
+            return;
+        }
+
+        // Check for individual request timeout
+        if (now - progress.last_request_time > types.SYNC.SYNC_TIMEOUT_SECONDS) {
+            print("⏰ Sync request timed out\n", .{});
+            self.requestNextSyncBatch() catch |err| {
+                print("❌ Failed to retry sync request: {}\n", .{err});
+                self.failSync("Failed to retry sync request");
+            };
+        }
+    }
+
+    /// Retry failed sync (can be called externally)
+    pub fn retrySyncIfFailed(self: *ZeiCoin) !void {
+        if (self.sync_state != .sync_failed) {
+            return;
+        }
+
+        if (self.network == null) {
+            return error.NoNetworkManager;
+        }
+
+        print("🔄 Retrying failed sync...\n", .{});
+
+        // Find any connected peer
+        const network = self.network.?;
+        for (network.peers.items) |*peer| {
+            if (peer.state == .connected) {
+                // Get their height and restart sync
+                // Note: In a full implementation, we'd send a version message first
+                // For now, just assume they're still ahead
+                if (self.sync_progress) |progress| {
+                    try self.startSync(peer, progress.target_height);
+                    return;
+                }
+            }
+        }
+
+        print("❌ No peers available for sync retry\n", .{});
+    }
 };
 
 // Tests
 const testing = std.testing;
 
-test "blockchain initialization" {
-    // Use unique data directory for this test
-    var zeicoin = ZeiCoin{
-        .database = try db.Database.init(testing.allocator, "test_zeicoin_data_init"),
+// Test helper function for cleaner test code
+fn createTestZeiCoin(data_dir: []const u8) !ZeiCoin {
+    return ZeiCoin{
+        .database = try db.Database.init(testing.allocator, data_dir),
         .mempool = ArrayList(Transaction).init(testing.allocator),
         .network = null,
         .allocator = testing.allocator,
+        .sync_state = .synced,
+        .sync_progress = null,
+        .sync_peer = null,
+        .failed_peers = ArrayList(*net.Peer).init(testing.allocator),
     };
+}
+
+test "blockchain initialization" {
+    var zeicoin = try createTestZeiCoin("test_zeicoin_data_init");
     defer zeicoin.deinit();
 
     // Create genesis manually for this test
@@ -849,13 +1228,7 @@ test "blockchain initialization" {
 }
 
 test "transaction processing" {
-    // Use unique data directory for this test
-    var zeicoin = ZeiCoin{
-        .database = try db.Database.init(testing.allocator, "test_zeicoin_data_tx"),
-        .mempool = ArrayList(Transaction).init(testing.allocator),
-        .network = null,
-        .allocator = testing.allocator,
-    };
+    var zeicoin = try createTestZeiCoin("test_zeicoin_data_tx");
     defer zeicoin.deinit();
 
     // Create genesis manually for this test
@@ -915,13 +1288,7 @@ test "transaction processing" {
 }
 
 test "block retrieval by height" {
-    // Use unique data directory for this test
-    var zeicoin = ZeiCoin{
-        .database = try db.Database.init(testing.allocator, "test_zeicoin_data_retrieval"),
-        .mempool = ArrayList(Transaction).init(testing.allocator),
-        .network = null,
-        .allocator = testing.allocator,
-    };
+    var zeicoin = try createTestZeiCoin("test_zeicoin_data_retrieval");
     defer zeicoin.deinit();
 
     // Create genesis manually for this test
@@ -1007,13 +1374,7 @@ test "block validation" {
 }
 
 test "mempool cleaning after block application" {
-    // Use unique data directory for this test
-    var zeicoin = ZeiCoin{
-        .database = try db.Database.init(testing.allocator, "test_zeicoin_data_mempool"),
-        .mempool = ArrayList(Transaction).init(testing.allocator),
-        .network = null,
-        .allocator = testing.allocator,
-    };
+    var zeicoin = try createTestZeiCoin("test_zeicoin_data_mempool");
     defer zeicoin.deinit();
 
     // Create genesis manually for this test
