@@ -72,7 +72,7 @@ if [ ! -f "randomx/randomx_helper" ] || [ ! -f "randomx/randomx_install/lib/libr
     cd build
     
     echo "🛠️  Compiling RandomX library..."
-    cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="../randomx_install"
+    cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="../../randomx_install"
     make -j$(nproc)
     make install
     
@@ -81,8 +81,8 @@ if [ ! -f "randomx/randomx_helper" ] || [ ! -f "randomx/randomx_install/lib/libr
     # Build RandomX helper (now back to project root)
     echo "🔗 Building RandomX helper..."
     gcc -o randomx/randomx_helper randomx/randomx_helper.c randomx/wrapper.c \
-        -Irandomx/randomx_build/RandomX/randomx_install/include \
-        -Lrandomx/randomx_build/RandomX/randomx_install/lib -lrandomx -lstdc++ -lm
+        -Irandomx/randomx_install/include \
+        -Lrandomx/randomx_install/lib -lrandomx -lstdc++ -lm
     
     echo "✅ RandomX built successfully!"
 else
@@ -102,4 +102,4 @@ echo "  make help       # Show all commands"
 echo ""
 echo "Create your first wallet:"
 echo "  ./zig-out/bin/zeicoin wallet create mywallet"
-echo "  ./zig-out/bin/zeicoin balance mywalletlist"
+echo "  ./zig-out/bin/zeicoin balance mywallet"

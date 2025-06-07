@@ -16,3 +16,5 @@ README.md
 
 # RandomX build files
 randomx/randomx_build/
+randomx/randomx_install/
+randomx/randomx_helper
