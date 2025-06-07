@@ -1,3 +1,6 @@
+// bech32.zig - Bech32 address encoding for ZeiCoin
+// Implements BIP 173 Bech32 encoding for human-readable cryptocurrency addresses
+
 const std = @import("std");
 
 const BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
@@ -113,7 +116,7 @@ pub fn hash160ToAddress(hash160: []const u8, hrp: []const u8) ![]u8 {
     defer data.deinit();
 
     try data.append(ADDRESSVERSION); // Version byte, e.g., 0 for P2WPKH
-    try data.appendSlice(hash160);   // Append the 20-byte hash160
+    try data.appendSlice(hash160); // Append the 20-byte hash160
 
     return encodeBech32(hrp, data.items);
 }
@@ -125,7 +128,7 @@ pub fn decodeBech32(bech: []const u8) !struct { hrp: []const u8, data: []u8 } {
     if (sepIndex == 0 or sepIndex + 7 > bech.len) return error.InvalidFormat;
 
     const hrp = bech[0..sepIndex];
-    const dataPart = bech[sepIndex + 1..];
+    const dataPart = bech[sepIndex + 1 ..];
 
     // Convert characters to 5-bit values
     var data5bit = std.ArrayList(u8).init(std.heap.page_allocator);
@@ -139,7 +142,7 @@ pub fn decodeBech32(bech: []const u8) !struct { hrp: []const u8, data: []u8 } {
     // TODO: Validate checksum here (omitted for brevity, should check polymod)
 
     // Convert 5-bit back to 8-bit
-    const data8bit = try convertBits(data5bit.items[0..data5bit.items.len - 6], 5, 8, false);
+    const data8bit = try convertBits(data5bit.items[0 .. data5bit.items.len - 6], 5, 8, false);
     return .{ .hrp = hrp, .data = data8bit };
 }
 

@@ -37,15 +37,18 @@ fi
 cd "$(dirname "$0")/.."
 PROJECT_ROOT=$(pwd)
 
-# Create data directory structure
-mkdir -p zeicoin_data/{blocks,accounts,wallets}
-echo "📁 Created ZeiCoin data directories"
+# Create data directory structure for both networks
+# The server will use the appropriate one based on CURRENT_NETWORK in types.zig
+mkdir -p zeicoin_data_testnet/{blocks,accounts,wallets}
+mkdir -p zeicoin_data_mainnet/{blocks,accounts,wallets}
+echo "📁 Created ZeiCoin data directories (testnet and mainnet)"
 
 echo ""
 echo "🎯 Starting ZeiCoin Server..."
 echo "   - P2P Network: $LOCAL_IP:10801"
 echo "   - Client API: $LOCAL_IP:10802"
-echo "   - Blockchain data: ./zeicoin_data/"
+echo "   - Blockchain data: ./zeicoin_data_testnet/ or ./zeicoin_data_mainnet/"
+echo "   - Active network determined by types.zig CURRENT_NETWORK setting"
 echo "   - Press Ctrl+C to stop"
 echo ""
 

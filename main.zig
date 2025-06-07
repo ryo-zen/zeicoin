@@ -55,8 +55,14 @@ pub const ZeiCoin = struct {
 
     /// Initialize new ZeiCoin blockchain with persistent storage
     pub fn init(allocator: std.mem.Allocator) !ZeiCoin {
+        // Use network-specific data directory
+        const data_dir = switch (types.CURRENT_NETWORK) {
+            .testnet => "zeicoin_data_testnet",
+            .mainnet => "zeicoin_data_mainnet",
+        };
+        
         // Initialize database
-        const database = try db.Database.init(allocator, "zeicoin_data");
+        const database = try db.Database.init(allocator, data_dir);
 
         var blockchain = ZeiCoin{
             .database = database,
@@ -82,31 +88,41 @@ pub const ZeiCoin = struct {
 
     /// Create the genesis block with initial distribution
     fn createGenesis(self: *ZeiCoin) !void {
-        // Genesis public key (zero for simplicity) and derive address
-        const genesis_public_key = std.mem.zeroes([32]u8);
+        // Get network-specific genesis configuration
+        const genesis_config = types.Genesis.getConfig();
+        
+        // Create unique genesis public key using network-specific nonce
+        var genesis_public_key: [32]u8 = undefined;
+        std.mem.writeInt(u64, genesis_public_key[0..8], genesis_config.nonce, .little);
+        @memset(genesis_public_key[8..], 0);
+        
         const genesis_addr = util.hash256(&genesis_public_key);
 
         // Create genesis account with initial supply
         const genesis_account = Account{
             .address = genesis_addr,
-            .balance = types.Genesis.reward,
+            .balance = genesis_config.reward,
             .nonce = 0,
         };
 
         // Save genesis account to database
         try self.database.saveAccount(genesis_addr, genesis_account);
 
-        // Create genesis block (no transactions, just establishes the chain)
+        // Create genesis block with network-specific message
         const genesis_transactions = try self.allocator.alloc(Transaction, 0);
         defer self.allocator.free(genesis_transactions);
+
+        // Include genesis message in merkle root calculation
+        var message_hash: Hash = undefined;
+        std.crypto.hash.sha2.Sha256.hash(genesis_config.message, &message_hash, .{});
 
         const genesis_block = Block{
             .header = BlockHeader{
                 .previous_hash = std.mem.zeroes(Hash),
-                .merkle_root = std.mem.zeroes(Hash),
-                .timestamp = types.Genesis.timestamp,
+                .merkle_root = message_hash, // Genesis message hash as merkle root
+                .timestamp = genesis_config.timestamp,
                 .difficulty = 0x1d00ffff, // Easy difficulty for genesis
-                .nonce = 0,
+                .nonce = @as(u32, @truncate(genesis_config.nonce)), // Use network nonce
             },
             .transactions = genesis_transactions,
         };
@@ -116,7 +132,9 @@ pub const ZeiCoin = struct {
 
         print("🎉 ZeiCoin Genesis Block Created!\n", .{});
         print("📦 Block #{}: {} transactions\n", .{ 0, genesis_block.txCount() });
-        print("💰 Genesis Account: {} ZEI\n", .{types.Genesis.reward / types.ZEI_COIN});
+        print("💰 Genesis Account: {} ZEI\n", .{genesis_config.reward / types.ZEI_COIN});
+        print("📝 Genesis Message: \"{s}\"\n", .{genesis_config.message});
+        print("🌐 Network: {s}\n", .{types.NetworkConfig.networkName()});
     }
 
     /// Get account for an address (creates new account if doesn't exist)
