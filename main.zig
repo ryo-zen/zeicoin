@@ -15,6 +15,7 @@ const db = @import("db.zig");
 const key = @import("key.zig");
 const net = @import("net.zig");
 const randomx = @import("randomx.zig");
+const genesis = @import("genesis.zig");
 
 // Type aliases for clarity
 const Transaction = types.Transaction;
@@ -145,12 +146,34 @@ pub const ZeiCoin = struct {
             .failed_peers = ArrayList(*net.Peer).init(allocator),
         };
 
-        // Create genesis block if database is empty
+        // Create canonical genesis block if database is empty
         if (try blockchain.getHeight() == 0) {
-            try blockchain.createGenesis();
+            try blockchain.createCanonicalGenesis();
         }
 
         return blockchain;
+    }
+
+    /// Initialize blockchain after network discovery
+    /// Creates genesis if no network exists, otherwise prepares for sync
+    pub fn initializeBlockchain(self: *ZeiCoin) !void {
+        const current_height = try self.getHeight();
+        
+        if (current_height == 0) {
+            // No blockchain exists locally
+            if (self.network) |network| {
+                const connected_peers = network.getConnectedPeers();
+                if (connected_peers > 0) {
+                    print("🔗 Connected to {} peers, waiting for blockchain sync...\n", .{connected_peers});
+                    // Don't create genesis - wait for sync to download the network's blockchain
+                    return;
+                }
+            }
+            
+            // No network peers found, create local genesis
+            print("🌐 No network peers found, creating local genesis block\n", .{});
+            try self.createGenesis();
+        }
     }
 
     /// Cleanup blockchain resources
@@ -161,55 +184,47 @@ pub const ZeiCoin = struct {
         // Note: network is managed externally
     }
 
-    /// Create the genesis block with initial distribution
-    fn createGenesis(self: *ZeiCoin) !void {
-        // Get network-specific genesis configuration
-        const genesis_config = types.Genesis.getConfig();
+    /// Create the canonical genesis block from hardcoded definition
+    fn createCanonicalGenesis(self: *ZeiCoin) !void {
+        // Get the canonical genesis block for current network
+        const genesis_block = try genesis.createGenesis(self.allocator);
+        defer self.allocator.free(genesis_block.transactions);
 
-        // Create unique genesis public key using network-specific nonce
-        var genesis_public_key: [32]u8 = undefined;
-        std.mem.writeInt(u64, genesis_public_key[0..8], genesis_config.nonce, .little);
-        @memset(genesis_public_key[8..], 0);
-
-        const genesis_addr = util.hash256(&genesis_public_key);
-
-        // Create genesis account with initial supply
-        const genesis_account = Account{
-            .address = genesis_addr,
-            .balance = genesis_config.reward,
-            .nonce = 0,
-        };
-
-        // Save genesis account to database
-        try self.database.saveAccount(genesis_addr, genesis_account);
-
-        // Create genesis block with network-specific message
-        const genesis_transactions = try self.allocator.alloc(Transaction, 0);
-        defer self.allocator.free(genesis_transactions);
-
-        // Include genesis message in merkle root calculation
-        var message_hash: Hash = undefined;
-        std.crypto.hash.sha2.Sha256.hash(genesis_config.message, &message_hash, .{});
-
-        const genesis_block = Block{
-            .header = BlockHeader{
-                .previous_hash = std.mem.zeroes(Hash),
-                .merkle_root = message_hash, // Genesis message hash as merkle root
-                .timestamp = genesis_config.timestamp,
-                .difficulty = types.ZenMining.initialDifficultyTarget().toU64(), // Use dynamic difficulty
-                .nonce = @as(u32, @truncate(genesis_config.nonce)), // Use network nonce
-            },
-            .transactions = genesis_transactions,
-        };
+        // Process genesis transactions to create initial accounts
+        for (genesis_block.transactions) |tx| {
+            if (tx.amount > 0) {
+                // Create account for genesis recipient
+                const genesis_account = Account{
+                    .address = tx.recipient,
+                    .balance = tx.amount,
+                    .nonce = 0,
+                };
+                try self.database.saveAccount(tx.recipient, genesis_account);
+            }
+        }
 
         // Save genesis block to database
         try self.database.saveBlock(0, genesis_block);
 
+        // Get network-specific info for display
+        const network_info = switch (types.CURRENT_NETWORK) {
+            .testnet => .{ 
+                .name = "TestNet", 
+                .message = genesis.GenesisBlocks.TESTNET.MESSAGE,
+                .reward = genesis.GenesisBlocks.TESTNET.MINER_REWARD,
+            },
+            .mainnet => .{ 
+                .name = "MainNet", 
+                .message = genesis.GenesisBlocks.MAINNET.MESSAGE,
+                .reward = genesis.GenesisBlocks.MAINNET.MINER_REWARD,
+            },
+        };
+
         print("🎉 ZeiCoin Genesis Block Created!\n", .{});
-        print("📦 Block #{}: {} transactions\n", .{ 0, genesis_block.txCount() });
-        print("💰 Genesis Account: {} ZEI\n", .{genesis_config.reward / types.ZEI_COIN});
-        print("📝 Genesis Message: \"{s}\"\n", .{genesis_config.message});
-        print("🌐 Network: {s}\n", .{types.NetworkConfig.networkName()});
+        print("📦 Block #0: {} transactions\n", .{genesis_block.txCount()});
+        print("💰 Genesis Account: {} ZEI\n", .{network_info.reward / types.ZEI_COIN});
+        print("📝 Genesis Message: \"{s}\"\n", .{network_info.message});
+        print("🌐 Network: {s}\n", .{network_info.name});
     }
 
     /// Get account for an address (creates new account if doesn't exist)
@@ -646,12 +661,27 @@ pub const ZeiCoin = struct {
 
     /// Validate an incoming block
     pub fn validateBlock(self: *ZeiCoin, block: Block, expected_height: u32) !bool {
+        // Special validation for genesis block (height 0)
+        if (expected_height == 0) {
+            if (!genesis.validateGenesis(block)) {
+                print("❌ Genesis block validation failed: not canonical genesis\n", .{});
+                return false;
+            }
+            return true; // Genesis block passed validation
+        }
+
         // Check basic block structure
-        if (!block.isValid()) return false;
+        if (!block.isValid()) {
+            print("❌ Block validation failed: invalid block structure\n", .{});
+            return false;
+        }
 
         // Check block height consistency
         const current_height = try self.getHeight();
-        if (expected_height != current_height) return false;
+        if (expected_height != current_height) {
+            print("❌ Block validation failed: height mismatch (expected: {}, current: {})\n", .{ expected_height, current_height });
+            return false;
+        }
 
         // Check proof-of-work with dynamic difficulty
         if (@import("builtin").mode == .Debug) {
@@ -923,12 +953,15 @@ pub const ZeiCoin = struct {
     pub fn startSync(self: *ZeiCoin, peer: *net.Peer, target_height: u32) !void {
         const current_height = try self.getHeight();
 
-        if (target_height <= current_height) {
+        // Special case: if we have no blockchain (height 0), sync from genesis (height 0)
+        if (current_height == 0 and target_height > 0) {
+            print("🔄 Starting sync from genesis: 0 -> {} ({} blocks to download)\n", .{ target_height, target_height });
+        } else if (target_height <= current_height) {
             print("ℹ️  Already up to date (height {})\n", .{current_height});
             return;
+        } else {
+            print("🔄 Starting sync: {} -> {} ({} blocks behind)\n", .{ current_height, target_height, target_height - current_height });
         }
-
-        print("🔄 Starting sync: {} -> {} ({} blocks behind)\n", .{ current_height, target_height, target_height - current_height });
 
         // Initialize sync state
         self.sync_state = .syncing;
@@ -1033,11 +1066,18 @@ pub const ZeiCoin = struct {
 
     /// Check if we need to sync with a peer
     pub fn shouldSync(self: *ZeiCoin, peer_height: u32) !bool {
+        const our_height = try self.getHeight();
+        
+        // If we have no blockchain and peer has blocks, always sync (including genesis)
+        if (our_height == 0 and peer_height > 0) {
+            print("🌐 Network has blockchain (height {}), will sync from genesis\n", .{peer_height});
+            return true;
+        }
+        
         if (self.sync_state != .synced) {
             return false; // Already syncing or in error state
         }
 
-        const our_height = try self.getHeight();
         return peer_height > our_height;
     }
 

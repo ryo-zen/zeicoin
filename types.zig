@@ -118,12 +118,25 @@ pub const Transaction = struct {
     /// Check if transaction has valid basic structure
     pub fn isValid(self: *const Transaction) bool {
         // Basic validation rules
-        if (self.amount == 0 or self.timestamp == 0) return false;
-        if (std.mem.eql(u8, &self.sender, &self.recipient)) return false; // Can't send to self
+        if (self.amount == 0) {
+            std.debug.print("❌ Transaction invalid: amount is 0\n", .{});
+            return false;
+        }
+        if (self.timestamp == 0) {
+            std.debug.print("❌ Transaction invalid: timestamp is 0\n", .{});
+            return false;
+        }
+        if (std.mem.eql(u8, &self.sender, &self.recipient)) {
+            std.debug.print("❌ Transaction invalid: sender equals recipient\n", .{});
+            return false;
+        }
 
         // Verify that sender address matches the hash of provided public key
         const derived_address = util.hash256(&self.sender_public_key);
-        if (!std.mem.eql(u8, &self.sender, &derived_address)) return false;
+        if (!std.mem.eql(u8, &self.sender, &derived_address)) {
+            std.debug.print("❌ Transaction invalid: sender address doesn't match public key\n", .{});
+            return false;
+        }
 
         return true;
     }
@@ -280,12 +293,21 @@ pub const Block = struct {
 
     /// Check if block structure is valid
     pub fn isValid(self: *const Block) bool {
-        // Basic validation
-        if (self.transactions.len == 0) return false;
+        // Genesis blocks can have transactions (they contain coinbase)
+        // Regular blocks must have at least one transaction
+        
+        // Regular blocks must have transactions
+        if (self.transactions.len == 0) {
+            std.debug.print("❌ Block invalid: no transactions\n", .{});
+            return false;
+        }
 
         // All transactions must be valid
-        for (self.transactions) |tx| {
-            if (!tx.isValid()) return false;
+        for (self.transactions, 0..) |tx, i| {
+            if (!tx.isValid()) {
+                std.debug.print("❌ Block invalid: transaction {} failed validation\n", .{i});
+                return false;
+            }
         }
 
         return true;
