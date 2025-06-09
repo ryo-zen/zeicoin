@@ -961,10 +961,10 @@ const MessageBuffer = struct {
         const total_size = @sizeOf(MessageHeader) + header.length;
         const message = self.data[0..total_size];
 
-        // Shift remaining data
+        // Shift remaining data (use copyForwards for overlapping memory)
         const remaining = self.pos - total_size;
         if (remaining > 0) {
-            @memcpy(self.data[0..remaining], self.data[total_size..self.pos]);
+            std.mem.copyForwards(u8, self.data[0..remaining], self.data[total_size..self.pos]);
         }
         self.pos = remaining;
 
@@ -1089,15 +1089,9 @@ fn handleIncomingTransaction(network: *NetworkManager, tx_data: []const u8) void
             return;
         };
 
-        // Relay valid transaction to other peers
-        logNetBroadcast("Relaying valid transaction to other peers", .{});
-        for (network.peers.items) |*peer| {
-            if (peer.state == .connected) {
-                peer.broadcastTransaction(transaction) catch |err| {
-                    logNetError("Failed to relay transaction to peer: {}", .{err});
-                };
-            }
-        }
+        // Note: Don't relay transactions received from network peers to avoid broadcast loops
+        // Only broadcast transactions that originate locally (from client API)
+        // This prevents the infinite relay storm between connected nodes
     }
 }
 

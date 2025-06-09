@@ -11,7 +11,6 @@ const wallet = @import("wallet.zig");
 const db = @import("db.zig");
 const util = @import("util.zig");
 
-
 const CLIError = error{
     InvalidCommand,
     InvalidArguments,
@@ -932,6 +931,7 @@ fn printZeiBanner() void {
 
 fn printHelp() void {
     printZeiBanner();
+
     print("WALLET COMMANDS:\n", .{});
     print("  zeicoin wallet create [name]     Create new wallet\n", .{});
     print("  zeicoin wallet load [name]       Load existing wallet\n", .{});

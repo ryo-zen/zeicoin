@@ -115,9 +115,29 @@ pub const Transaction = struct {
         return util.hash256(data);
     }
 
+    /// Check if this is a coinbase transaction (created from thin air)
+    pub fn isCoinbase(self: *const Transaction) bool {
+        return std.mem.eql(u8, &self.sender, &std.mem.zeroes(Address));
+    }
+
     /// Check if transaction has valid basic structure
     pub fn isValid(self: *const Transaction) bool {
-        // Basic validation rules
+        // Coinbase transactions have simpler validation rules
+        if (self.isCoinbase()) {
+            // Coinbase validation: amount > 0, timestamp > 0
+            if (self.amount == 0) {
+                std.debug.print("❌ Coinbase invalid: amount is 0\n", .{});
+                return false;
+            }
+            if (self.timestamp == 0) {
+                std.debug.print("❌ Coinbase invalid: timestamp is 0\n", .{});
+                return false;
+            }
+            // Coinbase can send to any recipient
+            return true;
+        }
+
+        // Regular transaction validation
         if (self.amount == 0) {
             std.debug.print("❌ Transaction invalid: amount is 0\n", .{});
             return false;
