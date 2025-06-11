@@ -13,6 +13,7 @@ pub const ZEI_CENT: u64 = 1000000; // 1 cent = 1,000,000 zei
 pub const TIMING = struct {
     pub const PEER_TIMEOUT_SECONDS: i64 = 60;
     pub const DISCOVERY_INTERVAL_SECONDS: i64 = 300; // 5 minutes
+    pub const HEIGHT_CHECK_INTERVAL_SECONDS: i64 = 120; // 2 minutes - less frequent
     pub const MAINTENANCE_CYCLE_SECONDS: u64 = 10;
     pub const SERVER_SLEEP_MS: u64 = 10;
     pub const CLI_TIMEOUT_SECONDS: u64 = 5;
@@ -32,14 +33,15 @@ pub const SYNC = struct {
     pub const SYNC_TIMEOUT_SECONDS: i64 = 30; // Timeout for sync requests
     pub const RETRY_DELAY_SECONDS: i64 = 5; // Delay before retrying failed sync
     pub const MAX_SYNC_RETRIES: u32 = 3; // Maximum sync retry attempts
+    pub const MAX_CONSECUTIVE_FAILURES: u32 = 5; // Maximum consecutive sync failures before peer disconnect
     pub const PROGRESS_REPORT_INTERVAL: u32 = 10; // Report progress every N blocks
 };
 
 // Network constants - Bootstrap nodes for peer discovery
 pub const BOOTSTRAP_NODES = [_][]const u8{
-    "134.199.168.129:10801", // Primary bootstrap node
-    "192.168.1.122:10801", // Secondary bootstrap node
-    "127.0.0.1:10801", // Local fallback
+    "134.199.168.129:10801", // Public bootstrap node
+    // Note: Local/private IPs should not be hardcoded as bootstrap nodes
+    // They will be discovered via local network scanning if available
 };
 
 // Network ports - ZeiCoin zen networking
@@ -47,6 +49,22 @@ pub const NETWORK_PORTS = struct {
     pub const P2P: u16 = 10801; // Peer-to-peer network
     pub const CLIENT_API: u16 = 10802; // Client API
     pub const DISCOVERY: u16 = 10800; // UDP discovery
+};
+
+// Node types for asymmetric networking
+pub const NodeType = enum {
+    full_node,     // Can accept incoming connections (public IP)
+    outbound_only, // Behind NAT, outbound connections only (private IP)
+    unknown,       // Not yet determined
+    
+    pub fn canServeBlocks(self: NodeType) bool {
+        return self == .full_node;
+    }
+    
+    pub fn canReceiveBlocks(self: NodeType) bool {
+        _ = self; // All node types can receive blocks
+        return true; // All nodes can receive blocks
+    }
 };
 
 // Address is a simple 32-byte hash
@@ -294,6 +312,21 @@ pub const BlockHeader = struct {
         const data = stream.getWritten();
         return util.hash256(data);
     }
+    
+    /// Calculate the work contribution of this block
+    pub fn getWork(self: *const BlockHeader) ChainWork {
+        const target = self.getDifficultyTarget();
+        
+        // Work = 2^128 / (target_value + 1)
+        // For simplicity, use approximation: work = base_bytes * 256^28 + inverse(threshold)
+        const base_work: ChainWork = (@as(ChainWork, target.base_bytes) << 112); // Heavy weight for zero bytes
+        const threshold_work: ChainWork = if (target.threshold > 0) 
+            @as(ChainWork, 0xFFFFFFFF) / @as(ChainWork, target.threshold)
+        else 
+            @as(ChainWork, 0xFFFFFFFF);
+            
+        return base_work + threshold_work;
+    }
 };
 
 /// Complete block with header and transactions
@@ -340,6 +373,37 @@ pub const GenesisConfig = struct {
     message: []const u8,
     reward: u64,
     nonce: u64, // Unique nonce for each network
+};
+
+/// Chain work - cumulative proof of work (use u128 for now, upgrade to u256 if needed)
+pub const ChainWork = u128;
+
+/// Chain state for tracking competing blockchain forks
+pub const ChainState = struct {
+    tip_hash: BlockHash,
+    tip_height: u32,
+    cumulative_work: ChainWork,
+    
+    pub fn init(genesis_hash: BlockHash, genesis_work: ChainWork) ChainState {
+        return .{
+            .tip_hash = genesis_hash,
+            .tip_height = 0,
+            .cumulative_work = genesis_work,
+        };
+    }
+    
+    /// Compare two chains by cumulative work
+    pub fn hasMoreWork(self: ChainState, other: ChainState) bool {
+        return self.cumulative_work > other.cumulative_work;
+    }
+};
+
+/// Fork block - block waiting to be connected to main chain
+pub const ForkBlock = struct {
+    block: Block,
+    height: u32,
+    cumulative_work: ChainWork,
+    received_time: i64,
 };
 
 /// Network-specific genesis configurations

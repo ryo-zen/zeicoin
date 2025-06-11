@@ -120,9 +120,7 @@ pub fn main() !void {
     // Start P2P networking for peer connections
     try network.start(p2p_port);
 
-    print("🔍 Discovering zen peers in the network (async)...\n", .{});
-    // Start peer discovery in background to avoid blocking client server setup
-    // try network.discoverPeers(p2p_port);
+    // Peer discovery handled automatically by maintenance thread
 
     // Create TCP server for client API connections (separate port)
     var server = address.listen(.{ .reuse_address = true }) catch |err| {
@@ -136,10 +134,9 @@ pub fn main() !void {
     print("🔗 Client API: Port {} ACCEPTING\n", .{client_port});
     print("⚡ Auto-discovery: ENABLED\n", .{});
     network.printStatus();
-    print("\n💎 The network flows like water...\n", .{});
-    print("⏹️  Press Ctrl+C to achieve digital nirvana\n\n", .{});
+    print("\n💎 Server running. Press Ctrl+C to stop.\n\n", .{});
 
-    // Statistics for the zen journey
+    // Server statistics
     var connection_count: u32 = 0;
     var transaction_count: u32 = 0;
     var block_count: u32 = 0;
@@ -240,6 +237,9 @@ fn handleZeiCoinClient(allocator: std.mem.Allocator, connection: net.Server.Conn
             const response = "PONG from ZeiCoin Bootstrap";
             try connection.stream.writeAll(response);
             print("🏓 Responded to PING\n", .{});
+        } else if (std.mem.eql(u8, message, "TRIGGER_SYNC")) {
+            print("🔄 Manual sync trigger received\n", .{});
+            try handleSyncTrigger(connection, zeicoin);
         } else {
             // Default response for unknown messages
             const response = "ZeiCoin Bootstrap Server Ready";
@@ -628,17 +628,33 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
     transaction_count.* += 1;
     print("✅ Client transaction #{} added to mempool\n", .{transaction_count.*});
 
-    // Zen broadcasting: transaction flows to all connected peers like ripples
+    // Broadcast transaction to network peers
     if (zeicoin.network) |network| {
         network.*.broadcastTransaction(client_tx);
         const peer_count = network.*.peers.items.len;
-        print("🌊 Transaction flows to {} zen peers naturally\n", .{peer_count});
+        print("📡 Transaction broadcast to {} peers\n", .{peer_count});
     }
 
     logMessage("📤 About to send success response to client", .{});
     const success_msg = "CLIENT_TRANSACTION_ACCEPTED";
     try connection.stream.writeAll(success_msg);
     logMessage("✅ Sent CLIENT_TRANSACTION_ACCEPTED to client", .{});
+}
+
+fn handleSyncTrigger(connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin) !void {
+    print("🔄 Processing manual sync trigger request\n", .{});
+    
+    // Trigger auto-sync logic (the same logic used for orphan blocks)
+    zeicoin.triggerAutoSyncWithPeerQuery() catch |err| {
+        print("❌ Failed to trigger sync: {}\n", .{err});
+        const error_msg = "SYNC_FAILED";
+        try connection.stream.writeAll(error_msg);
+        return;
+    };
+    
+    const success_msg = "SYNC_TRIGGERED";
+    try connection.stream.writeAll(success_msg);
+    print("✅ Manual sync triggered successfully\n", .{});
 }
 
 fn sendNewBlockNotification(connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin) !void {

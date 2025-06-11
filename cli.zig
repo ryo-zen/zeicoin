@@ -195,6 +195,7 @@ const Command = enum {
     status,
     address,
     fund,
+    sync,
     help,
 };
 
@@ -232,6 +233,7 @@ pub fn main() !void {
         .status => try handleStatusCommand(allocator, args[2..]),
         .address => try handleAddressCommand(allocator, args[2..]),
         .fund => try handleFundCommand(allocator, args[2..]),
+        .sync => try handleSyncCommand(allocator, args[2..]),
         .help => printHelp(),
     }
 }
@@ -554,6 +556,58 @@ fn handleAddressCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     print("🆔 Wallet '{s}' address:\n", .{wallet_name});
     print("   {s}\n", .{std.fmt.fmtSliceHexLower(&address)});
     print("📋 Short address: {s}\n", .{std.fmt.fmtSliceHexLower(address[0..16])});
+}
+
+fn handleSyncCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+    _ = args;
+
+    print("🔄 Triggering manual blockchain sync...\n", .{});
+
+    // Connect to server
+    const server_ip = try getServerIP(allocator);
+    defer allocator.free(server_ip);
+
+    const address = net.Address.parseIp4(server_ip, 10802) catch {
+        print("❌ Invalid server address\n", .{});
+        return;
+    };
+
+    const connection = connectWithTimeout(address) catch |err| {
+        switch (err) {
+            error.ConnectionTimeout => {
+                print("❌ Connection timeout to ZeiCoin server at {s}:10802 (5s)\n", .{server_ip});
+                return;
+            },
+            else => {
+                print("❌ Cannot connect to ZeiCoin server at {s}:10802\n", .{server_ip});
+                print("💡 Make sure the server is running\n", .{});
+                return;
+            },
+        }
+    };
+    defer connection.close();
+
+    // Send sync trigger request
+    try connection.writeAll("TRIGGER_SYNC");
+
+    // Read response with timeout
+    var buffer: [1024]u8 = undefined;
+    const bytes_read = readWithTimeout(connection, &buffer) catch |err| {
+        switch (err) {
+            error.ReadTimeout => {
+                print("❌ Server response timeout (5s)\n", .{});
+                return;
+            },
+            else => {
+                print("❌ Failed to read server response\n", .{});
+                return;
+            },
+        }
+    };
+    const response = buffer[0..bytes_read];
+
+    print("🌐 Server: {s}:10802\n", .{server_ip});
+    print("📨 Sync response: {s}\n", .{response});
 }
 
 fn handleFundCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
@@ -942,6 +996,7 @@ fn printHelp() void {
     print("  zeicoin fund [wallet]            Request test funds\n\n", .{});
     print("NETWORK COMMANDS:\n", .{});
     print("  zeicoin status                   Show network status\n", .{});
+    print("  zeicoin sync                     Trigger manual blockchain sync\n", .{});
     print("  zeicoin address [wallet]         Show wallet address\n\n", .{});
     print("EXAMPLES:\n", .{});
     print("  zeicoin wallet create alice      # Create wallet named 'alice'\n", .{});
