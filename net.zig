@@ -6,6 +6,7 @@ const net = std.net;
 const Thread = std.Thread;
 const ArrayList = std.ArrayList;
 const HashMap = std.HashMap;
+const Mutex = std.Thread.Mutex;
 
 const types = @import("types.zig");
 const util = @import("util.zig");
@@ -260,7 +261,16 @@ pub const Peer = struct {
             self.consecutive_failures += 1;
             self.state = .disconnected;
             self.last_seen = util.getTime();
-            handlePeerError(self.address, err, "Connection");
+            
+            // Only log connection errors for significant failures (not routine retries)
+            if (err == error.ConnectionRefused and self.consecutive_failures <= 2) {
+                // Suppress routine connection refused messages for first few attempts
+                var addr_buf: [32]u8 = undefined;
+                const addr_str = formatPeerAddress(self.address, &addr_buf);
+                logNetInfo("Connection to {s} refused (peer may be offline)", .{addr_str});
+            } else {
+                handlePeerError(self.address, err, "Connection");
+            }
             return err;
         };
 
@@ -286,7 +296,7 @@ pub const Peer = struct {
             thread.detach();
         }
         
-        logPeerSuccess(self.address, "Connection");
+        // Connection success logged during handshake completion
     }
 
     pub fn disconnect(self: *Peer) void {
@@ -319,7 +329,7 @@ pub const Peer = struct {
         const header = MessageHeader.create(.version, @sizeOf(@TypeOf(version_payload)));
         
         try sendMessage(self.socket.?, header, version_payload);
-        logNetBroadcast("Sent version to peer", .{});
+        // Version sent silently
     }
 
     pub fn sendPing(self: *Peer) !void {
@@ -338,6 +348,36 @@ pub const Peer = struct {
         self.last_ping = util.getTime();
         self.last_seen = self.last_ping;
         logNetInfo("Ping sent to peer", .{});
+    }
+
+    /// Request height update from peer (periodic sync check)
+    pub fn requestHeightUpdate(self: *Peer) !void {
+        if (!isConnectionValid(self.socket, self.state)) return error.NotConnected;
+
+        // Send a lightweight version message to query current height
+        const version_payload = struct {
+            version: u32,
+            block_height: u32,
+            timestamp: u64,
+            software_version: u32,
+        }{
+            .version = VERSION,
+            .block_height = 0, // We don't need to send our height for a query
+            .timestamp = @intCast(util.getTime()),
+            .software_version = SOFTWARE_VERSION,
+        };
+
+        const header = MessageHeader.create(.version, @sizeOf(@TypeOf(version_payload)));
+        
+        sendMessage(self.socket.?, header, version_payload) catch |err| {
+            // Socket was closed - mark as disconnected
+            self.socket = null;
+            self.state = .disconnected;
+            return err;
+        };
+
+        self.last_seen = util.getTime();
+        logNetInfo("Height query sent to peer", .{});
     }
 
     pub fn broadcastTransaction(self: *Peer, tx: types.Transaction) !void {
@@ -376,23 +416,30 @@ pub const Peer = struct {
 pub const NetworkManager = struct {
     allocator: std.mem.Allocator,
     peers: ArrayList(Peer),
+    peers_mutex: Mutex,
     is_running: bool,
     listen_address: ?net.Address,
     accept_thread: ?Thread,
     maintenance_thread: ?Thread,
     last_discovery: i64,
+    last_height_check: i64,
     blockchain: ?*@import("main.zig").ZeiCoin,
+    node_type: types.NodeType,
 
     pub fn init(allocator: std.mem.Allocator) NetworkManager {
+        const now = util.getTime();
         return NetworkManager{
             .allocator = allocator,
             .peers = ArrayList(Peer).init(allocator),
+            .peers_mutex = Mutex{},
             .is_running = false,
             .listen_address = null,
             .accept_thread = null,
             .maintenance_thread = null,
             .last_discovery = 0,
+            .last_height_check = now, // Initialize to current time to prevent immediate triggering
             .blockchain = null,
+            .node_type = .unknown, // Will be detected during startup
         };
     }
 
@@ -407,17 +454,24 @@ pub const NetworkManager = struct {
     pub fn start(self: *NetworkManager, port: u16) !void {
         if (self.is_running) return;
 
+        // Detect node type (full node vs outbound-only)
+        self.node_type = self.detectNodeType(port);
+        
         // Set up listening address
         self.listen_address = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, port);
 
-        // Start accept thread for incoming connections
-        self.accept_thread = try Thread.spawn(.{}, acceptConnections, .{self});
+        // Only start accept thread if we can serve blocks (full node)
+        if (self.node_type.canServeBlocks()) {
+            self.accept_thread = try Thread.spawn(.{}, acceptConnections, .{self});
+            logNetSuccess("Network started as FULL NODE on port {}", .{port});
+        } else {
+            logNetSuccess("Network started as OUTBOUND-ONLY NODE (behind NAT)", .{});
+        }
 
         // Start maintenance thread
         self.maintenance_thread = try Thread.spawn(.{}, maintainConnections, .{self});
 
         self.is_running = true;
-        logNetSuccess("Network started on port {}", .{port});
     }
 
     pub fn stop(self: *NetworkManager) void {
@@ -448,21 +502,42 @@ pub const NetworkManager = struct {
     }
 
     pub fn addPeer(self: *NetworkManager, address_str: []const u8) !void {
+        self.peers_mutex.lock();
+        defer self.peers_mutex.unlock();
+        
         if (self.peers.items.len >= MAX_PEERS) {
             logNetInfo("Maximum peers reached", .{});
             return;
         }
 
         const address = try NetworkAddress.fromString(address_str);
-        var peer = Peer.init(self.allocator, address);
+        
+        // Check if peer already exists to prevent duplicates
+        for (self.peers.items) |*existing_peer| {
+            if (std.mem.eql(u8, &existing_peer.address.ip, &address.ip) and 
+                existing_peer.address.port == address.port) {
+                logNetInfo("Peer {s} already exists, skipping", .{address_str});
+                return;
+            }
+        }
 
-        try peer.connect(self);
+        const peer = Peer.init(self.allocator, address);
+
+        // Add peer to list BEFORE connecting to avoid race condition
+        // The thread spawned by connect() operates on the peer in the list
         try self.peers.append(peer);
+        
+        // Now connect using the peer that's in the list
+        const peer_ptr = &self.peers.items[self.peers.items.len - 1];
+        try peer_ptr.connect(self);
 
-        logNetSuccess("Added peer: {s}", .{address_str});
+        // Peer addition success logged after handshake
     }
 
     pub fn broadcastTransaction(self: *NetworkManager, tx: types.Transaction) void {
+        self.peers_mutex.lock();
+        defer self.peers_mutex.unlock();
+        
         for (self.peers.items) |*peer| {
             peer.broadcastTransaction(tx) catch {
                 logNetError("Failed to broadcast transaction to peer", .{});
@@ -472,6 +547,9 @@ pub const NetworkManager = struct {
     }
 
     pub fn broadcastBlock(self: *NetworkManager, block: types.Block) void {
+        self.peers_mutex.lock();
+        defer self.peers_mutex.unlock();
+        
         for (self.peers.items) |*peer| {
             peer.broadcastBlock(block) catch {
                 logNetError("Failed to broadcast block to peer", .{});
@@ -481,6 +559,9 @@ pub const NetworkManager = struct {
     }
 
     pub fn getConnectedPeers(self: *NetworkManager) usize {
+        self.peers_mutex.lock();
+        defer self.peers_mutex.unlock();
+        
         var count: usize = 0;
         for (self.peers.items) |peer| {
             if (peer.state == .connected) count += 1;
@@ -497,6 +578,9 @@ pub const NetworkManager = struct {
 
     /// Connect to a specific peer
     pub fn connectToPeer(self: *NetworkManager, address: NetworkAddress) !void {
+        self.peers_mutex.lock();
+        defer self.peers_mutex.unlock();
+        
         const peer = Peer.init(self.allocator, address);
         try self.peers.append(peer);
 
@@ -515,20 +599,46 @@ pub const NetworkManager = struct {
     }
 
     pub fn printStatus(self: *NetworkManager) void {
+        self.peers_mutex.lock();
+        defer self.peers_mutex.unlock();
+        
+        // Count connected peers while we have the lock (avoid deadlock)
+        var connected_count: usize = 0;
+        for (self.peers.items) |peer| {
+            if (peer.state == .connected) connected_count += 1;
+        }
+        
         std.debug.print("\n🌐 Network Status:\n", .{});
         std.debug.print("   Running: {}\n", .{self.is_running});
-        std.debug.print("   Peers: {}/{}\n", .{ self.getConnectedPeers(), self.peers.items.len });
+        std.debug.print("   Node Type: {s}\n", .{if (self.node_type == .full_node) "Full Node (can serve blocks)" else if (self.node_type == .outbound_only) "Outbound-Only (behind NAT)" else "Unknown"});
+        std.debug.print("   Peers: {}/{}\n", .{ connected_count, self.peers.items.len });
 
-        for (self.peers.items, 0..) |peer, i| {
+        for (self.peers.items) |peer| {
             var addr_buf: [32]u8 = undefined;
             const addr_str = peer.address.toString(&addr_buf);
-            std.debug.print("   [{}] {} - {s}\n", .{ i, peer.state, addr_str });
+            const status_icon = switch (peer.state) {
+                .connected => "🟢",
+                .connecting => "🟡",
+                .handshaking => "🟡",
+                .reconnecting => "🛜",
+                .disconnecting => "🔴",
+                .disconnected => "🔴",
+            };
+            const status_text = switch (peer.state) {
+                .connected => "Connected",
+                .connecting => "Connecting",
+                .handshaking => "Handshaking",
+                .reconnecting => "Reconnecting", 
+                .disconnecting => "Disconnecting",
+                .disconnected => "Disconnected",
+            };
+            std.debug.print("   {s} {s} - {s}\n", .{ status_icon, status_text, addr_str });
         }
     }
 
     /// Auto-discover peers on local network
     pub fn discoverPeers(self: *NetworkManager, our_port: u16) !void {
-        logNetProcess("Starting peer discovery...", .{});
+        logNetInfo("🔍 Discovering peers...", .{});
 
         // Try bootstrap nodes first
         try self.connectToBootstrapNodes();
@@ -542,50 +652,50 @@ pub const NetworkManager = struct {
 
     /// Connect to bootstrap nodes for initial peer discovery
     fn connectToBootstrapNodes(self: *NetworkManager) !void {
-        logNetProcess("Connecting to bootstrap nodes...", .{});
-
         // Try environment variable first
         if (std.process.getEnvVarOwned(self.allocator, "ZEICOIN_BOOTSTRAP")) |env_value| {
             defer self.allocator.free(env_value);
-
-            logNetInfo("Using bootstrap nodes from ZEICOIN_BOOTSTRAP: {s}", .{env_value});
 
             // Parse comma-separated list and connect to each
             var it = std.mem.splitScalar(u8, env_value, ',');
             while (it.next()) |node_addr| {
                 const trimmed = std.mem.trim(u8, node_addr, " \t\n");
                 if (trimmed.len > 0) {
-                    self.connectToBootstrapNode(trimmed) catch |err| {
-                        logNetError("Bootstrap node {s} failed: {}", .{ trimmed, err });
-                        continue;
-                    };
+                    self.connectToBootstrapNode(trimmed) catch continue;
                 }
             }
         } else |_| {
             // Fallback to hardcoded bootstrap nodes
-            logNetInfo("Using default bootstrap nodes", .{});
             for (types.BOOTSTRAP_NODES) |bootstrap_addr| {
-                self.connectToBootstrapNode(bootstrap_addr) catch |err| {
-                    logNetError("Bootstrap node {s} failed: {}", .{ bootstrap_addr, err });
-                    continue;
-                };
+                self.connectToBootstrapNode(bootstrap_addr) catch continue;
             }
         }
     }
 
     /// Connect to a single bootstrap node
     fn connectToBootstrapNode(self: *NetworkManager, addr_str: []const u8) !void {
-        logNetProcess("Attempting bootstrap connection to {s}...", .{addr_str});
+        // Skip bootstrap nodes that match our local IP (prevent self-connection)
+        const local_ip = self.getLocalIP() catch [4]u8{ 0, 0, 0, 0 };
+        
+        // Parse bootstrap address to check if it's our local IP
+        if (NetworkAddress.fromString(addr_str)) |bootstrap_addr| {
+            if (std.mem.eql(u8, &bootstrap_addr.ip, &local_ip)) {
+                return; // Silently skip self-connections
+            }
+        } else |_| {
+            // If parsing fails, still try to connect (might be hostname)
+        }
 
         // Use standard addPeer method instead of custom connection handling
-        // This ensures proper peer lifecycle management
-        try self.addPeer(addr_str);
-        logNetSuccess("Added bootstrap node {s} to peer list", .{addr_str});
+        self.addPeer(addr_str) catch {
+            // Silently ignore bootstrap connection failures
+            return;
+        };
+        // Connection success will be logged when handshake completes
     }
 
     /// Send UDP broadcast to discover peers
     fn broadcastDiscovery(self: *NetworkManager, our_port: u16) !void {
-        logNetProcess("Broadcasting discovery message...", .{});
 
         // Create UDP socket
         const socket = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
@@ -634,14 +744,16 @@ pub const NetworkManager = struct {
             logNetError("Discovery: timeout setup failed (continuing): {}", .{err});
         };
 
-        // Bind to discovery port
+        // Bind to discovery port (gracefully handle if already in use)
         const bind_addr = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, DISCOVERY_PORT);
         std.posix.bind(socket, &bind_addr.any, bind_addr.getOsSockLen()) catch |err| {
-            logNetError("Discovery: bind failed: {}", .{err});
+            if (err == error.AddressInUse) {
+                // Silently continue - multiple instances are normal
+            } else {
+                logNetError("Discovery: bind failed: {}", .{err});
+            }
             return;
         };
-
-        logNetProcess("Discovery listening on UDP port {}", .{DISCOVERY_PORT});
 
         var buffer: [256]u8 = undefined;
         var sender_addr: std.posix.sockaddr = undefined;
@@ -682,16 +794,12 @@ pub const NetworkManager = struct {
             attempts = 0; // Reset attempts after successful receive
         }
 
-        logNetSuccess("Discovery session complete", .{});
     }
 
     /// Scan local network for peers (fallback method)
     fn scanLocalNetwork(self: *NetworkManager, our_port: u16) !void {
-        logNetProcess("Scanning local network...", .{});
-
         // Get local IP to determine subnet
         const local_ip = try self.getLocalIP();
-        logNetInfo("Local IP: {}.{}.{}.{}", .{ local_ip[0], local_ip[1], local_ip[2], local_ip[3] });
 
         // Scan the same subnet
         var ip: u8 = 1;
@@ -754,6 +862,30 @@ pub const NetworkManager = struct {
         _ = result;
 
         return true; // Connection succeeded
+    }
+    
+    /// Detect if this node is behind NAT or can accept incoming connections
+    fn detectNodeType(self: *NetworkManager, port: u16) types.NodeType {
+        _ = port; // Port not used in current implementation
+        // Check if we have a private IP address
+        const local_ip = self.getLocalIP() catch return .unknown;
+        
+        // Private IP ranges (RFC 1918):
+        // 10.0.0.0/8     (10.0.0.0 - 10.255.255.255)
+        // 172.16.0.0/12  (172.16.0.0 - 172.31.255.255) 
+        // 192.168.0.0/16 (192.168.0.0 - 192.168.255.255)
+        const is_private_ip = (local_ip[0] == 10) or
+                              (local_ip[0] == 172 and local_ip[1] >= 16 and local_ip[1] <= 31) or
+                              (local_ip[0] == 192 and local_ip[1] == 168) or
+                              (local_ip[0] == 127); // localhost
+        
+        if (is_private_ip) {
+            logNetInfo("Detected private IP: {}.{}.{}.{} - running as outbound-only node", .{ local_ip[0], local_ip[1], local_ip[2], local_ip[3] });
+            return .outbound_only;
+        } else {
+            logNetInfo("Detected public IP: {}.{}.{}.{} - running as full node", .{ local_ip[0], local_ip[1], local_ip[2], local_ip[3] });
+            return .full_node;
+        }
     }
 };
 
@@ -995,11 +1127,9 @@ fn processMessage(network: *NetworkManager, data: []const u8, peer_socket: ?net.
     const command_end = std.mem.indexOf(u8, &header.command, "\x00") orelse header.command.len;
     const command = header.command[0..command_end];
 
-    logNetInfo("Received message: {s} ({}bytes)", .{ command, header.length });
-
     // Handle different message types
     if (std.mem.eql(u8, command, "version")) {
-        handleVersionMessage(network, data[@sizeOf(MessageHeader)..]);
+        handleVersionMessage(network, data[@sizeOf(MessageHeader)..], peer_socket);
     } else if (std.mem.eql(u8, command, "tx")) {
         handleIncomingTransaction(network, data[@sizeOf(MessageHeader)..]);
     } else if (std.mem.eql(u8, command, "block")) {
@@ -1096,7 +1226,7 @@ fn handleIncomingTransaction(network: *NetworkManager, tx_data: []const u8) void
 }
 
 // Handle version message
-fn handleVersionMessage(network: *NetworkManager, version_data: []const u8) void {
+fn handleVersionMessage(network: *NetworkManager, version_data: []const u8, peer_socket: ?net.Stream) void {
     // Parse version payload
     const version_payload = struct {
         version: u32,
@@ -1131,64 +1261,83 @@ fn handleVersionMessage(network: *NetworkManager, version_data: []const u8) void
         break :blk result;
     };
     
-    logNetInfo("Peer version: {}, height: {}, software: v{}", .{ 
-        peer_version.version, 
-        peer_version.block_height,
-        peer_version.software_version 
-    });
+    // Version details logged silently
 
-    // Mark peer as connected after receiving version message
-    for (network.peers.items) |*peer| {
-        if (peer.state == .handshaking) {
-            peer.state = .connected;
-            peer.last_seen = util.getTime();
-            break;
+    // Find and mark the specific peer that sent this version message
+    var version_peer: ?*Peer = null;
+    network.peers_mutex.lock();
+    
+    if (peer_socket) |socket| {
+        // First try to find by socket handle (most reliable)
+        for (network.peers.items) |*peer| {
+            if (peer.socket != null and peer.socket.?.handle == socket.handle) {
+                version_peer = peer;
+                break;
+            }
         }
     }
+    
+    // If we didn't find by socket, fall back to first handshaking peer
+    if (version_peer == null) {
+        for (network.peers.items) |*peer| {
+            if (peer.state == .handshaking) {
+                version_peer = peer;
+                break;
+            }
+        }
+    }
+    
+    // Mark the identified peer as connected and log success
+    if (version_peer) |peer| {
+        peer.state = .connected;
+        peer.last_seen = util.getTime();
+        
+        // Show simple connection success message
+        var addr_buf: [32]u8 = undefined;
+        const addr_str = peer.address.toString(&addr_buf);
+        logNetSuccess("Connected to {s}", .{addr_str});
+        
+        // Initialize blockchain after first peer connection if not already done
+        if (network.blockchain) |blockchain| {
+            const current_height = blockchain.getHeight() catch 0;
+            if (current_height == 0) {
+                logNetProcess("First peer connected, initializing blockchain...", .{});
+                blockchain.initializeBlockchain() catch |err| {
+                    logNetError("Failed to initialize blockchain: {}", .{err});
+                };
+            }
+        }
+    }
+    
+    network.peers_mutex.unlock();
 
     // Get our blockchain height for comparison
     if (network.blockchain) |blockchain| {
         const our_height = blockchain.getHeight() catch 0;
-        std.debug.print("📊 Our height: {}, peer height: {}\n", .{ our_height, peer_version.block_height });
+        
+        // Only log if there's a significant height difference to reduce spam
+        if (peer_version.block_height > our_height and peer_version.block_height - our_height > 1) {
+            std.debug.print("📊 Our height: {}, peer height: {} (behind by {})\n", .{ our_height, peer_version.block_height, peer_version.block_height - our_height });
+        }
 
         // Sync logic: if peer is ahead, start sync process
         if (peer_version.block_height > our_height) {
-            const blocks_behind = peer_version.block_height - our_height;
-            std.debug.print("📈 We are {} blocks behind, need to sync\n", .{blocks_behind});
-            
             // Check if we should sync
             const should_sync = blockchain.shouldSync(peer_version.block_height) catch false;
             if (should_sync) {
-                // Find the peer that sent this version message
-                var sync_peer: ?*Peer = null;
-                for (network.peers.items) |*peer| {
-                    if (peer.state == .connected) {
-                        sync_peer = peer;
-                        break;
-                    }
-                }
-                
-                if (sync_peer) |peer| {
-                    std.debug.print("🔄 Starting sync with peer\n", .{});
+                // Use the peer that sent the version message for sync
+                if (version_peer) |peer| {
+                    std.debug.print("🔄 Starting sync with peer (height {})\n", .{peer_version.block_height});
                     blockchain.startSync(peer, peer_version.block_height) catch |err| {
                         std.debug.print("❌ Failed to start sync: {}\n", .{err});
                     };
-                } else {
-                    std.debug.print("⚠️ No connected peer found for sync\n", .{});
                 }
-            } else {
-                std.debug.print("⚠️ Sync already in progress or not ready\n", .{});
             }
-        } else if (our_height > peer_version.block_height) {
-            const blocks_ahead = our_height - peer_version.block_height;
-            std.debug.print("📈 We are {} blocks ahead\n", .{blocks_ahead});
-        } else {
-            std.debug.print("✅ Heights are equal\n", .{});
         }
     }
 
     // TODO: Send verack response
-    std.debug.print("🤝 Handshake complete\n", .{});
+    // std.debug.print("🤝 Handshake complete\n", .{}); // Disabled to reduce message spam
 }
 
 // Handle ping message
@@ -1215,6 +1364,12 @@ fn handleGetBlocksMessage(network: *NetworkManager, message_data: []const u8, pe
     const getblocks_msg = std.mem.bytesToValue(GetBlocksMessage, message_data[0..@sizeOf(GetBlocksMessage)]);
     logNetInfo("GetBlocks request: {} blocks starting from height {}", .{ getblocks_msg.count, getblocks_msg.start_height });
 
+    // Check if this node can serve blocks (asymmetric sync)
+    if (!network.node_type.canServeBlocks()) {
+        logNetInfo("Ignoring GetBlocks request - this is an outbound-only node (behind NAT)", .{});
+        return;
+    }
+
     // Check if we have a socket to respond to
     if (peer_socket == null) {
         logNetError("GetBlocks received but no peer socket provided", .{});
@@ -1234,8 +1389,9 @@ fn handleGetBlocksMessage(network: *NetworkManager, message_data: []const u8, pe
     };
 
     // Check if we have the requested blocks
+    // our_height is the count of blocks (0-indexed heights: 0 to our_height-1)
     if (getblocks_msg.start_height >= our_height) {
-        logNetError("Requested blocks beyond our height ({} >= {})", .{ getblocks_msg.start_height, our_height });
+        logNetError("Requested blocks beyond our height ({} >= {}) - we have blocks 0 to {}", .{ getblocks_msg.start_height, our_height, our_height - 1 });
         return;
     }
 
@@ -1248,9 +1404,14 @@ fn handleGetBlocksMessage(network: *NetworkManager, message_data: []const u8, pe
 
     logNetInfo("Sending {} blocks to peer", .{blocks_to_send});
 
-    // Send blocks response
+    // Send blocks response with improved error handling
     sendBlocksResponse(network, getblocks_msg.start_height, blocks_to_send, peer_socket) catch |err| {
-        logNetError("Failed to send blocks response: {}", .{err});
+        // Don't log BrokenPipe as error - it's normal when peer disconnects
+        if (err == error.BrokenPipe or err == error.ConnectionResetByPeer) {
+            logNetInfo("Peer disconnected during blocks response", .{});
+        } else {
+            logNetError("Failed to send blocks response: {}", .{err});
+        }
     };
 }
 
@@ -1306,44 +1467,75 @@ fn sendBlocksResponse(network: *NetworkManager, start_height: u32, count: u32, p
     const socket = peer_socket.?;
     const blockchain = network.blockchain.?;
     
-    // Calculate message size
-    var total_size: usize = @sizeOf(BlocksMessage);
+    // Pre-validate all blocks exist before calculating size
+    var validated_blocks = std.ArrayList(types.Block).init(network.allocator);
+    defer validated_blocks.deinit();
+    
     for (0..count) |i| {
         const block_height = start_height + @as(u32, @intCast(i));
-        const block = blockchain.getBlock(block_height) catch continue;
+        const block = blockchain.getBlock(block_height) catch |err| {
+            logNetError("Block {} not available for sync: {}", .{ block_height, err });
+            return; // Exit early if any block is missing
+        };
+        validated_blocks.append(block) catch return;
+    }
+    
+    const actual_count: u32 = @intCast(validated_blocks.items.len);
+    if (actual_count == 0) {
+        logNetError("No blocks available for sync from height {}", .{start_height});
+        return;
+    }
+    
+    // Calculate accurate message size with validated blocks
+    var total_size: usize = @sizeOf(BlocksMessage);
+    for (validated_blocks.items) |block| {
         total_size += @sizeOf(types.BlockHeader) + @sizeOf(u32) + @sizeOf(types.Transaction) * block.transactions.len;
     }
     
     // Send blocks message header
     const blocks_msg = BlocksMessage{
         .start_height = start_height,
-        .count = count,
+        .count = actual_count,
     };
     
     const header = MessageHeader.create(.blocks, @intCast(total_size));
     
-    _ = try socket.write(std.mem.asBytes(&header));
-    _ = try socket.write(std.mem.asBytes(&blocks_msg));
+    // Send with connection error handling
+    _ = socket.write(std.mem.asBytes(&header)) catch |err| {
+        logNetError("Failed to send blocks header (peer disconnected): {}", .{err});
+        return; // Don't propagate error - peer disconnection is normal
+    };
     
-    // Send each block
-    for (0..count) |i| {
-        const block_height = start_height + @as(u32, @intCast(i));
-        const block = blockchain.getBlock(block_height) catch continue;
-        
+    _ = socket.write(std.mem.asBytes(&blocks_msg)) catch |err| {
+        logNetError("Failed to send blocks message (peer disconnected): {}", .{err});
+        return;
+    };
+    
+    // Send each validated block with connection checking
+    for (validated_blocks.items, 0..) |block, i| {
         // Send block header
-        _ = try socket.write(std.mem.asBytes(&block.header));
+        _ = socket.write(std.mem.asBytes(&block.header)) catch |err| {
+            logNetError("Failed to send block {} header (peer disconnected): {}", .{ start_height + @as(u32, @intCast(i)), err });
+            return;
+        };
         
         // Send transaction count
         const tx_count: u32 = @intCast(block.transactions.len);
-        _ = try socket.write(std.mem.asBytes(&tx_count));
+        _ = socket.write(std.mem.asBytes(&tx_count)) catch |err| {
+            logNetError("Failed to send tx count for block {} (peer disconnected): {}", .{ start_height + @as(u32, @intCast(i)), err });
+            return;
+        };
         
         // Send transactions
         for (block.transactions) |tx| {
-            _ = try socket.write(std.mem.asBytes(&tx));
+            _ = socket.write(std.mem.asBytes(&tx)) catch |err| {
+                logNetError("Failed to send transaction in block {} (peer disconnected): {}", .{ start_height + @as(u32, @intCast(i)), err });
+                return;
+            };
         }
     }
     
-    logNetSuccess("Sent {} blocks to peer", .{count});
+    logNetSuccess("Sent {} blocks to peer", .{actual_count});
 }
 
 // Process batch of blocks received during sync
@@ -1392,15 +1584,24 @@ fn processBlocksBatch(network: *NetworkManager, start_height: u32, count: u32, b
             .transactions = transactions,
         };
         
-        try blockchain.handleSyncBlock(block_height, block);
+        blockchain.handleSyncBlock(block_height, block) catch |err| {
+            logNetError("🚨 handleSyncBlock FAILED for height {}: {}", .{block_height, err});
+            // This explains why the block is never saved - handleSyncBlock is throwing an error!
+            return; // Don't continue processing, something is fundamentally wrong
+        };
         logNetSuccess("Processed sync block at height {}", .{block_height});
     }
     
     // After processing the batch, request the next batch if still syncing
-    if (blockchain.getSyncState() == .syncing) {
+    const sync_state = blockchain.getSyncState();
+    logNetInfo("🔍 BATCH DEBUG: Finished processing {} blocks, sync_state = {}", .{count, sync_state});
+    if (sync_state == .syncing) {
+        logNetInfo("🔄 BATCH AUTO-REQUEST: Requesting next batch because sync_state = .syncing", .{});
         blockchain.requestNextSyncBatch() catch |err| {
             logNetError("Failed to request next sync batch: {}", .{err});
         };
+    } else {
+        logNetInfo("✅ BATCH COMPLETE: Not requesting more batches because sync_state = {}", .{sync_state});
     }
 }
 
@@ -1412,6 +1613,7 @@ fn maintainConnections(network: *NetworkManager) void {
         const now = util.getTime();
 
         // Health check - examine each peer
+        network.peers_mutex.lock();
         for (network.peers.items) |*peer| {
             const time_since_seen = now - peer.last_seen;
 
@@ -1434,19 +1636,48 @@ fn maintainConnections(network: *NetworkManager) void {
                 };
             }
         }
+        network.peers_mutex.unlock();
 
         // Check for sync timeouts
         if (network.blockchain) |blockchain| {
             blockchain.checkSyncTimeout();
+            
+            // Blockchain initialization is now handled immediately when peers connect
+            // This periodic check is no longer needed but kept as a safety net
+            const current_height = blockchain.getHeight() catch 0;
+            if (current_height == 0) {
+                var connected_peers: u32 = 0;
+                network.peers_mutex.lock();
+                for (network.peers.items) |peer| {
+                    if (peer.state == .connected) connected_peers += 1;
+                }
+                network.peers_mutex.unlock();
+                
+                if (connected_peers > 0) {
+                    logNetProcess("Safety check: initializing blockchain...", .{});
+                    blockchain.initializeBlockchain() catch |err| {
+                        logNetError("Failed to initialize blockchain: {}", .{err});
+                    };
+                }
+            }
+            
+            // Periodic height checking - RE-ENABLED with reduced spam
+            // Now much quieter due to reduced debug output in version handling
+            if (now - network.last_height_check > types.TIMING.HEIGHT_CHECK_INTERVAL_SECONDS) {
+                logNetProcess("Starting periodic height check (every 2 minutes)", .{});
+                blockchain.checkForNewBlocks() catch |err| {
+                    logNetError("Failed to check for new blocks: {}", .{err});
+                };
+                network.last_height_check = now;
+            }
         }
 
         // Periodic discovery (every 5 minutes)
         if (now - network.last_discovery > types.TIMING.DISCOVERY_INTERVAL_SECONDS) {
-            logNetProcess("Starting periodic peer discovery", .{});
-            network.discoverPeers(10801) catch |err| {
-                logNetError("Discovery failed: {}", .{err});
-            };
+            network.discoverPeers(10801) catch {};
             network.last_discovery = now;
+            
+            // Blockchain initialization now happens immediately when peers connect
         }
 
         // Monitoring cycle
@@ -1484,4 +1715,27 @@ test "Sync response routing fix" {
     try std.testing.expect(@sizeOf(BlocksMessage) == 8); // 2 u32 fields
     
     std.debug.print("\n✅ Sync response routing fix verified\n", .{});
+}
+
+test "Duplicate peer prevention" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    
+    var network = NetworkManager.init(allocator);
+    defer network.deinit();
+    
+    // Add the same peer twice
+    network.addPeer("192.168.1.100:10801") catch {};
+    try std.testing.expect(network.peers.items.len == 1);
+    
+    // Try to add the same peer again - should be skipped
+    network.addPeer("192.168.1.100:10801") catch {};
+    try std.testing.expect(network.peers.items.len == 1); // Still 1, not 2
+    
+    // Add a different peer - should be added
+    network.addPeer("192.168.1.101:10801") catch {};
+    try std.testing.expect(network.peers.items.len == 2);
+    
+    std.debug.print("\n✅ Duplicate peer prevention verified\n", .{});
 }
