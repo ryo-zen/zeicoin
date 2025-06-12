@@ -34,9 +34,13 @@ fn logNetBroadcast(comptime fmt: []const u8, args: anytype) void {
 }
 
 /// Send message header and payload to socket
-fn sendMessage(socket: net.Stream, header: MessageHeader, payload: anytype) !void {
+fn sendMessage(socket: net.Stream, header_template: MessageHeader, payload: anytype) !void {
+    var header = header_template;
+    const payload_bytes = std.mem.asBytes(&payload);
+    header.setChecksum(payload_bytes);
+    
     _ = try socket.write(std.mem.asBytes(&header));
-    _ = try socket.write(std.mem.asBytes(&payload));
+    _ = try socket.write(payload_bytes);
 }
 
 /// Send message header only to socket
@@ -44,22 +48,42 @@ fn sendHeaderOnly(socket: net.Stream, header: MessageHeader) !void {
     _ = try socket.write(std.mem.asBytes(&header));
 }
 
-/// Send block with header + transactions
-fn sendBlock(socket: net.Stream, header: MessageHeader, block: types.Block) !void {
-    // Send message header
+/// Send block with header + transactions (with checksum)
+fn sendBlock(socket: net.Stream, header_template: MessageHeader, block: types.Block, allocator: std.mem.Allocator) !void {
+    // Calculate total payload size
+    const payload_size = @sizeOf(types.BlockHeader) + @sizeOf(u32) + @sizeOf(types.Transaction) * block.transactions.len;
+    
+    // Allocate buffer for entire payload
+    const payload_buffer = try allocator.alloc(u8, payload_size);
+    defer allocator.free(payload_buffer);
+    
+    // Serialize payload into buffer
+    var offset: usize = 0;
+    
+    // Copy block header
+    @memcpy(payload_buffer[offset..offset + @sizeOf(types.BlockHeader)], std.mem.asBytes(&block.header));
+    offset += @sizeOf(types.BlockHeader);
+    
+    // Copy transaction count
+    const tx_count: u32 = @intCast(block.transactions.len);
+    @memcpy(payload_buffer[offset..offset + @sizeOf(u32)], std.mem.asBytes(&tx_count));
+    offset += @sizeOf(u32);
+    
+    // Copy all transactions
+    for (block.transactions) |tx| {
+        @memcpy(payload_buffer[offset..offset + @sizeOf(types.Transaction)], std.mem.asBytes(&tx));
+        offset += @sizeOf(types.Transaction);
+    }
+    
+    // Create header with checksum
+    var header = header_template;
+    header.setChecksum(payload_buffer);
+    
+    // Send header with checksum
     _ = try socket.write(std.mem.asBytes(&header));
     
-    // Send block header
-    _ = try socket.write(std.mem.asBytes(&block.header));
-    
-    // Send transaction count
-    const tx_count: u32 = @intCast(block.transactions.len);
-    _ = try socket.write(std.mem.asBytes(&tx_count));
-    
-    // Send all transactions
-    for (block.transactions) |tx| {
-        _ = try socket.write(std.mem.asBytes(&tx));
-    }
+    // Send payload
+    _ = try socket.write(payload_buffer);
 }
 
 
@@ -71,7 +95,7 @@ pub const DISCOVERY_MAGIC = [4]u8{ 0xDE, 0x11, 0xC0, 0x1E }; // ZeiCoin discover
 pub const MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024; // 32MB max message
 pub const MAX_PEERS: usize = 8; // Keep it simple
 pub const VERSION: u32 = 1;
-pub const SOFTWARE_VERSION: u32 = 5; // v5: Improved network robustness (buffer overflow protection, default port handling)
+pub const SOFTWARE_VERSION: u32 = 8; // v8: Fixed autosync with proper version response handling
 
 // Message types (similar to Bitcoin v0.01 protocol)
 pub const MessageType = enum(u12) {
@@ -151,8 +175,32 @@ pub const MessageHeader = struct {
             .magic = MAGIC_BYTES,
             .command = command,
             .length = payload_len,
-            .checksum = 0, // TODO: Calculate checksum
+            .checksum = 0, // Will be calculated when payload is available
         };
+    }
+
+    pub fn calculateChecksum(payload: []const u8) u32 {
+        // Simple CRC32-like checksum for message integrity
+        var checksum: u32 = 0xFFFFFFFF;
+        for (payload) |byte| {
+            checksum = checksum ^ @as(u32, byte);
+            for (0..8) |_| {
+                if (checksum & 1 != 0) {
+                    checksum = (checksum >> 1) ^ 0xEDB88320;
+                } else {
+                    checksum = checksum >> 1;
+                }
+            }
+        }
+        return ~checksum;
+    }
+
+    pub fn setChecksum(self: *MessageHeader, payload: []const u8) void {
+        self.checksum = calculateChecksum(payload);
+    }
+
+    pub fn verifyChecksum(self: MessageHeader, payload: []const u8) bool {
+        return self.checksum == calculateChecksum(payload);
     }
 };
 
@@ -391,13 +439,13 @@ pub const Peer = struct {
         logNetBroadcast("Broadcasted transaction to peer", .{});
     }
 
-    pub fn broadcastBlock(self: *Peer, block: types.Block) !void {
+    pub fn broadcastBlock(self: *Peer, block: types.Block, allocator: std.mem.Allocator) !void {
         if (!isConnectionValid(self.socket, self.state)) return;
 
         const payload_size = @sizeOf(types.BlockHeader) + @sizeOf(u32) + @sizeOf(types.Transaction) * block.transactions.len;
         const header = MessageHeader.create(.block, @intCast(payload_size));
         
-        try sendBlock(self.socket.?, header, block);
+        try sendBlock(self.socket.?, header, block, allocator);
         logNetBroadcast("Broadcasted block to peer", .{});
     }
 
@@ -554,7 +602,7 @@ pub const NetworkManager = struct {
         defer self.peers_mutex.unlock();
         
         for (self.peers.items) |*peer| {
-            peer.broadcastBlock(block) catch {
+            peer.broadcastBlock(block, self.allocator) catch {
                 logNetError("Failed to broadcast block to peer", .{});
             };
         }
@@ -678,15 +726,18 @@ pub const NetworkManager = struct {
     /// Connect to a single bootstrap node
     fn connectToBootstrapNode(self: *NetworkManager, addr_str: []const u8) !void {
         // Skip bootstrap nodes that match our local IP (prevent self-connection)
-        const local_ip = self.getLocalIP() catch [4]u8{ 0, 0, 0, 0 };
-        
-        // Parse bootstrap address to check if it's our local IP
-        if (NetworkAddress.fromString(addr_str)) |bootstrap_addr| {
-            if (std.mem.eql(u8, &bootstrap_addr.ip, &local_ip)) {
-                return; // Silently skip self-connections
+        if (self.getLocalIP()) |local_ip| {
+            // Parse bootstrap address to check if it's our local IP
+            if (NetworkAddress.fromString(addr_str)) |bootstrap_addr| {
+                if (std.mem.eql(u8, &bootstrap_addr.ip, &local_ip)) {
+                    return; // Silently skip self-connections
+                }
+            } else |_| {
+                // If parsing fails, still try to connect (might be hostname)
             }
         } else |_| {
-            // If parsing fails, still try to connect (might be hostname)
+            // If we can't determine local IP, proceed with connection attempt
+            logNetInfo("Unable to determine local IP for self-connection check", .{});
         }
 
         // Use standard addPeer method instead of custom connection handling
@@ -802,7 +853,7 @@ pub const NetworkManager = struct {
     /// Scan local network for peers (fallback method)
     fn scanLocalNetwork(self: *NetworkManager, our_port: u16) !void {
         // Get local IP to determine subnet
-        const local_ip = try self.getLocalIP();
+        const local_ip = self.getLocalIPOrDefault();
 
         // Scan the same subnet
         var ip: u8 = 1;
@@ -825,29 +876,46 @@ pub const NetworkManager = struct {
         }
     }
 
-    /// Get local IP address
+    /// Get local IP address - returns error if unable to determine
     fn getLocalIP(self: *NetworkManager) ![4]u8 {
         _ = self;
 
         // Create a dummy UDP socket to determine local IP
-        const socket = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+        const socket = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0) catch |err| {
+            logNetError("Failed to create socket for IP detection: {}", .{err});
+            return error.SocketCreationFailed;
+        };
         defer std.posix.close(socket);
 
         // Connect to a remote address (doesn't actually send data)
-        const remote_addr = net.Address.parseIp4("8.8.8.8", 80) catch return [4]u8{ 192, 168, 1, 100 };
-        std.posix.connect(socket, &remote_addr.any, remote_addr.getOsSockLen()) catch {
-            return [4]u8{ 192, 168, 1, 100 }; // Default fallback
+        const remote_addr = net.Address.parseIp4("8.8.8.8", 80) catch |err| {
+            logNetError("Failed to parse remote address: {}", .{err});
+            return error.AddressParseFailed;
+        };
+        
+        std.posix.connect(socket, &remote_addr.any, remote_addr.getOsSockLen()) catch |err| {
+            logNetError("Failed to connect to remote address for IP detection: {}", .{err});
+            return error.NetworkUnreachable;
         };
 
         // Get local socket address
         var local_addr: std.posix.sockaddr = undefined;
         var addr_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
-        std.posix.getsockname(socket, &local_addr, &addr_len) catch {
-            return [4]u8{ 192, 168, 1, 100 }; // Default fallback
+        std.posix.getsockname(socket, &local_addr, &addr_len) catch |err| {
+            logNetError("Failed to get local socket address: {}", .{err});
+            return error.AddressResolutionFailed;
         };
 
         const local_addr_in = @as(*const std.posix.sockaddr.in, @alignCast(@ptrCast(&local_addr)));
         return @as(*const [4]u8, @ptrCast(&local_addr_in.addr)).*;
+    }
+
+    /// Get local IP with fallback - for cases where callers need a reasonable default
+    fn getLocalIPOrDefault(self: *NetworkManager) [4]u8 {
+        return self.getLocalIP() catch |err| {
+            logNetError("Unable to determine local IP ({}), using fallback", .{err});
+            return [4]u8{ 192, 168, 1, 100 }; // Reasonable fallback
+        };
     }
 
     /// Test if a TCP connection can be established
@@ -871,7 +939,10 @@ pub const NetworkManager = struct {
     fn detectNodeType(self: *NetworkManager, port: u16) types.NodeType {
         _ = port; // Port not used in current implementation
         // Check if we have a private IP address
-        const local_ip = self.getLocalIP() catch return .unknown;
+        const local_ip = self.getLocalIP() catch {
+            logNetError("Cannot determine node type - IP detection failed", .{});
+            return .unknown;
+        };
         
         // Private IP ranges (RFC 1918):
         // 10.0.0.0/8     (10.0.0.0 - 10.255.255.255)
@@ -1149,6 +1220,22 @@ fn processMessage(network: *NetworkManager, data: []const u8, peer_socket: ?net.
         return;
     }
 
+    // Verify message length matches data
+    if (data.len != @sizeOf(MessageHeader) + header.length) {
+        logNetError("Message length mismatch: expected {}, got {}", .{ @sizeOf(MessageHeader) + header.length, data.len });
+        return;
+    }
+
+    // Verify checksum if payload exists and checksum is non-zero (backward compatibility)
+    // Skip verification for checksum = 0 (v5 and earlier, or block messages)
+    if (header.length > 0 and header.checksum != 0) {
+        const payload = data[@sizeOf(MessageHeader)..];
+        if (!header.verifyChecksum(payload)) {
+            logNetError("Message checksum verification failed", .{});
+            return;
+        }
+    }
+
     // Get command name
     const command_end = std.mem.indexOf(u8, &header.command, "\x00") orelse header.command.len;
     const command = header.command[0..command_end];
@@ -1166,9 +1253,9 @@ fn processMessage(network: *NetworkManager, data: []const u8, peer_socket: ?net.
     } else if (std.mem.eql(u8, command, "blocks")) {
         handleBlocksMessage(network, data[@sizeOf(MessageHeader)..]);
     } else if (std.mem.eql(u8, command, "ping")) {
-        handlePingMessage(network);
+        handlePingMessage(network, peer_socket);
     } else if (std.mem.eql(u8, command, "pong")) {
-        handlePongMessage(network);
+        handlePongMessage(network, peer_socket);
     }
 }
 
@@ -1289,6 +1376,34 @@ fn handleVersionMessage(network: *NetworkManager, version_data: []const u8, peer
     
     // Version details logged silently
 
+    // Only respond to version queries (not responses) to prevent message loops
+    // A version query has block_height = 0, while responses have actual height
+    if (peer_socket) |socket| {
+        if (peer_version.block_height == 0) {
+            // This is a query - respond with our height
+            const our_current_height = if (network.blockchain) |bc| bc.getHeight() catch 0 else 0;
+            const response_payload = struct {
+                version: u32,
+                services: u64,
+                timestamp: i64,
+                block_height: u32,
+                software_version: u32,
+            }{
+                .version = VERSION,
+                .services = 1, // NODE_NETWORK
+                .timestamp = util.getTime(),
+                .block_height = our_current_height,
+                .software_version = SOFTWARE_VERSION,
+            };
+
+            const response_header = MessageHeader.create(.version, @sizeOf(@TypeOf(response_payload)));
+            sendMessage(socket, response_header, response_payload) catch |err| {
+                logNetError("Failed to send version response to peer: {}", .{err});
+            };
+            logNetBroadcast("Sent version response (height {}) to query", .{our_current_height});
+        }
+    }
+
     // Find and mark the specific peer that sent this version message
     var version_peer: ?*Peer = null;
     network.peers_mutex.lock();
@@ -1367,17 +1482,41 @@ fn handleVersionMessage(network: *NetworkManager, version_data: []const u8, peer
 }
 
 // Handle ping message
-fn handlePingMessage(network: *NetworkManager) void {
-    _ = network; // TODO: Send pong back to specific peer
+fn handlePingMessage(network: *NetworkManager, peer_socket: ?net.Stream) void {
+    _ = network; // Not used in ping handling
     logNetInfo("Ping received - sending pong", .{});
-    // TODO: Send pong response to sender
+    
+    // Send pong response back to sender
+    if (peer_socket) |socket| {
+        const header = MessageHeader.create(.pong, 0);
+        sendHeaderOnly(socket, header) catch |err| {
+            logNetError("Failed to send pong response: {}", .{err});
+        };
+    } else {
+        logNetError("Cannot send pong - no peer socket provided", .{});
+    }
 }
 
 // Handle pong message
-fn handlePongMessage(network: *NetworkManager) void {
-    _ = network; // TODO: Update last_seen for specific peer
+fn handlePongMessage(network: *NetworkManager, peer_socket: ?net.Stream) void {
     logNetInfo("Pong received - peer alive", .{});
-    // TODO: Update peer last_seen timestamp
+    
+    // Update last_seen timestamp for the specific peer
+    if (peer_socket) |socket| {
+        network.peers_mutex.lock();
+        defer network.peers_mutex.unlock();
+        
+        // Find the peer by socket handle and update last_seen
+        for (network.peers.items) |*peer| {
+            if (peer.socket != null and peer.socket.?.handle == socket.handle) {
+                peer.last_seen = util.getTime();
+                logNetInfo("Updated peer last_seen timestamp", .{});
+                break;
+            }
+        }
+    } else {
+        logNetError("Cannot update peer timestamp - no peer socket provided", .{});
+    }
 }
 
 // Handle getblocks request - respond with requested blocks
@@ -1518,48 +1657,57 @@ fn sendBlocksResponse(network: *NetworkManager, start_height: u32, count: u32, p
         total_size += @sizeOf(types.BlockHeader) + @sizeOf(u32) + @sizeOf(types.Transaction) * block.transactions.len;
     }
     
-    // Send blocks message header
+    // Build entire payload with checksum
+    const payload_buffer = try network.allocator.alloc(u8, total_size - @sizeOf(BlocksMessage));
+    defer network.allocator.free(payload_buffer);
+    
+    var payload_offset: usize = 0;
+    
+    // Serialize all blocks into payload buffer
+    for (validated_blocks.items) |block| {
+        // Copy block header
+        @memcpy(payload_buffer[payload_offset..payload_offset + @sizeOf(types.BlockHeader)], std.mem.asBytes(&block.header));
+        payload_offset += @sizeOf(types.BlockHeader);
+        
+        // Copy transaction count
+        const tx_count: u32 = @intCast(block.transactions.len);
+        @memcpy(payload_buffer[payload_offset..payload_offset + @sizeOf(u32)], std.mem.asBytes(&tx_count));
+        payload_offset += @sizeOf(u32);
+        
+        // Copy transactions
+        for (block.transactions) |tx| {
+            @memcpy(payload_buffer[payload_offset..payload_offset + @sizeOf(types.Transaction)], std.mem.asBytes(&tx));
+            payload_offset += @sizeOf(types.Transaction);
+        }
+    }
+    
+    // Create blocks message and full payload
     const blocks_msg = BlocksMessage{
         .start_height = start_height,
         .count = actual_count,
     };
     
-    const header = MessageHeader.create(.blocks, @intCast(total_size));
+    // Combine blocks_msg + payload_buffer for checksum
+    const full_payload = try network.allocator.alloc(u8, @sizeOf(BlocksMessage) + payload_buffer.len);
+    defer network.allocator.free(full_payload);
     
-    // Send with connection error handling
+    @memcpy(full_payload[0..@sizeOf(BlocksMessage)], std.mem.asBytes(&blocks_msg));
+    @memcpy(full_payload[@sizeOf(BlocksMessage)..], payload_buffer);
+    
+    // Send header with checksum
+    var header = MessageHeader.create(.blocks, @intCast(full_payload.len));
+    header.setChecksum(full_payload);
+    
     _ = socket.write(std.mem.asBytes(&header)) catch |err| {
         logNetError("Failed to send blocks header (peer disconnected): {}", .{err});
-        return; // Don't propagate error - peer disconnection is normal
-    };
-    
-    _ = socket.write(std.mem.asBytes(&blocks_msg)) catch |err| {
-        logNetError("Failed to send blocks message (peer disconnected): {}", .{err});
         return;
     };
     
-    // Send each validated block with connection checking
-    for (validated_blocks.items, 0..) |block, i| {
-        // Send block header
-        _ = socket.write(std.mem.asBytes(&block.header)) catch |err| {
-            logNetError("Failed to send block {} header (peer disconnected): {}", .{ start_height + @as(u32, @intCast(i)), err });
-            return;
-        };
-        
-        // Send transaction count
-        const tx_count: u32 = @intCast(block.transactions.len);
-        _ = socket.write(std.mem.asBytes(&tx_count)) catch |err| {
-            logNetError("Failed to send tx count for block {} (peer disconnected): {}", .{ start_height + @as(u32, @intCast(i)), err });
-            return;
-        };
-        
-        // Send transactions
-        for (block.transactions) |tx| {
-            _ = socket.write(std.mem.asBytes(&tx)) catch |err| {
-                logNetError("Failed to send transaction in block {} (peer disconnected): {}", .{ start_height + @as(u32, @intCast(i)), err });
-                return;
-            };
-        }
-    }
+    // Send full payload
+    _ = socket.write(full_payload) catch |err| {
+        logNetError("Failed to send blocks payload (peer disconnected): {}", .{err});
+        return;
+    };
     
     logNetSuccess("Sent {} blocks to peer", .{actual_count});
 }
@@ -1731,6 +1879,26 @@ test "MessageHeader creation" {
     const header = MessageHeader.create(.version, 64);
     try std.testing.expect(std.mem.eql(u8, &header.magic, &MAGIC_BYTES));
     try std.testing.expect(header.length == 64);
+}
+
+test "MessageHeader checksum" {
+    const test_data = "Hello ZeiCoin Network!";
+    const checksum1 = MessageHeader.calculateChecksum(test_data);
+    const checksum2 = MessageHeader.calculateChecksum(test_data);
+    
+    // Same data should produce same checksum
+    try std.testing.expect(checksum1 == checksum2);
+    
+    // Different data should produce different checksum
+    const different_data = "Hello Different Network!";
+    const checksum3 = MessageHeader.calculateChecksum(different_data);
+    try std.testing.expect(checksum1 != checksum3);
+    
+    // Test header checksum verification
+    var header = MessageHeader.create(.version, @intCast(test_data.len));
+    header.setChecksum(test_data);
+    try std.testing.expect(header.verifyChecksum(test_data));
+    try std.testing.expect(!header.verifyChecksum(different_data));
 }
 
 test "Sync response routing fix" {
