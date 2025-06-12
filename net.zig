@@ -71,7 +71,7 @@ pub const DISCOVERY_MAGIC = [4]u8{ 0xDE, 0x11, 0xC0, 0x1E }; // ZeiCoin discover
 pub const MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024; // 32MB max message
 pub const MAX_PEERS: usize = 8; // Keep it simple
 pub const VERSION: u32 = 1;
-pub const SOFTWARE_VERSION: u32 = 3; // v3: Fixed sync response routing bug
+pub const SOFTWARE_VERSION: u32 = 5; // v5: Improved network robustness (buffer overflow protection, default port handling)
 
 // Message types (similar to Bitcoin v0.01 protocol)
 pub const MessageType = enum(u12) {
@@ -115,7 +115,6 @@ pub const NetworkAddress = struct {
     pub fn fromString(addr_str: []const u8) !NetworkAddress {
         var parts = std.mem.splitScalar(u8, addr_str, ':');
         const ip_str = parts.next() orelse return error.InvalidAddress;
-        const port_str = parts.next() orelse "10801";
 
         // Parse IP address
         var ip_parts = std.mem.splitScalar(u8, ip_str, '.');
@@ -125,7 +124,9 @@ pub const NetworkAddress = struct {
             ip[i] = try std.fmt.parseInt(u8, part, 10);
         }
 
-        const port = try std.fmt.parseInt(u16, port_str, 10);
+        // Parse port, use DEFAULT_PORT if not specified
+        const port_str_slice = parts.next() orelse ""; // Use empty string if no port part
+        const port = if (port_str_slice.len > 0) try std.fmt.parseInt(u16, port_str_slice, 10) else DEFAULT_PORT;
         return NetworkAddress{ .ip = ip, .port = port };
     }
 
@@ -354,16 +355,18 @@ pub const Peer = struct {
     pub fn requestHeightUpdate(self: *Peer) !void {
         if (!isConnectionValid(self.socket, self.state)) return error.NotConnected;
 
-        // Send a lightweight version message to query current height
+        // Send a proper version message to query current height
         const version_payload = struct {
             version: u32,
+            services: u64,
+            timestamp: i64,
             block_height: u32,
-            timestamp: u64,
             software_version: u32,
         }{
             .version = VERSION,
+            .services = 1, // NODE_NETWORK
+            .timestamp = util.getTime(),
             .block_height = 0, // We don't need to send our height for a query
-            .timestamp = @intCast(util.getTime()),
             .software_version = SOFTWARE_VERSION,
         };
 
@@ -1061,7 +1064,12 @@ fn handlePeerConnection(network: *NetworkManager, stream: net.Stream) void {
 
 // Message buffer for handling TCP fragmentation
 const MessageBuffer = struct {
-    data: [8192]u8,
+    // Buffer needs to be large enough for the largest possible message,
+    // or dynamically sized. MAX_MESSAGE_SIZE is 32MB, which is too large for a stack buffer.
+    // This component needs a rethink if messages can truly be that large (e.g. for 'blocks').
+    // A more robust solution would use an ArrayList(u8) or a two-stage read (header then payload).
+    // Increasing to 64KB as a temporary measure improves handling of moderately sized messages.
+    data: [64 * 1024]u8, // Increased from 8KB
     pos: usize,
 
     fn init() MessageBuffer {
@@ -1073,6 +1081,11 @@ const MessageBuffer = struct {
 
     fn addData(self: *MessageBuffer, new_data: []const u8) void {
         const available = self.data.len - self.pos;
+        if (new_data.len > available) {
+            // This is a critical situation: incoming data exceeds buffer capacity.
+            logNetError("MessageBuffer overflow: pos={}, available={}, new_data.len={}. Truncating.", .{ self.pos, available, new_data.len });
+            // Truncation will likely lead to protocol errors for the current message.
+        }
         const to_copy = @min(new_data.len, available);
         @memcpy(self.data[self.pos .. self.pos + to_copy], new_data[0..to_copy]);
         self.pos += to_copy;
@@ -1083,6 +1096,12 @@ const MessageBuffer = struct {
 
         const header = std.mem.bytesToValue(MessageHeader, self.data[0..@sizeOf(MessageHeader)]);
         const total_size = @sizeOf(MessageHeader) + header.length;
+
+        if (total_size > MAX_MESSAGE_SIZE) {
+            logNetError("Message too large as per header: {} bytes, max allowed: {}. Clearing buffer.", .{total_size, MAX_MESSAGE_SIZE});
+            self.pos = 0; // Clear buffer to prevent processing invalid message
+            return false;
+        }
         return self.pos >= total_size;
     }
 
@@ -1091,6 +1110,13 @@ const MessageBuffer = struct {
 
         const header = std.mem.bytesToValue(MessageHeader, self.data[0..@sizeOf(MessageHeader)]);
         const total_size = @sizeOf(MessageHeader) + header.length;
+
+        // Additional check to prevent out-of-bounds read if total_size is corrupted or too large for current buffer state
+        if (total_size > self.pos or total_size > self.data.len) {
+            logNetError("MessageBuffer extractMessage: invalid total_size {} (pos={}, data.len={}). Clearing buffer.", .{total_size, self.pos, self.data.len});
+            self.pos = 0; // Clear buffer to recover from corrupted stream
+            return &[_]u8{};
+        }
         const message = self.data[0..total_size];
 
         // Shift remaining data (use copyForwards for overlapping memory)
@@ -1693,6 +1719,12 @@ test "NetworkAddress parsing" {
     try std.testing.expect(addr.ip[0] == 127);
     try std.testing.expect(addr.ip[3] == 1);
     try std.testing.expect(addr.port == 10801);
+
+    // Test parsing address without port, should use DEFAULT_PORT
+    const addr_no_port = try NetworkAddress.fromString("192.168.0.1");
+    try std.testing.expect(addr_no_port.ip[0] == 192);
+    try std.testing.expect(addr_no_port.ip[3] == 1);
+    try std.testing.expect(addr_no_port.port == DEFAULT_PORT);
 }
 
 test "MessageHeader creation" {
