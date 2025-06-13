@@ -348,24 +348,41 @@ pub const ZeiCoin = struct {
         var recipient_account = try self.getAccount(tx.recipient);
 
         // 💰 Apply transaction with fee deduction
-        const total_cost = tx.amount + tx.fee;
+        // Check for integer overflow in addition
+        const total_cost = std.math.add(u64, tx.amount, tx.fee) catch {
+            return error.IntegerOverflow;
+        };
         
-        // Safety check for integer overflow during sync
+        // Safety check for sufficient balance
         if (sender_account.balance < total_cost) {
-            print("⚠️ Warning: insufficient balance during sync (trusting historical block)\n", .{});
-            print("   Account {} has {} zei, needs {} zei\n", .{ 
-                std.fmt.fmtSliceHexLower(sender_account.address[0..8]), 
-                sender_account.balance, 
-                total_cost 
-            });
-            // During sync, we trust the historical block was valid - just set balance to 0
-            sender_account.balance = 0;
+            // During sync, we might encounter historical blocks with different validation rules
+            // Log the issue but continue processing to maintain chain integrity
+            if (self.sync_state == .syncing) {
+                print("⚠️ Warning: insufficient balance during sync (historical block)\n", .{});
+                print("   Account {} has {} zei, needs {} zei\n", .{ 
+                    std.fmt.fmtSliceHexLower(sender_account.address[0..8]), 
+                    sender_account.balance, 
+                    total_cost 
+                });
+                // Deduct what we can, but don't go negative
+                sender_account.balance = 0;
+            } else {
+                // In normal operation, this is an error
+                return error.InsufficientBalance;
+            }
         } else {
             sender_account.balance -= total_cost;
         }
         
-        sender_account.nonce += 1;
-        recipient_account.balance += tx.amount; // Only amount goes to recipient, fee goes to miner
+        // Check for nonce overflow
+        sender_account.nonce = std.math.add(u64, sender_account.nonce, 1) catch {
+            return error.NonceOverflow;
+        };
+        
+        // Check for balance overflow on recipient
+        recipient_account.balance = std.math.add(u64, recipient_account.balance, tx.amount) catch {
+            return error.BalanceOverflow;
+        };
 
         // Save updated accounts to database
         try self.database.saveAccount(tx.sender, sender_account);

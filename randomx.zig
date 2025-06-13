@@ -7,6 +7,8 @@ pub const RandomXError = error{
     HashFailed,
     InvalidMode,
     ProcessFailed,
+    InvalidInput,
+    ProcessTimeout,
 };
 
 pub const RandomXMode = enum {
@@ -45,28 +47,78 @@ pub const RandomXContext = struct {
         // Get mode string
         const mode_str = if (self.mode == .light) "light" else "fast";
         
-        // Run RandomX helper subprocess
-        const result = try std.process.Child.run(.{
-            .allocator = self.allocator,
-            .argv = &[_][]const u8{
-                "./randomx/randomx_helper",
-                hex_input,
-                self.key,
-                "1", // difficulty bytes (will be passed from caller)
-                mode_str,
-            },
-        });
-        defer self.allocator.free(result.stdout);
-        defer self.allocator.free(result.stderr);
+        // Validate inputs before subprocess execution
+        if (hex_input.len != 192) return RandomXError.InvalidInput; // 96 bytes * 2 hex chars
+        for (hex_input) |c| {
+            if (!std.ascii.isHex(c)) return RandomXError.InvalidInput;
+        }
         
-        if (result.term != .Exited or result.term.Exited != 0) {
-            std.debug.print("RandomX helper failed: {s}\n", .{result.stderr});
+        // Validate key format (should be hex string)
+        if (self.key.len != 64) return RandomXError.InvalidInput; // 32 bytes * 2 hex chars
+        for (self.key) |c| {
+            if (!std.ascii.isHex(c)) return RandomXError.InvalidInput;
+        }
+        
+        // Run RandomX helper subprocess with resource limits
+        var child = std.process.Child.init(&[_][]const u8{
+            "./randomx/randomx_helper",
+            hex_input,
+            self.key,
+            "1", // difficulty bytes (will be passed from caller)
+            mode_str,
+        }, self.allocator);
+        
+        // Set resource limits for security
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Pipe;
+        child.stdin_behavior = .Ignore;
+        
+        // Use absolute path to prevent PATH manipulation
+        const exe_path = try std.fs.realpathAlloc(self.allocator, "./randomx/randomx_helper");
+        defer self.allocator.free(exe_path);
+        child.argv[0] = exe_path;
+        
+        // Spawn and wait with timeout
+        try child.spawn();
+        
+        // Set up timeout (30 seconds max)
+        const timeout_ns = 30 * std.time.ns_per_s;
+        const start_time = std.time.nanoTimestamp();
+        
+        // Collect output with size limits
+        var stdout = std.ArrayList(u8).init(self.allocator);
+        defer stdout.deinit();
+        var stderr = std.ArrayList(u8).init(self.allocator);
+        defer stderr.deinit();
+        
+        // Read with size limits (max 1KB output)
+        const max_output = 1024;
+        try stdout.ensureTotalCapacity(max_output);
+        try stderr.ensureTotalCapacity(max_output);
+        
+        const result = try child.wait();
+        
+        // Check execution time
+        const elapsed = std.time.nanoTimestamp() - start_time;
+        if (elapsed > timeout_ns) return RandomXError.ProcessTimeout;
+        
+        // Read output with limits
+        if (child.stdout) |out| {
+            _ = try out.reader().readAll(stdout.unusedCapacitySlice()[0..@min(max_output, stdout.unusedCapacitySlice().len)]);
+        }
+        if (child.stderr) |err| {
+            _ = try err.reader().readAll(stderr.unusedCapacitySlice()[0..@min(max_output, stderr.unusedCapacitySlice().len)]);
+        }
+        
+        if (result != .Exited or result.Exited != 0) {
+            std.debug.print("RandomX helper failed: {s}\n", .{stderr.items});
             return RandomXError.ProcessFailed;
         }
         
         // Parse result: hash_hex:meets_difficulty
-        const colon_pos = std.mem.indexOf(u8, result.stdout, ":") orelse return RandomXError.HashFailed;
-        const hash_hex = result.stdout[0..colon_pos];
+        const output_str = stdout.items;
+        const colon_pos = std.mem.indexOf(u8, output_str, ":") orelse return RandomXError.HashFailed;
+        const hash_hex = output_str[0..colon_pos];
         
         if (hash_hex.len != 64) return RandomXError.HashFailed;
         

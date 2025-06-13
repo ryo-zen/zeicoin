@@ -727,8 +727,8 @@ fn loadWalletForOperation(allocator: std.mem.Allocator, wallet_name: []const u8)
 
     // Use appropriate password based on wallet name
     const password = if (std.mem.eql(u8, wallet_name, "server_miner")) "zen_miner" else "zen";
-    zen_wallet.loadFromFile(wallet_path, password) catch {
-        print("❌ Failed to load wallet '{s}'\n", .{wallet_name});
+    zen_wallet.loadFromFile(wallet_path, password) catch |err| {
+        print("❌ Failed to load wallet '{s}': {}\n", .{wallet_name, err});
         return error.WalletNotFound;
     };
 

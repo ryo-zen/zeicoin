@@ -18,6 +18,7 @@ pub const DatabaseError = error{
     SaveFailed,
     LoadFailed,
     NotFound,
+    InvalidPath,
     SerializationFailed,
 };
 
@@ -112,8 +113,12 @@ pub const Database = struct {
 
     /// Save account to file
     pub fn saveAccount(self: *Database, address: Address, account: Account) !void {
+        // Create hex representation of address
+        var hex_buffer: [64]u8 = undefined;
+        _ = std.fmt.bufPrint(&hex_buffer, "{}", .{std.fmt.fmtSliceHexLower(&address)}) catch unreachable;
+        
         // Create filename: accounts/1a2b3c4d...hex.account
-        const filename = try std.fmt.allocPrint(self.allocator, "{s}/{s}.account", .{ self.accounts_dir, std.fmt.fmtSliceHexLower(&address) });
+        const filename = try std.fmt.allocPrint(self.allocator, "{s}/{s}.account", .{ self.accounts_dir, hex_buffer });
         defer self.allocator.free(filename);
 
         // Serialize account to buffer
@@ -132,8 +137,12 @@ pub const Database = struct {
 
     /// Load account from file
     pub fn getAccount(self: *Database, address: Address) !Account {
+        // Create hex representation of address
+        var hex_buffer: [64]u8 = undefined;
+        _ = std.fmt.bufPrint(&hex_buffer, "{}", .{std.fmt.fmtSliceHexLower(&address)}) catch unreachable;
+        
         // Create filename
-        const filename = try std.fmt.allocPrint(self.allocator, "{s}/{s}.account", .{ self.accounts_dir, std.fmt.fmtSliceHexLower(&address) });
+        const filename = try std.fmt.allocPrint(self.allocator, "{s}/{s}.account", .{ self.accounts_dir, hex_buffer });
         defer self.allocator.free(filename);
 
         // Read file
@@ -187,6 +196,19 @@ pub const Database = struct {
 
     /// Get wallet file path - zen simplicity
     pub fn getWalletPath(self: *Database, wallet_name: []const u8) ![]u8 {
+        // Sanitize wallet name to prevent path traversal
+        for (wallet_name) |c| {
+            // Allow alphanumeric, underscore, and dash only
+            if (!std.ascii.isAlphanumeric(c) and c != '_' and c != '-') {
+                return DatabaseError.InvalidPath;
+            }
+        }
+        
+        // Limit wallet name length to prevent abuse
+        if (wallet_name.len == 0 or wallet_name.len > 64) {
+            return DatabaseError.InvalidPath;
+        }
+        
         return std.fmt.allocPrint(self.allocator, "{s}/{s}.wallet", .{ self.wallets_dir, wallet_name });
     }
 

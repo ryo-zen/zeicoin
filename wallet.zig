@@ -12,12 +12,13 @@ pub const WalletError = error{
     InvalidPassword,
     CorruptedWallet,
     InvalidWalletFile,
+    DecryptionFailed,
 };
 
 /// ℹ️ Zeicoin wallet file format - encrypted and secure
 pub const WalletFile = struct {
     version: u32,
-    encrypted_private_key: [64]u8, // Encrypted Ed25519 private key
+    encrypted_data: [128]u8, // AES-GCM encrypted private key (64 bytes) + auth tag (16 bytes) + padding
     public_key: [32]u8, // Ed25519 public key
     address: types.Address, // Derived address
     salt: [16]u8, // Salt for key derivation
@@ -38,20 +39,20 @@ pub const WalletFile = struct {
         const address = deriveAddress(zeicoin_keypair.public_key);
 
         // Encrypt the full 64-byte private key with password and salt
-        var encrypted_key: [64]u8 = undefined;
-        try encryptKey64(private_key_64, password, salt, &encrypted_key);
+        var encrypted_data: [128]u8 = undefined;
+        try encryptKey64(private_key_64, password, salt, &encrypted_data);
 
         // Calculate checksum
         var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-        hasher.update(&encrypted_key);
+        hasher.update(&encrypted_data);
         hasher.update(&zeicoin_keypair.public_key);
         hasher.update(&address);
         hasher.update(&salt);
         const checksum = hasher.finalResult();
 
         return WalletFile{
-            .version = 1,
-            .encrypted_private_key = encrypted_key,
+            .version = 2, // AES-GCM format
+            .encrypted_data = encrypted_data,
             .public_key = zeicoin_keypair.public_key,
             .address = address,
             .salt = salt,
@@ -63,7 +64,7 @@ pub const WalletFile = struct {
     pub fn decryptPrivateKey(self: *const WalletFile, password: []const u8) ![64]u8 {
         // Verify checksum first
         var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-        hasher.update(&self.encrypted_private_key);
+        hasher.update(&self.encrypted_data);
         hasher.update(&self.public_key);
         hasher.update(&self.address);
         hasher.update(&self.salt);
@@ -73,9 +74,9 @@ pub const WalletFile = struct {
             return error.CorruptedWallet;
         }
 
-        // Decrypt private key
+        // Decrypt private key using AES-GCM
         var private_key: [64]u8 = undefined;
-        try decryptKey64(self.encrypted_private_key, password, self.salt, &private_key);
+        try decryptKey64(self.encrypted_data, password, self.salt, &private_key);
 
         // Simple validation - verify decryption worked (basic checksum)
         if (std.mem.allEqual(u8, private_key[0..], 0)) {
@@ -246,26 +247,53 @@ fn deriveAddress(public_key: [32]u8) types.Address {
     return util.hash256(&public_key);
 }
 
-/// 🔒 Encrypt 64-byte private key using PBKDF2 + XOR
-fn encryptKey64(private_key: [64]u8, password: []const u8, salt: [16]u8, output: *[64]u8) !void {
-    // Derive key using PBKDF2 with 4096 iterations
-    var derived_key: [64]u8 = undefined;
-    try std.crypto.pwhash.pbkdf2(&derived_key, password, &salt, 4096, std.crypto.auth.hmac.sha2.HmacSha256);
+/// 🔒 Encrypt 64-byte private key using PBKDF2 + AES256-GCM
+fn encryptKey64(private_key: [64]u8, password: []const u8, salt: [16]u8, output: *[128]u8) !void {
+    // Derive 32-byte key using PBKDF2 with 100,000 iterations
+    var derived_key: [32]u8 = undefined;
+    try std.crypto.pwhash.pbkdf2(&derived_key, password, &salt, 100_000, std.crypto.auth.hmac.sha2.HmacSha256);
+    defer std.crypto.utils.secureZero(u8, &derived_key);
 
-    // XOR encrypt the entire private key
-    for (private_key, 0..) |byte, i| {
-        output[i] = byte ^ derived_key[i];
-    }
+    // Use AES256-GCM for authenticated encryption
+    const aes = std.crypto.aead.aes_gcm.Aes256Gcm;
+    
+    // Generate nonce from salt (first 12 bytes)
+    var nonce: [aes.nonce_length]u8 = undefined;
+    @memcpy(&nonce, salt[0..aes.nonce_length]);
+    
+    // Encrypt with authentication tag
+    var ciphertext: [64]u8 = undefined;
+    var tag: [aes.tag_length]u8 = undefined;
+    aes.encrypt(&ciphertext, &tag, &private_key, &.{}, nonce, derived_key);
+    
+    // Store ciphertext and tag in output
+    @memcpy(output[0..64], &ciphertext);
+    @memcpy(output[64..80], &tag);
+    // Remaining bytes (80-128) are zero-padded
+    @memset(output[80..128], 0);
 }
 
-/// 🔓 Decrypt 64-byte private key using PBKDF2 + XOR
-fn decryptKey64(encrypted_key: [64]u8, password: []const u8, salt: [16]u8, output: *[64]u8) !void {
-    // Derive key using PBKDF2 with 4096 iterations
-    var derived_key: [64]u8 = undefined;
-    try std.crypto.pwhash.pbkdf2(&derived_key, password, &salt, 4096, std.crypto.auth.hmac.sha2.HmacSha256);
+/// 🔓 Decrypt 64-byte private key using PBKDF2 + AES256-GCM
+fn decryptKey64(encrypted_data: [128]u8, password: []const u8, salt: [16]u8, output: *[64]u8) !void {
+    // Derive 32-byte key using PBKDF2 with 100,000 iterations
+    var derived_key: [32]u8 = undefined;
+    try std.crypto.pwhash.pbkdf2(&derived_key, password, &salt, 100_000, std.crypto.auth.hmac.sha2.HmacSha256);
+    defer std.crypto.utils.secureZero(u8, &derived_key);
 
-    // XOR decrypt the entire private key
-    for (encrypted_key, 0..) |byte, i| {
-        output[i] = byte ^ derived_key[i];
-    }
+    // Use AES256-GCM for authenticated decryption
+    const aes = std.crypto.aead.aes_gcm.Aes256Gcm;
+    
+    // Generate nonce from salt (first 12 bytes)
+    var nonce: [aes.nonce_length]u8 = undefined;
+    @memcpy(&nonce, salt[0..aes.nonce_length]);
+    
+    // Extract ciphertext and tag
+    const ciphertext = encrypted_data[0..64];
+    const tag = encrypted_data[64..80];
+    
+    // Decrypt and verify authentication tag
+    aes.decrypt(output, ciphertext, tag.*, &.{}, nonce, derived_key) catch {
+        return error.DecryptionFailed;
+    };
 }
+
