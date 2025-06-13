@@ -25,8 +25,7 @@ pub const WalletFile = struct {
     checksum: [32]u8, // SHA256 checksum for integrity
 
     /// 👌 Create wallet file from private key (64-byte Ed25519 secret key)
-    pub fn fromPrivateKey(private_key_64: [64]u8, password: []const u8, allocator: std.mem.Allocator) !WalletFile {
-        _ = allocator;
+    pub fn fromPrivateKey(private_key_64: [64]u8, password: []const u8) !WalletFile {
 
         // Generate salt
         var salt: [16]u8 = undefined;
@@ -76,12 +75,12 @@ pub const WalletFile = struct {
 
         // Decrypt private key using AES-GCM
         var private_key: [64]u8 = undefined;
-        try decryptKey64(self.encrypted_data, password, self.salt, &private_key);
-
-        // Simple validation - verify decryption worked (basic checksum)
-        if (std.mem.allEqual(u8, private_key[0..], 0)) {
-            return error.InvalidPassword;
-        }
+        decryptKey64(self.encrypted_data, password, self.salt, &private_key) catch |err| {
+            if (err == error.DecryptionFailed) {
+                return error.InvalidPassword; // Map decryption failure to invalid password
+            }
+            return err; // Propagate other potential errors
+        };
 
         return private_key;
     }
@@ -131,7 +130,7 @@ pub const Wallet = struct {
 
         // Use the full 64-byte Ed25519 private key
         const private_key_64 = self.private_key.?;
-        const wallet_file = try WalletFile.fromPrivateKey(private_key_64, password, self.allocator);
+        const wallet_file = try WalletFile.fromPrivateKey(private_key_64, password);
 
         // Write to file
         const file = try std.fs.cwd().createFile(file_path, .{});
