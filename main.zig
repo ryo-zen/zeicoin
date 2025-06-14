@@ -722,6 +722,33 @@ pub const ZeiCoin = struct {
     pub fn getBlockByHeight(self: *ZeiCoin, height: u32) !Block {
         return try self.database.getBlock(height);
     }
+    
+    /// Calculate median time past (MTP) for timestamp validation
+    fn getMedianTimePast(self: *ZeiCoin, height: u32) !u64 {
+        // Need at least MTP_BLOCK_COUNT blocks for meaningful median
+        if (height < types.TimestampValidation.MTP_BLOCK_COUNT) {
+            // For early blocks, use genesis timestamp as baseline
+            return types.Genesis.timestamp();
+        }
+        
+        var timestamps = std.ArrayList(u64).init(self.allocator);
+        defer timestamps.deinit();
+        
+        // Collect timestamps from last MTP_BLOCK_COUNT blocks
+        const start_height = height - types.TimestampValidation.MTP_BLOCK_COUNT + 1;
+        for (start_height..height + 1) |h| {
+            const block = try self.database.getBlock(@intCast(h));
+            defer self.allocator.free(block.transactions);
+            try timestamps.append(block.header.timestamp);
+        }
+        
+        // Sort timestamps
+        std.sort.heap(u64, timestamps.items, {}, comptime std.sort.asc(u64));
+        
+        // Return median (middle value for odd count)
+        const median_index = timestamps.items.len / 2;
+        return timestamps.items[median_index];
+    }
 
     /// Validate an incoming block
     pub fn validateBlock(self: *ZeiCoin, block: Block, expected_height: u32) !bool {
@@ -739,6 +766,14 @@ pub const ZeiCoin = struct {
             print("❌ Block validation failed: invalid block structure\n", .{});
             return false;
         }
+        
+        // Timestamp validation - prevent blocks from the future
+        const current_time = util.getTime();
+        if (!types.TimestampValidation.isTimestampValid(block.header.timestamp, current_time)) {
+            const future_seconds = @as(i64, @intCast(block.header.timestamp)) - current_time;
+            print("❌ Block timestamp too far in future: {} seconds ahead\n", .{future_seconds});
+            return false;
+        }
 
         // Check block height consistency
         const current_height = try self.getHeight();
@@ -746,6 +781,30 @@ pub const ZeiCoin = struct {
             print("❌ Block validation failed: height mismatch (expected: {}, current: {})\n", .{ expected_height, current_height });
             return false;
         }
+        
+        // For non-genesis blocks, validate against previous block
+        if (expected_height > 0) {
+            const prev_block = try self.getBlockByHeight(expected_height - 1);
+            defer self.allocator.free(prev_block.transactions);
+            
+            // Check timestamp against median time past (MTP)
+            const mtp = try self.getMedianTimePast(expected_height - 1);
+            if (block.header.timestamp <= mtp) {
+                print("❌ Block timestamp not greater than median time past\n", .{});
+                print("   MTP: {}, Block timestamp: {}\n", .{ mtp, block.header.timestamp });
+                return false;
+            }
+            
+            // Check previous hash links correctly
+            const prev_hash = prev_block.hash();
+            if (!std.mem.eql(u8, &block.header.previous_hash, &prev_hash)) {
+                print("❌ Previous hash validation failed\n", .{});
+                print("   Expected: {s}\n", .{std.fmt.fmtSliceHexLower(&prev_hash)});
+                print("   Received: {s}\n", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+                return false;
+            }
+        }
+        
         // Check proof-of-work with dynamic difficulty
         if (@import("builtin").mode == .Debug) {
             // In test mode, use dynamic difficulty with SHA256 for speed
@@ -758,20 +817,6 @@ pub const ZeiCoin = struct {
             // In production, use full RandomX validation with dynamic difficulty
             if (!try self.validateBlockPoW(block)) {
                 print("❌ RandomX proof-of-work validation failed\n", .{});
-                return false;
-            }
-        }
-
-        // Check previous hash links correctly
-        if (expected_height > 0) {
-            const prev_block = try self.getBlockByHeight(expected_height - 1);
-            defer self.allocator.free(prev_block.transactions);
-
-            const prev_hash = prev_block.hash();
-            if (!std.mem.eql(u8, &block.header.previous_hash, &prev_hash)) {
-                print("❌ Previous hash validation failed\n", .{});
-                print("   Expected: {s}\n", .{std.fmt.fmtSliceHexLower(&prev_hash)});
-                print("   Received: {s}\n", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
                 return false;
             }
         }
@@ -831,6 +876,16 @@ pub const ZeiCoin = struct {
             return false;
         }
         print("✅ Basic block structure validation passed for height {}\n", .{expected_height});
+        
+        // Timestamp validation for sync blocks (more lenient than normal validation)
+        const current_time = util.getTime();
+        // Allow more future time during sync (network time differences)
+        const sync_future_allowance = types.TimestampValidation.MAX_FUTURE_TIME * 2; // 4 hours
+        if (@as(i64, @intCast(block.header.timestamp)) > current_time + sync_future_allowance) {
+            const future_seconds = @as(i64, @intCast(block.header.timestamp)) - current_time;
+            print("❌ Sync block timestamp too far in future: {} seconds ahead\n", .{future_seconds});
+            return false;
+        }
 
         print("🔍 validateSyncBlock: Checking proof-of-work for height {}\n", .{expected_height});
         
@@ -968,6 +1023,15 @@ pub const ZeiCoin = struct {
         // Check basic block structure
         if (!block.isValid()) {
             print("❌ Block validation failed: invalid block structure\n", .{});
+            return false;
+        }
+        
+        // Timestamp validation for reorg blocks (lenient like sync)
+        const current_time = util.getTime();
+        const reorg_future_allowance = types.TimestampValidation.MAX_FUTURE_TIME * 2; // 4 hours
+        if (@as(i64, @intCast(block.header.timestamp)) > current_time + reorg_future_allowance) {
+            const future_seconds = @as(i64, @intCast(block.header.timestamp)) - current_time;
+            print("❌ Reorg block timestamp too far in future: {} seconds ahead\n", .{future_seconds});
             return false;
         }
 
@@ -2163,4 +2227,88 @@ test "block broadcasting integration" {
 
     // Test passed if we get here without crashing
     try testing.expect(true);
+}
+
+test "timestamp validation - future blocks rejected" {
+    var zeicoin = try createTestZeiCoin("test_zeicoin_timestamp_future");
+    defer zeicoin.deinit();
+    defer std.fs.cwd().deleteTree("test_zeicoin_timestamp_future") catch {};
+    
+    // Create a block with timestamp too far in future
+    const future_time = @as(u64, @intCast(util.getTime())) + @as(u64, @intCast(types.TimestampValidation.MAX_FUTURE_TIME)) + 3600; // 1 hour beyond limit
+    
+    var transactions = [_]types.Transaction{};
+    const future_block = types.Block{
+        .header = types.BlockHeader{
+            .previous_hash = std.mem.zeroes(types.Hash),
+            .merkle_root = std.mem.zeroes(types.Hash),
+            .timestamp = future_time,
+            .difficulty = types.ZenMining.initialDifficultyTarget().toU64(),
+            .nonce = 0,
+        },
+        .transactions = &transactions,
+    };
+    
+    // Block should be rejected
+    const is_valid = try zeicoin.validateBlock(future_block, 1);
+    try testing.expect(!is_valid);
+}
+
+test "timestamp validation - median time past" {
+    var zeicoin = try createTestZeiCoin("test_zeicoin_mtp");
+    defer zeicoin.deinit();
+    defer std.fs.cwd().deleteTree("test_zeicoin_mtp") catch {};
+    
+    // Mine some blocks with increasing timestamps
+    var i: u32 = 0;
+    while (i < 15) : (i += 1) {
+        var transactions = [_]types.Transaction{};
+        const block = types.Block{
+            .header = types.BlockHeader{
+                .previous_hash = if (i == 0) std.mem.zeroes(types.Hash) else blk: {
+                    const prev = try zeicoin.getBlockByHeight(i - 1);
+                    defer zeicoin.allocator.free(prev.transactions);
+                    break :blk prev.hash();
+                },
+                .merkle_root = std.mem.zeroes(types.Hash),
+                .timestamp = types.Genesis.timestamp() + (i + 1) * 600, // 10 minutes apart
+                .difficulty = types.ZenMining.initialDifficultyTarget().toU64(),
+                .nonce = 0,
+            },
+            .transactions = &transactions,
+        };
+        
+        // Process block directly (bypass validation for test setup)
+        try zeicoin.database.saveBlock(i, block);
+    }
+    
+    // Calculate expected MTP (median of last 11 blocks)
+    const expected_mtp = types.Genesis.timestamp() + 10 * 600; // Median of blocks 4-14
+    const actual_mtp = try zeicoin.getMedianTimePast(14);
+    try testing.expectEqual(expected_mtp, actual_mtp);
+    
+    // Create block with timestamp equal to MTP (should fail)
+    var bad_transactions = [_]types.Transaction{};
+    const bad_block = types.Block{
+        .header = types.BlockHeader{
+            .previous_hash = std.mem.zeroes(types.Hash),
+            .merkle_root = std.mem.zeroes(types.Hash),
+            .timestamp = expected_mtp,
+            .difficulty = types.ZenMining.initialDifficultyTarget().toU64(),
+            .nonce = 0,
+        },
+        .transactions = &bad_transactions,
+    };
+    
+    // This should fail MTP validation
+    const is_valid = try zeicoin.validateBlock(bad_block, 15);
+    try testing.expect(!is_valid);
+}
+
+test "timestamp validation - constants" {
+    // Test that our constants make sense
+    try testing.expect(types.TimestampValidation.MAX_FUTURE_TIME > 0);
+    try testing.expect(types.TimestampValidation.MAX_FUTURE_TIME <= 24 * 60 * 60); // Max 24 hours
+    try testing.expect(types.TimestampValidation.MTP_BLOCK_COUNT >= 3); // Need at least 3 for meaningful median
+    try testing.expect(types.TimestampValidation.MTP_BLOCK_COUNT % 2 == 1); // Odd number for clean median
 }
