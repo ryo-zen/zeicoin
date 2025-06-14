@@ -516,6 +516,30 @@ pub const ZenFees = struct {
     pub const PRIORITY_FEE: u64 = NetworkConfig.current().min_fee * 10; // 10x minimum
 };
 
+/// ⏰ Timestamp validation configuration - prevents time-based attacks
+pub const TimestampValidation = struct {
+    /// Maximum allowed timestamp in the future (seconds)
+    pub const MAX_FUTURE_TIME: i64 = 2 * 60 * 60; // 2 hours
+    
+    /// Minimum blocks for median time past calculation
+    pub const MTP_BLOCK_COUNT: u32 = 11; // Use last 11 blocks for median
+    
+    /// Maximum timestamp adjustment per block (seconds)
+    pub const MAX_TIME_ADJUSTMENT: i64 = 90 * 60; // 90 minutes
+    
+    /// Validate a block timestamp against current time
+    pub fn isTimestampValid(timestamp: u64, current_time: i64) bool {
+        const block_time = @as(i64, @intCast(timestamp));
+        return block_time <= current_time + MAX_FUTURE_TIME;
+    }
+    
+    /// Check if timestamp is not too far in the past
+    pub fn isNotTooOld(timestamp: u64, previous_timestamp: u64) bool {
+        // Block timestamp must be greater than previous block
+        return timestamp > previous_timestamp;
+    }
+};
+
 // Tests
 const testing = std.testing;
 
