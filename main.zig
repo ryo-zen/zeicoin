@@ -128,10 +128,10 @@ pub const ZeiCoin = struct {
     sync_progress: ?SyncProgress,
     sync_peer: ?*net.Peer,
     failed_peers: ArrayList(*net.Peer), // Blacklist of failed sync peers
-    
+
     // Transaction history for duplicate detection
     processed_transactions: std.ArrayList([32]u8), // Recent tx hashes (simple array for compatibility)
-    
+
     // Fork manager for longest chain consensus
     fork_manager: forkmanager.ForkManager,
 
@@ -271,7 +271,7 @@ pub const ZeiCoin = struct {
         if (!tx.isValid()) return false;
 
         // Additional integrity checks
-        
+
         // 1. Prevent self-transfer (wasteful but not harmful)
         if (std.mem.eql(u8, &tx.sender, &tx.recipient)) {
             print("⚠️ Self-transfer detected (wasteful but allowed)\n", .{});
@@ -352,18 +352,14 @@ pub const ZeiCoin = struct {
         const total_cost = std.math.add(u64, tx.amount, tx.fee) catch {
             return error.IntegerOverflow;
         };
-        
+
         // Safety check for sufficient balance
         if (sender_account.balance < total_cost) {
             // During sync, we might encounter historical blocks with different validation rules
             // Log the issue but continue processing to maintain chain integrity
             if (self.sync_state == .syncing) {
                 print("⚠️ Warning: insufficient balance during sync (historical block)\n", .{});
-                print("   Account {} has {} zei, needs {} zei\n", .{ 
-                    std.fmt.fmtSliceHexLower(sender_account.address[0..8]), 
-                    sender_account.balance, 
-                    total_cost 
-                });
+                print("   Account {} has {} zei, needs {} zei\n", .{ std.fmt.fmtSliceHexLower(sender_account.address[0..8]), sender_account.balance, total_cost });
                 // Deduct what we can, but don't go negative
                 sender_account.balance = 0;
             } else {
@@ -373,12 +369,12 @@ pub const ZeiCoin = struct {
         } else {
             sender_account.balance -= total_cost;
         }
-        
+
         // Check for nonce overflow
         sender_account.nonce = std.math.add(u64, sender_account.nonce, 1) catch {
             return error.NonceOverflow;
         };
-        
+
         // Check for balance overflow on recipient
         recipient_account.balance = std.math.add(u64, recipient_account.balance, tx.amount) catch {
             return error.BalanceOverflow;
@@ -437,12 +433,31 @@ pub const ZeiCoin = struct {
 
         print("💰 Miner reward: {s} (base) + {s} (fees) = {s} total\n", .{ base_reward_display, fees_display, total_reward_display });
 
-        // Combine coinbase + mempool transactions
-        var all_transactions = try self.allocator.alloc(Transaction, self.mempool.items.len + 1);
-        defer self.allocator.free(all_transactions);
+        // Apply soft limit for mining (2MB default, configurable)
+        var transactions_to_include = std.ArrayList(Transaction).init(self.allocator);
+        defer transactions_to_include.deinit();
 
-        all_transactions[0] = coinbase_tx; // Coinbase always first
-        @memcpy(all_transactions[1..], self.mempool.items);
+        // Always include coinbase
+        try transactions_to_include.append(coinbase_tx);
+
+        // Calculate running block size
+        var current_block_size: usize = 84 + 4; // Header + tx count
+        current_block_size += 192; // Coinbase transaction
+
+        // Add transactions from mempool until we hit soft limit
+        for (self.mempool.items) |tx| {
+            const tx_size: usize = 192; // Approximate transaction size
+            if (current_block_size + tx_size > types.BlockLimits.SOFT_BLOCK_SIZE) {
+                print("📦 Soft block size limit reached: {} bytes (limit: {} bytes)\n", .{ current_block_size, types.BlockLimits.SOFT_BLOCK_SIZE });
+                print("📊 Including {} of {} mempool transactions\n", .{ transactions_to_include.items.len - 1, self.mempool.items.len });
+                break;
+            }
+            try transactions_to_include.append(tx);
+            current_block_size += tx_size;
+        }
+
+        const all_transactions = try transactions_to_include.toOwnedSlice();
+        defer self.allocator.free(all_transactions);
 
         // Get previous block hash and calculate next difficulty
         const current_height = try self.getHeight();
@@ -493,7 +508,7 @@ pub const ZeiCoin = struct {
 
             // Clear mempool
             self.mempool.clearRetainingCapacity();
-            
+
             // Cleanup old processed transactions periodically
             self.cleanupProcessedTransactions();
 
@@ -722,7 +737,7 @@ pub const ZeiCoin = struct {
     pub fn getBlockByHeight(self: *ZeiCoin, height: u32) !Block {
         return try self.database.getBlock(height);
     }
-    
+
     /// Calculate median time past (MTP) for timestamp validation
     fn getMedianTimePast(self: *ZeiCoin, height: u32) !u64 {
         // Need at least MTP_BLOCK_COUNT blocks for meaningful median
@@ -730,10 +745,10 @@ pub const ZeiCoin = struct {
             // For early blocks, use genesis timestamp as baseline
             return types.Genesis.timestamp();
         }
-        
+
         var timestamps = std.ArrayList(u64).init(self.allocator);
         defer timestamps.deinit();
-        
+
         // Collect timestamps from last MTP_BLOCK_COUNT blocks
         const start_height = height - types.TimestampValidation.MTP_BLOCK_COUNT + 1;
         for (start_height..height + 1) |h| {
@@ -741,10 +756,10 @@ pub const ZeiCoin = struct {
             defer self.allocator.free(block.transactions);
             try timestamps.append(block.header.timestamp);
         }
-        
+
         // Sort timestamps
         std.sort.heap(u64, timestamps.items, {}, comptime std.sort.asc(u64));
-        
+
         // Return median (middle value for odd count)
         const median_index = timestamps.items.len / 2;
         return timestamps.items[median_index];
@@ -766,7 +781,14 @@ pub const ZeiCoin = struct {
             print("❌ Block validation failed: invalid block structure\n", .{});
             return false;
         }
-        
+
+        // Check block size limit (16MB hard limit)
+        const block_size = block.getSize();
+        if (block_size > types.BlockLimits.MAX_BLOCK_SIZE) {
+            print("❌ Block validation failed: size {} bytes exceeds limit of {} bytes\n", .{ block_size, types.BlockLimits.MAX_BLOCK_SIZE });
+            return false;
+        }
+
         // Timestamp validation - prevent blocks from the future
         const current_time = util.getTime();
         if (!types.TimestampValidation.isTimestampValid(block.header.timestamp, current_time)) {
@@ -781,12 +803,12 @@ pub const ZeiCoin = struct {
             print("❌ Block validation failed: height mismatch (expected: {}, current: {})\n", .{ expected_height, current_height });
             return false;
         }
-        
+
         // For non-genesis blocks, validate against previous block
         if (expected_height > 0) {
             const prev_block = try self.getBlockByHeight(expected_height - 1);
             defer self.allocator.free(prev_block.transactions);
-            
+
             // Check timestamp against median time past (MTP)
             const mtp = try self.getMedianTimePast(expected_height - 1);
             if (block.header.timestamp <= mtp) {
@@ -794,7 +816,7 @@ pub const ZeiCoin = struct {
                 print("   MTP: {}, Block timestamp: {}\n", .{ mtp, block.header.timestamp });
                 return false;
             }
-            
+
             // Check previous hash links correctly
             const prev_hash = prev_block.hash();
             if (!std.mem.eql(u8, &block.header.previous_hash, &prev_hash)) {
@@ -804,7 +826,7 @@ pub const ZeiCoin = struct {
                 return false;
             }
         }
-        
+
         // Check proof-of-work with dynamic difficulty
         if (@import("builtin").mode == .Debug) {
             // In test mode, use dynamic difficulty with SHA256 for speed
@@ -838,11 +860,11 @@ pub const ZeiCoin = struct {
     /// Validate block during sync (skips transaction balance checks)
     pub fn validateSyncBlock(self: *ZeiCoin, block: Block, expected_height: u32) !bool {
         print("🔍 validateSyncBlock: Starting validation for height {}\n", .{expected_height});
-        
+
         // Special validation for genesis block (height 0)
         if (expected_height == 0) {
             print("🔍 validateSyncBlock: Processing genesis block (height 0)\n", .{});
-            
+
             // Detailed genesis validation debugging
             print("🔍 Genesis validation details:\n", .{});
             print("   Block timestamp: {}\n", .{block.header.timestamp});
@@ -851,11 +873,11 @@ pub const ZeiCoin = struct {
             print("   Block difficulty: {}\n", .{block.header.difficulty});
             print("   Block nonce: 0x{X}\n", .{block.header.nonce});
             print("   Block transaction count: {}\n", .{block.txCount()});
-            
+
             const block_hash = block.hash();
             print("   Block hash: {s}\n", .{std.fmt.fmtSliceHexLower(&block_hash)});
             print("   Expected genesis hash: {s}\n", .{std.fmt.fmtSliceHexLower(&genesis.getCanonicalGenesisHash())});
-            
+
             if (!genesis.validateGenesis(block)) {
                 print("❌ Genesis block validation failed: not canonical genesis\n", .{});
                 print("❌ Genesis validation failed - detailed comparison above\n", .{});
@@ -866,7 +888,7 @@ pub const ZeiCoin = struct {
         }
 
         print("🔍 validateSyncBlock: Checking basic block structure for height {}\n", .{expected_height});
-        
+
         // Check basic block structure
         if (!block.isValid()) {
             print("❌ Block validation failed: invalid block structure at height {}\n", .{expected_height});
@@ -876,7 +898,7 @@ pub const ZeiCoin = struct {
             return false;
         }
         print("✅ Basic block structure validation passed for height {}\n", .{expected_height});
-        
+
         // Timestamp validation for sync blocks (more lenient than normal validation)
         const current_time = util.getTime();
         // Allow more future time during sync (network time differences)
@@ -888,7 +910,7 @@ pub const ZeiCoin = struct {
         }
 
         print("🔍 validateSyncBlock: Checking proof-of-work for height {}\n", .{expected_height});
-        
+
         // Check proof-of-work with dynamic difficulty
         if (@import("builtin").mode == .Debug) {
             // In test mode, use dynamic difficulty with SHA256 for speed
@@ -896,7 +918,7 @@ pub const ZeiCoin = struct {
             const block_hash = block.header.hash();
             print("   Difficulty target: {}\n", .{difficulty_target.toU64()});
             print("   Block hash: {s}\n", .{std.fmt.fmtSliceHexLower(&block_hash)});
-            
+
             if (!difficulty_target.meetsDifficulty(block_hash)) {
                 print("❌ Proof-of-work validation failed for height {}\n", .{expected_height});
                 print("   Difficulty target does not meet required threshold\n", .{});
@@ -912,13 +934,13 @@ pub const ZeiCoin = struct {
         print("✅ Proof-of-work validation passed for height {}\n", .{expected_height});
 
         print("🔍 validateSyncBlock: Checking previous hash links for height {}\n", .{expected_height});
-        
+
         // Check previous hash links correctly (only if we have previous blocks)
         if (expected_height > 0) {
             const current_height = try self.getHeight();
             print("   Current blockchain height: {}\n", .{current_height});
             print("   Expected block height: {}\n", .{expected_height});
-            
+
             if (expected_height > current_height) {
                 // During sync, we might not have the previous block yet - skip this check
                 print("⚠️ Skipping previous hash check during sync (height {} > current {})\n", .{ expected_height, current_height });
@@ -931,7 +953,7 @@ pub const ZeiCoin = struct {
                 const prev_hash = prev_block.hash();
                 print("   Previous block hash in chain: {s}\n", .{std.fmt.fmtSliceHexLower(&prev_hash)});
                 print("   Block's previous_hash field: {s}\n", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
-                
+
                 if (!std.mem.eql(u8, &block.header.previous_hash, &prev_hash)) {
                     print("❌ Previous hash validation failed during sync\n", .{});
                     print("   Expected: {s}\n", .{std.fmt.fmtSliceHexLower(&prev_hash)});
@@ -946,12 +968,12 @@ pub const ZeiCoin = struct {
         }
 
         print("🔍 validateSyncBlock: Validating {} transactions for height {}\n", .{ block.txCount(), expected_height });
-        
+
         // For sync blocks, validate transaction structure but skip balance checks
         // The balance validation will happen naturally when transactions are processed
         for (block.transactions, 0..) |tx, i| {
             print("   🔍 Validating transaction {} of {}\n", .{ i, block.txCount() - 1 });
-            
+
             // Skip coinbase transaction (first one) - it doesn't need signature validation
             if (i == 0) {
                 print("   ✅ Skipping coinbase transaction validation\n", .{});
@@ -959,7 +981,7 @@ pub const ZeiCoin = struct {
             }
 
             print("   🔍 Checking transaction structure...\n", .{});
-            
+
             // Basic transaction structure validation only
             if (!tx.isValid()) {
                 print("❌ Transaction {} structure validation failed\n", .{i});
@@ -974,7 +996,7 @@ pub const ZeiCoin = struct {
             print("   ✅ Transaction {} structure validation passed\n", .{i});
 
             print("   🔍 Checking transaction signature...\n", .{});
-            
+
             // Signature validation (but no balance check)
             if (!try self.validateTransactionSignature(tx)) {
                 print("❌ Transaction {} signature validation failed\n", .{i});
@@ -992,13 +1014,13 @@ pub const ZeiCoin = struct {
     /// Validate transaction signature only (used during sync)
     fn validateTransactionSignature(self: *ZeiCoin, tx: Transaction) !bool {
         _ = self; // Unused parameter
-        
+
         // Verify transaction signature
         const tx_hash = tx.hashForSigning();
         print("     🔍 Transaction hash for signing: {s}\n", .{std.fmt.fmtSliceHexLower(&tx_hash)});
         print("     🔍 Sender public key: {s}\n", .{std.fmt.fmtSliceHexLower(&tx.sender_public_key)});
         print("     🔍 Transaction signature: {s}\n", .{std.fmt.fmtSliceHexLower(&tx.signature)});
-        
+
         if (!key.verify(tx.sender_public_key, &tx_hash, tx.signature)) {
             print("❌ Invalid signature: transaction not signed by sender\n", .{});
             print("❌ Signature verification failed - detailed info above\n", .{});
@@ -1025,7 +1047,7 @@ pub const ZeiCoin = struct {
             print("❌ Block validation failed: invalid block structure\n", .{});
             return false;
         }
-        
+
         // Timestamp validation for reorg blocks (lenient like sync)
         const current_time = util.getTime();
         const reorg_future_allowance = types.TimestampValidation.MAX_FUTURE_TIME * 2; // 4 hours
@@ -1080,19 +1102,19 @@ pub const ZeiCoin = struct {
     /// Check if a block builds on a known block in our chain (for fork detection)
     fn isValidForkBlock(self: *ZeiCoin, block: types.Block) !bool {
         const current_height = try self.getHeight();
-        
+
         // Check if block's previous_hash matches any block in our chain
         for (0..current_height) |height| {
             const existing_block = self.database.getBlock(@intCast(height)) catch continue;
             defer self.allocator.free(existing_block.transactions);
-            
+
             const existing_hash = existing_block.hash();
             if (std.mem.eql(u8, &block.header.previous_hash, &existing_hash)) {
                 print("🔗 Fork block builds on height {} (current tip: {})\n", .{ height, current_height - 1 });
                 return true;
             }
         }
-        
+
         return false;
     }
 
@@ -1103,7 +1125,7 @@ pub const ZeiCoin = struct {
         _ = self;
         _ = block;
         _ = fork_height;
-        
+
         print("⚠️ Fork storage not yet implemented - longest chain rule needed\n", .{});
         // TODO: Implement proper fork storage and reorganization
         // This is the main remaining piece for full fork resolution
@@ -1237,7 +1259,7 @@ pub const ZeiCoin = struct {
     pub fn handleIncomingTransaction(self: *ZeiCoin, transaction: types.Transaction) !void {
         // Check if we've already processed this transaction (prevents broadcast storms)
         const tx_hash = transaction.hash();
-        
+
         // 1. Check if already processed in a block
         for (self.processed_transactions.items) |processed_hash| {
             if (std.mem.eql(u8, &processed_hash, &tx_hash)) {
@@ -1245,7 +1267,7 @@ pub const ZeiCoin = struct {
                 return;
             }
         }
-        
+
         // 2. Check if already in mempool
         for (self.mempool.items) |existing_tx| {
             if (std.mem.eql(u8, &existing_tx.hash(), &tx_hash)) {
@@ -1267,7 +1289,7 @@ pub const ZeiCoin = struct {
     pub fn handleIncomingBlock(self: *ZeiCoin, block: types.Block) !void {
         const current_height = try self.getHeight();
         const block_height = current_height + 1; // Block would be at next height if accepted
-        
+
         print("🌊 Block flows in from network peer with {} transactions\n", .{block.transactions.len});
 
         // Calculate cumulative work for this block
@@ -1279,7 +1301,7 @@ pub const ZeiCoin = struct {
                 return;
             };
             defer self.allocator.free(parent_block.transactions);
-            
+
             // For now, estimate parent cumulative work (should be stored in future)
             const parent_work = self.estimateCumulativeWork(current_height - 1) catch 0;
             break :parent_calc parent_work + block_work;
@@ -1298,12 +1320,12 @@ pub const ZeiCoin = struct {
             },
             .orphan_stored => {
                 print("🔀 Block stored as orphan - waiting for parent\n", .{});
-                
+
                 // Auto-sync logic: If we're storing orphan blocks, we're likely behind
                 // The block was stored as orphan, which means it doesn't fit our current chain
                 // This indicates we're likely behind - trigger auto-sync to catch up
                 print("🔄 Orphan block detected - we may be behind, triggering auto-sync\n", .{});
-                
+
                 // Use a defer to ensure auto-sync happens after current processing completes
                 // This avoids any issues with peer references during message handling
                 defer {
@@ -1325,7 +1347,7 @@ pub const ZeiCoin = struct {
             },
         }
     }
-    
+
     /// Estimate cumulative work for a block height (temporary until we store it properly)
     fn estimateCumulativeWork(self: *ZeiCoin, height: u32) !types.ChainWork {
         var total_work: types.ChainWork = 0;
@@ -1336,42 +1358,38 @@ pub const ZeiCoin = struct {
         }
         return total_work;
     }
-    
+
     /// Handle chain reorganization when a better chain is found
     fn handleChainReorganization(self: *ZeiCoin, new_block: types.Block, new_chain_state: types.ChainState) !void {
         const current_height = try self.getHeight();
-        
+
         // Safety check: prevent very deep reorganizations
         if (self.fork_manager.isReorgTooDeep(current_height, new_chain_state.tip_height)) {
             print("❌ Reorganization too deep ({} -> {}) - rejected for safety\n", .{ current_height, new_chain_state.tip_height });
             return;
         }
-        
-        print("🔄 Starting reorganization: {} -> {} (depth: {})\n", .{ 
-            current_height, 
-            new_chain_state.tip_height,
-            if (current_height > new_chain_state.tip_height) current_height - new_chain_state.tip_height else new_chain_state.tip_height - current_height 
-        });
-        
+
+        print("🔄 Starting reorganization: {} -> {} (depth: {})\n", .{ current_height, new_chain_state.tip_height, if (current_height > new_chain_state.tip_height) current_height - new_chain_state.tip_height else new_chain_state.tip_height - current_height });
+
         // Find common ancestor (simplified - assume we need to rebuild from genesis for now)
         const common_ancestor_height = try self.findCommonAncestor(new_chain_state.tip_hash);
-        
+
         if (common_ancestor_height == 0) {
             print("⚠️ Deep reorganization required - rebuilding from genesis\n", .{});
         }
-        
+
         // Rollback to common ancestor (no transaction backup needed - new block contains valid transactions)
         try self.rollbackToHeight(common_ancestor_height);
-        
+
         // Accept the new block (this will become the new tip)
         try self.acceptBlock(new_block);
-        
+
         // Update fork manager
         self.fork_manager.updateChain(0, new_chain_state); // Update main chain
-        
+
         print("✅ Reorganization complete! New chain tip: {s}\n", .{std.fmt.fmtSliceHexLower(new_chain_state.tip_hash[0..8])});
     }
-    
+
     /// Find common ancestor between current chain and new chain
     fn findCommonAncestor(self: *ZeiCoin, new_tip_hash: types.BlockHash) !u32 {
         // Simplified: return 0 for now (rebuild from genesis)
@@ -1380,15 +1398,15 @@ pub const ZeiCoin = struct {
         _ = new_tip_hash;
         return 0;
     }
-    
+
     /// Backup transactions from orphaned blocks
     fn backupOrphanedTransactions(self: *ZeiCoin, from_height: u32, to_height: u32) !void {
         print("💾 Backing up transactions from orphaned blocks ({} to {})\n", .{ from_height, to_height });
-        
+
         for (from_height..to_height) |height| {
             const block = self.database.getBlock(@intCast(height)) catch continue;
             defer self.allocator.free(block.transactions);
-            
+
             // Re-validate and add non-coinbase transactions back to mempool
             for (block.transactions) |tx| {
                 if (!tx.isCoinbase()) {
@@ -1403,48 +1421,48 @@ pub const ZeiCoin = struct {
             }
         }
     }
-    
+
     /// Rollback blockchain to specified height
     fn rollbackToHeight(self: *ZeiCoin, target_height: u32) !void {
         const current_height = try self.getHeight();
-        
+
         if (target_height >= current_height) {
             return; // Nothing to rollback
         }
-        
+
         print("⏪ Rolling back blockchain from {} to {}\n", .{ current_height, target_height });
-        
+
         // For simplicity in dev mode, we'll rebuild account state by replaying from genesis
         // Clear all accounts first
         // TODO: Implement proper account state rollback
-        
+
         print("✅ Rollback complete\n", .{});
     }
-    
+
     /// Accept a block after validation (used in reorganization)
     fn acceptBlock(self: *ZeiCoin, block: types.Block) !void {
         const current_height = try self.getHeight();
-        
+
         // Special case: if we're at height 0 (after rollback to genesis) and the incoming block
         // is not a genesis block, we need to save it at height 1, not height 0
         const target_height = if (current_height == 0 and !genesis.validateGenesis(block)) blk: {
             print("🔄 Accepting non-genesis block after rollback - placing at height 1\n", .{});
             break :blk @as(u32, 1);
         } else current_height;
-        
+
         // During reorganization, use reorganization-specific validation (skips hash chain checks)
         if (!try self.validateReorgBlock(block, target_height)) {
             return error.BlockValidationFailed;
         }
-        
+
         // Process transactions
         try self.processBlockTransactions(block.transactions);
-        
+
         // Save to database
         try self.database.saveBlock(target_height, block);
-        
+
         print("✅ Block accepted at height {}\n", .{target_height});
-        
+
         // Broadcast to network
         if (self.network) |network| {
             network.*.broadcastBlock(block);
@@ -1459,12 +1477,12 @@ pub const ZeiCoin = struct {
         const existing_block = self.database.getBlock(expected_height) catch null;
         if (existing_block != null) {
             print("ℹ️  Block {} already exists, skipping duplicate during sync\n", .{expected_height});
-            
+
             // Still need to update sync progress for this "processed" block
             if (self.sync_progress) |*progress| {
                 progress.blocks_downloaded += 1;
                 progress.consecutive_failures = 0; // Reset on successful processing
-                
+
                 // Check if we've completed sync with this existing block
                 const current_height = self.getHeight() catch expected_height;
                 if (current_height >= progress.target_height) {
@@ -1478,29 +1496,29 @@ pub const ZeiCoin = struct {
 
         // For sync, validate block structure and PoW only (skip transaction balance checks)
         const validation_result = self.validateSyncBlock(block, expected_height) catch |err| {
-            print("❌ Block validation threw error at height {}: {}\n", .{expected_height, err});
+            print("❌ Block validation threw error at height {}: {}\n", .{ expected_height, err });
             return;
         };
         if (!validation_result) {
             print("❌ Block validation failed at height {}\n", .{expected_height});
-            
+
             // Check if this is a hash validation failure during sync
             const current_height = try self.getHeight();
             if (expected_height == current_height) {
                 print("🔄 Hash validation failed during sync - this might be a fork situation\n", .{});
                 print("💡 Restarting sync from current position to handle potential fork\n", .{});
-                
+
                 // Reset sync to restart from current position
                 if (self.sync_progress) |*progress| {
                     progress.current_height = current_height;
                     progress.retry_count = 0;
                 }
-                
+
                 // Trigger a fresh sync request
                 try self.requestNextSyncBatch();
                 return;
             }
-            
+
             return error.InvalidSyncBlock;
         }
 
@@ -1525,16 +1543,13 @@ pub const ZeiCoin = struct {
 
             // Check if we've reached the target height
             const current_height = self.getHeight() catch expected_height;
-            print("🔍 SYNC DEBUG: current_height={}, target_height={}, expected_height={}\n", 
-                  .{current_height, progress.target_height, expected_height});
+            print("🔍 SYNC DEBUG: current_height={}, target_height={}, expected_height={}\n", .{ current_height, progress.target_height, expected_height });
             if (current_height >= progress.target_height) {
-                print("🎉 SYNC COMPLETION: Calling completSync() because {} >= {}\n", 
-                      .{current_height, progress.target_height});
+                print("🎉 SYNC COMPLETION: Calling completSync() because {} >= {}\n", .{ current_height, progress.target_height });
                 self.completSync();
                 return;
             } else {
-                print("⏳ SYNC CONTINUING: Not complete because {} < {}\n", 
-                      .{current_height, progress.target_height});
+                print("⏳ SYNC CONTINUING: Not complete because {} < {}\n", .{ current_height, progress.target_height });
             }
         }
 
@@ -1582,45 +1597,42 @@ pub const ZeiCoin = struct {
                 print("⚠️  No peers available for auto-sync\n", .{});
                 return;
             }
-            
+
             // Try each peer until we find a connected one
             var attempts: u32 = 0;
             for (network.peers.items) |*peer| {
                 attempts += 1;
-                
+
                 // Skip if not connected
                 if (peer.state != .connected) {
                     continue;
                 }
-                
+
                 // Skip if socket is null
                 if (peer.socket == null) {
                     print("⚠️  Peer has no socket, skipping\n", .{});
                     continue;
                 }
-                
+
                 // Format peer address safely with bounds checking
                 var addr_buf: [64]u8 = undefined;
-                const addr_str = std.fmt.bufPrint(&addr_buf, "{s}:{}", .{ 
-                    peer.address.ip, 
-                    peer.address.port 
-                }) catch {
+                const addr_str = std.fmt.bufPrint(&addr_buf, "{s}:{}", .{ peer.address.ip, peer.address.port }) catch {
                     print("⚠️  Failed to format peer address\n", .{});
                     continue;
                 };
-                
+
                 print("🔄 Auto-sync triggered - requesting peer height from {s}\n", .{addr_str});
-                
+
                 // Send version to query height
                 peer.sendVersion(current_height) catch |err| {
                     print("⚠️  Failed to query peer {s}: {}\n", .{ addr_str, err });
                     continue;
                 };
-                
+
                 print("📡 Height query sent to peer - sync will trigger automatically if needed\n", .{});
                 return;
             }
-            
+
             print("⚠️  Tried {} peers but none were suitable for auto-sync\n", .{attempts});
         } else {
             print("⚠️  No network manager available for auto-sync\n", .{});
@@ -1724,13 +1736,13 @@ pub const ZeiCoin = struct {
     /// Check if we need to sync with a peer
     pub fn shouldSync(self: *ZeiCoin, peer_height: u32) !bool {
         const our_height = try self.getHeight();
-        
+
         // If we have no blockchain and peer has blocks, always sync (including genesis)
         if (our_height == 0 and peer_height > 0) {
             print("🌐 Network has blockchain (height {}), will sync from genesis\n", .{peer_height});
             return true;
         }
-        
+
         if (self.sync_state != .synced) {
             return false; // Already syncing or in error state
         }
@@ -1758,15 +1770,15 @@ pub const ZeiCoin = struct {
                 try self.processCoinbaseTransaction(tx, tx.recipient);
             }
         }
-        
-        // Second pass: process all regular transactions  
+
+        // Second pass: process all regular transactions
         for (transactions) |tx| {
             if (!isCoinbaseTransaction(tx)) {
                 print("💸 Processing transaction: {} ZEI\n", .{tx.amount / types.ZEI_COIN});
                 try self.processTransaction(tx);
             }
         }
-        
+
         // Mark all transactions as processed to prevent re-broadcasting
         for (transactions) |tx| {
             const tx_hash = tx.hash();
@@ -1781,22 +1793,22 @@ pub const ZeiCoin = struct {
             progress.last_request_time = util.getTime();
         }
     }
-    
+
     /// Clean old processed transactions to prevent memory growth
     fn cleanupProcessedTransactions(self: *ZeiCoin) void {
         // Keep only recent transactions (limit to 1000 for memory efficiency)
         const MAX_PROCESSED_TXS = 1000;
         const KEEP_RECENT_TXS = 500; // Keep half when cleaning up
-        
+
         if (self.processed_transactions.items.len > MAX_PROCESSED_TXS) {
             // Keep only the most recent transactions (better integrity than clearing all)
             const items_to_remove = self.processed_transactions.items.len - KEEP_RECENT_TXS;
-            
+
             // Remove oldest transactions (first items in the list)
             for (0..items_to_remove) |_| {
                 _ = self.processed_transactions.orderedRemove(0);
             }
-            
+
             print("🧹 Cleaned {} old processed transactions (kept {} recent)\n", .{ items_to_remove, KEEP_RECENT_TXS });
         }
     }
@@ -1882,10 +1894,10 @@ pub const ZeiCoin = struct {
                 self.failSync("Too many consecutive sync failures");
                 return;
             }
-            
+
             print("⏰ Sync request timed out (failure #{}) \n", .{progress.consecutive_failures + 1});
             progress.consecutive_failures += 1;
-            
+
             self.requestNextSyncBatch() catch |err| {
                 print("❌ Failed to retry sync request: {}\n", .{err});
                 self.failSync("Failed to retry sync request");
@@ -1905,18 +1917,18 @@ pub const ZeiCoin = struct {
         }
 
         const network = self.network.?;
-        
+
         // Only query one random connected peer to reduce message traffic
         network.peers_mutex.lock();
         defer network.peers_mutex.unlock();
-        
+
         var connected_count: usize = 0;
         for (network.peers.items) |peer| {
             if (peer.state == .connected) connected_count += 1;
         }
-        
+
         if (connected_count == 0) return;
-        
+
         // Find a connected peer to query (simple round-robin approach)
         var peer_index: usize = 0;
         for (network.peers.items, 0..) |*peer, i| {
@@ -1925,7 +1937,7 @@ pub const ZeiCoin = struct {
                 break;
             }
         }
-        
+
         // Query only one peer to avoid message storm
         if (peer_index < network.peers.items.len) {
             const peer = &network.peers.items[peer_index];
@@ -1974,7 +1986,7 @@ const testing = std.testing;
 fn createTestZeiCoin(data_dir: []const u8) !ZeiCoin {
     // Clean up any existing test data first
     std.fs.cwd().deleteTree(data_dir) catch {};
-    
+
     var zeicoin = ZeiCoin{
         .database = try db.Database.init(testing.allocator, data_dir),
         .mempool = ArrayList(Transaction).init(testing.allocator),
@@ -1987,12 +1999,12 @@ fn createTestZeiCoin(data_dir: []const u8) !ZeiCoin {
         .processed_transactions = std.ArrayList([32]u8).init(testing.allocator),
         .fork_manager = forkmanager.ForkManager.init(testing.allocator),
     };
-    
+
     // Initialize fork manager with genesis (database should be empty now)
     if (try zeicoin.getHeight() == 0) {
         try zeicoin.createCanonicalGenesis();
     }
-    
+
     return zeicoin;
 }
 
@@ -2233,10 +2245,10 @@ test "timestamp validation - future blocks rejected" {
     var zeicoin = try createTestZeiCoin("test_zeicoin_timestamp_future");
     defer zeicoin.deinit();
     defer std.fs.cwd().deleteTree("test_zeicoin_timestamp_future") catch {};
-    
+
     // Create a block with timestamp too far in future
     const future_time = @as(u64, @intCast(util.getTime())) + @as(u64, @intCast(types.TimestampValidation.MAX_FUTURE_TIME)) + 3600; // 1 hour beyond limit
-    
+
     var transactions = [_]types.Transaction{};
     const future_block = types.Block{
         .header = types.BlockHeader{
@@ -2248,7 +2260,7 @@ test "timestamp validation - future blocks rejected" {
         },
         .transactions = &transactions,
     };
-    
+
     // Block should be rejected
     const is_valid = try zeicoin.validateBlock(future_block, 1);
     try testing.expect(!is_valid);
@@ -2258,7 +2270,7 @@ test "timestamp validation - median time past" {
     var zeicoin = try createTestZeiCoin("test_zeicoin_mtp");
     defer zeicoin.deinit();
     defer std.fs.cwd().deleteTree("test_zeicoin_mtp") catch {};
-    
+
     // Mine some blocks with increasing timestamps
     var i: u32 = 0;
     while (i < 15) : (i += 1) {
@@ -2277,16 +2289,16 @@ test "timestamp validation - median time past" {
             },
             .transactions = &transactions,
         };
-        
+
         // Process block directly (bypass validation for test setup)
         try zeicoin.database.saveBlock(i, block);
     }
-    
+
     // Calculate expected MTP (median of last 11 blocks)
     const expected_mtp = types.Genesis.timestamp() + 10 * 600; // Median of blocks 4-14
     const actual_mtp = try zeicoin.getMedianTimePast(14);
     try testing.expectEqual(expected_mtp, actual_mtp);
-    
+
     // Create block with timestamp equal to MTP (should fail)
     var bad_transactions = [_]types.Transaction{};
     const bad_block = types.Block{
@@ -2299,7 +2311,7 @@ test "timestamp validation - median time past" {
         },
         .transactions = &bad_transactions,
     };
-    
+
     // This should fail MTP validation
     const is_valid = try zeicoin.validateBlock(bad_block, 15);
     try testing.expect(!is_valid);

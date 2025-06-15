@@ -344,6 +344,31 @@ pub const Block = struct {
         return @intCast(self.transactions.len);
     }
 
+    /// Calculate the serialized size of this block in bytes
+    pub fn getSize(self: *const Block) usize {
+        var size: usize = 0;
+        
+        // Header size (fixed): 32 + 32 + 8 + 8 + 4 = 84 bytes
+        size += @sizeOf(BlockHash);    // previous_hash: 32 bytes
+        size += @sizeOf(Hash);         // merkle_root: 32 bytes  
+        size += @sizeOf(u64);          // timestamp: 8 bytes
+        size += @sizeOf(u64);          // difficulty: 8 bytes
+        size += @sizeOf(u32);          // nonce: 4 bytes
+        
+        // Transaction count: 4 bytes
+        size += @sizeOf(u32);
+        
+        // Each transaction size (approximate)
+        for (self.transactions) |_| {
+            // Transaction structure:
+            // sender: 32, recipient: 32, amount: 8, fee: 8, nonce: 8, 
+            // timestamp: 8, sender_public_key: 32, signature: 64
+            size += 32 + 32 + 8 + 8 + 8 + 8 + 32 + 64; // 192 bytes per transaction
+        }
+        
+        return size;
+    }
+
     /// Check if block structure is valid
     pub fn isValid(self: *const Block) bool {
         // Genesis blocks can have transactions (they contain coinbase)
@@ -514,6 +539,24 @@ pub const ZenFees = struct {
     pub const MIN_FEE: u64 = NetworkConfig.current().min_fee;
     pub const STANDARD_FEE: u64 = NetworkConfig.current().min_fee * 5; // 5x minimum
     pub const PRIORITY_FEE: u64 = NetworkConfig.current().min_fee * 10; // 10x minimum
+};
+
+/// 📦 Block size limits - prevent spam while allowing growth
+pub const BlockLimits = struct {
+    /// Maximum block size in bytes (16MB) - hard consensus limit
+    pub const MAX_BLOCK_SIZE: usize = 16 * 1024 * 1024; // 16MB
+    
+    /// Soft limit for miners (2MB) - can be adjusted without fork
+    pub const SOFT_BLOCK_SIZE: usize = 2 * 1024 * 1024; // 2MB
+    
+    /// Average transaction size estimate for capacity planning
+    pub const AVG_TX_SIZE: usize = 2048; // 2KB average
+    
+    /// Estimated transactions per block at soft limit
+    pub const SOFT_TXS_PER_BLOCK: usize = SOFT_BLOCK_SIZE / AVG_TX_SIZE; // ~1000 txs
+    
+    /// Estimated transactions per block at hard limit  
+    pub const MAX_TXS_PER_BLOCK: usize = MAX_BLOCK_SIZE / AVG_TX_SIZE; // ~8000 txs
 };
 
 /// ⏰ Timestamp validation configuration - prevents time-based attacks

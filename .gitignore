@@ -13,6 +13,7 @@ zeicoin_data_mainnet/
 CLAUDE.md
 .claude
 README.md
+server.log
 
 # RandomX build files
 randomx/randomx_build/

@@ -50,7 +50,6 @@ fn printCompactBanner() void {
     print("\n", .{});
 }
 
-
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -129,7 +128,7 @@ pub fn main() !void {
     };
     defer server.deinit();
 
-    print("✅ ZeiCoin Stage 3 server ready!\n", .{});
+    print("✅ ZeiCoin server ready!\n", .{});
     print("🌐 P2P Network: Port {} ACTIVE\n", .{p2p_port});
     print("🔗 Client API: Port {} ACCEPTING\n", .{client_port});
     print("⚡ Auto-discovery: ENABLED\n", .{});
@@ -643,7 +642,7 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
 
 fn handleSyncTrigger(connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin) !void {
     print("🔄 Processing manual sync trigger request\n", .{});
-    
+
     // Trigger auto-sync logic (the same logic used for orphan blocks)
     zeicoin.triggerAutoSyncWithPeerQuery() catch |err| {
         print("❌ Failed to trigger sync: {}\n", .{err});
@@ -651,7 +650,7 @@ fn handleSyncTrigger(connection: net.Server.Connection, zeicoin: *zeicoin_main.Z
         try connection.stream.writeAll(error_msg);
         return;
     };
-    
+
     const success_msg = "SYNC_TRIGGERED";
     try connection.stream.writeAll(success_msg);
     print("✅ Manual sync triggered successfully\n", .{});
