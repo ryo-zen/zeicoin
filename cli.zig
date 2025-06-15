@@ -385,7 +385,7 @@ fn handleBalanceCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const address = zen_wallet.getAddress() orelse return error.WalletNotLoaded;
 
     // Connect to server and check balance
-    const balance = getBalanceFromServer(allocator, address) catch |err| {
+    const balance_info = getBalanceFromServer(allocator, address) catch |err| {
         switch (err) {
             error.NetworkError => {
                 print("❌ Cannot connect to ZeiCoin server\n", .{});
@@ -396,11 +396,22 @@ fn handleBalanceCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         }
     };
 
-    // Format balance properly for display
-    const balance_display = util.formatZEI(allocator, balance) catch "? ZEI";
-    defer if (!std.mem.eql(u8, balance_display, "? ZEI")) allocator.free(balance_display);
+    // Format balances properly for display
+    const mature_display = util.formatZEI(allocator, balance_info.mature) catch "? ZEI";
+    defer if (!std.mem.eql(u8, mature_display, "? ZEI")) allocator.free(mature_display);
+    
+    const immature_display = util.formatZEI(allocator, balance_info.immature) catch "? ZEI";
+    defer if (!std.mem.eql(u8, immature_display, "? ZEI")) allocator.free(immature_display);
+    
+    const total_display = util.formatZEI(allocator, balance_info.mature + balance_info.immature) catch "? ZEI";
+    defer if (!std.mem.eql(u8, total_display, "? ZEI")) allocator.free(total_display);
 
-    print("💰 Wallet '{s}' balance: {s}\n", .{ wallet_name, balance_display });
+    print("💰 Wallet '{s}' balance:\n", .{wallet_name});
+    print("   ✅ Mature (spendable): {s}\n", .{mature_display});
+    if (balance_info.immature > 0) {
+        print("   ⏳ Immature (pending): {s}\n", .{immature_display});
+        print("   📊 Total balance: {s}\n", .{total_display});
+    }
     print("🆔 Address: {s}\n", .{std.fmt.fmtSliceHexLower(address[0..16])});
 }
 
@@ -734,7 +745,12 @@ fn loadWalletForOperation(allocator: std.mem.Allocator, wallet_name: []const u8)
     return zen_wallet;
 }
 
-fn getBalanceFromServer(allocator: std.mem.Allocator, address: types.Address) !u64 {
+const BalanceInfo = struct {
+    mature: u64,
+    immature: u64,
+};
+
+fn getBalanceFromServer(allocator: std.mem.Allocator, address: types.Address) !BalanceInfo {
     // Connect to server
     const server_ip = try getServerIP(allocator);
     defer allocator.free(server_ip);
@@ -779,13 +795,22 @@ fn getBalanceFromServer(allocator: std.mem.Allocator, address: types.Address) !u
     };
     const response = buffer[0..bytes_read];
 
-    // Parse BALANCE:amount response
+    // Parse BALANCE:mature:immature response
     if (std.mem.startsWith(u8, response, "BALANCE:")) {
         const balance_str = response[8..];
-        return std.fmt.parseInt(u64, balance_str, 10) catch 0;
+        
+        // Split by colon to get mature and immature
+        var parts = std.mem.splitScalar(u8, balance_str, ':');
+        const mature_str = parts.next() orelse "0";
+        const immature_str = parts.next() orelse "0";
+        
+        return BalanceInfo{
+            .mature = std.fmt.parseInt(u64, mature_str, 10) catch 0,
+            .immature = std.fmt.parseInt(u64, immature_str, 10) catch 0,
+        };
     }
 
-    return 0;
+    return BalanceInfo{ .mature = 0, .immature = 0 };
 }
 
 fn getNonceFromServer(allocator: std.mem.Allocator, address: types.Address) !u64 {

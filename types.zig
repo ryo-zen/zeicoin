@@ -183,18 +183,37 @@ pub const Transaction = struct {
 /// Account state in ZeiCoin network
 pub const Account = struct {
     address: Address,
-    balance: u64, // Current balance in zei
+    balance: u64, // Current balance in zei (mature, spendable)
     nonce: u64, // Next expected transaction nonce
-
-    /// Check if account can afford a transaction
+    immature_balance: u64 = 0, // Balance from recent coinbase transactions (not spendable)
+    
+    /// Check if account can afford a transaction (only considers mature balance)
     pub fn canAfford(self: *const Account, amount: u64) bool {
         return self.balance >= amount;
     }
-
+    
     /// Get expected nonce for next transaction
     pub fn nextNonce(self: *const Account) u64 {
         return self.nonce;
     }
+    
+    /// Get total balance (mature + immature)
+    pub fn totalBalance(self: *const Account) u64 {
+        return self.balance + self.immature_balance;
+    }
+};
+
+/// Track immature coinbase rewards for an account
+pub const ImmatureCoins = struct {
+    address: Address,
+    entries: [100]ImmatureCoinEntry = std.mem.zeroes([100]ImmatureCoinEntry), // Max 100 immature entries
+    count: u32 = 0, // Number of valid entries
+};
+
+/// Individual immature coin entry
+pub const ImmatureCoinEntry = struct {
+    height: u32, // Block height where coins were created
+    amount: u64, // Amount of coins that are immature
 };
 
 /// Dynamic difficulty target for constrained adjustment
@@ -527,6 +546,7 @@ pub const ZenMining = struct {
     pub const RANDOMX_MODE: bool = NetworkConfig.current().randomx_mode;
     pub const DIFFICULTY_ADJUSTMENT_PERIOD: u64 = 20; // Adjust every 20 blocks
     pub const MAX_ADJUSTMENT_FACTOR: f64 = 2.0; // Maximum 2x change per adjustment
+    pub const COINBASE_MATURITY: u32 = 100; // Coinbase rewards require 100 confirmations
     
     /// Get initial difficulty target for current network
     pub fn initialDifficultyTarget() DifficultyTarget {

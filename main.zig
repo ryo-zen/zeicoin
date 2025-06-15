@@ -711,15 +711,69 @@ pub const ZeiCoin = struct {
             .address = miner_address,
             .balance = 0,
             .nonce = 0,
+            .immature_balance = 0,
         };
 
-        // Create new coins! (This is where ZEI comes from)
-        miner_account.balance += coinbase_tx.amount;
+        // Get current height to determine when coins mature
+        const current_height = try self.getHeight();
+        const maturity_height = current_height + types.ZenMining.COINBASE_MATURITY;
+
+        // Create new coins as IMMATURE (require 100 blocks to mature)
+        miner_account.immature_balance += coinbase_tx.amount;
 
         // Save miner account
         try self.database.saveAccount(miner_address, miner_account);
 
-        print("💰 NEW COINS CREATED: {} ZEI for miner {s}\n", .{ coinbase_tx.amount / types.ZEI_COIN, std.fmt.fmtSliceHexLower(miner_address[0..8]) });
+        print("💰 NEW COINS CREATED: {} ZEI for miner {s} (immature until block {})\n", .{ 
+            coinbase_tx.amount / types.ZEI_COIN, 
+            std.fmt.fmtSliceHexLower(miner_address[0..8]),
+            maturity_height
+        });
+    }
+    
+    /// Check if a transaction is a coinbase transaction
+    fn isCoinbaseTransaction(self: *ZeiCoin, tx: Transaction) bool {
+        _ = self;
+        // Coinbase transactions have zero sender address and nonce
+        return std.mem.eql(u8, &tx.sender, &std.mem.zeroes(Address)) and tx.nonce == 0;
+    }
+    
+    /// Check and mature any coins that have reached required confirmations
+    /// This should be called when processing each new block
+    pub fn matureCoinbaseRewards(self: *ZeiCoin, new_block_height: u32) !void {
+        // Check if we're past the maturity period
+        if (new_block_height < types.ZenMining.COINBASE_MATURITY) {
+            return; // Nothing can be mature yet
+        }
+        
+        // The block whose coinbase can now be spent
+        const mature_block_height = new_block_height - types.ZenMining.COINBASE_MATURITY;
+        
+        // Load the block that's now mature
+        const mature_block = try self.database.getBlock(mature_block_height);
+        defer self.allocator.free(mature_block.transactions);
+        
+        // Find the coinbase transaction (always first)
+        if (mature_block.transactions.len > 0) {
+            const coinbase_tx = mature_block.transactions[0];
+            if (self.isCoinbaseTransaction(coinbase_tx)) {
+                // Move coins from immature to mature balance
+                var miner_account = try self.getAccount(coinbase_tx.recipient);
+                
+                if (miner_account.immature_balance >= coinbase_tx.amount) {
+                    miner_account.immature_balance -= coinbase_tx.amount;
+                    miner_account.balance += coinbase_tx.amount;
+                    
+                    try self.database.saveAccount(coinbase_tx.recipient, miner_account);
+                    
+                    print("✅ Matured {} ZEI for miner {s} from block {}\n", .{
+                        coinbase_tx.amount / types.ZEI_COIN,
+                        std.fmt.fmtSliceHexLower(coinbase_tx.recipient[0..8]),
+                        mature_block_height
+                    });
+                }
+            }
+        }
     }
 
     /// Get blockchain height
@@ -1139,6 +1193,9 @@ pub const ZeiCoin = struct {
         // Save block to database
         const block_height = try self.getHeight();
         try self.database.saveBlock(block_height, block);
+        
+        // Mature any coinbase rewards that have reached 100 confirmations
+        try self.matureCoinbaseRewards(block_height);
 
         // Remove processed transactions from mempool
         self.cleanMempool(block);
@@ -1765,7 +1822,7 @@ pub const ZeiCoin = struct {
     fn processBlockTransactions(self: *ZeiCoin, transactions: []Transaction) !void {
         // First pass: process all coinbase transactions
         for (transactions) |tx| {
-            if (isCoinbaseTransaction(tx)) {
+            if (self.isCoinbaseTransaction(tx)) {
                 print("💰 Processing coinbase: {} ZEI for miner\n", .{tx.amount / types.ZEI_COIN});
                 try self.processCoinbaseTransaction(tx, tx.recipient);
             }
@@ -1773,7 +1830,7 @@ pub const ZeiCoin = struct {
 
         // Second pass: process all regular transactions
         for (transactions) |tx| {
-            if (!isCoinbaseTransaction(tx)) {
+            if (!self.isCoinbaseTransaction(tx)) {
                 print("💸 Processing transaction: {} ZEI\n", .{tx.amount / types.ZEI_COIN});
                 try self.processTransaction(tx);
             }
@@ -2323,4 +2380,27 @@ test "timestamp validation - constants" {
     try testing.expect(types.TimestampValidation.MAX_FUTURE_TIME <= 24 * 60 * 60); // Max 24 hours
     try testing.expect(types.TimestampValidation.MTP_BLOCK_COUNT >= 3); // Need at least 3 for meaningful median
     try testing.expect(types.TimestampValidation.MTP_BLOCK_COUNT % 2 == 1); // Odd number for clean median
+}
+
+test "coinbase maturity basic" {
+    const test_dir = "test_coinbase_maturity";
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+    
+    var zeicoin = try createTestZeiCoin(test_dir);
+    defer zeicoin.deinit();
+
+    // Create a test miner
+    const miner_keypair = try key.KeyPair.generateNew();
+    const miner_address = miner_keypair.getAddress();
+
+    // Mine a block (coinbase reward should be immature)
+    const block1 = try zeicoin.zenMineBlock(miner_keypair);
+    defer zeicoin.allocator.free(block1.transactions);
+    
+    // Check balance - should all be immature
+    const account1 = try zeicoin.getAccount(miner_address);
+    try testing.expectEqual(@as(u64, 0), account1.balance); // No mature balance
+    try testing.expectEqual(@as(u64, types.ZenMining.BLOCK_REWARD), account1.immature_balance); // All immature
+    
+    print("\n✅ Coinbase maturity test: Mining reward correctly marked as immature\n", .{});
 }

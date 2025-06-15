@@ -424,21 +424,29 @@ fn handleBalanceCheck(allocator: std.mem.Allocator, connection: net.Server.Conne
     // Get account balance
     const account = zeicoin.database.getAccount(client_address) catch |err| {
         print("⚠️  Account not found: {}\n", .{err});
-        const error_msg = "BALANCE:0";
+        // Send zeros for both mature and immature balance
+        const error_msg = "BALANCE:0:0";
         try connection.stream.writeAll(error_msg);
         return;
     };
 
-    // Send raw balance in zei units (no division to preserve decimals)
-    const response = try std.fmt.allocPrint(allocator, "BALANCE:{}", .{account.balance});
+    // Send both mature and immature balance
+    const response = try std.fmt.allocPrint(allocator, "BALANCE:{}:{}", .{account.balance, account.immature_balance});
     defer allocator.free(response);
 
     try connection.stream.writeAll(response);
 
     // Format display for server logs
-    const balance_display = util.formatZEI(allocator, account.balance) catch "? ZEI";
-    defer if (!std.mem.eql(u8, balance_display, "? ZEI")) allocator.free(balance_display);
-    print("📤 Sent balance: {s} for {s}\n", .{ balance_display, address_hex[0..16] });
+    const mature_display = util.formatZEI(allocator, account.balance) catch "? ZEI";
+    defer if (!std.mem.eql(u8, mature_display, "? ZEI")) allocator.free(mature_display);
+    const immature_display = util.formatZEI(allocator, account.immature_balance) catch "? ZEI";
+    defer if (!std.mem.eql(u8, immature_display, "? ZEI")) allocator.free(immature_display);
+    
+    print("📤 Sent balance: {s} mature + {s} immature for {s}\n", .{ 
+        mature_display, 
+        immature_display, 
+        address_hex[0..16] 
+    });
 }
 
 fn handleNonceCheck(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, message: []const u8) !void {
