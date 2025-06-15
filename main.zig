@@ -505,6 +505,9 @@ pub const ZeiCoin = struct {
             // Save block to database
             const block_height = try self.getHeight();
             try self.database.saveBlock(block_height, new_block);
+            
+            // Check for matured coinbase rewards
+            try self.matureCoinbaseRewards(block_height);
 
             // Clear mempool
             self.mempool.clearRetainingCapacity();
@@ -1479,6 +1482,120 @@ pub const ZeiCoin = struct {
         }
     }
 
+    /// Clear all account state from the database
+    fn clearAllAccounts(self: *ZeiCoin) !void {
+        print("🗑️  Clearing all account state for rebuild\n", .{});
+        
+        // Open accounts directory
+        var accounts_dir = std.fs.cwd().openDir(self.database.accounts_dir, .{ .iterate = true }) catch {
+            // Directory might not exist, that's okay
+            return;
+        };
+        defer accounts_dir.close();
+        
+        // Delete all account files
+        var iter = accounts_dir.iterate();
+        while (try iter.next()) |entry| {
+            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".account")) {
+                accounts_dir.deleteFile(entry.name) catch |err| {
+                    print("  ⚠️  Failed to delete account file {s}: {}\n", .{entry.name, err});
+                };
+            }
+        }
+        
+        print("  ✅ Cleared all account files\n", .{});
+    }
+    
+    /// Replay blockchain from genesis to rebuild account state
+    fn replayFromGenesis(self: *ZeiCoin, up_to_height: u32) !void {
+        print("🔄 Replaying blockchain from genesis to height {}\n", .{up_to_height});
+        
+        // Start from genesis (height 0)
+        for (0..up_to_height + 1) |height| {
+            const block = self.database.getBlock(@intCast(height)) catch {
+                print("❌ Failed to load block at height {} during replay\n", .{height});
+                return error.ReplayFailed;
+            };
+            defer self.allocator.free(block.transactions);
+            
+            // Process each transaction in the block
+            for (block.transactions, 0..) |tx, tx_index| {
+                if (tx.isCoinbase()) {
+                    // Process coinbase - credits go to immature balance
+                    try self.replayCoinbaseTransaction(tx, @intCast(height));
+                } else {
+                    // Process regular transaction
+                    try self.replayRegularTransaction(tx);
+                }
+                
+                // Show progress every 100 blocks
+                if (height % 100 == 0 and tx_index == 0) {
+                    print("  📊 Replayed up to block {}/{}\n", .{height, up_to_height});
+                }
+            }
+            
+            // After processing block, check for matured coinbase rewards
+            if (height >= types.ZenMining.COINBASE_MATURITY) {
+                try self.matureCoinbaseRewards(@intCast(height));
+            }
+        }
+        
+        print("✅ Replay complete - all account states rebuilt\n", .{});
+    }
+    
+    /// Process a coinbase transaction during replay
+    fn replayCoinbaseTransaction(self: *ZeiCoin, tx: types.Transaction, block_height: u32) !void {
+        _ = block_height; // Will be used for maturity tracking in the future
+        
+        var miner_account = self.getAccount(tx.recipient) catch types.Account{
+            .address = tx.recipient,
+            .balance = 0,
+            .nonce = 0,
+            .immature_balance = 0,
+        };
+        
+        // Add to immature balance (will mature after 100 blocks)
+        miner_account.immature_balance += tx.amount;
+        
+        // Save updated account
+        try self.database.saveAccount(tx.recipient, miner_account);
+    }
+    
+    /// Process a regular transaction during replay
+    fn replayRegularTransaction(self: *ZeiCoin, tx: types.Transaction) !void {
+        // Get sender account (might not exist in test scenario)
+        var sender_account = self.getAccount(tx.sender) catch {
+            // In test scenarios, we might have pre-funded accounts that don't exist in blocks
+            // Skip this transaction during replay
+            print("  ⚠️  Skipping transaction during replay - sender not found\n", .{});
+            return;
+        };
+        
+        // Check if sender has sufficient balance (safety check)
+        const total_cost = tx.amount + tx.fee;
+        if (sender_account.balance < total_cost) {
+            print("  ⚠️  Skipping transaction during replay - insufficient balance\n", .{});
+            return;
+        }
+        
+        // Deduct amount and fee from sender
+        sender_account.balance -= total_cost;
+        sender_account.nonce = tx.nonce + 1;
+        try self.database.saveAccount(tx.sender, sender_account);
+        
+        // Credit recipient
+        var recipient_account = self.getAccount(tx.recipient) catch types.Account{
+            .address = tx.recipient,
+            .balance = 0,
+            .nonce = 0,
+            .immature_balance = 0,
+        };
+        recipient_account.balance += tx.amount;
+        try self.database.saveAccount(tx.recipient, recipient_account);
+        
+        // Fee goes to immature balance tracking (handled by coinbase in same block)
+    }
+
     /// Rollback blockchain to specified height
     fn rollbackToHeight(self: *ZeiCoin, target_height: u32) !void {
         const current_height = try self.getHeight();
@@ -1489,11 +1606,17 @@ pub const ZeiCoin = struct {
 
         print("⏪ Rolling back blockchain from {} to {}\n", .{ current_height, target_height });
 
-        // For simplicity in dev mode, we'll rebuild account state by replaying from genesis
-        // Clear all accounts first
-        // TODO: Implement proper account state rollback
+        // Clear all account state - we'll rebuild by replaying from genesis
+        try self.clearAllAccounts();
+        
+        // Clear mempool as transactions may no longer be valid
+        self.mempool.clearRetainingCapacity();
+        print("🗑️  Cleared mempool during rollback\n", .{});
 
-        print("✅ Rollback complete\n", .{});
+        // Replay blockchain from genesis up to target height
+        try self.replayFromGenesis(target_height);
+
+        print("✅ Rollback complete - state rebuilt up to height {}\n", .{target_height});
     }
 
     /// Accept a block after validation (used in reorganization)
@@ -2403,4 +2526,108 @@ test "coinbase maturity basic" {
     try testing.expectEqual(@as(u64, types.ZenMining.BLOCK_REWARD), account1.immature_balance); // All immature
     
     print("\n✅ Coinbase maturity test: Mining reward correctly marked as immature\n", .{});
+}
+
+test "reorganization with coinbase maturity" {
+    const test_dir = "test_reorg_maturity";
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+    
+    var zeicoin = try createTestZeiCoin(test_dir);
+    defer zeicoin.deinit();
+
+    // Create test accounts
+    const miner1 = try key.KeyPair.generateNew();
+    const miner1_addr = miner1.getAddress();
+    const miner2 = try key.KeyPair.generateNew();
+    const miner2_addr = miner2.getAddress();
+    
+    // Fund an account for transactions
+    const sender = try key.KeyPair.generateNew();
+    const sender_addr = sender.getAddress();
+    try zeicoin.database.saveAccount(sender_addr, types.Account{
+        .address = sender_addr,
+        .balance = 1000 * types.ZEI_COIN,
+        .nonce = 0,
+        .immature_balance = 0,
+    });
+    
+    print("\n🧪 Testing reorganization with coinbase maturity...\n", .{});
+    
+    // Scenario: Mine 101 blocks so first coinbase matures
+    print("  1️⃣ Mining 101 blocks to mature first coinbase...\n", .{});
+    var i: u32 = 0;
+    while (i < 101) : (i += 1) {
+        const block = try zeicoin.zenMineBlock(miner1);
+        zeicoin.allocator.free(block.transactions);
+    }
+    
+    // Check miner1's balance after 101 blocks  
+    // Note: We start at height 0 (genesis), so after mining 101 blocks we're at height 101
+    // Block at height 1 matures at height 101 (100 blocks later)
+    const height = try zeicoin.getHeight();
+    print("  📊 Current height: {}\n", .{height});
+    const account_before = try zeicoin.getAccount(miner1_addr);
+    print("  💰 Miner balance - mature: {}, immature: {}\n", .{account_before.balance, account_before.immature_balance});
+    try testing.expectEqual(@as(u64, types.ZenMining.BLOCK_REWARD), account_before.balance); // Block 1 matured
+    try testing.expectEqual(@as(u64, 100 * types.ZenMining.BLOCK_REWARD), account_before.immature_balance); // Blocks 2-101 still immature
+    print("  ✅ Block 1 coinbase matured correctly\n", .{});
+    
+    // Create a transaction that spends the matured coinbase
+    const spend_tx = types.Transaction{
+        .sender = miner1_addr,
+        .sender_public_key = miner1.public_key,
+        .recipient = miner2_addr,
+        .amount = types.ZenMining.BLOCK_REWARD / 2, // Spend half
+        .fee = types.ZenFees.MIN_FEE,
+        .nonce = 0,
+        .timestamp = @intCast(util.getTime()),
+        .signature = undefined,
+    };
+    var signed_tx = spend_tx;
+    signed_tx.signature = try miner1.signTransaction(spend_tx.hash());
+    
+    // Add transaction and mine it
+    try zeicoin.addTransaction(signed_tx);
+    const block_with_spend = try zeicoin.zenMineBlock(miner1);
+    defer zeicoin.allocator.free(block_with_spend.transactions);
+    print("  ✅ Spent matured coinbase in block 102\n", .{});
+    
+    // Verify the spend worked
+    const miner1_after_spend = try zeicoin.getAccount(miner1_addr);
+    const miner2_after_spend = try zeicoin.getAccount(miner2_addr);
+    print("  💰 After spend - Miner1: mature={}, immature={}\n", .{miner1_after_spend.balance, miner1_after_spend.immature_balance});
+    print("  💰 After spend - Miner2: mature={}, immature={}\n", .{miner2_after_spend.balance, miner2_after_spend.immature_balance});
+    // Miner1 spent half of first mature block but block 2 also matured, plus got fees
+    // So balance should be: 0.5 ZEI (remaining from block 1) + 1 ZEI (block 2) + small fees
+    try testing.expect(miner1_after_spend.balance > 0); // Has balance
+    try testing.expect(miner2_after_spend.balance == types.ZenMining.BLOCK_REWARD / 2); // Got exactly half
+    
+    // Now trigger a reorg back to height 50 (before maturity)
+    print("  2️⃣ Simulating reorganization back to height 50...\n", .{});
+    const current_height = try zeicoin.getHeight();
+    try testing.expectEqual(@as(u32, 103), current_height); // Genesis + 101 + 1 spend block
+    
+    // Perform rollback
+    try zeicoin.rollbackToHeight(50);
+    
+    // Verify rollback worked
+    const height_after_rollback = try zeicoin.getHeight();
+    try testing.expectEqual(@as(u32, 103), height_after_rollback); // Height doesn't change, only state
+    
+    // Check miner1's balance after rollback - no mature coins yet!
+    const account_after_reorg = try zeicoin.getAccount(miner1_addr);
+    try testing.expectEqual(@as(u64, 0), account_after_reorg.balance); // No mature balance at height 50
+    // We replayed to height 50, which includes blocks 1-50 (genesis at 0 has no miner reward)
+    try testing.expectEqual(@as(u64, 50 * types.ZenMining.BLOCK_REWARD), account_after_reorg.immature_balance); // Blocks 1-50
+    
+    // Miner2 should have no balance
+    const miner2_after_reorg = zeicoin.getAccount(miner2_addr) catch {
+        // Account might not exist, which is fine
+        print("  ✅ Miner2 account correctly doesn't exist after reorg\n", .{});
+        return;
+    };
+    try testing.expectEqual(@as(u64, 0), miner2_after_reorg.balance);
+    try testing.expectEqual(@as(u64, 0), miner2_after_reorg.immature_balance);
+    
+    print("  ✅ Reorganization correctly rolled back matured coinbase and dependent transactions\n", .{});
 }
