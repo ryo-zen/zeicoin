@@ -61,10 +61,7 @@ fn getServerIP(allocator: std.mem.Allocator) ![]const u8 {
 
         // Test if detected IP actually has a ZeiCoin server
         if (testServerConnection(detected_ip)) {
-            print("🔍 Auto-detected server IP: {s}\n", .{detected_ip});
             return allocator.dupe(u8, detected_ip);
-        } else {
-            print("🔍 Auto-detected {s} but no ZeiCoin server found\n", .{detected_ip});
         }
     }
 
@@ -489,6 +486,8 @@ fn handleStatusCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     // Connect to server
     const server_ip = try getServerIP(allocator);
     defer allocator.free(server_ip);
+    
+    print("🌐 Server: {s}:10802\n", .{server_ip});
 
     const address = net.Address.parseIp4(server_ip, 10802) catch {
         print("❌ Invalid server address\n", .{});
