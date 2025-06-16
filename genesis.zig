@@ -27,6 +27,7 @@ pub const GenesisBlocks = struct {
 
             // Create coinbase transaction for initial distribution
             const coinbase_tx = types.Transaction{
+                .version = 0, // Version 0 for genesis
                 .sender = std.mem.zeroes(types.Address), // From thin air
                 .sender_public_key = std.mem.zeroes([32]u8),
                 .recipient = genesis_address,
@@ -77,6 +78,7 @@ pub const GenesisBlocks = struct {
 
             // Create coinbase transaction for initial distribution
             const coinbase_tx = types.Transaction{
+                .version = 0, // Version 0 for genesis
                 .sender = std.mem.zeroes(types.Address),
                 .sender_public_key = std.mem.zeroes([32]u8),
                 .recipient = genesis_address,

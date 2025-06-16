@@ -920,6 +920,7 @@ fn sendTransaction(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
     // Create transaction
     const fee = types.ZenFees.STANDARD_FEE;
     var transaction = types.Transaction{
+        .version = 0, // Version 0 for initial protocol
         .sender = sender_address,
         .sender_public_key = sender_public_key,
         .recipient = recipient_address,

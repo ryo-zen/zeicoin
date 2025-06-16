@@ -317,6 +317,7 @@ fn handleTransaction(allocator: std.mem.Allocator, connection: net.Server.Connec
     const send_amount = 10 * types.ZEI_COIN; // Send 10 ZEI
     const zen_fee = types.ZenFees.STANDARD_FEE; // 💰 Pay standard fee
     var test_tx = types.Transaction{
+        .version = 0, // Version 0 for initial protocol
         .sender = sender_address,
         .sender_public_key = test_sender_wallet.public_key,
         .recipient = recipient_address,
@@ -604,6 +605,7 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
 
     // Create transaction from client data with real signature and public key
     const client_tx = types.Transaction{
+        .version = 0, // Version 0 for initial protocol
         .sender = sender_address,
         .sender_public_key = public_key,
         .recipient = recipient_address,
