@@ -80,6 +80,7 @@ pub const BlockHash = Hash;
 
 /// ZeiCoin transaction - simple account model
 pub const Transaction = struct {
+    version: u16, // Transaction version for protocol upgrades
     sender: Address,
     recipient: Address,
     amount: u64, // Amount in zei (base unit)
@@ -98,6 +99,7 @@ pub const Transaction = struct {
     pub fn hashForSigning(self: *const Transaction) Hash {
         // Create a copy without signature for hashing
         const tx_for_hash = struct {
+            version: u16,
             sender: Address,
             recipient: Address,
             amount: u64,
@@ -106,6 +108,7 @@ pub const Transaction = struct {
             timestamp: u64,
             sender_public_key: [32]u8,
         }{
+            .version = self.version,
             .sender = self.sender,
             .recipient = self.recipient,
             .amount = self.amount,
@@ -121,6 +124,7 @@ pub const Transaction = struct {
         const writer = stream.writer();
 
         // Simple serialization for hashing (order matters!)
+        writer.writeInt(u16, tx_for_hash.version, .little) catch unreachable;
         writer.writeAll(&tx_for_hash.sender) catch unreachable;
         writer.writeAll(&tx_for_hash.recipient) catch unreachable;
         writer.writeInt(u64, tx_for_hash.amount, .little) catch unreachable;
@@ -140,6 +144,12 @@ pub const Transaction = struct {
 
     /// Check if transaction has valid basic structure
     pub fn isValid(self: *const Transaction) bool {
+        // Version validation - only version 0 is currently supported
+        if (self.version != 0) {
+            std.debug.print("❌ Transaction invalid: unsupported version {}\n", .{self.version});
+            return false;
+        }
+        
         // Coinbase transactions have simpler validation rules
         if (self.isCoinbase()) {
             // Coinbase validation: amount > 0, timestamp > 0
@@ -380,9 +390,9 @@ pub const Block = struct {
         // Each transaction size (approximate)
         for (self.transactions) |_| {
             // Transaction structure:
-            // sender: 32, recipient: 32, amount: 8, fee: 8, nonce: 8, 
+            // version: 2, sender: 32, recipient: 32, amount: 8, fee: 8, nonce: 8, 
             // timestamp: 8, sender_public_key: 32, signature: 64
-            size += 32 + 32 + 8 + 8 + 8 + 8 + 32 + 64; // 192 bytes per transaction
+            size += 2 + 32 + 32 + 8 + 8 + 8 + 8 + 32 + 64; // 194 bytes per transaction
         }
         
         return size;
@@ -614,6 +624,7 @@ test "transaction validation" {
     bob_addr[0] = 1; // Make it different from alice
 
     const tx = Transaction{
+        .version = 0,
         .sender = alice_addr,
         .recipient = bob_addr,
         .amount = 100 * ZEI_COIN,
@@ -646,6 +657,7 @@ test "block validation" {
     bob_addr[0] = 1;
 
     const tx = Transaction{
+        .version = 0,
         .sender = alice_addr,
         .recipient = bob_addr,
         .amount = 100 * ZEI_COIN,
@@ -686,6 +698,7 @@ test "transaction hash" {
 
     // Create test transaction
     const tx1 = Transaction{
+        .version = 0,
         .sender = sender_addr,
         .recipient = [_]u8{1} ++ std.mem.zeroes([31]u8),
         .amount = 1000000000,
@@ -698,6 +711,7 @@ test "transaction hash" {
 
     // Create identical transaction
     const tx2 = Transaction{
+        .version = 0,
         .sender = sender_addr,
         .recipient = [_]u8{1} ++ std.mem.zeroes([31]u8),
         .amount = 1000000000,
@@ -715,6 +729,7 @@ test "transaction hash" {
 
     // Different transactions should have different hashes
     const tx3 = Transaction{
+        .version = 0,
         .sender = sender_addr,
         .recipient = [_]u8{1} ++ std.mem.zeroes([31]u8),
         .amount = 2000000000, // Different amount
@@ -807,6 +822,7 @@ test "block hash delegated to header hash" {
     bob_addr[0] = 1;
 
     const tx = Transaction{
+        .version = 0,
         .sender = alice_addr,
         .recipient = bob_addr,
         .amount = 100 * ZEI_COIN,

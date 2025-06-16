@@ -413,6 +413,7 @@ pub const ZeiCoin = struct {
         // Create coinbase transaction (miner reward + fees)
         const miner_reward = types.ZenMining.BLOCK_REWARD + total_fees;
         const coinbase_tx = Transaction{
+            .version = 0, // Version 0 for coinbase
             .sender = std.mem.zeroes(types.Address), // From thin air (coinbase)
             .sender_public_key = std.mem.zeroes([32]u8), // No sender for coinbase
             .recipient = miner_keypair.getAddress(),
@@ -2229,6 +2230,7 @@ test "transaction processing" {
 
     // Create and sign transaction
     var tx = Transaction{
+        .version = 0,
         .sender = sender_addr,
         .recipient = alice_addr,
         .amount = 10 * types.ZEI_COIN,
@@ -2275,7 +2277,7 @@ test "block retrieval by height" {
 }
 
 test "block validation" {
-    var zeicoin = try ZeiCoin.init(testing.allocator);
+    var zeicoin = try createTestZeiCoin("test_zeicoin_data_validation");
     defer zeicoin.deinit();
 
     // Create a valid test block that extends the genesis
@@ -2295,6 +2297,7 @@ test "block validation" {
     const coinbase_public_key = std.mem.zeroes([32]u8);
     const coinbase_sender = util.hash256(&coinbase_public_key);
     transactions[0] = types.Transaction{
+        .version = 0,
         .sender = coinbase_sender,
         .sender_public_key = coinbase_public_key,
         .recipient = std.mem.zeroes(types.Address),
@@ -2342,6 +2345,9 @@ test "block validation" {
     invalid_block.header.previous_hash = std.mem.zeroes(types.Hash);
     const is_invalid = try zeicoin.validateBlock(invalid_block, current_height);
     try testing.expect(!is_invalid);
+
+    // Clean up test data
+    std.fs.cwd().deleteTree("test_zeicoin_data_validation") catch {};
 }
 
 test "mempool cleaning after block application" {
@@ -2366,6 +2372,7 @@ test "mempool cleaning after block application" {
 
     // Create and add transaction to mempool
     var tx = types.Transaction{
+        .version = 0,
         .sender = sender_addr,
         .recipient = alice_addr,
         .amount = 10 * types.ZEI_COIN,
@@ -2574,6 +2581,7 @@ test "reorganization with coinbase maturity" {
     
     // Create a transaction that spends the matured coinbase
     const spend_tx = types.Transaction{
+        .version = 0,
         .sender = miner1_addr,
         .sender_public_key = miner1.public_key,
         .recipient = miner2_addr,
