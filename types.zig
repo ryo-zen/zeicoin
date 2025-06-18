@@ -188,6 +188,13 @@ pub const Transaction = struct {
 
         return true;
     }
+    
+    /// Get the serialized size of this transaction in bytes
+    pub fn getSerializedSize(self: *const Transaction) usize {
+        _ = self;
+        // All transactions have the same size due to fixed-size fields
+        return MempoolLimits.TRANSACTION_SIZE;
+    }
 };
 
 /// Account state in ZeiCoin network
@@ -587,6 +594,18 @@ pub const BlockLimits = struct {
     
     /// Estimated transactions per block at hard limit  
     pub const MAX_TXS_PER_BLOCK: usize = MAX_BLOCK_SIZE / AVG_TX_SIZE; // ~8000 txs
+};
+
+/// 🏊 Mempool limits - prevent memory exhaustion attacks
+pub const MempoolLimits = struct {
+    /// Maximum number of transactions in mempool
+    pub const MAX_TRANSACTIONS: usize = 10_000;
+    
+    /// Maximum total size of mempool in bytes (50MB)
+    pub const MAX_SIZE_BYTES: usize = 50 * 1024 * 1024;
+    
+    /// Transaction size for serialization (with version field)
+    pub const TRANSACTION_SIZE: usize = 194;
 };
 
 /// ⏰ Timestamp validation configuration - prevents time-based attacks

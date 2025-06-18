@@ -116,6 +116,7 @@ pub const ZeiCoin = struct {
 
     // Memory pool for pending transactions
     mempool: ArrayList(Transaction),
+    mempool_size_bytes: usize, // Track total size of mempool in bytes
 
     // Network manager for P2P communication (pointer to external manager)
     network: ?*net.NetworkManager,
@@ -149,6 +150,7 @@ pub const ZeiCoin = struct {
         var blockchain = ZeiCoin{
             .database = database,
             .mempool = ArrayList(Transaction).init(allocator),
+            .mempool_size_bytes = 0,
             .network = null,
             .allocator = allocator,
             .sync_state = .synced,
@@ -256,8 +258,35 @@ pub const ZeiCoin = struct {
             return error.InvalidTransaction;
         }
 
+        // Check mempool limits before adding
+        const tx_size = transaction.getSerializedSize();
+        
+        // Check transaction count limit
+        if (self.mempool.items.len >= types.MempoolLimits.MAX_TRANSACTIONS) {
+            print("❌ Mempool full: {} transactions (limit: {})\n", .{
+                self.mempool.items.len, 
+                types.MempoolLimits.MAX_TRANSACTIONS
+            });
+            return error.MempoolFull;
+        }
+        
+        // Check size limit
+        if (self.mempool_size_bytes + tx_size > types.MempoolLimits.MAX_SIZE_BYTES) {
+            print("❌ Mempool size limit exceeded: {} + {} bytes > {} bytes\n", .{
+                self.mempool_size_bytes,
+                tx_size,
+                types.MempoolLimits.MAX_SIZE_BYTES
+            });
+            return error.MempoolSizeLimitExceeded;
+        }
+
         try self.mempool.append(transaction);
-        logInfo("Transaction added to mempool: {} ZEI from sender to recipient", .{transaction.amount / types.ZEI_COIN});
+        self.mempool_size_bytes += tx_size;
+        logInfo("Transaction added to mempool: {} ZEI from sender to recipient (mempool: {}/{})", .{
+            transaction.amount / types.ZEI_COIN,
+            self.mempool.items.len,
+            types.MempoolLimits.MAX_TRANSACTIONS
+        });
 
         // Broadcast transaction to network peers
         if (self.network) |*network| {
@@ -512,6 +541,7 @@ pub const ZeiCoin = struct {
 
             // Clear mempool
             self.mempool.clearRetainingCapacity();
+            self.mempool_size_bytes = 0;
 
             // Cleanup old processed transactions periodically
             self.cleanupProcessedTransactions();
@@ -1221,7 +1251,10 @@ pub const ZeiCoin = struct {
             }
 
             if (found_in_block) {
+                // Update size before removing
+                const tx_size = mempool_tx.getSerializedSize();
                 _ = self.mempool.swapRemove(i);
+                self.mempool_size_bytes -= tx_size;
                 // Don't increment i since we removed an item
             } else {
                 i += 1;
@@ -1474,6 +1507,7 @@ pub const ZeiCoin = struct {
                     // Validate transaction is still valid
                     if (self.validateTransaction(tx) catch false) {
                         try self.mempool.append(tx);
+                        self.mempool_size_bytes += tx.getSerializedSize();
                         print("🔄 Restored orphaned transaction to mempool\n", .{});
                     } else {
                         print("❌ Orphaned transaction no longer valid - discarded\n", .{});
@@ -1612,6 +1646,7 @@ pub const ZeiCoin = struct {
         
         // Clear mempool as transactions may no longer be valid
         self.mempool.clearRetainingCapacity();
+        self.mempool_size_bytes = 0;
         print("🗑️  Cleared mempool during rollback\n", .{});
 
         // Replay blockchain from genesis up to target height
@@ -2171,6 +2206,7 @@ fn createTestZeiCoin(data_dir: []const u8) !ZeiCoin {
     var zeicoin = ZeiCoin{
         .database = try db.Database.init(testing.allocator, data_dir),
         .mempool = ArrayList(Transaction).init(testing.allocator),
+        .mempool_size_bytes = 0,
         .network = null,
         .allocator = testing.allocator,
         .sync_state = .synced,
@@ -2533,6 +2569,126 @@ test "coinbase maturity basic" {
     try testing.expectEqual(@as(u64, types.ZenMining.BLOCK_REWARD), account1.immature_balance); // All immature
     
     print("\n✅ Coinbase maturity test: Mining reward correctly marked as immature\n", .{});
+}
+
+test "mempool limits enforcement" {
+    const test_dir = "test_mempool_limits";
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+    
+    var zeicoin = try createTestZeiCoin(test_dir);
+    defer zeicoin.deinit();
+
+    // Test 1: Test reaching transaction count limit
+    print("\n🧪 Testing mempool transaction count limit...\n", .{});
+    
+    // Directly fill mempool to limit by manipulating internal state
+    // This avoids creating 10,000 actual transactions
+    const max_tx = types.MempoolLimits.MAX_TRANSACTIONS;
+    
+    // Create dummy transactions to fill mempool
+    var i: usize = 0;
+    while (i < max_tx) : (i += 1) {
+        var dummy_tx = types.Transaction{
+            .version = 0,
+            .sender = std.mem.zeroes(types.Address),
+            .sender_public_key = std.mem.zeroes([32]u8),
+            .recipient = std.mem.zeroes(types.Address),
+            .amount = 1,
+            .fee = types.ZenFees.MIN_FEE,
+            .nonce = i,
+            .timestamp = @intCast(util.getTime()),
+            .signature = std.mem.zeroes(types.Signature),
+        };
+        // Make each transaction unique by setting different recipient
+        dummy_tx.recipient[0] = @intCast(i % 256);
+        dummy_tx.recipient[1] = @intCast((i / 256) % 256);
+        
+        try zeicoin.mempool.append(dummy_tx);
+        zeicoin.mempool_size_bytes += dummy_tx.getSerializedSize();
+    }
+    
+    try testing.expectEqual(@as(usize, max_tx), zeicoin.mempool.items.len);
+    print("  ✅ Mempool filled to exactly {} transactions (limit)\n", .{max_tx});
+    
+    
+    // Try to add one more (should fail)
+    const overflow_sender = try key.KeyPair.generateNew();
+    const overflow_sender_addr = overflow_sender.getAddress();
+    try zeicoin.database.saveAccount(overflow_sender_addr, types.Account{
+        .address = overflow_sender_addr,
+        .balance = 10 * types.ZEI_COIN,
+        .nonce = 0,
+        .immature_balance = 0,
+    });
+    
+    var overflow_addr = std.mem.zeroes(types.Address);
+    overflow_addr[0] = 254;
+    const overflow_tx = types.Transaction{
+        .version = 0,
+        .sender = overflow_sender_addr,
+        .sender_public_key = overflow_sender.public_key,
+        .recipient = overflow_addr,
+        .amount = 1 * types.ZEI_COIN,
+        .fee = types.ZenFees.MIN_FEE,
+        .nonce = 0,
+        .timestamp = @intCast(util.getTime()),
+        .signature = undefined,
+    };
+    var signed_overflow = overflow_tx;
+    signed_overflow.signature = try overflow_sender.signTransaction(overflow_tx.hashForSigning());
+    
+    const result = zeicoin.addTransaction(signed_overflow);
+    try testing.expectError(error.MempoolFull, result);
+    print("  ✅ Transaction correctly rejected when mempool full\n", .{});
+    
+    // Test 2: Size tracking
+    const expected_size = max_tx * types.MempoolLimits.TRANSACTION_SIZE;
+    try testing.expectEqual(expected_size, zeicoin.mempool_size_bytes);
+    print("  ✅ Mempool size correctly tracked: {} bytes\n", .{expected_size});
+    
+    // Test 3: Clear mempool and test size limit
+    zeicoin.mempool.clearRetainingCapacity();
+    zeicoin.mempool_size_bytes = 0;
+    print("\n🧪 Testing mempool size limit...\n", .{});
+    
+    // Calculate how many transactions fit in size limit
+    const txs_for_size_limit = types.MempoolLimits.MAX_SIZE_BYTES / types.MempoolLimits.TRANSACTION_SIZE;
+    print("  📊 Size limit allows for {} transactions\n", .{txs_for_size_limit});
+    
+    // Artificially set the size to just below limit
+    zeicoin.mempool_size_bytes = types.MempoolLimits.MAX_SIZE_BYTES - types.MempoolLimits.TRANSACTION_SIZE + 1;
+    
+    // Try to add a transaction (should fail due to size limit)
+    const size_test_sender = try key.KeyPair.generateNew();
+    const size_test_sender_addr = size_test_sender.getAddress();
+    try zeicoin.database.saveAccount(size_test_sender_addr, types.Account{
+        .address = size_test_sender_addr,
+        .balance = 10 * types.ZEI_COIN,
+        .nonce = 0,
+        .immature_balance = 0,
+    });
+    
+    var size_test_recipient = std.mem.zeroes(types.Address);
+    size_test_recipient[0] = 123;
+    const size_test_tx = types.Transaction{
+        .version = 0,
+        .sender = size_test_sender_addr,
+        .sender_public_key = size_test_sender.public_key,
+        .recipient = size_test_recipient,
+        .amount = 1 * types.ZEI_COIN,
+        .fee = types.ZenFees.MIN_FEE,
+        .nonce = 0,
+        .timestamp = @intCast(util.getTime()),
+        .signature = undefined,
+    };
+    var signed_size_test = size_test_tx;
+    signed_size_test.signature = try size_test_sender.signTransaction(size_test_tx.hashForSigning());
+    
+    const size_result = zeicoin.addTransaction(signed_size_test);
+    try testing.expectError(error.MempoolSizeLimitExceeded, size_result);
+    print("  ✅ Transaction correctly rejected when size limit exceeded\n", .{});
+    
+    print("\n🎉 All mempool limit tests passed!\n", .{});
 }
 
 test "reorganization with coinbase maturity" {
