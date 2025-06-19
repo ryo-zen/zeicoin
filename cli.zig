@@ -917,8 +917,34 @@ fn sendTransaction(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
     else
         0;
 
-    // Create transaction
+    // Get current blockchain height from server for expiry calculation
+    try connection.writeAll("GET_HEIGHT");
+    
+    // Read height response with timeout
+    var height_buffer: [1024]u8 = undefined;
+    const height_bytes_read = readWithTimeout(connection, &height_buffer) catch |err| {
+        switch (err) {
+            error.ReadTimeout => {
+                print("❌ Height request timeout (5s)\n", .{});
+                return error.NetworkError;
+            },
+            else => {
+                print("❌ Failed to read blockchain height\n", .{});
+                return error.NetworkError;
+            },
+        }
+    };
+    const height_response = height_buffer[0..height_bytes_read];
+    
+    // Parse HEIGHT:value response
+    const current_height = if (std.mem.startsWith(u8, height_response, "HEIGHT:"))
+        std.fmt.parseInt(u64, height_response[7..], 10) catch 0
+    else
+        0;
+    
+    // Create transaction with expiry height (24 hours from now)
     const fee = types.ZenFees.STANDARD_FEE;
+    const expiry_window = types.TransactionExpiry.getExpiryWindow();
     var transaction = types.Transaction{
         .version = 0, // Version 0 for initial protocol
         .sender = sender_address,
@@ -928,6 +954,7 @@ fn sendTransaction(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
         .fee = fee,
         .nonce = current_nonce,
         .timestamp = @intCast(util.getTime()),
+        .expiry_height = current_height + expiry_window,
         .signature = std.mem.zeroes(types.Signature),
     };
 

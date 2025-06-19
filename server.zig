@@ -313,6 +313,10 @@ fn handleTransaction(allocator: std.mem.Allocator, connection: net.Server.Connec
     try zeicoin.database.saveAccount(sender_address, sender_account);
     print("💰 Funded sender with {} ZEI\n", .{sender_balance / types.ZEI_COIN});
 
+    // Get current blockchain height for expiry calculation
+    const current_height = zeicoin.getHeight() catch 0;
+    const expiry_window = types.TransactionExpiry.getExpiryWindow();
+    
     // Create valid transaction with zen fee
     const send_amount = 10 * types.ZEI_COIN; // Send 10 ZEI
     const zen_fee = types.ZenFees.STANDARD_FEE; // 💰 Pay standard fee
@@ -325,6 +329,7 @@ fn handleTransaction(allocator: std.mem.Allocator, connection: net.Server.Connec
         .fee = zen_fee, // 💰 Include fee for complete crypto
         .nonce = sender_account.nonce, // Use current account nonce
         .timestamp = @intCast(util.getTime()),
+        .expiry_height = current_height + expiry_window,
         .signature = std.mem.zeroes(types.Signature), // Will be filled below
     };
 
@@ -603,6 +608,10 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
         return;
     }
 
+    // Get current blockchain height for expiry calculation
+    const current_height = zeicoin.getHeight() catch 0;
+    const expiry_window = types.TransactionExpiry.getExpiryWindow();
+    
     // Create transaction from client data with real signature and public key
     const client_tx = types.Transaction{
         .version = 0, // Version 0 for initial protocol
@@ -613,6 +622,7 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
         .fee = fee, // 💰 Include zen fee
         .nonce = nonce,
         .timestamp = @intCast(util.getTime()),
+        .expiry_height = current_height + expiry_window,
         .signature = signature,
     };
 
