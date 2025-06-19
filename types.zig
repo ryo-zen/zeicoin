@@ -87,6 +87,7 @@ pub const Transaction = struct {
     fee: u64, // 💰 Transaction fee paid to miner
     nonce: u64, // Sender's transaction counter (prevents double-spend)
     timestamp: u64, // Unix timestamp when transaction was created
+    expiry_height: u64, // Block height after which transaction expires (24hr window)
     sender_public_key: [32]u8, // Public key of sender (for signature verification)
     signature: Signature, // Ed25519 signature of transaction data
 
@@ -106,6 +107,7 @@ pub const Transaction = struct {
             fee: u64, // 💰 Include fee in transaction hash
             nonce: u64,
             timestamp: u64,
+            expiry_height: u64,
             sender_public_key: [32]u8,
         }{
             .version = self.version,
@@ -115,6 +117,7 @@ pub const Transaction = struct {
             .fee = self.fee,
             .nonce = self.nonce,
             .timestamp = self.timestamp,
+            .expiry_height = self.expiry_height,
             .sender_public_key = self.sender_public_key,
         };
 
@@ -604,8 +607,23 @@ pub const MempoolLimits = struct {
     /// Maximum total size of mempool in bytes (50MB)
     pub const MAX_SIZE_BYTES: usize = 50 * 1024 * 1024;
     
-    /// Transaction size for serialization (with version field)
-    pub const TRANSACTION_SIZE: usize = 194;
+    /// Transaction size for serialization (with version and expiry fields)
+    pub const TRANSACTION_SIZE: usize = 202; // 194 + 8 bytes for expiry_height
+};
+
+/// 📅 Transaction expiration configuration - prevents old transaction replay
+pub const TransactionExpiry = struct {
+    /// Default expiry window in blocks (24 hours worth)
+    pub const EXPIRY_WINDOW_TESTNET: u64 = 8_640; // 24 hours * 60 minutes * 6 blocks/minute
+    pub const EXPIRY_WINDOW_MAINNET: u64 = 720;   // 24 hours * 60 minutes * 0.5 blocks/minute
+    
+    /// Get expiry window for current network
+    pub fn getExpiryWindow() u64 {
+        return switch (CURRENT_NETWORK) {
+            .testnet => EXPIRY_WINDOW_TESTNET,
+            .mainnet => EXPIRY_WINDOW_MAINNET,
+        };
+    }
 };
 
 /// ⏰ Timestamp validation configuration - prevents time-based attacks
@@ -650,6 +668,7 @@ test "transaction validation" {
         .fee = ZenFees.STANDARD_FEE,
         .nonce = 1,
         .timestamp = 1704067200,
+        .expiry_height = 10000,
         .sender_public_key = alice_public_key,
         .signature = std.mem.zeroes(Signature),
     };
@@ -683,6 +702,7 @@ test "block validation" {
         .fee = ZenFees.STANDARD_FEE,
         .nonce = 1,
         .timestamp = 1704067200,
+        .expiry_height = 10000,
         .sender_public_key = alice_public_key,
         .signature = std.mem.zeroes(Signature),
     };
@@ -724,6 +744,7 @@ test "transaction hash" {
         .fee = ZenFees.STANDARD_FEE,
         .nonce = 0,
         .timestamp = 1234567890,
+        .expiry_height = 10000,
         .sender_public_key = public_key,
         .signature = std.mem.zeroes(Signature),
     };
@@ -737,6 +758,7 @@ test "transaction hash" {
         .fee = ZenFees.STANDARD_FEE,
         .nonce = 0,
         .timestamp = 1234567890,
+        .expiry_height = 10000,
         .sender_public_key = public_key,
         .signature = std.mem.zeroes(Signature),
     };
@@ -755,6 +777,7 @@ test "transaction hash" {
         .fee = ZenFees.STANDARD_FEE,
         .nonce = 0,
         .timestamp = 1234567890,
+        .expiry_height = 10000,
         .sender_public_key = public_key,
         .signature = std.mem.zeroes(Signature),
     };
@@ -848,6 +871,7 @@ test "block hash delegated to header hash" {
         .fee = ZenFees.STANDARD_FEE,
         .nonce = 1,
         .timestamp = 1704067200,
+        .expiry_height = 10000,
         .sender_public_key = alice_public_key,
         .signature = std.mem.zeroes(Signature),
     };

@@ -35,6 +35,7 @@ pub const GenesisBlocks = struct {
                 .fee = 0,
                 .nonce = 0,
                 .timestamp = TIMESTAMP,
+                .expiry_height = std.math.maxInt(u64), // Genesis tx never expires
                 .signature = std.mem.zeroes(types.Signature),
             };
 
@@ -86,6 +87,7 @@ pub const GenesisBlocks = struct {
                 .fee = 0,
                 .nonce = 0,
                 .timestamp = TIMESTAMP,
+                .expiry_height = std.math.maxInt(u64), // Genesis tx never expires
                 .signature = std.mem.zeroes(types.Signature),
             };
 

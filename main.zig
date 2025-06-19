@@ -300,26 +300,33 @@ pub const ZeiCoin = struct {
         if (!tx.isValid()) return false;
 
         // Additional integrity checks
+        
+        // 1. Check if transaction has expired
+        const current_height = self.getHeight() catch 0;
+        if (tx.expiry_height <= current_height) {
+            print("❌ Transaction expired: expiry height {} <= current height {}\n", .{ tx.expiry_height, current_height });
+            return false;
+        }
 
-        // 1. Prevent self-transfer (wasteful but not harmful)
+        // 2. Prevent self-transfer (wasteful but not harmful)
         if (std.mem.eql(u8, &tx.sender, &tx.recipient)) {
             print("⚠️ Self-transfer detected (wasteful but allowed)\n", .{});
             // Allow but warn - some users might legitimately do this
         }
 
-        // 2. Check for zero amount (should pay fee only)
+        // 3. Check for zero amount (should pay fee only)
         if (tx.amount == 0) {
             print("💸 Zero amount transaction (fee-only payment)\n", .{});
             // Allow zero-amount transactions (useful for fee-only operations)
         }
 
-        // 3. Sanity check for extremely high amounts (overflow protection)
+        // 4. Sanity check for extremely high amounts (overflow protection)
         if (tx.amount > 1000000 * types.ZEI_COIN) { // 1 million ZEI limit
             print("❌ Transaction amount too high: {} ZEI (max: 1,000,000 ZEI)\n", .{tx.amount / types.ZEI_COIN});
             return false;
         }
 
-        // 4. Check if transaction was already processed (replay protection)
+        // 5. Check if transaction was already processed (replay protection)
         const tx_hash = tx.hash();
         for (self.processed_transactions.items) |processed_hash| {
             if (std.mem.eql(u8, &processed_hash, &tx_hash)) {
@@ -450,6 +457,7 @@ pub const ZeiCoin = struct {
             .fee = 0, // Coinbase has no fee
             .nonce = 0, // Coinbase always nonce 0
             .timestamp = @intCast(util.getTime()),
+            .expiry_height = std.math.maxInt(u64), // Coinbase transactions never expire
             .signature = std.mem.zeroes(types.Signature), // No signature needed for coinbase
         };
 
@@ -2273,6 +2281,7 @@ test "transaction processing" {
         .fee = types.ZenFees.STANDARD_FEE,
         .nonce = 0,
         .timestamp = 1704067200,
+        .expiry_height = 10000, // Far future for test
         .sender_public_key = sender_keypair.public_key,
         .signature = std.mem.zeroes(types.Signature), // Will be replaced
     };
@@ -2341,6 +2350,7 @@ test "block validation" {
         .fee = 0, // Coinbase has no fee
         .nonce = 0,
         .timestamp = @intCast(util.getTime()),
+        .expiry_height = std.math.maxInt(u64), // Coinbase never expires
         .signature = std.mem.zeroes(types.Signature),
     };
 
@@ -2415,6 +2425,7 @@ test "mempool cleaning after block application" {
         .fee = types.ZenFees.STANDARD_FEE,
         .nonce = 0,
         .timestamp = @intCast(util.getTime()),
+        .expiry_height = 10000,
         .sender_public_key = sender_keypair.public_key,
         .signature = std.mem.zeroes(types.Signature),
     };
@@ -2597,6 +2608,7 @@ test "mempool limits enforcement" {
             .fee = types.ZenFees.MIN_FEE,
             .nonce = i,
             .timestamp = @intCast(util.getTime()),
+            .expiry_height = 10000,
             .signature = std.mem.zeroes(types.Signature),
         };
         // Make each transaction unique by setting different recipient
@@ -2632,6 +2644,7 @@ test "mempool limits enforcement" {
         .fee = types.ZenFees.MIN_FEE,
         .nonce = 0,
         .timestamp = @intCast(util.getTime()),
+        .expiry_height = 10000,
         .signature = undefined,
     };
     var signed_overflow = overflow_tx;
@@ -2679,6 +2692,7 @@ test "mempool limits enforcement" {
         .fee = types.ZenFees.MIN_FEE,
         .nonce = 0,
         .timestamp = @intCast(util.getTime()),
+        .expiry_height = 10000,
         .signature = undefined,
     };
     var signed_size_test = size_test_tx;
@@ -2689,6 +2703,113 @@ test "mempool limits enforcement" {
     print("  ✅ Transaction correctly rejected when size limit exceeded\n", .{});
     
     print("\n🎉 All mempool limit tests passed!\n", .{});
+}
+
+test "transaction expiration" {
+    const test_dir = "test_tx_expiry";
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+    
+    var zeicoin = try createTestZeiCoin(test_dir);
+    defer zeicoin.deinit();
+
+    // Create test wallets
+    const sender_keypair = try key.KeyPair.generateNew();
+    const sender_addr = sender_keypair.getAddress();
+    const recipient_keypair = try key.KeyPair.generateNew();
+    const recipient_addr = recipient_keypair.getAddress();
+
+    // Fund sender
+    try zeicoin.database.saveAccount(sender_addr, types.Account{
+        .address = sender_addr,
+        .balance = 100 * types.ZEI_COIN,
+        .nonce = 0,
+        .immature_balance = 0,
+    });
+
+    print("\n📅 Testing transaction expiration...\n", .{});
+
+    // Test 1: Valid transaction with future expiry
+    const current_height = zeicoin.getHeight() catch 0;
+    const valid_tx = types.Transaction{
+        .version = 0,
+        .sender = sender_addr,
+        .sender_public_key = sender_keypair.public_key,
+        .recipient = recipient_addr,
+        .amount = 10 * types.ZEI_COIN,
+        .fee = types.ZenFees.MIN_FEE,
+        .nonce = 0,
+        .timestamp = @intCast(util.getTime()),
+        .expiry_height = current_height + 100, // Expires in 100 blocks
+        .signature = undefined,
+    };
+    var signed_valid = valid_tx;
+    signed_valid.signature = try sender_keypair.signTransaction(valid_tx.hashForSigning());
+    
+    try zeicoin.addTransaction(signed_valid);
+    try testing.expectEqual(@as(usize, 1), zeicoin.mempool.items.len);
+    print("  ✅ Transaction with future expiry accepted\n", .{});
+
+    // Clear mempool
+    zeicoin.mempool.clearRetainingCapacity();
+
+    // Test 2: Expired transaction (expiry at current height)
+    const expired_tx = types.Transaction{
+        .version = 0,
+        .sender = sender_addr,
+        .sender_public_key = sender_keypair.public_key,
+        .recipient = recipient_addr,
+        .amount = 10 * types.ZEI_COIN,
+        .fee = types.ZenFees.MIN_FEE,
+        .nonce = 0,
+        .timestamp = @intCast(util.getTime()),
+        .expiry_height = current_height, // Already expired
+        .signature = undefined,
+    };
+    var signed_expired = expired_tx;
+    signed_expired.signature = try sender_keypair.signTransaction(expired_tx.hashForSigning());
+    
+    const expired_result = zeicoin.addTransaction(signed_expired);
+    try testing.expectError(error.InvalidTransaction, expired_result);
+    try testing.expectEqual(@as(usize, 0), zeicoin.mempool.items.len);
+    print("  ✅ Expired transaction correctly rejected\n", .{});
+
+    // Test 3: Mine blocks and verify transaction expiration
+    // Add a transaction that expires in 2 blocks
+    const short_expiry_tx = types.Transaction{
+        .version = 0,
+        .sender = sender_addr,
+        .sender_public_key = sender_keypair.public_key,
+        .recipient = recipient_addr,
+        .amount = 10 * types.ZEI_COIN,
+        .fee = types.ZenFees.MIN_FEE,
+        .nonce = 0,
+        .timestamp = @intCast(util.getTime()),
+        .expiry_height = current_height + 2, // Expires in 2 blocks
+        .signature = undefined,
+    };
+    var signed_short = short_expiry_tx;
+    signed_short.signature = try sender_keypair.signTransaction(short_expiry_tx.hashForSigning());
+    
+    try zeicoin.addTransaction(signed_short);
+    try testing.expectEqual(@as(usize, 1), zeicoin.mempool.items.len);
+    
+    // Mine first block - transaction should still be valid
+    _ = try zeicoin.zenMineBlock(sender_keypair);
+    
+    // Mine second block - now at expiry height
+    _ = try zeicoin.zenMineBlock(sender_keypair);
+    
+    // Try to add the same transaction again (simulating rebroadcast)
+    const rebroadcast_result = zeicoin.addTransaction(signed_short);
+    try testing.expectError(error.InvalidTransaction, rebroadcast_result);
+    print("  ✅ Transaction expired after mining blocks\n", .{});
+
+    // Test 4: Verify default expiry window is set correctly
+    const expiry_window = types.TransactionExpiry.getExpiryWindow();
+    try testing.expectEqual(@as(u64, 8_640), expiry_window); // TestNet: 24 hours
+    print("  ✅ Default expiry window is 24 hours (8,640 blocks)\n", .{});
+
+    print("\n🎉 All transaction expiration tests passed!\n", .{});
 }
 
 test "reorganization with coinbase maturity" {
@@ -2745,6 +2866,7 @@ test "reorganization with coinbase maturity" {
         .fee = types.ZenFees.MIN_FEE,
         .nonce = 0,
         .timestamp = @intCast(util.getTime()),
+        .expiry_height = 10000,
         .signature = undefined,
     };
     var signed_tx = spend_tx;
