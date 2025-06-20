@@ -66,7 +66,7 @@ pub const KeyPair = struct {
     /// Get ZeiCoin address from this keypair
     /// Address = SHA256(public_key)
     pub fn getAddress(self: *const KeyPair) Address {
-        return util.hash256(&self.public_key);
+        return Address.fromPublicKey(self.public_key);
     }
 
     /// Sign a message with this keypair's private key
@@ -123,7 +123,7 @@ pub fn verify(public_key: [32]u8, message: []const u8, signature: Signature) boo
 
 /// Generate address from public key
 pub fn publicKeyToAddress(public_key: [32]u8) Address {
-    return util.hash256(&public_key);
+    return Address.fromPublicKey(public_key);
 }
 
 /// Check if a private key has been securely cleared (all zeros)

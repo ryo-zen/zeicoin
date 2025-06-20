@@ -115,7 +115,8 @@ pub const Database = struct {
     pub fn saveAccount(self: *Database, address: Address, account: Account) !void {
         // Create hex representation of address
         var hex_buffer: [64]u8 = undefined;
-        _ = std.fmt.bufPrint(&hex_buffer, "{}", .{std.fmt.fmtSliceHexLower(&address)}) catch unreachable;
+        const addr_bytes = address.toLegacyBytes();
+        _ = std.fmt.bufPrint(&hex_buffer, "{}", .{std.fmt.fmtSliceHexLower(&addr_bytes)}) catch unreachable;
         
         // Create filename: accounts/1a2b3c4d...hex.account
         const filename = try std.fmt.allocPrint(self.allocator, "{s}/{s}.account", .{ self.accounts_dir, hex_buffer });
@@ -139,7 +140,8 @@ pub const Database = struct {
     pub fn getAccount(self: *Database, address: Address) !Account {
         // Create hex representation of address
         var hex_buffer: [64]u8 = undefined;
-        _ = std.fmt.bufPrint(&hex_buffer, "{}", .{std.fmt.fmtSliceHexLower(&address)}) catch unreachable;
+        const addr_bytes = address.toLegacyBytes();
+        _ = std.fmt.bufPrint(&hex_buffer, "{}", .{std.fmt.fmtSliceHexLower(&addr_bytes)}) catch unreachable;
         
         // Create filename
         const filename = try std.fmt.allocPrint(self.allocator, "{s}/{s}.account", .{ self.accounts_dir, hex_buffer });

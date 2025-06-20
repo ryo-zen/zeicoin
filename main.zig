@@ -309,7 +309,7 @@ pub const ZeiCoin = struct {
         }
 
         // 2. Prevent self-transfer (wasteful but not harmful)
-        if (std.mem.eql(u8, &tx.sender, &tx.recipient)) {
+        if (tx.sender.equals(tx.recipient)) {
             print("⚠️ Self-transfer detected (wasteful but allowed)\n", .{});
             // Allow but warn - some users might legitimately do this
         }
@@ -395,7 +395,8 @@ pub const ZeiCoin = struct {
             // Log the issue but continue processing to maintain chain integrity
             if (self.sync_state == .syncing) {
                 print("⚠️ Warning: insufficient balance during sync (historical block)\n", .{});
-                print("   Account {} has {} zei, needs {} zei\n", .{ std.fmt.fmtSliceHexLower(sender_account.address[0..8]), sender_account.balance, total_cost });
+                const addr_bytes = sender_account.address.toLegacyBytes();
+                print("   Account {} has {} zei, needs {} zei\n", .{ std.fmt.fmtSliceHexLower(addr_bytes[0..8]), sender_account.balance, total_cost });
                 // Deduct what we can, but don't go negative
                 sender_account.balance = 0;
             } else {
@@ -450,7 +451,8 @@ pub const ZeiCoin = struct {
         const miner_reward = types.ZenMining.BLOCK_REWARD + total_fees;
         const coinbase_tx = Transaction{
             .version = 0, // Version 0 for coinbase
-            .sender = std.mem.zeroes(types.Address), // From thin air (coinbase)
+            .flags = .{}, // Default flags
+            .sender = types.Address.zero(), // From thin air (coinbase)
             .sender_public_key = std.mem.zeroes([32]u8), // No sender for coinbase
             .recipient = miner_keypair.getAddress(),
             .amount = miner_reward, // 💰 Block reward + all transaction fees
@@ -459,6 +461,9 @@ pub const ZeiCoin = struct {
             .timestamp = @intCast(util.getTime()),
             .expiry_height = std.math.maxInt(u64), // Coinbase transactions never expire
             .signature = std.mem.zeroes(types.Signature), // No signature needed for coinbase
+            .script_version = 0,
+            .witness_data = &[_]u8{},
+            .extra_data = &[_]u8{},
         };
 
         // Format miner reward display
@@ -518,6 +523,10 @@ pub const ZeiCoin = struct {
                 .timestamp = @intCast(util.getTime()),
                 .difficulty = next_difficulty_target.toU64(),
                 .nonce = 0,
+                .witness_root = std.mem.zeroes(Hash), // No witness data yet
+                .state_root = std.mem.zeroes(Hash), // No state yet
+                .extra_nonce = 0,
+                .extra_data = std.mem.zeroes([32]u8), // No extra data
             },
             .transactions = try self.allocator.dupe(Transaction, all_transactions),
         };
@@ -767,9 +776,10 @@ pub const ZeiCoin = struct {
         // Save miner account
         try self.database.saveAccount(miner_address, miner_account);
 
+        const miner_addr_bytes = miner_address.toLegacyBytes();
         print("💰 NEW COINS CREATED: {} ZEI for miner {s} (immature until block {})\n", .{ 
             coinbase_tx.amount / types.ZEI_COIN, 
-            std.fmt.fmtSliceHexLower(miner_address[0..8]),
+            std.fmt.fmtSliceHexLower(miner_addr_bytes[0..8]),
             maturity_height
         });
     }
@@ -778,7 +788,7 @@ pub const ZeiCoin = struct {
     fn isCoinbaseTransaction(self: *ZeiCoin, tx: Transaction) bool {
         _ = self;
         // Coinbase transactions have zero sender address and nonce
-        return std.mem.eql(u8, &tx.sender, &std.mem.zeroes(Address)) and tx.nonce == 0;
+        return tx.sender.isZero() and tx.nonce == 0;
     }
     
     /// Check and mature any coins that have reached required confirmations
@@ -809,9 +819,10 @@ pub const ZeiCoin = struct {
                     
                     try self.database.saveAccount(coinbase_tx.recipient, miner_account);
                     
+                    const recipient_bytes = coinbase_tx.recipient.toLegacyBytes();
                     print("✅ Matured {} ZEI for miner {s} from block {}\n", .{
                         coinbase_tx.amount / types.ZEI_COIN,
-                        std.fmt.fmtSliceHexLower(coinbase_tx.recipient[0..8]),
+                        std.fmt.fmtSliceHexLower(recipient_bytes[0..8]),
                         mature_block_height
                     });
                 }
@@ -1082,8 +1093,10 @@ pub const ZeiCoin = struct {
             // Basic transaction structure validation only
             if (!tx.isValid()) {
                 print("❌ Transaction {} structure validation failed\n", .{i});
-                print("   Sender: {s}\n", .{std.fmt.fmtSliceHexLower(&tx.sender)});
-                print("   Recipient: {s}\n", .{std.fmt.fmtSliceHexLower(&tx.recipient)});
+                const sender_bytes = tx.sender.toLegacyBytes();
+                const recipient_bytes = tx.recipient.toLegacyBytes();
+                print("   Sender: {s}\n", .{std.fmt.fmtSliceHexLower(&sender_bytes)});
+                print("   Recipient: {s}\n", .{std.fmt.fmtSliceHexLower(&recipient_bytes)});
                 print("   Amount: {}\n", .{tx.amount});
                 print("   Fee: {}\n", .{tx.fee});
                 print("   Nonce: {}\n", .{tx.nonce});

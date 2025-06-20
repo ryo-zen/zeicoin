@@ -23,12 +23,13 @@ pub const GenesisBlocks = struct {
         pub fn getBlock() types.Block {
             // Create genesis public key from network identifier
             const genesis_public_key = createGenesisPublicKey("TESTNET_GENESIS");
-            const genesis_address = util.hash256(&genesis_public_key);
+            const genesis_address = types.Address.fromPublicKey(genesis_public_key);
 
             // Create coinbase transaction for initial distribution
             const coinbase_tx = types.Transaction{
                 .version = 0, // Version 0 for genesis
-                .sender = std.mem.zeroes(types.Address), // From thin air
+                .flags = .{}, // Default flags
+                .sender = types.Address.zero(), // From thin air
                 .sender_public_key = std.mem.zeroes([32]u8),
                 .recipient = genesis_address,
                 .amount = MINER_REWARD,
@@ -37,6 +38,9 @@ pub const GenesisBlocks = struct {
                 .timestamp = TIMESTAMP,
                 .expiry_height = std.math.maxInt(u64), // Genesis tx never expires
                 .signature = std.mem.zeroes(types.Signature),
+                .script_version = 0,
+                .witness_data = &[_]u8{},
+                .extra_data = &[_]u8{},
             };
 
             // Create genesis block header
@@ -47,6 +51,10 @@ pub const GenesisBlocks = struct {
                 .timestamp = TIMESTAMP,
                 .difficulty = types.ZenMining.initialDifficultyTarget().toU64(),
                 .nonce = @truncate(NONCE),
+                .witness_root = std.mem.zeroes([32]u8), // No witness data yet
+                .state_root = std.mem.zeroes([32]u8), // No state yet
+                .extra_nonce = 0,
+                .extra_data = std.mem.zeroes([32]u8), // No extra data
             };
 
             // Allocate transactions array (must be freed by caller)
@@ -76,12 +84,13 @@ pub const GenesisBlocks = struct {
         pub fn getBlock() types.Block {
             // Create genesis public key from network identifier
             const genesis_public_key = createGenesisPublicKey("MAINNET_GENESIS");
-            const genesis_address = util.hash256(&genesis_public_key);
+            const genesis_address = types.Address.fromPublicKey(genesis_public_key);
 
             // Create coinbase transaction for initial distribution
             const coinbase_tx = types.Transaction{
                 .version = 0, // Version 0 for genesis
-                .sender = std.mem.zeroes(types.Address),
+                .flags = .{}, // Default flags
+                .sender = types.Address.zero(),
                 .sender_public_key = std.mem.zeroes([32]u8),
                 .recipient = genesis_address,
                 .amount = MINER_REWARD,
@@ -90,6 +99,9 @@ pub const GenesisBlocks = struct {
                 .timestamp = TIMESTAMP,
                 .expiry_height = std.math.maxInt(u64), // Genesis tx never expires
                 .signature = std.mem.zeroes(types.Signature),
+                .script_version = 0,
+                .witness_data = &[_]u8{},
+                .extra_data = &[_]u8{},
             };
 
             // Create genesis block header
@@ -100,6 +112,10 @@ pub const GenesisBlocks = struct {
                 .timestamp = TIMESTAMP,
                 .difficulty = types.ZenMining.initialDifficultyTarget().toU64(),
                 .nonce = @truncate(NONCE),
+                .witness_root = std.mem.zeroes([32]u8),
+                .state_root = std.mem.zeroes([32]u8),
+                .extra_nonce = 0,
+                .extra_data = std.mem.zeroes([32]u8),
             };
 
             // Create a static slice for the transaction
