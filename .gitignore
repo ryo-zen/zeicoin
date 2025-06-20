@@ -21,4 +21,4 @@ randomx/randomx_install/
 randomx/randomx_helper
 
 # Test Folder
-test/
+tests/
