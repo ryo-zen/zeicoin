@@ -67,8 +67,86 @@ pub const NodeType = enum {
     }
 };
 
-// Address is a simple 32-byte hash
-pub const Address = [32]u8;
+// Address versioning for future extensibility
+pub const AddressVersion = enum(u8) {
+    P2PKH = 0,           // Pay to Public Key Hash (current)
+    Multisig = 1,        // M-of-N multisignature (future)
+    P2SH = 2,            // Pay to Script Hash (future)
+    P2WSH = 3,           // Pay to Witness Script Hash (future)
+    Taproot = 4,         // Taproot for privacy + smart contracts (future)
+    PostQuantum = 5,     // Quantum-resistant addresses (future)
+    // 6-127 reserved for future standard types
+    // 128-255 reserved for experimental/custom
+    _,
+};
+
+// Future-proof versioned address structure (maintains 32-byte size)
+pub const Address = extern struct {
+    version: u8,         // Address type/version
+    hash: [31]u8,        // Address hash (1 byte less to fit version)
+    
+    /// Create a P2PKH address from a public key
+    pub fn fromPublicKey(public_key: [32]u8) Address {
+        const full_hash = util.hash256(&public_key);
+        var addr = Address{
+            .version = @intFromEnum(AddressVersion.P2PKH),
+            .hash = undefined,
+        };
+        @memcpy(&addr.hash, full_hash[0..31]);
+        return addr;
+    }
+    
+    /// Create a zero address (for coinbase transactions)
+    pub fn zero() Address {
+        return Address{
+            .version = 0,
+            .hash = std.mem.zeroes([31]u8),
+        };
+    }
+    
+    /// Check if this is a zero address
+    pub fn isZero(self: Address) bool {
+        return self.version == 0 and std.mem.eql(u8, &self.hash, &std.mem.zeroes([31]u8));
+    }
+    
+    /// Compare two addresses for equality
+    pub fn equals(self: Address, other: Address) bool {
+        return self.version == other.version and std.mem.eql(u8, &self.hash, &other.hash);
+    }
+    
+    /// Get the address version as enum (with unknown handling)
+    pub fn getVersion(self: Address) AddressVersion {
+        return @enumFromInt(self.version);
+    }
+    
+    /// Convert to legacy format for display (temporary compatibility)
+    pub fn toLegacyBytes(self: Address) [32]u8 {
+        var result: [32]u8 = undefined;
+        result[0] = self.version;
+        @memcpy(result[1..], &self.hash);
+        return result;
+    }
+    
+    /// Create from legacy bytes (for migration)
+    pub fn fromLegacyBytes(bytes: [32]u8) Address {
+        return Address{
+            .version = 0, // Assume P2PKH for legacy
+            .hash = bytes[0..31].*,
+        };
+    }
+    
+    /// Encode address to bech32 string
+    pub fn toBech32(self: Address, allocator: std.mem.Allocator, network: NetworkType) ![]u8 {
+        const bech32 = @import("bech32.zig");
+        return bech32.encodeAddress(allocator, self, network);
+    }
+    
+    /// Parse address from string (bech32 or hex)
+    pub fn fromString(allocator: std.mem.Allocator, str: []const u8) !Address {
+        const bech32 = @import("bech32.zig");
+        return bech32.parseAddress(allocator, str);
+    }
+};
 
 // Transaction signature (Ed25519 signature)
 pub const Signature = [64]u8;
@@ -78,18 +156,51 @@ pub const Hash = [32]u8;
 pub const TxHash = Hash;
 pub const BlockHash = Hash;
 
-/// ZeiCoin transaction - simple account model
+// Script types for future smart contracts
+pub const ScriptVersion = u16;
+pub const ScriptOpcode = enum(u8) {
+    // Constants
+    OP_0 = 0x00,
+    OP_PUSHDATA1 = 0x4c,
+    
+    // Crypto
+    OP_CHECKSIG = 0xac,
+    OP_CHECKMULTISIG = 0xae,
+    OP_CHECKSIGVERIFY = 0xad,
+    
+    // Reserved for future opcodes
+    _,
+};
+
+// Transaction flags for soft fork activation
+pub const TransactionFlags = packed struct(u16) {
+    witness_enabled: bool = false,      // Bit 0: Witness data present
+    script_enabled: bool = false,       // Bit 1: Script execution enabled
+    multisig_enabled: bool = false,     // Bit 2: Multisig support
+    taproot_enabled: bool = false,      // Bit 3: Taproot support
+    // Bits 4-15: Reserved for future features
+    reserved: u12 = 0,
+};
+
+/// ZeiCoin transaction v2 - Future-proof design
 pub const Transaction = struct {
-    version: u16, // Transaction version for protocol upgrades
-    sender: Address,
-    recipient: Address,
-    amount: u64, // Amount in zei (base unit)
-    fee: u64, // 💰 Transaction fee paid to miner
-    nonce: u64, // Sender's transaction counter (prevents double-spend)
-    timestamp: u64, // Unix timestamp when transaction was created
-    expiry_height: u64, // Block height after which transaction expires (24hr window)
-    sender_public_key: [32]u8, // Public key of sender (for signature verification)
-    signature: Signature, // Ed25519 signature of transaction data
+    // Core fields (existing)
+    version: u16,                       // Transaction version for protocol upgrades
+    flags: TransactionFlags,            // Feature flags for soft forks
+    sender: Address,                    // Versioned sender address
+    recipient: Address,                 // Versioned recipient address
+    amount: u64,                        // Amount in zei (base unit)
+    fee: u64,                          // Transaction fee paid to miner
+    nonce: u64,                        // Sender's transaction counter
+    timestamp: u64,                    // Unix timestamp when created
+    expiry_height: u64,                // Block height after which expires
+    sender_public_key: [32]u8,         // Public key of sender
+    signature: Signature,               // Ed25519 signature (moves to witness later)
+    
+    // Future-proofing fields
+    script_version: ScriptVersion,      // Script language version (0 = none)
+    witness_data: []const u8,          // Signatures, scripts, proofs (empty for now)
+    extra_data: []const u8,            // Arbitrary data for soft forks (empty for now)
 
     /// Calculate the hash of this transaction (used as transaction ID)
     pub fn hash(self: *const Transaction) TxHash {
@@ -101,16 +212,20 @@ pub const Transaction = struct {
         // Create a copy without signature for hashing
         const tx_for_hash = struct {
             version: u16,
+            flags: TransactionFlags,
             sender: Address,
             recipient: Address,
             amount: u64,
-            fee: u64, // 💰 Include fee in transaction hash
+            fee: u64,
             nonce: u64,
             timestamp: u64,
             expiry_height: u64,
             sender_public_key: [32]u8,
+            script_version: ScriptVersion,
+            // Note: witness_data and extra_data are included in hash
         }{
             .version = self.version,
+            .flags = self.flags,
             .sender = self.sender,
             .recipient = self.recipient,
             .amount = self.amount,
@@ -119,6 +234,7 @@ pub const Transaction = struct {
             .timestamp = self.timestamp,
             .expiry_height = self.expiry_height,
             .sender_public_key = self.sender_public_key,
+            .script_version = self.script_version,
         };
 
         // Serialize and hash the transaction data
@@ -128,13 +244,22 @@ pub const Transaction = struct {
 
         // Simple serialization for hashing (order matters!)
         writer.writeInt(u16, tx_for_hash.version, .little) catch unreachable;
-        writer.writeAll(&tx_for_hash.sender) catch unreachable;
-        writer.writeAll(&tx_for_hash.recipient) catch unreachable;
+        writer.writeInt(u16, @bitCast(tx_for_hash.flags), .little) catch unreachable;
+        writer.writeAll(std.mem.asBytes(&tx_for_hash.sender)) catch unreachable;
+        writer.writeAll(std.mem.asBytes(&tx_for_hash.recipient)) catch unreachable;
         writer.writeInt(u64, tx_for_hash.amount, .little) catch unreachable;
         writer.writeInt(u64, tx_for_hash.fee, .little) catch unreachable;
         writer.writeInt(u64, tx_for_hash.nonce, .little) catch unreachable;
         writer.writeInt(u64, tx_for_hash.timestamp, .little) catch unreachable;
+        writer.writeInt(u64, tx_for_hash.expiry_height, .little) catch unreachable;
         writer.writeAll(&tx_for_hash.sender_public_key) catch unreachable;
+        writer.writeInt(u16, tx_for_hash.script_version, .little) catch unreachable;
+        
+        // Include witness_data and extra_data in hash
+        writer.writeInt(u32, @intCast(self.witness_data.len), .little) catch unreachable;
+        writer.writeAll(self.witness_data) catch unreachable;
+        writer.writeInt(u32, @intCast(self.extra_data.len), .little) catch unreachable;
+        writer.writeAll(self.extra_data) catch unreachable;
 
         const data = stream.getWritten();
         return util.hash256(data);
@@ -142,7 +267,7 @@ pub const Transaction = struct {
 
     /// Check if this is a coinbase transaction (created from thin air)
     pub fn isCoinbase(self: *const Transaction) bool {
-        return std.mem.eql(u8, &self.sender, &std.mem.zeroes(Address));
+        return self.sender.isZero();
     }
 
     /// Check if transaction has valid basic structure
@@ -177,14 +302,31 @@ pub const Transaction = struct {
             std.debug.print("❌ Transaction invalid: timestamp is 0\n", .{});
             return false;
         }
-        if (std.mem.eql(u8, &self.sender, &self.recipient)) {
+        if (self.sender.equals(self.recipient)) {
             std.debug.print("❌ Transaction invalid: sender equals recipient\n", .{});
+            return false;
+        }
+        
+        // Validate future-proof fields
+        if (self.script_version != 0) {
+            std.debug.print("❌ Transaction invalid: unsupported script version {}\n", .{self.script_version});
+            return false;
+        }
+        
+        // For now, witness_data and extra_data must be empty
+        if (self.witness_data.len > 0) {
+            std.debug.print("❌ Transaction invalid: witness data not yet supported\n", .{});
+            return false;
+        }
+        
+        if (self.extra_data.len > 0) {
+            std.debug.print("❌ Transaction invalid: extra data not yet supported\n", .{});
             return false;
         }
 
         // Verify that sender address matches the hash of provided public key
-        const derived_address = util.hash256(&self.sender_public_key);
-        if (!std.mem.eql(u8, &self.sender, &derived_address)) {
+        const derived_address = Address.fromPublicKey(self.sender_public_key);
+        if (!self.sender.equals(derived_address)) {
             std.debug.print("❌ Transaction invalid: sender address doesn't match public key\n", .{});
             return false;
         }
@@ -194,9 +336,28 @@ pub const Transaction = struct {
     
     /// Get the serialized size of this transaction in bytes
     pub fn getSerializedSize(self: *const Transaction) usize {
-        _ = self;
-        // All transactions have the same size due to fixed-size fields
-        return MempoolLimits.TRANSACTION_SIZE;
+        // Base size for fixed fields
+        var size: usize = 0;
+        size += @sizeOf(u16); // version
+        size += @sizeOf(TransactionFlags); // flags
+        size += @sizeOf(Address); // sender
+        size += @sizeOf(Address); // recipient
+        size += @sizeOf(u64); // amount
+        size += @sizeOf(u64); // fee
+        size += @sizeOf(u64); // nonce
+        size += @sizeOf(u64); // timestamp
+        size += @sizeOf(u64); // expiry_height
+        size += @sizeOf([32]u8); // sender_public_key
+        size += @sizeOf(Signature); // signature
+        size += @sizeOf(ScriptVersion); // script_version
+        
+        // Variable length fields
+        size += @sizeOf(u32); // witness_data length prefix
+        size += self.witness_data.len;
+        size += @sizeOf(u32); // extra_data length prefix
+        size += self.extra_data.len;
+        
+        return size;
     }
 };
 
@@ -318,12 +479,19 @@ pub const DifficultyTarget = struct {
 
 /// Block header containing essential block information
 pub const BlockHeader = struct {
-    version: u32, // Block version for protocol upgrades
-    previous_hash: BlockHash,
-    merkle_root: Hash, // Root of transaction merkle tree
-    timestamp: u64, // Unix timestamp when block was created
-    difficulty: u64, // Dynamic difficulty target (serialized DifficultyTarget)
-    nonce: u32, // Proof-of-work nonce
+    // Core fields (existing)
+    version: u32,              // Block version for protocol upgrades
+    previous_hash: BlockHash,  // Hash of previous block
+    merkle_root: Hash,         // Root of transaction merkle tree
+    timestamp: u64,            // Unix timestamp when block was created
+    difficulty: u64,           // Dynamic difficulty target
+    nonce: u32,                // Proof-of-work nonce
+    
+    // Future-proofing fields
+    witness_root: Hash,        // Merkle root of witness data (unused for now)
+    state_root: Hash,          // For future state commitments (unused for now)
+    extra_nonce: u64,          // Extra nonce for mining pools
+    extra_data: [32]u8,        // For soft fork signaling and future use
 
     /// Serialize block header to bytes
     pub fn serialize(self: *const BlockHeader, writer: anytype) !void {
@@ -333,6 +501,12 @@ pub const BlockHeader = struct {
         try writer.writeInt(u64, self.timestamp, .little);
         try writer.writeInt(u64, self.difficulty, .little);
         try writer.writeInt(u32, self.nonce, .little);
+        
+        // New future-proof fields
+        try writer.writeAll(&self.witness_root);
+        try writer.writeAll(&self.state_root);
+        try writer.writeInt(u64, self.extra_nonce, .little);
+        try writer.writeAll(&self.extra_data);
     }
     
     /// Get difficulty target from header

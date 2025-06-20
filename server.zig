@@ -102,7 +102,8 @@ pub fn main() !void {
     }
 
     const miner_address = zen_wallet.getAddress() orelse return error.WalletLoadFailed;
-    print("⛏️  Zen miner: {s}\n", .{std.fmt.fmtSliceHexLower(miner_address[0..8])});
+    const miner_addr_bytes = miner_address.toLegacyBytes();
+    print("⛏️  Zen miner: {s}\n", .{std.fmt.fmtSliceHexLower(miner_addr_bytes[0..8])});
 
     // Get our ports (zen port separation)
     const p2p_port: u16 = 10801; // P2P network port
@@ -298,8 +299,10 @@ fn handleTransaction(allocator: std.mem.Allocator, connection: net.Server.Connec
     var test_recipient_wallet = try key.KeyPair.generateNew();
     const recipient_address = test_recipient_wallet.getAddress();
 
-    print("📝 Sender: {s}\n", .{std.fmt.fmtSliceHexLower(sender_address[0..8])});
-    print("📝 Recipient: {s}\n", .{std.fmt.fmtSliceHexLower(recipient_address[0..8])});
+    const sender_bytes = sender_address.toLegacyBytes();
+    const recipient_bytes = recipient_address.toLegacyBytes();
+    print("📝 Sender: {s}\n", .{std.fmt.fmtSliceHexLower(sender_bytes[0..8])});
+    print("📝 Recipient: {s}\n", .{std.fmt.fmtSliceHexLower(recipient_bytes[0..8])});
 
     // Fund the sender account (create account with balance)
     const sender_balance = 100 * types.ZEI_COIN; // Give sender 100 ZEI
@@ -322,6 +325,7 @@ fn handleTransaction(allocator: std.mem.Allocator, connection: net.Server.Connec
     const zen_fee = types.ZenFees.STANDARD_FEE; // 💰 Pay standard fee
     var test_tx = types.Transaction{
         .version = 0, // Version 0 for initial protocol
+        .flags = .{}, // Default flags
         .sender = sender_address,
         .sender_public_key = test_sender_wallet.public_key,
         .recipient = recipient_address,
@@ -331,6 +335,9 @@ fn handleTransaction(allocator: std.mem.Allocator, connection: net.Server.Connec
         .timestamp = @intCast(util.getTime()),
         .expiry_height = current_height + expiry_window,
         .signature = std.mem.zeroes(types.Signature), // Will be filled below
+        .script_version = 0,
+        .witness_data = &[_]u8{},
+        .extra_data = &[_]u8{},
     };
 
     // Sign the transaction properly
@@ -338,7 +345,7 @@ fn handleTransaction(allocator: std.mem.Allocator, connection: net.Server.Connec
     test_tx.signature = try test_sender_wallet.signTransaction(tx_hash);
 
     print("✍️  Transaction signed with valid Ed25519 signature\n", .{});
-    print("📊 Transaction details: {} ZEI from {s} to {s}\n", .{ send_amount / types.ZEI_COIN, std.fmt.fmtSliceHexLower(sender_address[0..8]), std.fmt.fmtSliceHexLower(recipient_address[0..8]) });
+    print("📊 Transaction details: {} ZEI from {s} to {s}\n", .{ send_amount / types.ZEI_COIN, std.fmt.fmtSliceHexLower(sender_bytes[0..8]), std.fmt.fmtSliceHexLower(recipient_bytes[0..8]) });
 
     // Add to mempool
     zeicoin.addTransaction(test_tx) catch |err| {
@@ -358,7 +365,6 @@ fn handleTransaction(allocator: std.mem.Allocator, connection: net.Server.Connec
 }
 
 fn handleWalletFunding(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, message: []const u8) !void {
-    _ = allocator;
 
     // Parse FUND_WALLET:address message
     const prefix = "FUND_WALLET:";
@@ -368,22 +374,12 @@ fn handleWalletFunding(allocator: std.mem.Allocator, connection: net.Server.Conn
     print("💰 Funding request for client address: {s}\n", .{address_hex});
 
     // Parse hex address
-    var client_address: types.Address = undefined;
-    const parsed_len = std.fmt.hexToBytes(&client_address, address_hex) catch |err| {
-        print("❌ Failed to parse hex address: {}\n", .{err});
+    const client_address = types.Address.fromString(allocator, address_hex) catch |err| {
+        print("❌ Failed to parse address: {}\n", .{err});
         const error_msg = "ERROR: Invalid address format";
         try connection.stream.writeAll(error_msg);
         return;
     };
-
-    print("✅ Parsed address length: {}, expected: {}\n", .{ parsed_len.len, @sizeOf(types.Address) });
-
-    if (parsed_len.len != @sizeOf(types.Address)) {
-        print("❌ Address length mismatch\n", .{});
-        const error_msg = "ERROR: Invalid address length";
-        try connection.stream.writeAll(error_msg);
-        return;
-    }
 
     // Create funded account for client
     const client_balance = 100 * types.ZEI_COIN; // Give client 100 ZEI
@@ -412,20 +408,12 @@ fn handleBalanceCheck(allocator: std.mem.Allocator, connection: net.Server.Conne
     print("💰 Balance check for address: {s}\n", .{address_hex});
 
     // Parse hex address
-    var client_address: types.Address = undefined;
-    const parsed_len = std.fmt.hexToBytes(&client_address, address_hex) catch |err| {
-        print("❌ Failed to parse hex address: {}\n", .{err});
+    const client_address = types.Address.fromString(allocator, address_hex) catch |err| {
+        print("❌ Failed to parse address: {}\n", .{err});
         const error_msg = "ERROR: Invalid address format";
         try connection.stream.writeAll(error_msg);
         return;
     };
-
-    if (parsed_len.len != @sizeOf(types.Address)) {
-        print("❌ Address length mismatch\n", .{});
-        const error_msg = "ERROR: Invalid address length";
-        try connection.stream.writeAll(error_msg);
-        return;
-    }
 
     // Get account balance
     const account = zeicoin.database.getAccount(client_address) catch |err| {
@@ -464,9 +452,8 @@ fn handleNonceCheck(allocator: std.mem.Allocator, connection: net.Server.Connect
     print("🔢 Nonce check for address: {s}\n", .{address_hex});
 
     // Parse hex address
-    var client_address: types.Address = undefined;
-    _ = std.fmt.hexToBytes(&client_address, address_hex) catch |err| {
-        print("❌ Failed to parse hex address: {}\n", .{err});
+    const client_address = types.Address.fromString(allocator, address_hex) catch |err| {
+        print("❌ Failed to parse address: {}\n", .{err});
         const error_msg = "ERROR: Invalid address format";
         try connection.stream.writeAll(error_msg);
         return;
@@ -497,7 +484,7 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
     const data = message[prefix.len..];
     logMessage("💸 Processing client transaction: {s}", .{data});
 
-    // Parse CLIENT_TRANSACTION:sender_hex:recipient_hex:amount:fee:nonce:signature_hex:public_key_hex
+    // Parse CLIENT_TRANSACTION:sender_hex:recipient_hex:amount:fee:nonce:timestamp:expiry_height:signature_hex:public_key_hex
     var parts = std.mem.splitScalar(u8, data, ':');
     const sender_hex = parts.next() orelse {
         const error_msg = "ERROR: Missing sender address";
@@ -524,6 +511,16 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
         try connection.stream.writeAll(error_msg);
         return;
     };
+    const timestamp_str = parts.next() orelse {
+        const error_msg = "ERROR: Missing timestamp";
+        try connection.stream.writeAll(error_msg);
+        return;
+    };
+    const expiry_height_str = parts.next() orelse {
+        const error_msg = "ERROR: Missing expiry_height";
+        try connection.stream.writeAll(error_msg);
+        return;
+    };
     const signature_hex = parts.next() orelse {
         const error_msg = "ERROR: Missing signature";
         try connection.stream.writeAll(error_msg);
@@ -536,22 +533,20 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
     };
 
     // Parse sender address
-    var sender_address: types.Address = undefined;
-    _ = std.fmt.hexToBytes(&sender_address, sender_hex) catch {
+    const sender_address = types.Address.fromString(allocator, sender_hex) catch {
         const error_msg = "ERROR: Invalid sender address format";
         try connection.stream.writeAll(error_msg);
         return;
     };
 
     // Parse recipient address
-    var recipient_address: types.Address = undefined;
-    _ = std.fmt.hexToBytes(&recipient_address, recipient_hex) catch {
+    const recipient_address = types.Address.fromString(allocator, recipient_hex) catch {
         const error_msg = "ERROR: Invalid recipient address format";
         try connection.stream.writeAll(error_msg);
         return;
     };
 
-    // Parse amount, fee, and nonce
+    // Parse amount, fee, nonce, timestamp, and expiry_height
     const amount = std.fmt.parseInt(u64, amount_str, 10) catch {
         const error_msg = "ERROR: Invalid amount format";
         try connection.stream.writeAll(error_msg);
@@ -564,6 +559,16 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
     };
     const nonce = std.fmt.parseInt(u32, nonce_str, 10) catch {
         const error_msg = "ERROR: Invalid nonce format";
+        try connection.stream.writeAll(error_msg);
+        return;
+    };
+    const timestamp = std.fmt.parseInt(u64, timestamp_str, 10) catch {
+        const error_msg = "ERROR: Invalid timestamp format";
+        try connection.stream.writeAll(error_msg);
+        return;
+    };
+    const expiry_height = std.fmt.parseInt(u64, expiry_height_str, 10) catch {
+        const error_msg = "ERROR: Invalid expiry_height format";
         try connection.stream.writeAll(error_msg);
         return;
     };
@@ -608,22 +613,22 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
         return;
     }
 
-    // Get current blockchain height for expiry calculation
-    const current_height = zeicoin.getHeight() catch 0;
-    const expiry_window = types.TransactionExpiry.getExpiryWindow();
-    
     // Create transaction from client data with real signature and public key
     const client_tx = types.Transaction{
         .version = 0, // Version 0 for initial protocol
+        .flags = .{}, // Default flags
         .sender = sender_address,
         .sender_public_key = public_key,
         .recipient = recipient_address,
         .amount = amount,
         .fee = fee, // 💰 Include zen fee
         .nonce = nonce,
-        .timestamp = @intCast(util.getTime()),
-        .expiry_height = current_height + expiry_window,
+        .timestamp = timestamp, // Use client's timestamp
+        .expiry_height = expiry_height, // Use client's expiry_height
         .signature = signature,
+        .script_version = 0,
+        .witness_data = &[_]u8{},
+        .extra_data = &[_]u8{},
     };
 
     // Format amounts properly for display
@@ -632,7 +637,9 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
     const fee_display = util.formatZEI(allocator, fee) catch "? ZEI";
     defer if (!std.mem.eql(u8, fee_display, "? ZEI")) allocator.free(fee_display);
 
-    logMessage("📝 Client transaction: {s} + {s} fee from {s} to {s}", .{ amount_display, fee_display, std.fmt.fmtSliceHexLower(sender_address[0..8]), std.fmt.fmtSliceHexLower(recipient_address[0..8]) });
+    const sender_bytes = sender_address.toLegacyBytes();
+    const recipient_bytes = recipient_address.toLegacyBytes();
+    logMessage("📝 Client transaction: {s} + {s} fee from {s} to {s}", .{ amount_display, fee_display, std.fmt.fmtSliceHexLower(sender_bytes[0..8]), std.fmt.fmtSliceHexLower(recipient_bytes[0..8]) });
 
     logMessage("🔄 About to call zeicoin.addTransaction...", .{});
     // Add to mempool (ZeiCoin will handle balance updates after validation)

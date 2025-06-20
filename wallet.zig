@@ -45,7 +45,7 @@ pub const WalletFile = struct {
         var hasher = std.crypto.hash.sha2.Sha256.init(.{});
         hasher.update(&encrypted_data);
         hasher.update(&zeicoin_keypair.public_key);
-        hasher.update(&address);
+        hasher.update(std.mem.asBytes(&address));
         hasher.update(&salt);
         const checksum = hasher.finalResult();
 
@@ -65,7 +65,7 @@ pub const WalletFile = struct {
         var hasher = std.crypto.hash.sha2.Sha256.init(.{});
         hasher.update(&self.encrypted_data);
         hasher.update(&self.public_key);
-        hasher.update(&self.address);
+        hasher.update(std.mem.asBytes(&self.address));
         hasher.update(&self.salt);
         const computed_checksum = hasher.finalResult();
 
@@ -117,7 +117,7 @@ pub const Wallet = struct {
         const zeicoin_keypair = try key.KeyPair.generateNew();
 
         // Derive address from public key (same as ZeiCoin)
-        const address = util.hash256(&zeicoin_keypair.public_key);
+        const address = types.Address.fromPublicKey(zeicoin_keypair.public_key);
 
         self.private_key = zeicoin_keypair.private_key;
         self.public_key = zeicoin_keypair.public_key;
@@ -210,7 +210,8 @@ pub const Wallet = struct {
     pub fn getAddressHex(self: *Wallet, allocator: std.mem.Allocator) !?[]u8 {
         if (self.address == null) return null;
 
-        return try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&self.address.?)});
+        const addr_bytes = self.address.?.toLegacyBytes();
+        return try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&addr_bytes)});
     }
 
     /// 📝 Get short address for UI display (first 16 chars)
@@ -218,7 +219,8 @@ pub const Wallet = struct {
         if (self.address == null) return null;
 
         var short_addr: [16]u8 = undefined;
-        const hex_slice = std.fmt.fmtSliceHexLower(self.address.?[0..8]);
+        const addr_bytes = self.address.?.toLegacyBytes();
+        const hex_slice = std.fmt.fmtSliceHexLower(addr_bytes[0..8]);
         _ = std.fmt.bufPrint(&short_addr, "{s}", .{hex_slice}) catch return null;
         return short_addr;
     }
@@ -243,7 +245,7 @@ fn expandPrivateKey(seed: [32]u8) [64]u8 {
 
 /// 🏠 Derive ZeiCoin address from public key
 fn deriveAddress(public_key: [32]u8) types.Address {
-    return util.hash256(&public_key);
+    return types.Address.fromPublicKey(public_key);
 }
 
 /// 🔒 Encrypt 64-byte private key using PBKDF2 + AES256-GCM

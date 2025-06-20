@@ -95,7 +95,7 @@ pub const DISCOVERY_MAGIC = [4]u8{ 0xDE, 0x11, 0xC0, 0x1E }; // ZeiCoin discover
 pub const MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024; // 32MB max message
 pub const MAX_PEERS: usize = 8; // Keep it simple
 pub const VERSION: u32 = 1;
-pub const SOFTWARE_VERSION: u32 = 10; // v10: Added block versioning support
+pub const SOFTWARE_VERSION: u32 = 11; // v11: Added address versioning and future-proof transaction/block fields
 
 // Message types (similar to Bitcoin v0.01 protocol)
 pub const MessageType = enum(u12) {
