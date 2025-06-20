@@ -318,6 +318,7 @@ pub const DifficultyTarget = struct {
 
 /// Block header containing essential block information
 pub const BlockHeader = struct {
+    version: u32, // Block version for protocol upgrades
     previous_hash: BlockHash,
     merkle_root: Hash, // Root of transaction merkle tree
     timestamp: u64, // Unix timestamp when block was created
@@ -326,6 +327,7 @@ pub const BlockHeader = struct {
 
     /// Serialize block header to bytes
     pub fn serialize(self: *const BlockHeader, writer: anytype) !void {
+        try writer.writeInt(u32, self.version, .little);
         try writer.writeAll(&self.previous_hash);
         try writer.writeAll(&self.merkle_root);
         try writer.writeInt(u64, self.timestamp, .little);
@@ -387,7 +389,8 @@ pub const Block = struct {
     pub fn getSize(self: *const Block) usize {
         var size: usize = 0;
         
-        // Header size (fixed): 32 + 32 + 8 + 8 + 4 = 84 bytes
+        // Header size (fixed): 4 + 32 + 32 + 8 + 8 + 4 = 88 bytes
+        size += @sizeOf(u32);          // version: 4 bytes
         size += @sizeOf(BlockHash);    // previous_hash: 32 bytes
         size += @sizeOf(Hash);         // merkle_root: 32 bytes  
         size += @sizeOf(u64);          // timestamp: 8 bytes
@@ -410,6 +413,12 @@ pub const Block = struct {
 
     /// Check if block structure is valid
     pub fn isValid(self: *const Block) bool {
+        // Check block version - only version 0 is currently supported
+        if (self.header.version != 0) {
+            std.debug.print("❌ Block invalid: unsupported version {}\n", .{self.header.version});
+            return false;
+        }
+        
         // Genesis blocks can have transactions (they contain coinbase)
         // Regular blocks must have at least one transaction
         
@@ -711,6 +720,7 @@ test "block validation" {
 
     const block = Block{
         .header = BlockHeader{
+            .version = 0, // Block version 0 for current protocol
             .previous_hash = std.mem.zeroes(BlockHash),
             .merkle_root = std.mem.zeroes(Hash),
             .timestamp = 1704067200,
@@ -790,6 +800,7 @@ test "block header hash consistency" {
     // Create test block header
     const test_difficulty = ZenMining.initialDifficultyTarget().toU64();
     const header1 = BlockHeader{
+        .version = 0, // Block version 0 for current protocol
         .previous_hash = std.mem.zeroes(Hash),
         .merkle_root = [_]u8{1} ++ std.mem.zeroes([31]u8),
         .timestamp = 1704067200,
@@ -799,6 +810,7 @@ test "block header hash consistency" {
 
     // Create identical header
     const header2 = BlockHeader{
+        .version = 0, // Block version 0 for current protocol
         .previous_hash = std.mem.zeroes(Hash),
         .merkle_root = [_]u8{1} ++ std.mem.zeroes([31]u8),
         .timestamp = 1704067200,
@@ -819,6 +831,7 @@ test "block header hash consistency" {
 test "block header hash uniqueness" {
     const test_difficulty = ZenMining.initialDifficultyTarget().toU64();
     const base_header = BlockHeader{
+        .version = 0, // Block version 0 for current protocol
         .previous_hash = std.mem.zeroes(Hash),
         .merkle_root = std.mem.zeroes(Hash),
         .timestamp = 1704067200,
@@ -880,6 +893,7 @@ test "block hash delegated to header hash" {
 
     const block = Block{
         .header = BlockHeader{
+            .version = 0, // Block version 0 for current protocol
             .previous_hash = std.mem.zeroes(BlockHash),
             .merkle_root = std.mem.zeroes(Hash),
             .timestamp = 1704067200,
@@ -893,4 +907,69 @@ test "block hash delegated to header hash" {
     const block_hash = block.hash();
     const header_hash = block.header.hash();
     try testing.expectEqualSlices(u8, &block_hash, &header_hash);
+}
+
+test "block version validation" {
+    const allocator = testing.allocator;
+    
+    // Create a valid transaction
+    const tx = Transaction{
+        .version = 0,
+        .sender = std.mem.zeroes(Address),
+        .recipient = std.mem.zeroes(Address),
+        .amount = 100,
+        .fee = 0,
+        .nonce = 0,
+        .timestamp = 1000,
+        .expiry_height = std.math.maxInt(u64),
+        .sender_public_key = std.mem.zeroes([32]u8),
+        .signature = std.mem.zeroes(Signature),
+    };
+    
+    // Create transactions array
+    const txs = try allocator.alloc(Transaction, 1);
+    defer allocator.free(txs);
+    txs[0] = tx;
+    
+    // Test version 0 block (should be valid)
+    var block_v0 = Block{
+        .header = BlockHeader{
+            .version = 0,
+            .previous_hash = std.mem.zeroes(BlockHash),
+            .merkle_root = std.mem.zeroes(Hash),
+            .timestamp = 1000,
+            .difficulty = 0,
+            .nonce = 0,
+        },
+        .transactions = txs,
+    };
+    try testing.expect(block_v0.isValid());
+    
+    // Test version 1 block (should be invalid)
+    var block_v1 = Block{
+        .header = BlockHeader{
+            .version = 1,
+            .previous_hash = std.mem.zeroes(BlockHash),
+            .merkle_root = std.mem.zeroes(Hash),
+            .timestamp = 1000,
+            .difficulty = 0,
+            .nonce = 0,
+        },
+        .transactions = txs,
+    };
+    try testing.expect(!block_v1.isValid());
+    
+    // Test high version block (should be invalid)
+    var block_v999 = Block{
+        .header = BlockHeader{
+            .version = 999,
+            .previous_hash = std.mem.zeroes(BlockHash),
+            .merkle_root = std.mem.zeroes(Hash),
+            .timestamp = 1000,
+            .difficulty = 0,
+            .nonce = 0,
+        },
+        .transactions = txs,
+    };
+    try testing.expect(!block_v999.isValid());
 }

@@ -256,6 +256,7 @@ test "block storage and retrieval" {
 
     const test_block = Block{
         .header = types.BlockHeader{
+            .version = 0, // Block version 0 for current protocol
             .previous_hash = std.mem.zeroes(types.Hash),
             .merkle_root = std.mem.zeroes(types.Hash),
             .timestamp = 1234567890,

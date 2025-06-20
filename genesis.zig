@@ -41,6 +41,7 @@ pub const GenesisBlocks = struct {
 
             // Create genesis block header
             const header = types.BlockHeader{
+                .version = 0, // Version 0 for genesis
                 .previous_hash = std.mem.zeroes([32]u8), // No previous block
                 .merkle_root = coinbase_tx.hash(),
                 .timestamp = TIMESTAMP,
@@ -93,6 +94,7 @@ pub const GenesisBlocks = struct {
 
             // Create genesis block header
             const header = types.BlockHeader{
+                .version = 0, // Version 0 for genesis
                 .previous_hash = std.mem.zeroes([32]u8),
                 .merkle_root = coinbase_tx.hash(),
                 .timestamp = TIMESTAMP,

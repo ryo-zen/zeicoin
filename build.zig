@@ -23,4 +23,77 @@ pub fn build(b: *std.Build) void {
     });
     zeicoin_cli.linkLibC();
     b.installArtifact(zeicoin_cli);
+
+    // Tests
+    const main_tests = b.addTest(.{
+        .root_source_file = b.path("main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    main_tests.linkLibC();
+
+    const types_tests = b.addTest(.{
+        .root_source_file = b.path("types.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const db_tests = b.addTest(.{
+        .root_source_file = b.path("db.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const net_tests = b.addTest(.{
+        .root_source_file = b.path("net.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const serialize_tests = b.addTest(.{
+        .root_source_file = b.path("serialize.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const key_tests = b.addTest(.{
+        .root_source_file = b.path("key.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const genesis_tests = b.addTest(.{
+        .root_source_file = b.path("genesis.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const forkmanager_tests = b.addTest(.{
+        .root_source_file = b.path("forkmanager.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Block security tests
+    const security_tests = b.addTest(.{
+        .root_source_file = b.path("block_security_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Test step that runs all tests
+    const test_step = b.step("test", "Run all unit tests");
+    test_step.dependOn(&main_tests.step);
+    test_step.dependOn(&types_tests.step);
+    test_step.dependOn(&db_tests.step);
+    test_step.dependOn(&net_tests.step);
+    test_step.dependOn(&serialize_tests.step);
+    test_step.dependOn(&key_tests.step);
+    test_step.dependOn(&genesis_tests.step);
+    test_step.dependOn(&forkmanager_tests.step);
+    test_step.dependOn(&security_tests.step);
+
+    // Individual test steps
+    const test_security_step = b.step("test-security", "Run block security tests");
+    test_security_step.dependOn(&security_tests.step);
 }

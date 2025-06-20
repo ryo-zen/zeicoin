@@ -512,6 +512,7 @@ pub const ZeiCoin = struct {
         // Create block with dynamic difficulty
         var new_block = Block{
             .header = BlockHeader{
+                .version = 0, // Block version 0 for current protocol
                 .previous_hash = previous_hash,
                 .merkle_root = std.mem.zeroes(Hash), // Zen simplicity
                 .timestamp = @intCast(util.getTime()),
@@ -2357,6 +2358,7 @@ test "block validation" {
     // Create valid block
     var valid_block = types.Block{
         .header = types.BlockHeader{
+            .version = 0, // Block version 0 for current protocol
             .previous_hash = prev_block.hash(),
             .merkle_root = std.mem.zeroes(types.Hash),
             .timestamp = @intCast(util.getTime()),
@@ -2459,6 +2461,7 @@ test "block broadcasting integration" {
 
     const test_block = types.Block{
         .header = types.BlockHeader{
+            .version = 0, // Block version 0 for current protocol
             .previous_hash = std.mem.zeroes(types.Hash),
             .merkle_root = std.mem.zeroes(types.Hash),
             .timestamp = @intCast(util.getTime()),
@@ -2486,6 +2489,7 @@ test "timestamp validation - future blocks rejected" {
     var transactions = [_]types.Transaction{};
     const future_block = types.Block{
         .header = types.BlockHeader{
+            .version = 0, // Block version 0 for current protocol
             .previous_hash = std.mem.zeroes(types.Hash),
             .merkle_root = std.mem.zeroes(types.Hash),
             .timestamp = future_time,
@@ -2511,6 +2515,7 @@ test "timestamp validation - median time past" {
         var transactions = [_]types.Transaction{};
         const block = types.Block{
             .header = types.BlockHeader{
+                .version = 0, // Block version 0 for current protocol
                 .previous_hash = if (i == 0) std.mem.zeroes(types.Hash) else blk: {
                     const prev = try zeicoin.getBlockByHeight(i - 1);
                     defer zeicoin.allocator.free(prev.transactions);
@@ -2537,6 +2542,7 @@ test "timestamp validation - median time past" {
     var bad_transactions = [_]types.Transaction{};
     const bad_block = types.Block{
         .header = types.BlockHeader{
+            .version = 0, // Block version 0 for current protocol
             .previous_hash = std.mem.zeroes(types.Hash),
             .merkle_root = std.mem.zeroes(types.Hash),
             .timestamp = expected_mtp,
