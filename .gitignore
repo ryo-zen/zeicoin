@@ -22,3 +22,9 @@ randomx/randomx_helper
 
 # Test Folder
 tests/
+
+# Docs Folder
+/docs
+
+# SQL Scripts
+/sql
