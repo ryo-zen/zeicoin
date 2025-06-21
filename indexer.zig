@@ -66,30 +66,30 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
-    
+
     // Configuration
     const blockchain_path = switch (types.CURRENT_NETWORK) {
         .testnet => "zeicoin_data_testnet",
         .mainnet => "zeicoin_data_mainnet",
     };
-    
+
     // Dynamic database name based on network
     const database_name = switch (types.CURRENT_NETWORK) {
         .testnet => "zeicoin_testnet",
         .mainnet => "zeicoin_mainnet",
     };
-    
+
     std.log.info("🚀 Starting ZeiCoin PostgreSQL Indexer", .{});
     std.log.info("📁 Blockchain path: {s}", .{blockchain_path});
     std.log.info("🌐 Network: {s}", .{@tagName(types.CURRENT_NETWORK)});
     std.log.info("🗄️ Database: {s}", .{database_name});
-    
+
     // Create indexer configuration
     const config = PgConfig{
         .database = database_name,
         // Use defaults for other fields
     };
-    
+
     // Create connection pool using config
     var pool = try pg.Pool.init(allocator, .{
         .size = config.pool_size,
@@ -105,70 +105,67 @@ pub fn main() !void {
         },
     });
     defer pool.deinit();
-    
+
     std.log.info("✅ Connected to PostgreSQL pool!", .{});
-    
+
     // Test the connection
     var result = try pool.query("SELECT version()", .{});
     defer result.deinit();
-    
+
     while (try result.next()) |row| {
         const version = row.get([]const u8, 0);
         std.log.info("📊 PostgreSQL version: {s}", .{version});
     }
-    
+
     // Get last indexed height
     const last_height = try getLastIndexedHeight(pool);
     std.log.info("📈 Last indexed height: {}", .{last_height});
-    
+
     // Initialize indexer
     var indexer = try Indexer.init(allocator, blockchain_path, config);
     defer indexer.deinit();
-    
+
     // Get current blockchain height
     const current_height = try indexer.getBlockchainHeight();
     std.log.info("📊 Current blockchain height: {}", .{current_height});
-    
+
     if (last_height < current_height) {
-        std.log.info("🔄 Indexing blocks {} to {}...", .{last_height + 1, current_height});
-        
+        std.log.info("🔄 Indexing blocks {} to {}...", .{ last_height + 1, current_height });
+
         // Index new blocks
         var height = last_height + 1;
         while (height <= current_height) : (height += 1) {
             try indexBlock(pool, allocator, blockchain_path, height);
-            
+
             // Update last indexed height
             try updateLastIndexedHeight(pool, height);
-            
+
             std.log.info("✅ Indexed block {}", .{height});
         }
     } else {
         std.log.info("✨ Already up to date!", .{});
     }
-    
+
     // Show some statistics
     try showStats(pool);
 }
 
 fn getLastIndexedHeight(pool: *Pool) !u32 {
-    var result = try pool.query(
-        "SELECT value FROM indexer_state WHERE key = 'last_indexed_height'",
-        .{}
-    );
+    var result = try pool.query("SELECT value FROM indexer_state WHERE key = 'last_indexed_height'", .{});
     defer result.deinit();
-    
+
     while (try result.next()) |row| {
         const value_str = row.get([]const u8, 0);
         return try std.fmt.parseInt(u32, value_str, 10);
     }
-    
+
     return 0;
 }
 
 fn updateLastIndexedHeight(pool: *Pool, height: u32) !void {
     var buf: [20]u8 = undefined;
     const height_str = try std.fmt.bufPrint(&buf, "{}", .{height});
-    
+
     _ = try pool.exec(
         \\UPDATE indexer_state 
         \\SET value = $1, updated_at = CURRENT_TIMESTAMP 
@@ -183,17 +180,17 @@ fn indexBlock(pool: *Pool, allocator: std.mem.Allocator, blockchain_path: []cons
         height,
     });
     defer allocator.free(block_path);
-    
+
     // Read block file directly
     const file = try std.fs.cwd().openFile(block_path, .{});
     defer file.close();
-    
+
     const contents = try file.readToEndAlloc(allocator, 16 * 1024 * 1024); // 16MB max
     defer allocator.free(contents);
-    
+
     var fbs = std.io.fixedBufferStream(contents);
     const reader = fbs.reader();
-    
+
     const block = try serialize.deserialize(reader, types.Block, allocator);
     defer {
         for (block.transactions) |tx| {
@@ -202,20 +199,20 @@ fn indexBlock(pool: *Pool, allocator: std.mem.Allocator, blockchain_path: []cons
         }
         allocator.free(block.transactions);
     }
-    
+
     // Begin transaction
     _ = try pool.exec("BEGIN", .{});
     errdefer _ = pool.exec("ROLLBACK", .{}) catch {};
-    
+
     // Calculate block hash
     const block_hash = block.hash();
     var hash_hex: [64]u8 = undefined;
     _ = try std.fmt.bufPrint(&hash_hex, "{}", .{std.fmt.fmtSliceHexLower(&block_hash)});
-    
+
     // Calculate previous hash hex
     var prev_hash_hex: [64]u8 = undefined;
     _ = try std.fmt.bufPrint(&prev_hash_hex, "{}", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
-    
+
     // Calculate total fees
     var total_fees: u64 = 0;
     for (block.transactions) |tx| {
@@ -223,7 +220,7 @@ fn indexBlock(pool: *Pool, allocator: std.mem.Allocator, blockchain_path: []cons
             total_fees += tx.fee;
         }
     }
-    
+
     // Insert block
     _ = try pool.exec(
         \\INSERT INTO blocks (height, hash, previous_hash, timestamp, difficulty, nonce, tx_count, total_fees, size)
@@ -240,12 +237,12 @@ fn indexBlock(pool: *Pool, allocator: std.mem.Allocator, blockchain_path: []cons
         total_fees,
         block.getSize(),
     });
-    
+
     // Insert transactions
     for (block.transactions, 0..) |tx, pos| {
         try indexTransaction(pool, allocator, &tx, height, &hash_hex, @intCast(pos));
     }
-    
+
     // Commit transaction
     _ = try pool.exec("COMMIT", .{});
 }
@@ -262,11 +259,11 @@ fn indexTransaction(
     const tx_hash = tx.hash();
     var tx_hash_hex: [64]u8 = undefined;
     _ = try std.fmt.bufPrint(&tx_hash_hex, "{}", .{std.fmt.fmtSliceHexLower(&tx_hash)});
-    
+
     // Convert addresses to bech32
     var sender_str: [70]u8 = undefined;
     var recipient_str: [70]u8 = undefined;
-    
+
     if (tx.sender.isZero()) {
         @memcpy(sender_str[0..8], "coinbase");
         sender_str[8] = 0;
@@ -276,12 +273,12 @@ fn indexTransaction(
         @memcpy(sender_str[0..sender_bech32.len], sender_bech32);
         sender_str[sender_bech32.len] = 0;
     }
-    
+
     const recipient_bech32 = try tx.recipient.toBech32(allocator, types.CURRENT_NETWORK);
     defer allocator.free(recipient_bech32);
     @memcpy(recipient_str[0..recipient_bech32.len], recipient_bech32);
     recipient_str[recipient_bech32.len] = 0;
-    
+
     // Insert transaction
     _ = try pool.exec(
         \\INSERT INTO transactions (hash, block_height, block_hash, position, sender, recipient, amount, fee, nonce, timestamp)
@@ -299,7 +296,7 @@ fn indexTransaction(
         tx.nonce,
         tx.timestamp,
     });
-    
+
     // Update account balances
     if (!tx.sender.isZero()) {
         // Deduct from sender
@@ -322,7 +319,7 @@ fn indexTransaction(
             tx.amount + tx.fee,
         });
     }
-    
+
     // Add to recipient
     _ = try pool.exec(
         \\INSERT INTO accounts (address, balance, last_active_block, tx_count, total_received)
@@ -342,7 +339,7 @@ fn indexTransaction(
 
 fn showStats(pool: *Pool) !void {
     std.log.info("\n📊 Blockchain Statistics:", .{});
-    
+
     // Total blocks
     var blocks_result = try pool.query("SELECT COUNT(*) FROM blocks", .{});
     defer blocks_result.deinit();
@@ -350,7 +347,7 @@ fn showStats(pool: *Pool) !void {
         const count = row.get(i64, 0);
         std.log.info("   Total blocks: {}", .{count});
     }
-    
+
     // Total transactions
     var txs_result = try pool.query("SELECT COUNT(*) FROM transactions", .{});
     defer txs_result.deinit();
@@ -358,7 +355,7 @@ fn showStats(pool: *Pool) !void {
         const count = row.get(i64, 0);
         std.log.info("   Total transactions: {}", .{count});
     }
-    
+
     // Total accounts
     var accounts_result = try pool.query("SELECT COUNT(*) FROM accounts WHERE balance > 0", .{});
     defer accounts_result.deinit();
@@ -366,7 +363,7 @@ fn showStats(pool: *Pool) !void {
         const count = row.get(i64, 0);
         std.log.info("   Active accounts: {}", .{count});
     }
-    
+
     // Total supply - cast to BIGINT for pg.zig compatibility
     var supply_result = try pool.query("SELECT CAST(COALESCE(SUM(balance), 0) AS BIGINT) FROM accounts", .{});
     defer supply_result.deinit();
