@@ -335,8 +335,21 @@ fn loadWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
     const address = zen_wallet.getAddress() orelse return error.WalletLoadFailed;
     print("✅ Wallet '{s}' loaded successfully!\n", .{wallet_name});
-    const addr_bytes = address.toLegacyBytes();
-    print("🆔 Address: {s}\n", .{std.fmt.fmtSliceHexLower(&addr_bytes)});
+    
+    // Show bech32 address
+    const bech32_addr = address.toBech32(allocator, types.CURRENT_NETWORK) catch |err| blk: {
+        print("⚠️  Could not encode bech32 address: {}\n", .{err});
+        break :blk null;
+    };
+    defer if (bech32_addr) |addr| allocator.free(addr);
+    
+    if (bech32_addr) |addr| {
+        print("🆔 Address: {s}\n", .{addr});
+    } else {
+        // Fallback to hex if bech32 fails
+        const addr_bytes = address.toLegacyBytes();
+        print("🆔 Address (hex): {s}\n", .{std.fmt.fmtSliceHexLower(&addr_bytes)});
+    }
 }
 
 fn listWallets(allocator: std.mem.Allocator) !void {
@@ -492,10 +505,38 @@ fn handleSendCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const sender_public_key = zen_wallet.getPublicKey() orelse return error.WalletNotLoaded;
 
     print("💸 Sending {} ZEI from wallet '{s}'...\n", .{ amount_zei, wallet_name });
-    const sender_bytes = sender_address.toLegacyBytes();
-    const recipient_bytes = recipient_address.toLegacyBytes();
-    print("🆔 From: {s}\n", .{std.fmt.fmtSliceHexLower(sender_bytes[0..16])});
-    print("🎯 To: {s}\n", .{std.fmt.fmtSliceHexLower(recipient_bytes[0..16])});
+    
+    // Format addresses for display
+    const sender_bech32 = sender_address.toBech32(allocator, types.CURRENT_NETWORK) catch null;
+    defer if (sender_bech32) |addr| allocator.free(addr);
+    
+    const recipient_bech32 = recipient_address.toBech32(allocator, types.CURRENT_NETWORK) catch null;
+    defer if (recipient_bech32) |addr| allocator.free(addr);
+    
+    // Display addresses (prefer bech32, fallback to hex)
+    if (sender_bech32) |addr| {
+        // Show shortened bech32 (first 16 + last 4 chars)
+        const short_addr = if (addr.len > 20) 
+            try std.fmt.allocPrint(allocator, "{s}...{s}", .{addr[0..16], addr[addr.len-4..]})
+        else addr;
+        defer if (addr.len > 20) allocator.free(short_addr);
+        print("🆔 From: {s}\n", .{short_addr});
+    } else {
+        const sender_bytes = sender_address.toLegacyBytes();
+        print("🆔 From: {s}\n", .{std.fmt.fmtSliceHexLower(sender_bytes[0..16])});
+    }
+    
+    if (recipient_bech32) |addr| {
+        // Show shortened bech32 (first 16 + last 4 chars)
+        const short_addr = if (addr.len > 20) 
+            try std.fmt.allocPrint(allocator, "{s}...{s}", .{addr[0..16], addr[addr.len-4..]})
+        else addr;
+        defer if (addr.len > 20) allocator.free(short_addr);
+        print("🎯 To: {s}\n", .{short_addr});
+    } else {
+        const recipient_bytes = recipient_address.toLegacyBytes();
+        print("🎯 To: {s}\n", .{std.fmt.fmtSliceHexLower(recipient_bytes[0..16])});
+    }
 
     // Create and send transaction
     sendTransaction(allocator, zen_wallet, sender_address, sender_public_key, recipient_address, amount) catch |err| {
@@ -592,9 +633,21 @@ fn handleAddressCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const address = zen_wallet.getAddress() orelse return error.WalletNotLoaded;
 
     print("🆔 Wallet '{s}' address:\n", .{wallet_name});
+    
+    // Show bech32 address as primary format
+    const bech32_addr = address.toBech32(allocator, types.CURRENT_NETWORK) catch |err| blk: {
+        print("⚠️  Could not encode bech32 address: {}\n", .{err});
+        break :blk null;
+    };
+    defer if (bech32_addr) |addr| allocator.free(addr);
+    
+    if (bech32_addr) |addr| {
+        print("   {s}\n", .{addr});
+    }
+    
+    // Also show hex format for compatibility
     const addr_bytes = address.toLegacyBytes();
-    print("   {s}\n", .{std.fmt.fmtSliceHexLower(&addr_bytes)});
-    print("📋 Short address: {s}\n", .{std.fmt.fmtSliceHexLower(addr_bytes[0..16])});
+    print("📋 Hex format: {s}\n", .{std.fmt.fmtSliceHexLower(&addr_bytes)});
 }
 
 fn handleSyncCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
