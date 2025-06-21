@@ -3,6 +3,12 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    
+    // Add pg.zig dependency
+    const pg_dep = b.dependency("pg", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     // 🖥️ Zen Server
     const zen_server = b.addExecutable(.{
@@ -23,6 +29,17 @@ pub fn build(b: *std.Build) void {
     });
     zeicoin_cli.linkLibC();
     b.installArtifact(zeicoin_cli);
+    
+    // 📊 PostgreSQL Indexer
+    const zeicoin_indexer = b.addExecutable(.{
+        .name = "zeicoin_indexer",
+        .root_source_file = b.path("indexer.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    zeicoin_indexer.linkLibC();
+    zeicoin_indexer.root_module.addImport("pg", pg_dep.module("pg"));
+    b.installArtifact(zeicoin_indexer);
 
     // Tests
     const main_tests = b.addTest(.{
@@ -80,6 +97,14 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    
+    // Indexer tests
+    const indexer_tests = b.addTest(.{
+        .root_source_file = b.path("indexer.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    indexer_tests.root_module.addImport("pg", pg_dep.module("pg"));
 
     // Test step that runs all tests
     const test_step = b.step("test", "Run all unit tests");
@@ -92,6 +117,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&genesis_tests.step);
     test_step.dependOn(&forkmanager_tests.step);
     test_step.dependOn(&security_tests.step);
+    test_step.dependOn(&indexer_tests.step);
 
     // Individual test steps
     const test_security_step = b.step("test-security", "Run block security tests");
