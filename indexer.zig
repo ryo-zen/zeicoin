@@ -191,14 +191,8 @@ fn indexBlock(pool: *Pool, allocator: std.mem.Allocator, blockchain_path: []cons
     var fbs = std.io.fixedBufferStream(contents);
     const reader = fbs.reader();
 
-    const block = try serialize.deserialize(reader, types.Block, allocator);
-    defer {
-        for (block.transactions) |tx| {
-            allocator.free(tx.witness_data);
-            allocator.free(tx.extra_data);
-        }
-        allocator.free(block.transactions);
-    }
+    var block = try serialize.deserialize(reader, types.Block, allocator);
+    defer block.deinit(allocator);
 
     // Begin transaction
     _ = try pool.exec("BEGIN", .{});

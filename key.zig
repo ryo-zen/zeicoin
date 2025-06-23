@@ -144,10 +144,9 @@ test "key generation and address derivation" {
     // Get address
     const address = keypair.getAddress();
 
-    // Address should be 32 bytes and not all zeros
-    try testing.expect(address.len == 32);
-    const zero_address = std.mem.zeroes(Address);
-    try testing.expect(!std.mem.eql(u8, &address, &zero_address));
+    // Address should not be all zeros
+    const zero_address = Address.zero();
+    try testing.expect(!address.equals(zero_address));
 }
 
 test "signing and verification" {
@@ -205,5 +204,5 @@ test "address consistency" {
     const address1 = keypair.getAddress();
     const address2 = publicKeyToAddress(keypair.public_key);
 
-    try testing.expectEqualSlices(u8, &address1, &address2);
+    try testing.expect(address1.equals(address2));
 }

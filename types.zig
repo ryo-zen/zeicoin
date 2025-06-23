@@ -37,6 +37,16 @@ pub const SYNC = struct {
     pub const PROGRESS_REPORT_INTERVAL: u32 = 10; // Report progress every N blocks
 };
 
+// Block versioning - for protocol upgrades
+pub const BlockVersion = enum(u32) {
+    V0 = 0, // Initial protocol version
+    // Future versions will be added here for protocol upgrades
+    _,
+};
+
+// Current block version used by the protocol
+pub const CURRENT_BLOCK_VERSION: u32 = @intFromEnum(BlockVersion.V0);
+
 // Network constants - Bootstrap nodes for peer discovery
 pub const BOOTSTRAP_NODES = [_][]const u8{
     "134.199.168.129:10801", // Public bootstrap node
@@ -371,6 +381,39 @@ pub const Transaction = struct {
         
         return size;
     }
+    
+    /// Free all dynamically allocated memory in this transaction
+    /// Safe to call on any transaction - will only free heap-allocated memory
+    pub fn deinit(self: *Transaction, allocator: std.mem.Allocator) void {
+        // For empty slices, check if they're the static empty slice by comparing the pointer
+        // The static empty slice &[_]u8{} has a special sentinel address
+        const empty_slice = &[_]u8{};
+        
+        // Only free if the slices are non-empty and not pointing to the static empty slice
+        if (self.witness_data.len > 0 and self.witness_data.ptr != empty_slice.ptr) {
+            allocator.free(self.witness_data);
+        }
+        if (self.extra_data.len > 0 and self.extra_data.ptr != empty_slice.ptr) {
+            allocator.free(self.extra_data);
+        }
+    }
+    
+    /// Create a deep copy of the transaction, allocating new memory for slices
+    pub fn dupe(self: *const Transaction, allocator: std.mem.Allocator) !Transaction {
+        var new_tx = self.*;
+        
+        // Deep copy witness_data if not empty
+        if (self.witness_data.len > 0) {
+            new_tx.witness_data = try allocator.dupe(u8, self.witness_data);
+        }
+        
+        // Deep copy extra_data if not empty
+        if (self.extra_data.len > 0) {
+            new_tx.extra_data = try allocator.dupe(u8, self.extra_data);
+        }
+        
+        return new_tx;
+    }
 };
 
 /// Account state in ZeiCoin network
@@ -521,6 +564,26 @@ pub const BlockHeader = struct {
         try writer.writeAll(&self.extra_data);
     }
     
+    /// Deserialize block header from bytes
+    pub fn deserialize(reader: anytype) !BlockHeader {
+        var header: BlockHeader = undefined;
+        
+        header.version = try reader.readInt(u32, .little);
+        _ = try reader.readAll(&header.previous_hash);
+        _ = try reader.readAll(&header.merkle_root);
+        header.timestamp = try reader.readInt(u64, .little);
+        header.difficulty = try reader.readInt(u64, .little);
+        header.nonce = try reader.readInt(u32, .little);
+        
+        // New future-proof fields
+        _ = try reader.readAll(&header.witness_root);
+        _ = try reader.readAll(&header.state_root);
+        header.extra_nonce = try reader.readInt(u64, .little);
+        _ = try reader.readAll(&header.extra_data);
+        
+        return header;
+    }
+    
     /// Get difficulty target from header
     pub fn getDifficultyTarget(self: *const BlockHeader) DifficultyTarget {
         return DifficultyTarget.fromU64(self.difficulty);
@@ -623,6 +686,18 @@ pub const Block = struct {
         }
 
         return true;
+    }
+    
+    /// Free all dynamically allocated memory in this block
+    /// This includes the transactions array and any nested allocations
+    /// IMPORTANT: Only call this on blocks loaded from disk/database
+    pub fn deinit(self: *Block, allocator: std.mem.Allocator) void {
+        // First free all nested allocations in each transaction
+        for (self.transactions) |*tx| {
+            tx.deinit(allocator);
+        }
+        // Then free the transactions array itself
+        allocator.free(self.transactions);
     }
 };
 
@@ -802,8 +877,8 @@ pub const MempoolLimits = struct {
     /// Maximum total size of mempool in bytes (50MB)
     pub const MAX_SIZE_BYTES: usize = 50 * 1024 * 1024;
     
-    /// Transaction size for serialization (with version and expiry fields)
-    pub const TRANSACTION_SIZE: usize = 202; // 194 + 8 bytes for expiry_height
+    /// Transaction size for serialization (includes all fields)
+    pub const TRANSACTION_SIZE: usize = 214; // Base fields + version(2) + flags(2) + script_version(2) + witness_data_len(4) + extra_data_len(4)
 };
 
 /// 💸 Transaction limits - prevent individual transaction DoS attacks
@@ -863,12 +938,18 @@ const testing = std.testing;
 test "transaction validation" {
     // Create a test public key and derive address from it
     const alice_public_key = std.mem.zeroes([32]u8);
-    const alice_addr = util.hash256(&alice_public_key);
-    var bob_addr = std.mem.zeroes(Address);
-    bob_addr[0] = 1; // Make it different from alice
+    const alice_addr = Address.fromPublicKey(alice_public_key);
+    var bob_hash: [31]u8 = undefined;
+    @memset(&bob_hash, 0);
+    bob_hash[0] = 1; // Make it different from alice
+    const bob_addr = Address{
+        .version = @intFromEnum(AddressVersion.P2PKH),
+        .hash = bob_hash,
+    };
 
     const tx = Transaction{
         .version = 0,
+        .flags = std.mem.zeroes(TransactionFlags),
         .sender = alice_addr,
         .recipient = bob_addr,
         .amount = 100 * ZEI_COIN,
@@ -878,6 +959,9 @@ test "transaction validation" {
         .expiry_height = 10000,
         .sender_public_key = alice_public_key,
         .signature = std.mem.zeroes(Signature),
+        .script_version = 0,
+        .witness_data = &[_]u8{},
+        .extra_data = &[_]u8{},
     };
 
     try testing.expect(tx.isValid());
@@ -897,12 +981,18 @@ test "account affordability" {
 
 test "block validation" {
     const alice_public_key = std.mem.zeroes([32]u8);
-    const alice_addr = util.hash256(&alice_public_key);
-    var bob_addr = std.mem.zeroes(Address);
-    bob_addr[0] = 1;
+    const alice_addr = Address.fromPublicKey(alice_public_key);
+    var bob_hash: [31]u8 = undefined;
+    @memset(&bob_hash, 0);
+    bob_hash[0] = 1;
+    const bob_addr = Address{
+        .version = @intFromEnum(AddressVersion.P2PKH),
+        .hash = bob_hash,
+    };
 
     const tx = Transaction{
         .version = 0,
+        .flags = std.mem.zeroes(TransactionFlags),
         .sender = alice_addr,
         .recipient = bob_addr,
         .amount = 100 * ZEI_COIN,
@@ -912,6 +1002,9 @@ test "block validation" {
         .expiry_height = 10000,
         .sender_public_key = alice_public_key,
         .signature = std.mem.zeroes(Signature),
+        .script_version = 0,
+        .witness_data = &[_]u8{},
+        .extra_data = &[_]u8{},
     };
 
     var transactions = [_]Transaction{tx};
@@ -924,6 +1017,10 @@ test "block validation" {
             .timestamp = 1704067200,
             .difficulty = ZenMining.initialDifficultyTarget().toU64(),
             .nonce = 0,
+            .witness_root = std.mem.zeroes(Hash),
+            .state_root = std.mem.zeroes(Hash),
+            .extra_nonce = 0,
+            .extra_data = std.mem.zeroes([32]u8),
         },
         .transactions = &transactions,
     };
@@ -941,13 +1038,22 @@ test "money constants" {
 test "transaction hash" {
     // Create test public key and address
     const public_key = std.mem.zeroes([32]u8);
-    const sender_addr = util.hash256(&public_key);
+    const sender_addr = Address.fromPublicKey(public_key);
+    
+    var recipient_hash: [31]u8 = undefined;
+    @memset(&recipient_hash, 0);
+    recipient_hash[0] = 1;
+    const recipient_addr = Address{
+        .version = @intFromEnum(AddressVersion.P2PKH),
+        .hash = recipient_hash,
+    };
 
     // Create test transaction
     const tx1 = Transaction{
         .version = 0,
+        .flags = std.mem.zeroes(TransactionFlags),
         .sender = sender_addr,
-        .recipient = [_]u8{1} ++ std.mem.zeroes([31]u8),
+        .recipient = recipient_addr,
         .amount = 1000000000,
         .fee = ZenFees.STANDARD_FEE,
         .nonce = 0,
@@ -955,13 +1061,17 @@ test "transaction hash" {
         .expiry_height = 10000,
         .sender_public_key = public_key,
         .signature = std.mem.zeroes(Signature),
+        .script_version = 0,
+        .witness_data = &[_]u8{},
+        .extra_data = &[_]u8{},
     };
 
     // Create identical transaction
     const tx2 = Transaction{
         .version = 0,
+        .flags = std.mem.zeroes(TransactionFlags),
         .sender = sender_addr,
-        .recipient = [_]u8{1} ++ std.mem.zeroes([31]u8),
+        .recipient = recipient_addr,
         .amount = 1000000000,
         .fee = ZenFees.STANDARD_FEE,
         .nonce = 0,
@@ -969,6 +1079,9 @@ test "transaction hash" {
         .expiry_height = 10000,
         .sender_public_key = public_key,
         .signature = std.mem.zeroes(Signature),
+        .script_version = 0,
+        .witness_data = &[_]u8{},
+        .extra_data = &[_]u8{},
     };
 
     // Identical transactions should have same hash
@@ -979,8 +1092,9 @@ test "transaction hash" {
     // Different transactions should have different hashes
     const tx3 = Transaction{
         .version = 0,
+        .flags = std.mem.zeroes(TransactionFlags),
         .sender = sender_addr,
-        .recipient = [_]u8{1} ++ std.mem.zeroes([31]u8),
+        .recipient = recipient_addr,
         .amount = 2000000000, // Different amount
         .fee = ZenFees.STANDARD_FEE,
         .nonce = 0,
@@ -988,6 +1102,9 @@ test "transaction hash" {
         .expiry_height = 10000,
         .sender_public_key = public_key,
         .signature = std.mem.zeroes(Signature),
+        .script_version = 0,
+        .witness_data = &[_]u8{},
+        .extra_data = &[_]u8{},
     };
 
     const hash3 = tx3.hash();
@@ -1004,6 +1121,10 @@ test "block header hash consistency" {
         .timestamp = 1704067200,
         .difficulty = test_difficulty,
         .nonce = 42,
+        .witness_root = std.mem.zeroes(Hash),
+        .state_root = std.mem.zeroes(Hash),
+        .extra_nonce = 0,
+        .extra_data = std.mem.zeroes([32]u8),
     };
 
     // Create identical header
@@ -1014,6 +1135,10 @@ test "block header hash consistency" {
         .timestamp = 1704067200,
         .difficulty = test_difficulty,
         .nonce = 42,
+        .witness_root = std.mem.zeroes(Hash),
+        .state_root = std.mem.zeroes(Hash),
+        .extra_nonce = 0,
+        .extra_data = std.mem.zeroes([32]u8),
     };
 
     // Identical headers should have same hash
@@ -1035,6 +1160,10 @@ test "block header hash uniqueness" {
         .timestamp = 1704067200,
         .difficulty = test_difficulty,
         .nonce = 0,
+        .witness_root = std.mem.zeroes(Hash),
+        .state_root = std.mem.zeroes(Hash),
+        .extra_nonce = 0,
+        .extra_data = std.mem.zeroes([32]u8),
     };
 
     // Different nonce should produce different hash
@@ -1070,12 +1199,18 @@ test "block header hash uniqueness" {
 
 test "block hash delegated to header hash" {
     const alice_public_key = std.mem.zeroes([32]u8);
-    const alice_addr = util.hash256(&alice_public_key);
-    var bob_addr = std.mem.zeroes(Address);
-    bob_addr[0] = 1;
+    const alice_addr = Address.fromPublicKey(alice_public_key);
+    var bob_hash: [31]u8 = undefined;
+    @memset(&bob_hash, 0);
+    bob_hash[0] = 1;
+    const bob_addr = Address{
+        .version = @intFromEnum(AddressVersion.P2PKH),
+        .hash = bob_hash,
+    };
 
     const tx = Transaction{
         .version = 0,
+        .flags = std.mem.zeroes(TransactionFlags),
         .sender = alice_addr,
         .recipient = bob_addr,
         .amount = 100 * ZEI_COIN,
@@ -1085,6 +1220,9 @@ test "block hash delegated to header hash" {
         .expiry_height = 10000,
         .sender_public_key = alice_public_key,
         .signature = std.mem.zeroes(Signature),
+        .script_version = 0,
+        .witness_data = &[_]u8{},
+        .extra_data = &[_]u8{},
     };
 
     var transactions = [_]Transaction{tx};
@@ -1097,6 +1235,10 @@ test "block hash delegated to header hash" {
             .timestamp = 1704067200,
             .difficulty = ZenMining.initialDifficultyTarget().toU64(),
             .nonce = 12345,
+            .witness_root = std.mem.zeroes(Hash),
+            .state_root = std.mem.zeroes(Hash),
+            .extra_nonce = 0,
+            .extra_data = std.mem.zeroes([32]u8),
         },
         .transactions = &transactions,
     };
@@ -1113,6 +1255,7 @@ test "block version validation" {
     // Create a valid transaction
     const tx = Transaction{
         .version = 0,
+        .flags = std.mem.zeroes(TransactionFlags),
         .sender = std.mem.zeroes(Address),
         .recipient = std.mem.zeroes(Address),
         .amount = 100,
@@ -1122,6 +1265,9 @@ test "block version validation" {
         .expiry_height = std.math.maxInt(u64),
         .sender_public_key = std.mem.zeroes([32]u8),
         .signature = std.mem.zeroes(Signature),
+        .script_version = 0,
+        .witness_data = &[_]u8{},
+        .extra_data = &[_]u8{},
     };
     
     // Create transactions array
@@ -1138,6 +1284,10 @@ test "block version validation" {
             .timestamp = 1000,
             .difficulty = 0,
             .nonce = 0,
+            .witness_root = std.mem.zeroes(Hash),
+            .state_root = std.mem.zeroes(Hash),
+            .extra_nonce = 0,
+            .extra_data = std.mem.zeroes([32]u8),
         },
         .transactions = txs,
     };
@@ -1152,6 +1302,10 @@ test "block version validation" {
             .timestamp = 1000,
             .difficulty = 0,
             .nonce = 0,
+            .witness_root = std.mem.zeroes(Hash),
+            .state_root = std.mem.zeroes(Hash),
+            .extra_nonce = 0,
+            .extra_data = std.mem.zeroes([32]u8),
         },
         .transactions = txs,
     };
@@ -1166,6 +1320,10 @@ test "block version validation" {
             .timestamp = 1000,
             .difficulty = 0,
             .nonce = 0,
+            .witness_root = std.mem.zeroes(Hash),
+            .state_root = std.mem.zeroes(Hash),
+            .extra_nonce = 0,
+            .extra_data = std.mem.zeroes([32]u8),
         },
         .transactions = txs,
     };

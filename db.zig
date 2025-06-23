@@ -258,12 +258,16 @@ test "block storage and retrieval" {
 
     const test_block = Block{
         .header = types.BlockHeader{
-            .version = 0, // Block version 0 for current protocol
+            .version = types.CURRENT_BLOCK_VERSION,
             .previous_hash = std.mem.zeroes(types.Hash),
             .merkle_root = std.mem.zeroes(types.Hash),
             .timestamp = 1234567890,
             .difficulty = 0x1d00ffff,
             .nonce = 42,
+            .witness_root = std.mem.zeroes(types.Hash),
+            .state_root = std.mem.zeroes(types.Hash),
+            .extra_nonce = 0,
+            .extra_data = std.mem.zeroes([32]u8),
         },
         .transactions = transactions,
     };
@@ -278,7 +282,8 @@ test "block storage and retrieval" {
     try testing.expectEqual(@as(u32, 1), try db.getHeight());
 
     // Cleanup retrieved block
-    allocator.free(retrieved_block.transactions);
+    var block_to_free = retrieved_block;
+    block_to_free.deinit(allocator);
 }
 
 test "account storage and retrieval" {

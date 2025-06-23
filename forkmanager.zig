@@ -60,6 +60,13 @@ pub const ForkManager = struct {
     }
     
     pub fn deinit(self: *ForkManager) void {
+        // Free all orphan blocks before deinitializing the HashMap
+        var iterator = self.orphan_blocks.iterator();
+        while (iterator.next()) |entry| {
+            var block_to_free = entry.value_ptr.block;
+            block_to_free.deinit(self.allocator);
+        }
+        
         self.orphan_blocks.deinit();
         self.recent_blocks.deinit();
     }
@@ -149,9 +156,33 @@ pub const ForkManager = struct {
             self.cleanupOrphans();
         }
         
-        // Store as orphan
+        // Store as orphan - need to deep copy the block since we're storing it
+        // The caller owns the original block and will free it
+        var block_copy = types.Block{
+            .header = block.header,
+            .transactions = undefined,
+        };
+        
+        // Deep copy transactions
+        block_copy.transactions = blk: {
+            const allocated_txs = try self.allocator.alloc(types.Transaction, block.transactions.len);
+            var copied_count: usize = 0;
+            errdefer {
+                // Clean up any transactions we've already copied if an error occurs
+                for (allocated_txs[0..copied_count]) |*tx| {
+                    tx.deinit(self.allocator);
+                }
+                self.allocator.free(allocated_txs);
+            }
+            for (block.transactions, 0..) |tx, i| {
+                allocated_txs[i] = try tx.dupe(self.allocator); // Use the Transaction.dupe method for deep copy
+                copied_count += 1;
+            }
+            break :blk allocated_txs;
+        };
+        
         const fork_block = ForkBlock{
-            .block = block,
+            .block = block_copy,
             .height = block_height,
             .cumulative_work = cumulative_work,
             .received_time = util.getTime(),
@@ -198,7 +229,11 @@ pub const ForkManager = struct {
         }
         
         for (to_remove.items) |hash| {
-            _ = self.orphan_blocks.remove(hash);
+            if (self.orphan_blocks.fetchRemove(hash)) |entry| {
+                // Free the deep-copied block
+                var block_to_free = entry.value.block;
+                block_to_free.deinit(self.allocator);
+            }
         }
         
         if (to_remove.items.len > 0) {

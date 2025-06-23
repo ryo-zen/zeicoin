@@ -92,6 +92,52 @@ fn isCoinbaseTransaction(tx: Transaction) bool {
     return tx.isCoinbase();
 }
 
+/// Create a test transaction with all required fields
+fn createTestTransaction(sender: Address, recipient: Address, amount: u64, fee: u64, nonce: u64, keypair: key.KeyPair, allocator: std.mem.Allocator) !Transaction {
+    _ = allocator; // Currently unused
+    const timestamp = @as(u64, @intCast(std.time.timestamp()));
+    const expiry_height = 1000000; // Far in the future for tests
+    
+    var tx = Transaction{
+        .version = 0,
+        .flags = std.mem.zeroes(types.TransactionFlags),
+        .sender = sender,
+        .recipient = recipient,
+        .amount = amount,
+        .fee = fee,
+        .nonce = nonce,
+        .timestamp = timestamp,
+        .expiry_height = expiry_height,
+        .sender_public_key = keypair.public_key,
+        .signature = undefined,
+        .script_version = 0,
+        .witness_data = &[_]u8{},
+        .extra_data = &[_]u8{},
+    };
+    
+    // Sign the transaction
+    const hash = tx.hashForSigning();
+    tx.signature = try keypair.sign(&hash);
+    
+    return tx;
+}
+
+/// Create a test block header with all required fields
+fn createTestBlockHeader(previous_hash: Hash, merkle_root: Hash, timestamp: u64, difficulty: u64, nonce: u32) BlockHeader {
+    return BlockHeader{
+        .version = 0,
+        .previous_hash = previous_hash,
+        .merkle_root = merkle_root,
+        .timestamp = timestamp,
+        .difficulty = difficulty,
+        .nonce = nonce,
+        .witness_root = std.mem.zeroes(Hash),
+        .state_root = std.mem.zeroes(Hash),
+        .extra_nonce = 0,
+        .extra_data = std.mem.zeroes([32]u8),
+    };
+}
+
 /// Logging utilities for simplicity
 fn logError(comptime fmt: []const u8, args: anytype) void {
     print("❌ " ++ fmt ++ "\n", args);
@@ -185,7 +231,13 @@ pub const ZeiCoin = struct {
     /// Cleanup blockchain resources
     pub fn deinit(self: *ZeiCoin) void {
         self.database.deinit();
+        
+        // Free all transactions in mempool before freeing the mempool itself
+        for (self.mempool.items) |*tx| {
+            tx.deinit(self.allocator);
+        }
         self.mempool.deinit();
+        
         self.failed_peers.deinit();
         self.processed_transactions.deinit();
         self.fork_manager.deinit();
@@ -195,8 +247,9 @@ pub const ZeiCoin = struct {
     /// Create the canonical genesis block from hardcoded definition
     fn createCanonicalGenesis(self: *ZeiCoin) !void {
         // Use the actual canonical genesis from genesis.zig instead of custom empty one
-        const genesis_block = try genesis.createGenesis(self.allocator);
-        defer self.allocator.free(genesis_block.transactions);
+        // Use the deinit pattern for robust cleanup, consistency, and future-proofing
+        var genesis_block = try genesis.createGenesis(self.allocator);
+        defer genesis_block.deinit(self.allocator);
 
         // Save genesis block to database
         try self.database.saveBlock(0, genesis_block);
@@ -289,7 +342,11 @@ pub const ZeiCoin = struct {
             return error.MempoolSizeLimitExceeded;
         }
 
-        try self.mempool.append(transaction);
+        // Take ownership of the transaction by deep copying it
+        var owned_tx = try transaction.dupe(self.allocator);
+        errdefer owned_tx.deinit(self.allocator);
+        
+        try self.mempool.append(owned_tx);
         self.mempool_size_bytes += tx_size;
         logInfo("Transaction added to mempool: {} ZEI from sender to recipient (mempool: {}/{})", .{
             transaction.amount / types.ZEI_COIN,
@@ -514,9 +571,9 @@ pub const ZeiCoin = struct {
         // Get previous block hash and calculate next difficulty
         const current_height = try self.getHeight();
         const previous_hash = if (current_height > 0) blk: {
-            const prev_block = try self.database.getBlock(current_height - 1);
+            var prev_block = try self.database.getBlock(current_height - 1);
             const hash = prev_block.hash();
-            self.allocator.free(prev_block.transactions);
+            prev_block.deinit(self.allocator);
             break :blk hash;
         } else std.mem.zeroes(Hash);
 
@@ -526,7 +583,7 @@ pub const ZeiCoin = struct {
         // Create block with dynamic difficulty
         var new_block = Block{
             .header = BlockHeader{
-                .version = 0, // Block version 0 for current protocol
+                .version = types.CURRENT_BLOCK_VERSION,
                 .previous_hash = previous_hash,
                 .merkle_root = std.mem.zeroes(Hash), // Zen simplicity
                 .timestamp = @intCast(util.getTime()),
@@ -537,7 +594,25 @@ pub const ZeiCoin = struct {
                 .extra_nonce = 0,
                 .extra_data = std.mem.zeroes([32]u8), // No extra data
             },
-            .transactions = try self.allocator.dupe(Transaction, all_transactions),
+            // Deep copy all transactions to ensure the block owns its memory.
+            // This prevents double-frees or invalid frees when the block is deinitialized.
+            .transactions = blk: {
+                const allocated_txs = try self.allocator.alloc(types.Transaction, all_transactions.len);
+                var copied_count: usize = 0;
+                errdefer {
+                    // Clean up any transactions we've already copied if an error occurs
+                    for (allocated_txs[0..copied_count]) |*tx| {
+                        tx.deinit(self.allocator);
+                    }
+                    self.allocator.free(allocated_txs);
+                }
+                
+                for (all_transactions, 0..) |tx, i| {
+                    allocated_txs[i] = try tx.dupe(self.allocator);
+                    copied_count += 1;
+                }
+                break :blk allocated_txs;
+            },
         };
 
         print("👌 Starting mining\n", .{});
@@ -584,7 +659,7 @@ pub const ZeiCoin = struct {
         } else {
             print("😔 Zen mining failed - nonce not found (the universe wasn't ready)\n", .{});
             // Free block memory and return error
-            self.allocator.free(new_block.transactions);
+            new_block.deinit(self.allocator);
             return error.MiningFailed;
         }
     }
@@ -718,8 +793,8 @@ pub const ZeiCoin = struct {
         if (current_height % types.ZenMining.DIFFICULTY_ADJUSTMENT_PERIOD != 0) {
             // Not an adjustment block, use previous difficulty
             const prev_block_height: u32 = @intCast(current_height - 1);
-            const prev_block = try self.database.getBlock(prev_block_height);
-            defer self.allocator.free(prev_block.transactions);
+            var prev_block = try self.database.getBlock(prev_block_height);
+            defer prev_block.deinit(self.allocator);
             return prev_block.header.getDifficultyTarget();
         }
 
@@ -734,15 +809,15 @@ pub const ZeiCoin = struct {
         // Get timestamp from 20 blocks ago
         if (current_height >= lookback_blocks) {
             const old_block_height: u32 = @intCast(current_height - lookback_blocks);
-            const old_block = try self.database.getBlock(old_block_height);
-            defer self.allocator.free(old_block.transactions);
+            var old_block = try self.database.getBlock(old_block_height);
+            defer old_block.deinit(self.allocator);
             oldest_timestamp = old_block.header.timestamp;
         }
 
         // Get timestamp from previous block
         const prev_block_height: u32 = @intCast(current_height - 1);
-        const prev_block = try self.database.getBlock(prev_block_height);
-        defer self.allocator.free(prev_block.transactions);
+        var prev_block = try self.database.getBlock(prev_block_height);
+        defer prev_block.deinit(self.allocator);
         newest_timestamp = prev_block.header.timestamp;
         const current_difficulty = prev_block.header.getDifficultyTarget();
 
@@ -812,8 +887,8 @@ pub const ZeiCoin = struct {
         const mature_block_height = new_block_height - types.ZenMining.COINBASE_MATURITY;
         
         // Load the block that's now mature
-        const mature_block = try self.database.getBlock(mature_block_height);
-        defer self.allocator.free(mature_block.transactions);
+        var mature_block = try self.database.getBlock(mature_block_height);
+        defer mature_block.deinit(self.allocator);
         
         // Find the coinbase transaction (always first)
         if (mature_block.transactions.len > 0) {
@@ -869,8 +944,8 @@ pub const ZeiCoin = struct {
         // Collect timestamps from last MTP_BLOCK_COUNT blocks
         const start_height = height - types.TimestampValidation.MTP_BLOCK_COUNT + 1;
         for (start_height..height + 1) |h| {
-            const block = try self.database.getBlock(@intCast(h));
-            defer self.allocator.free(block.transactions);
+            var block = try self.database.getBlock(@intCast(h));
+            defer block.deinit(self.allocator);
             try timestamps.append(block.header.timestamp);
         }
 
@@ -923,8 +998,8 @@ pub const ZeiCoin = struct {
 
         // For non-genesis blocks, validate against previous block
         if (expected_height > 0) {
-            const prev_block = try self.getBlockByHeight(expected_height - 1);
-            defer self.allocator.free(prev_block.transactions);
+            var prev_block = try self.getBlockByHeight(expected_height - 1);
+            defer prev_block.deinit(self.allocator);
 
             // Check timestamp against median time past (MTP)
             const mtp = try self.getMedianTimePast(expected_height - 1);
@@ -1064,8 +1139,8 @@ pub const ZeiCoin = struct {
             } else if (expected_height == current_height) {
                 // We're about to add this block - check against our current tip
                 print("   Checking previous hash against current blockchain tip\n", .{});
-                const prev_block = try self.getBlockByHeight(expected_height - 1);
-                defer self.allocator.free(prev_block.transactions);
+                var prev_block = try self.getBlockByHeight(expected_height - 1);
+                defer prev_block.deinit(self.allocator);
 
                 const prev_hash = prev_block.hash();
                 print("   Previous block hash in chain: {s}\n", .{std.fmt.fmtSliceHexLower(&prev_hash)});
@@ -1224,8 +1299,8 @@ pub const ZeiCoin = struct {
 
         // Check if block's previous_hash matches any block in our chain
         for (0..current_height) |height| {
-            const existing_block = self.database.getBlock(@intCast(height)) catch continue;
-            defer self.allocator.free(existing_block.transactions);
+            var existing_block = self.database.getBlock(@intCast(height)) catch continue;
+            defer existing_block.deinit(self.allocator);
 
             const existing_hash = existing_block.hash();
             if (std.mem.eql(u8, &block.header.previous_hash, &existing_hash)) {
@@ -1361,10 +1436,11 @@ pub const ZeiCoin = struct {
         const start_idx = if (height > 3) height - 3 else 0;
         var i = start_idx;
         while (i < height) : (i += 1) {
-            if (self.database.getBlock(i)) |block| {
+            if (self.database.getBlock(i)) |block_data| {
+                var block = block_data;
                 print("   Block #{}: {} txs\n", .{ i, block.txCount() });
                 // Free block memory after displaying
-                self.allocator.free(block.transactions);
+                block.deinit(self.allocator);
             } else |_| {
                 print("   Block #{}: Error loading\n", .{i});
             }
@@ -1411,21 +1487,26 @@ pub const ZeiCoin = struct {
     }
 
     /// Handle incoming block from network peer with longest chain consensus
+    /// NOTE: We take ownership of the block - the caller transfers ownership to us.
     pub fn handleIncomingBlock(self: *ZeiCoin, block: types.Block) !void {
+        // Take ownership and ensure cleanup
+        var owned_block = block;
+        defer owned_block.deinit(self.allocator);
+        
         const current_height = try self.getHeight();
         const block_height = current_height + 1; // Block would be at next height if accepted
 
         print("🌊 Block flows in from network peer with {} transactions\n", .{block.transactions.len});
 
         // Calculate cumulative work for this block
-        const block_work = block.header.getWork();
+        const block_work = owned_block.header.getWork();
         const cumulative_work = if (current_height > 0) parent_calc: {
             // Get parent block work
-            const parent_block = self.database.getBlock(current_height - 1) catch {
+            var parent_block = self.database.getBlock(current_height - 1) catch {
                 print("❌ Cannot find parent block for height {}\n", .{current_height - 1});
                 return;
             };
-            defer self.allocator.free(parent_block.transactions);
+            defer parent_block.deinit(self.allocator);
 
             // For now, estimate parent cumulative work (should be stored in future)
             const parent_work = self.estimateCumulativeWork(current_height - 1) catch 0;
@@ -1433,7 +1514,7 @@ pub const ZeiCoin = struct {
         } else block_work;
 
         // Evaluate block using fork manager
-        const decision = self.fork_manager.evaluateBlock(block, block_height, cumulative_work) catch |err| {
+        const decision = self.fork_manager.evaluateBlock(owned_block, block_height, cumulative_work) catch |err| {
             print("❌ Fork evaluation failed: {}\n", .{err});
             return;
         };
@@ -1463,7 +1544,7 @@ pub const ZeiCoin = struct {
             .extends_chain => |chain_info| {
                 if (chain_info.is_new_best) {
                     print("🏆 New best chain detected! Starting reorganization...\n", .{});
-                    try self.handleChainReorganization(block, chain_info.new_chain_state);
+                    try self.handleChainReorganization(owned_block, chain_info.new_chain_state);
                 } else {
                     print("📈 Block extends side chain {}\n", .{chain_info.chain_index});
                     // Just update the side chain for now
@@ -1477,8 +1558,8 @@ pub const ZeiCoin = struct {
     fn estimateCumulativeWork(self: *ZeiCoin, height: u32) !types.ChainWork {
         var total_work: types.ChainWork = 0;
         for (0..height + 1) |h| {
-            const block = self.database.getBlock(@intCast(h)) catch continue;
-            defer self.allocator.free(block.transactions);
+            var block = self.database.getBlock(@intCast(h)) catch continue;
+            defer block.deinit(self.allocator);
             total_work += block.header.getWork();
         }
         return total_work;
@@ -1530,14 +1611,18 @@ pub const ZeiCoin = struct {
 
         for (from_height..to_height) |height| {
             const block = self.database.getBlock(@intCast(height)) catch continue;
-            defer self.allocator.free(block.transactions);
+            defer block.deinit(self.allocator);
 
             // Re-validate and add non-coinbase transactions back to mempool
             for (block.transactions) |tx| {
                 if (!tx.isCoinbase()) {
                     // Validate transaction is still valid
                     if (self.validateTransaction(tx) catch false) {
-                        try self.mempool.append(tx);
+                        // Deep copy the transaction before adding to mempool
+                        var owned_tx = try tx.dupe(self.allocator);
+                        errdefer owned_tx.deinit(self.allocator);
+                        
+                        try self.mempool.append(owned_tx);
                         self.mempool_size_bytes += tx.getSerializedSize();
                         print("🔄 Restored orphaned transaction to mempool\n", .{});
                     } else {
@@ -1578,11 +1663,11 @@ pub const ZeiCoin = struct {
         
         // Start from genesis (height 0)
         for (0..up_to_height + 1) |height| {
-            const block = self.database.getBlock(@intCast(height)) catch {
+            var block = self.database.getBlock(@intCast(height)) catch {
                 print("❌ Failed to load block at height {} during replay\n", .{height});
                 return error.ReplayFailed;
             };
-            defer self.allocator.free(block.transactions);
+            defer block.deinit(self.allocator);
             
             // Process each transaction in the block
             for (block.transactions, 0..) |tx, tx_index| {
@@ -1717,12 +1802,21 @@ pub const ZeiCoin = struct {
     }
 
     /// Handle sync block from network (specifically for sync process)
+    /// NOTE: We take ownership of the block - the caller transfers ownership to us.
     pub fn handleSyncBlock(self: *ZeiCoin, expected_height: u32, block: types.Block) !void {
+        // Take ownership and ensure cleanup
+        var owned_block = block;
+        defer owned_block.deinit(self.allocator);
+        
         print("🔄 Processing sync block at height {}\n", .{expected_height});
 
         // Check if block already exists to prevent duplicate processing
         const existing_block = self.database.getBlock(expected_height) catch null;
-        if (existing_block != null) {
+        if (existing_block) |block_data| {
+            // IMPORTANT: Free the loaded block to prevent memory leak
+            var block_to_free = block_data;
+            defer block_to_free.deinit(self.allocator);
+            
             print("ℹ️  Block {} already exists, skipping duplicate during sync\n", .{expected_height});
 
             // Still need to update sync progress for this "processed" block
@@ -1742,7 +1836,7 @@ pub const ZeiCoin = struct {
         }
 
         // For sync, validate block structure and PoW only (skip transaction balance checks)
-        const validation_result = self.validateSyncBlock(block, expected_height) catch |err| {
+        const validation_result = self.validateSyncBlock(owned_block, expected_height) catch |err| {
             print("❌ Block validation threw error at height {}: {}\n", .{ expected_height, err });
             return;
         };
@@ -1770,10 +1864,10 @@ pub const ZeiCoin = struct {
         }
 
         // Process transactions first to update account states
-        try self.processBlockTransactions(block.transactions);
+        try self.processBlockTransactions(owned_block.transactions);
 
         // Add block to chain
-        try self.database.saveBlock(expected_height, block);
+        try self.database.saveBlock(expected_height, owned_block);
 
         // Update sync progress
         if (self.sync_progress) |*progress| {
@@ -2281,11 +2375,16 @@ test "transaction processing" {
     defer sender_keypair.deinit();
 
     const sender_addr = sender_keypair.getAddress();
-    var alice_addr = std.mem.zeroes(Address);
-    // Use a more unique address pattern
-    alice_addr[0] = 0xAA;
-    alice_addr[1] = 0xBB;
-    alice_addr[31] = 0xFF;
+    // Create a unique test address
+    var alice_hash: [31]u8 = undefined;
+    @memset(&alice_hash, 0);
+    alice_hash[0] = 0xAA;
+    alice_hash[1] = 0xBB;
+    alice_hash[30] = 0xFF;
+    const alice_addr = Address{
+        .version = @intFromEnum(types.AddressVersion.P2PKH),
+        .hash = alice_hash,
+    };
 
     // Create account for sender manually since this is just a test
     const sender_account = Account{
@@ -2298,6 +2397,7 @@ test "transaction processing" {
     // Create and sign transaction
     var tx = Transaction{
         .version = 0,
+        .flags = std.mem.zeroes(types.TransactionFlags),
         .sender = sender_addr,
         .recipient = alice_addr,
         .amount = 10 * types.ZEI_COIN,
@@ -2307,6 +2407,9 @@ test "transaction processing" {
         .expiry_height = 10000, // Far future for test
         .sender_public_key = sender_keypair.public_key,
         .signature = std.mem.zeroes(types.Signature), // Will be replaced
+        .script_version = 0,
+        .witness_data = &[_]u8{},
+        .extra_data = &[_]u8{},
     };
 
     // Sign the transaction
@@ -2319,7 +2422,8 @@ test "transaction processing" {
     var miner_keypair = try key.KeyPair.generateNew();
     defer miner_keypair.deinit();
     const mined_block = try zeicoin.zenMineBlock(miner_keypair);
-    defer testing.allocator.free(mined_block.transactions);
+    var mutable_mined_block = mined_block;
+    defer mutable_mined_block.deinit(testing.allocator);
 
     // Check balances
     const alice_balance = try zeicoin.getBalance(alice_addr);
@@ -2334,8 +2438,8 @@ test "block retrieval by height" {
     defer zeicoin.deinit();
 
     // Should have genesis block at height 0
-    const genesis_block = try zeicoin.getBlockByHeight(0);
-    defer testing.allocator.free(genesis_block.transactions);
+    var genesis_block = try zeicoin.getBlockByHeight(0);
+    defer genesis_block.deinit(testing.allocator);
 
     try testing.expectEqual(@as(u32, 1), genesis_block.txCount()); // Genesis has 1 coinbase transaction
     try testing.expectEqual(@as(u64, types.Genesis.timestamp()), genesis_block.header.timestamp);
@@ -2354,24 +2458,26 @@ test "block validation" {
         // Skip this test if no genesis block exists
         return;
     }
-    const prev_block = try zeicoin.getBlockByHeight(current_height - 1);
-    defer testing.allocator.free(prev_block.transactions);
+    var prev_block = try zeicoin.getBlockByHeight(current_height - 1);
+    defer prev_block.deinit(testing.allocator);
 
     // Create valid transactions for the block
     const transactions = try testing.allocator.alloc(types.Transaction, 1);
     defer testing.allocator.free(transactions);
 
-    // Coinbase transaction - sender address must match hash of public key
-    const coinbase_public_key = std.mem.zeroes([32]u8);
-    const coinbase_sender = util.hash256(&coinbase_public_key);
+    // Coinbase transaction
     transactions[0] = types.Transaction{
         .version = 0,
-        .sender = coinbase_sender,
-        .sender_public_key = coinbase_public_key,
-        .recipient = std.mem.zeroes(types.Address),
+        .flags = std.mem.zeroes(types.TransactionFlags),
+        .sender = Address.zero(),
+        .sender_public_key = std.mem.zeroes([32]u8),
+        .recipient = Address.zero(),
         .amount = types.ZenMining.BLOCK_REWARD,
         .fee = 0, // Coinbase has no fee
         .nonce = 0,
+        .script_version = 0,
+        .witness_data = &[_]u8{},
+        .extra_data = &[_]u8{},
         .timestamp = @intCast(util.getTime()),
         .expiry_height = std.math.maxInt(u64), // Coinbase never expires
         .signature = std.mem.zeroes(types.Signature),
@@ -2379,14 +2485,13 @@ test "block validation" {
 
     // Create valid block
     var valid_block = types.Block{
-        .header = types.BlockHeader{
-            .version = 0, // Block version 0 for current protocol
-            .previous_hash = prev_block.hash(),
-            .merkle_root = std.mem.zeroes(types.Hash),
-            .timestamp = @intCast(util.getTime()),
-            .difficulty = types.ZenMining.initialDifficultyTarget().toU64(),
-            .nonce = 0,
-        },
+        .header = createTestBlockHeader(
+            prev_block.hash(),
+            std.mem.zeroes(types.Hash),
+            @intCast(util.getTime()),
+            types.ZenMining.initialDifficultyTarget().toU64(),
+            0
+        ),
         .transactions = transactions,
     };
 
@@ -2429,8 +2534,14 @@ test "mempool cleaning after block application" {
     defer sender_keypair.deinit();
 
     const sender_addr = sender_keypair.getAddress();
-    var alice_addr = std.mem.zeroes(types.Address);
-    alice_addr[0] = 1;
+    // Create a unique test address
+    var alice_hash: [31]u8 = undefined;
+    @memset(&alice_hash, 0);
+    alice_hash[0] = 1;
+    const alice_addr = Address{
+        .version = @intFromEnum(types.AddressVersion.P2PKH),
+        .hash = alice_hash,
+    };
 
     // Create sender account
     const sender_account = types.Account{
@@ -2443,6 +2554,7 @@ test "mempool cleaning after block application" {
     // Create and add transaction to mempool
     var tx = types.Transaction{
         .version = 0,
+        .flags = std.mem.zeroes(types.TransactionFlags),
         .sender = sender_addr,
         .recipient = alice_addr,
         .amount = 10 * types.ZEI_COIN,
@@ -2452,6 +2564,9 @@ test "mempool cleaning after block application" {
         .expiry_height = 10000,
         .sender_public_key = sender_keypair.public_key,
         .signature = std.mem.zeroes(types.Signature),
+        .script_version = 0,
+        .witness_data = &[_]u8{},
+        .extra_data = &[_]u8{},
     };
 
     const tx_hash = tx.hashForSigning();
@@ -2464,7 +2579,8 @@ test "mempool cleaning after block application" {
 
     // Mine block (which includes the transaction)
     const mined_block = try zeicoin.zenMineBlock(sender_keypair);
-    defer testing.allocator.free(mined_block.transactions);
+    var mutable_mined_block = mined_block;
+    defer mutable_mined_block.deinit(testing.allocator);
 
     // Mempool should be empty after mining
     try testing.expectEqual(@as(usize, 0), zeicoin.mempool.items.len);
@@ -2482,14 +2598,13 @@ test "block broadcasting integration" {
     defer testing.allocator.free(transactions);
 
     const test_block = types.Block{
-        .header = types.BlockHeader{
-            .version = 0, // Block version 0 for current protocol
-            .previous_hash = std.mem.zeroes(types.Hash),
-            .merkle_root = std.mem.zeroes(types.Hash),
-            .timestamp = @intCast(util.getTime()),
-            .difficulty = types.ZenMining.initialDifficultyTarget().toU64(),
-            .nonce = 0,
-        },
+        .header = createTestBlockHeader(
+            std.mem.zeroes(types.Hash),
+            std.mem.zeroes(types.Hash),
+            @intCast(util.getTime()),
+            types.ZenMining.initialDifficultyTarget().toU64(),
+            0
+        ),
         .transactions = transactions,
     };
 
@@ -2510,14 +2625,13 @@ test "timestamp validation - future blocks rejected" {
 
     var transactions = [_]types.Transaction{};
     const future_block = types.Block{
-        .header = types.BlockHeader{
-            .version = 0, // Block version 0 for current protocol
-            .previous_hash = std.mem.zeroes(types.Hash),
-            .merkle_root = std.mem.zeroes(types.Hash),
-            .timestamp = future_time,
-            .difficulty = types.ZenMining.initialDifficultyTarget().toU64(),
-            .nonce = 0,
-        },
+        .header = createTestBlockHeader(
+            std.mem.zeroes(types.Hash),
+            std.mem.zeroes(types.Hash),
+            future_time,
+            types.ZenMining.initialDifficultyTarget().toU64(),
+            0
+        ),
         .transactions = &transactions,
     };
 
@@ -2536,18 +2650,17 @@ test "timestamp validation - median time past" {
     while (i < 15) : (i += 1) {
         var transactions = [_]types.Transaction{};
         const block = types.Block{
-            .header = types.BlockHeader{
-                .version = 0, // Block version 0 for current protocol
-                .previous_hash = if (i == 0) std.mem.zeroes(types.Hash) else blk: {
-                    const prev = try zeicoin.getBlockByHeight(i - 1);
-                    defer zeicoin.allocator.free(prev.transactions);
+            .header = createTestBlockHeader(
+                if (i == 0) std.mem.zeroes(types.Hash) else blk: {
+                    var prev = try zeicoin.getBlockByHeight(i - 1);
+                    defer prev.deinit(zeicoin.allocator);
                     break :blk prev.hash();
                 },
-                .merkle_root = std.mem.zeroes(types.Hash),
-                .timestamp = types.Genesis.timestamp() + (i + 1) * 600, // 10 minutes apart
-                .difficulty = types.ZenMining.initialDifficultyTarget().toU64(),
-                .nonce = 0,
-            },
+                std.mem.zeroes(types.Hash),
+                types.Genesis.timestamp() + (i + 1) * 600, // 10 minutes apart
+                types.ZenMining.initialDifficultyTarget().toU64(),
+                0
+            ),
             .transactions = &transactions,
         };
 
@@ -2563,14 +2676,13 @@ test "timestamp validation - median time past" {
     // Create block with timestamp equal to MTP (should fail)
     var bad_transactions = [_]types.Transaction{};
     const bad_block = types.Block{
-        .header = types.BlockHeader{
-            .version = 0, // Block version 0 for current protocol
-            .previous_hash = std.mem.zeroes(types.Hash),
-            .merkle_root = std.mem.zeroes(types.Hash),
-            .timestamp = expected_mtp,
-            .difficulty = types.ZenMining.initialDifficultyTarget().toU64(),
-            .nonce = 0,
-        },
+        .header = createTestBlockHeader(
+            std.mem.zeroes(types.Hash),
+            std.mem.zeroes(types.Hash),
+            expected_mtp,
+            types.ZenMining.initialDifficultyTarget().toU64(),
+            0
+        ),
         .transactions = &bad_transactions,
     };
 
@@ -2600,7 +2712,8 @@ test "coinbase maturity basic" {
 
     // Mine a block (coinbase reward should be immature)
     const block1 = try zeicoin.zenMineBlock(miner_keypair);
-    defer zeicoin.allocator.free(block1.transactions);
+    var mutable_block1 = block1;
+    defer mutable_block1.deinit(zeicoin.allocator);
     
     // Check balance - should all be immature
     const account1 = try zeicoin.getAccount(miner_address);
@@ -2627,21 +2740,32 @@ test "mempool limits enforcement" {
     // Create dummy transactions to fill mempool
     var i: usize = 0;
     while (i < max_tx) : (i += 1) {
+        // Create unique recipient address for each transaction
+        var recipient_hash: [31]u8 = undefined;
+        @memset(&recipient_hash, 0);
+        recipient_hash[0] = @intCast(i % 256);
+        recipient_hash[1] = @intCast((i / 256) % 256);
+        const recipient_addr = Address{
+            .version = @intFromEnum(types.AddressVersion.P2PKH),
+            .hash = recipient_hash,
+        };
+        
         var dummy_tx = types.Transaction{
             .version = 0,
+            .flags = std.mem.zeroes(types.TransactionFlags),
             .sender = std.mem.zeroes(types.Address),
             .sender_public_key = std.mem.zeroes([32]u8),
-            .recipient = std.mem.zeroes(types.Address),
+            .recipient = recipient_addr,
             .amount = 1,
             .fee = types.ZenFees.MIN_FEE,
             .nonce = i,
             .timestamp = @intCast(util.getTime()),
             .expiry_height = 10000,
             .signature = std.mem.zeroes(types.Signature),
+            .script_version = 0,
+            .witness_data = &[_]u8{},
+            .extra_data = &[_]u8{},
         };
-        // Make each transaction unique by setting different recipient
-        dummy_tx.recipient[0] = @intCast(i % 256);
-        dummy_tx.recipient[1] = @intCast((i / 256) % 256);
         
         try zeicoin.mempool.append(dummy_tx);
         zeicoin.mempool_size_bytes += dummy_tx.getSerializedSize();
@@ -2661,10 +2785,16 @@ test "mempool limits enforcement" {
         .immature_balance = 0,
     });
     
-    var overflow_addr = std.mem.zeroes(types.Address);
-    overflow_addr[0] = 254;
-    const overflow_tx = types.Transaction{
+    var overflow_hash: [31]u8 = undefined;
+    @memset(&overflow_hash, 0);
+    overflow_hash[0] = 254;
+    const overflow_addr = Address{
+        .version = @intFromEnum(types.AddressVersion.P2PKH),
+        .hash = overflow_hash,
+    };
+    var overflow_tx = types.Transaction{
         .version = 0,
+        .flags = std.mem.zeroes(types.TransactionFlags),
         .sender = overflow_sender_addr,
         .sender_public_key = overflow_sender.public_key,
         .recipient = overflow_addr,
@@ -2674,6 +2804,9 @@ test "mempool limits enforcement" {
         .timestamp = @intCast(util.getTime()),
         .expiry_height = 10000,
         .signature = undefined,
+        .script_version = 0,
+        .witness_data = &[_]u8{},
+        .extra_data = &[_]u8{},
     };
     var signed_overflow = overflow_tx;
     signed_overflow.signature = try overflow_sender.signTransaction(overflow_tx.hashForSigning());
@@ -2709,10 +2842,16 @@ test "mempool limits enforcement" {
         .immature_balance = 0,
     });
     
-    var size_test_recipient = std.mem.zeroes(types.Address);
-    size_test_recipient[0] = 123;
+    var recipient_hash: [31]u8 = undefined;
+    @memset(&recipient_hash, 0);
+    recipient_hash[0] = 123;
+    const size_test_recipient = Address{
+        .version = @intFromEnum(types.AddressVersion.P2PKH),
+        .hash = recipient_hash,
+    };
     const size_test_tx = types.Transaction{
         .version = 0,
+        .flags = std.mem.zeroes(types.TransactionFlags),
         .sender = size_test_sender_addr,
         .sender_public_key = size_test_sender.public_key,
         .recipient = size_test_recipient,
@@ -2722,6 +2861,9 @@ test "mempool limits enforcement" {
         .timestamp = @intCast(util.getTime()),
         .expiry_height = 10000,
         .signature = undefined,
+        .script_version = 0,
+        .witness_data = &[_]u8{},
+        .extra_data = &[_]u8{},
     };
     var signed_size_test = size_test_tx;
     signed_size_test.signature = try size_test_sender.signTransaction(size_test_tx.hashForSigning());
@@ -2760,6 +2902,7 @@ test "transaction expiration" {
     const current_height = zeicoin.getHeight() catch 0;
     const valid_tx = types.Transaction{
         .version = 0,
+        .flags = std.mem.zeroes(types.TransactionFlags),
         .sender = sender_addr,
         .sender_public_key = sender_keypair.public_key,
         .recipient = recipient_addr,
@@ -2769,6 +2912,9 @@ test "transaction expiration" {
         .timestamp = @intCast(util.getTime()),
         .expiry_height = current_height + 100, // Expires in 100 blocks
         .signature = undefined,
+        .script_version = 0,
+        .witness_data = &[_]u8{},
+        .extra_data = &[_]u8{},
     };
     var signed_valid = valid_tx;
     signed_valid.signature = try sender_keypair.signTransaction(valid_tx.hashForSigning());
@@ -2783,6 +2929,7 @@ test "transaction expiration" {
     // Test 2: Expired transaction (expiry at current height)
     const expired_tx = types.Transaction{
         .version = 0,
+        .flags = std.mem.zeroes(types.TransactionFlags),
         .sender = sender_addr,
         .sender_public_key = sender_keypair.public_key,
         .recipient = recipient_addr,
@@ -2792,6 +2939,9 @@ test "transaction expiration" {
         .timestamp = @intCast(util.getTime()),
         .expiry_height = current_height, // Already expired
         .signature = undefined,
+        .script_version = 0,
+        .witness_data = &[_]u8{},
+        .extra_data = &[_]u8{},
     };
     var signed_expired = expired_tx;
     signed_expired.signature = try sender_keypair.signTransaction(expired_tx.hashForSigning());
@@ -2805,6 +2955,7 @@ test "transaction expiration" {
     // Add a transaction that expires in 2 blocks
     const short_expiry_tx = types.Transaction{
         .version = 0,
+        .flags = std.mem.zeroes(types.TransactionFlags),
         .sender = sender_addr,
         .sender_public_key = sender_keypair.public_key,
         .recipient = recipient_addr,
@@ -2814,6 +2965,9 @@ test "transaction expiration" {
         .timestamp = @intCast(util.getTime()),
         .expiry_height = current_height + 2, // Expires in 2 blocks
         .signature = undefined,
+        .script_version = 0,
+        .witness_data = &[_]u8{},
+        .extra_data = &[_]u8{},
     };
     var signed_short = short_expiry_tx;
     signed_short.signature = try sender_keypair.signTransaction(short_expiry_tx.hashForSigning());
@@ -2822,10 +2976,14 @@ test "transaction expiration" {
     try testing.expectEqual(@as(usize, 1), zeicoin.mempool.items.len);
     
     // Mine first block - transaction should still be valid
-    _ = try zeicoin.zenMineBlock(sender_keypair);
+    const block1 = try zeicoin.zenMineBlock(sender_keypair);
+    var mutable_block1 = block1;
+    defer mutable_block1.deinit(zeicoin.allocator);
     
     // Mine second block - now at expiry height
-    _ = try zeicoin.zenMineBlock(sender_keypair);
+    const block2 = try zeicoin.zenMineBlock(sender_keypair);
+    var mutable_block2 = block2;
+    defer mutable_block2.deinit(zeicoin.allocator);
     
     // Try to add the same transaction again (simulating rebroadcast)
     const rebroadcast_result = zeicoin.addTransaction(signed_short);
@@ -2869,8 +3027,9 @@ test "reorganization with coinbase maturity" {
     print("  1️⃣ Mining 101 blocks to mature first coinbase...\n", .{});
     var i: u32 = 0;
     while (i < 101) : (i += 1) {
-        const block = try zeicoin.zenMineBlock(miner1);
-        zeicoin.allocator.free(block.transactions);
+        // Mine a block and immediately deinitialize it to free its transactions
+        var block = try zeicoin.zenMineBlock(miner1);
+        block.deinit(zeicoin.allocator);
     }
     
     // Check miner1's balance after 101 blocks  
@@ -2887,6 +3046,7 @@ test "reorganization with coinbase maturity" {
     // Create a transaction that spends the matured coinbase
     const spend_tx = types.Transaction{
         .version = 0,
+        .flags = std.mem.zeroes(types.TransactionFlags),
         .sender = miner1_addr,
         .sender_public_key = miner1.public_key,
         .recipient = miner2_addr,
@@ -2896,6 +3056,9 @@ test "reorganization with coinbase maturity" {
         .timestamp = @intCast(util.getTime()),
         .expiry_height = 10000,
         .signature = undefined,
+        .script_version = 0,
+        .witness_data = &[_]u8{},
+        .extra_data = &[_]u8{},
     };
     var signed_tx = spend_tx;
     signed_tx.signature = try miner1.signTransaction(spend_tx.hash());
@@ -2903,7 +3066,8 @@ test "reorganization with coinbase maturity" {
     // Add transaction and mine it
     try zeicoin.addTransaction(signed_tx);
     const block_with_spend = try zeicoin.zenMineBlock(miner1);
-    defer zeicoin.allocator.free(block_with_spend.transactions);
+    var mutable_block_with_spend = block_with_spend;
+    defer mutable_block_with_spend.deinit(zeicoin.allocator);
     print("  ✅ Spent matured coinbase in block 102\n", .{});
     
     // Verify the spend worked
@@ -3032,4 +3196,185 @@ test "transaction size limit" {
     print("  ✅ Valid transaction successfully added to mempool\n", .{});
     
     print("  ✅ Transaction size limit tests passed!\n", .{});
+}
+
+test "memory leak detection - block operations" {
+    print("\n🔍 Testing memory leak prevention in block operations...\n", .{});
+    
+    // Use testing allocator which tracks leaks
+    const allocator = testing.allocator;
+    
+    // Test 1: Block loading and cleanup
+    {
+        print("  Testing block load/free cycle...\n", .{});
+        var zeicoin = try createTestZeiCoin("test_memory_leak_blocks");
+        defer zeicoin.deinit();
+        
+        // Create and mine a block with multiple transactions
+        const alice = try key.KeyPair.generateNew();
+        const bob = try key.KeyPair.generateNew();
+        const alice_addr = alice.getAddress();
+        const bob_addr = bob.getAddress();
+        
+        // Fund alice by creating an account
+        const alice_account = types.Account{
+            .address = alice_addr,
+            .balance = 1000 * types.ZEI_COIN,
+            .immature_balance = 0,
+            .nonce = 0,
+        };
+        try zeicoin.database.saveAccount(alice_addr, alice_account);
+        
+        // Add multiple transactions (without extra_data to avoid allocation issues)
+        // Note: All use nonce 0 since they're all from the same account in mempool
+        for (0..3) |i| {
+            const amount = (10 + i) * types.ZEI_COIN; // Vary amount instead of nonce
+            const tx = try createTestTransaction(alice_addr, bob_addr, amount, types.ZenFees.MIN_FEE, 0, alice, allocator);
+            try zeicoin.addTransaction(tx);
+        }
+        
+        // Mine block
+        const block = try zeicoin.zenMineBlock(alice);
+        var mutable_block = block;
+        defer mutable_block.deinit(zeicoin.allocator);
+        
+        // Load block from database multiple times to test cleanup
+        for (0..5) |_| {
+            var loaded_block = try zeicoin.database.getBlock(0);
+            // This should properly free all nested allocations
+            loaded_block.deinit(zeicoin.allocator);
+        }
+        
+        print("  ✅ Block load/free cycle completed without leaks\n", .{});
+    }
+    
+    // Test 2: Sync block handling
+    {
+        print("  Testing sync block memory management...\n", .{});
+        var zeicoin = try createTestZeiCoin("test_memory_leak_sync");
+        defer zeicoin.deinit();
+        
+        // Create a block with transactions containing extra_data
+        const miner = try key.KeyPair.generateNew();
+        const recipient = try key.KeyPair.generateNew();
+        
+        var transactions = try allocator.alloc(types.Transaction, 2);
+        
+        // Coinbase transaction
+        transactions[0] = types.Transaction{
+            .version = 0,
+            .flags = types.TransactionFlags{},
+            .sender = types.Address.zero(),
+            .recipient = miner.getAddress(),
+            .amount = types.ZenMining.BLOCK_REWARD,
+            .fee = 0,
+            .nonce = 0,
+            .timestamp = @intCast(std.time.timestamp()),
+            .expiry_height = 0,
+            .sender_public_key = std.mem.zeroes([32]u8),
+            .signature = std.mem.zeroes(types.Signature),
+            .script_version = 0,
+            .witness_data = &[_]u8{},
+            .extra_data = &[_]u8{},
+        };
+        
+        // Regular transaction with extra_data
+        const test_message = "Test message for memory leak detection";
+        const extra_data_copy = try allocator.dupe(u8, test_message);
+        transactions[1] = types.Transaction{
+            .version = 0,
+            .flags = types.TransactionFlags{},
+            .sender = miner.getAddress(),
+            .recipient = recipient.getAddress(),
+            .amount = 5 * types.ZEI_COIN,
+            .fee = types.ZenFees.MIN_FEE,
+            .nonce = 0,
+            .timestamp = @intCast(std.time.timestamp()),
+            .expiry_height = 1000,
+            .sender_public_key = miner.public_key,
+            .signature = std.mem.zeroes(types.Signature),
+            .script_version = 0,
+            .witness_data = &[_]u8{},
+            .extra_data = extra_data_copy,
+        };
+        
+        // Create first block for sync
+        const sync_block1 = types.Block{
+            .header = createTestBlockHeader(std.mem.zeroes(types.Hash), std.mem.zeroes(types.Hash), @intCast(std.time.timestamp()), 0x1d00ffff, 0),
+            .transactions = transactions,
+        };
+        
+        // Create a duplicate of transactions for second block
+        const transactions2 = try allocator.alloc(types.Transaction, 2);
+        // Deep copy transactions to avoid double-free
+        for (transactions, 0..) |tx, i| {
+            transactions2[i] = try tx.dupe(allocator);
+        }
+        
+        const sync_block2 = types.Block{
+            .header = createTestBlockHeader(std.mem.zeroes(types.Hash), std.mem.zeroes(types.Hash), @intCast(std.time.timestamp()), 0x1d00ffff, 0),
+            .transactions = transactions2,
+        };
+        
+        // Simulate receiving this block during sync
+        // handleSyncBlock takes ownership and will free the block
+        try zeicoin.handleSyncBlock(0, sync_block1);
+        
+        // Try again with duplicate - should detect duplicate and free properly
+        try zeicoin.handleSyncBlock(0, sync_block2);
+        
+        print("  ✅ Sync block memory properly managed\n", .{});
+    }
+    
+    // Test 3: Transaction deinit validation
+    {
+        print("  Testing transaction deinit with various slice configurations...\n", .{});
+        
+        // Test with allocated slices
+        const witness_buf = try allocator.alloc(u8, 10);
+        const extra_buf = try allocator.alloc(u8, 20);
+        @memset(witness_buf, 'W');
+        @memset(extra_buf, 'E');
+        
+        var tx1 = types.Transaction{
+            .version = 0,
+            .flags = types.TransactionFlags{},
+            .sender = types.Address.zero(),
+            .recipient = types.Address.zero(),
+            .amount = 1000,
+            .fee = 0,
+            .nonce = 0,
+            .timestamp = 0,
+            .expiry_height = 0,
+            .sender_public_key = std.mem.zeroes([32]u8),
+            .signature = std.mem.zeroes(types.Signature),
+            .script_version = 0,
+            .witness_data = witness_buf,
+            .extra_data = extra_buf,
+        };
+        tx1.deinit(allocator);
+        
+        // Test with empty static slices (should not crash)
+        var tx2 = types.Transaction{
+            .version = 0,
+            .flags = types.TransactionFlags{},
+            .sender = types.Address.zero(),
+            .recipient = types.Address.zero(),
+            .amount = 1000,
+            .fee = 0,
+            .nonce = 0,
+            .timestamp = 0,
+            .expiry_height = 0,
+            .sender_public_key = std.mem.zeroes([32]u8),
+            .signature = std.mem.zeroes(types.Signature),
+            .script_version = 0,
+            .witness_data = &[_]u8{},
+            .extra_data = &[_]u8{},
+        };
+        tx2.deinit(allocator); // Should handle empty slices gracefully
+        
+        print("  ✅ Transaction deinit handles all slice configurations correctly\n", .{});
+    }
+    
+    print("\n🎉 All memory leak detection tests passed!\n", .{});
 }

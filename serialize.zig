@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const testing = std.testing;
+const types = @import("types.zig");
 
 // Error types for serialization
 pub const SerializeError = error{
@@ -155,6 +156,11 @@ pub fn deserialize(reader: anytype, comptime T: type, allocator: std.mem.Allocat
                 .slice => {
                     const len = try deserialize(reader, u32, allocator);
 
+                    // Return empty slice without allocation for zero-length slices
+                    if (len == 0) {
+                        return &[_]ptr_info.child{};
+                    }
+
                     if (ptr_info.child == u8) {
                         // String/byte slice
                         const data = try allocator.alloc(u8, len);
@@ -240,6 +246,109 @@ pub fn serializeToBytes(allocator: std.mem.Allocator, value: anytype) ![]u8 {
 pub fn deserializeFromBytes(data: []const u8, comptime T: type, allocator: std.mem.Allocator) !T {
     var stream = std.io.fixedBufferStream(data);
     return deserialize(stream.reader(), T, allocator);
+}
+
+/// Serialize a Block to a writer
+pub fn writeBlock(writer: anytype, block: types.Block) !void {
+    // Serialize header
+    try block.header.serialize(writer);
+
+    // Serialize transaction count
+    try writer.writeInt(u32, @intCast(block.transactions.len), .little);
+
+    // Serialize each transaction
+    for (block.transactions) |tx| {
+        try writeTransaction(writer, tx);
+    }
+}
+
+/// Deserialize a Block from a reader
+pub fn readBlock(reader: anytype, allocator: std.mem.Allocator) !types.Block {
+    // Deserialize header
+    const header = try types.BlockHeader.deserialize(reader);
+
+    // Deserialize transaction count
+    const tx_count = try reader.readInt(u32, .little);
+
+    // Deserialize transactions
+    const transactions = try allocator.alloc(types.Transaction, tx_count);
+    errdefer allocator.free(transactions);
+
+    var i: usize = 0;
+    while (i < tx_count) : (i += 1) {
+        transactions[i] = readTransaction(reader, allocator) catch |err| {
+            // If an error occurs, deinit all previously read transactions to prevent leaks
+            for (transactions[0..i]) |*tx| {
+                tx.deinit(allocator);
+            }
+            // Propagate the error, which will trigger the outer errdefer to free the main array
+            return err;
+        };
+    }
+
+    return types.Block{
+        .header = header,
+        .transactions = transactions,
+    };
+}
+
+/// Serialize a Transaction to a writer
+pub fn writeTransaction(writer: anytype, tx: types.Transaction) !void {
+    try writer.writeInt(u16, tx.version, .little);
+    try writer.writeInt(u16, @bitCast(tx.flags), .little);
+    try writer.writeAll(std.mem.asBytes(&tx.sender));
+    try writer.writeAll(std.mem.asBytes(&tx.recipient));
+    try writer.writeInt(u64, tx.amount, .little);
+    try writer.writeInt(u64, tx.fee, .little);
+    try writer.writeInt(u64, tx.nonce, .little);
+    try writer.writeInt(u64, tx.timestamp, .little);
+    try writer.writeInt(u64, tx.expiry_height, .little);
+    try writer.writeAll(&tx.sender_public_key);
+    try writer.writeAll(std.mem.asBytes(&tx.signature));
+    try writer.writeInt(u16, tx.script_version, .little);
+    
+    // Variable length fields with length prefixes
+    try writer.writeInt(u32, @intCast(tx.witness_data.len), .little);
+    try writer.writeAll(tx.witness_data);
+    try writer.writeInt(u32, @intCast(tx.extra_data.len), .little);
+    try writer.writeAll(tx.extra_data);
+}
+
+/// Deserialize a Transaction from a reader
+pub fn readTransaction(reader: anytype, allocator: std.mem.Allocator) !types.Transaction {
+    // Initialize with zeroes to ensure slice lengths are 0. This makes the errdefer safe.
+    var tx: types.Transaction = std.mem.zeroes(types.Transaction);
+    // This errdefer will clean up any partially allocated data if an error occurs below
+    errdefer tx.deinit(allocator);
+
+    tx.version = try reader.readInt(u16, .little);
+    tx.flags = @bitCast(try reader.readInt(u16, .little));
+    _ = try reader.readAll(std.mem.asBytes(&tx.sender));
+    _ = try reader.readAll(std.mem.asBytes(&tx.recipient));
+    tx.amount = try reader.readInt(u64, .little);
+    tx.fee = try reader.readInt(u64, .little);
+    tx.nonce = try reader.readInt(u64, .little);
+    tx.timestamp = try reader.readInt(u64, .little);
+    tx.expiry_height = try reader.readInt(u64, .little);
+    _ = try reader.readAll(&tx.sender_public_key);
+    _ = try reader.readAll(std.mem.asBytes(&tx.signature));
+    tx.script_version = try reader.readInt(u16, .little);
+
+    const witness_len = try reader.readInt(u32, .little);
+    if (witness_len > 0) {
+        const witness_buf = try allocator.alloc(u8, witness_len);
+        _ = try reader.readAll(witness_buf);
+        tx.witness_data = witness_buf;
+    }
+
+    const extra_len = try reader.readInt(u32, .little);
+    if (extra_len > 0) {
+        const extra_buf = try allocator.alloc(u8, extra_len);
+        _ = try reader.readAll(extra_buf);
+        tx.extra_data = extra_buf;
+    }
+
+    return tx;
 }
 
 // Tests
