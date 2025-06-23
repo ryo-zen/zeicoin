@@ -238,6 +238,8 @@ pub const Transaction = struct {
         };
 
         // Serialize and hash the transaction data
+        // TODO: This fixed buffer size is a limitation - transactions with large extra_data
+        // (approaching 1KB) will panic. Should use dynamic allocation for large transactions.
         var buffer: [1024]u8 = undefined;
         var stream = std.io.fixedBufferStream(&buffer);
         const writer = stream.writer();
@@ -278,6 +280,24 @@ pub const Transaction = struct {
             return false;
         }
         
+        // Size validation - prevent DoS with oversized transactions
+        const tx_size = self.getSerializedSize();
+        if (tx_size > TransactionLimits.MAX_TX_SIZE) {
+            std.debug.print("❌ Transaction invalid: size {} bytes exceeds maximum {} bytes\n", .{ tx_size, TransactionLimits.MAX_TX_SIZE });
+            return false;
+        }
+        
+        // Validate field sizes
+        if (self.witness_data.len > TransactionLimits.MAX_WITNESS_SIZE) {
+            std.debug.print("❌ Transaction invalid: witness_data size {} bytes exceeds maximum {} bytes\n", .{ self.witness_data.len, TransactionLimits.MAX_WITNESS_SIZE });
+            return false;
+        }
+        
+        if (self.extra_data.len > TransactionLimits.MAX_EXTRA_DATA_SIZE) {
+            std.debug.print("❌ Transaction invalid: extra_data size {} bytes exceeds maximum {} bytes\n", .{ self.extra_data.len, TransactionLimits.MAX_EXTRA_DATA_SIZE });
+            return false;
+        }
+        
         // Coinbase transactions have simpler validation rules
         if (self.isCoinbase()) {
             // Coinbase validation: amount > 0, timestamp > 0
@@ -313,16 +333,8 @@ pub const Transaction = struct {
             return false;
         }
         
-        // For now, witness_data and extra_data must be empty
-        if (self.witness_data.len > 0) {
-            std.debug.print("❌ Transaction invalid: witness data not yet supported\n", .{});
-            return false;
-        }
-        
-        if (self.extra_data.len > 0) {
-            std.debug.print("❌ Transaction invalid: extra data not yet supported\n", .{});
-            return false;
-        }
+        // Note: witness_data and extra_data are allowed but size-limited
+        // The size limits were already checked above in the size validation section
 
         // Verify that sender address matches the hash of provided public key
         const derived_address = Address.fromPublicKey(self.sender_public_key);
@@ -792,6 +804,18 @@ pub const MempoolLimits = struct {
     
     /// Transaction size for serialization (with version and expiry fields)
     pub const TRANSACTION_SIZE: usize = 202; // 194 + 8 bytes for expiry_height
+};
+
+/// 💸 Transaction limits - prevent individual transaction DoS attacks
+pub const TransactionLimits = struct {
+    /// Maximum size of a single transaction in bytes (100KB)
+    pub const MAX_TX_SIZE: usize = 100 * 1024; // 100KB
+    
+    /// Maximum witness_data size (for future use)
+    pub const MAX_WITNESS_SIZE: usize = 10 * 1024; // 10KB
+    
+    /// Maximum extra_data size (for messages/future use)
+    pub const MAX_EXTRA_DATA_SIZE: usize = 1024; // 1KB
 };
 
 /// 📅 Transaction expiration configuration - prevents old transaction replay

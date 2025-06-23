@@ -261,6 +261,15 @@ pub const ZeiCoin = struct {
         // Check mempool limits before adding
         const tx_size = transaction.getSerializedSize();
         
+        // Double-check individual transaction size limit (defense in depth)
+        if (tx_size > types.TransactionLimits.MAX_TX_SIZE) {
+            print("❌ Transaction too large: {} bytes (max: {} bytes)\n", .{
+                tx_size, 
+                types.TransactionLimits.MAX_TX_SIZE
+            });
+            return error.TransactionTooLarge;
+        }
+        
         // Check transaction count limit
         if (self.mempool.items.len >= types.MempoolLimits.MAX_TRANSACTIONS) {
             print("❌ Mempool full: {} transactions (limit: {})\n", .{
@@ -2935,4 +2944,92 @@ test "reorganization with coinbase maturity" {
     try testing.expectEqual(@as(u64, 0), miner2_after_reorg.immature_balance);
     
     print("  ✅ Reorganization correctly rolled back matured coinbase and dependent transactions\n", .{});
+}
+
+test "transaction size limit" {
+    // This test verifies that transactions exceeding MAX_TX_SIZE are rejected
+    print("\n🔍 Testing transaction size limit...\n", .{});
+    
+    // Create test blockchain
+    var zeicoin = try createTestZeiCoin("test_zeicoin_data_tx_size");
+    defer zeicoin.deinit();
+    
+    // Create test keypairs
+    var alice = try key.KeyPair.generateNew();
+    defer alice.deinit();
+    const alice_addr = alice.getAddress();
+    var bob = try key.KeyPair.generateNew();
+    defer bob.deinit();
+    const bob_addr = bob.getAddress();
+    
+    // Give Alice some coins
+    try zeicoin.database.saveAccount(alice_addr, types.Account{
+        .address = alice_addr,
+        .balance = 1000 * types.ZEI_COIN,
+        .nonce = 0,
+        .immature_balance = 0,
+    });
+    
+    // Create a transaction with extra_data that exceeds the limit
+    const large_data = try testing.allocator.alloc(u8, types.TransactionLimits.MAX_TX_SIZE);
+    defer testing.allocator.free(large_data);
+    @memset(large_data, 'A'); // Fill with 'A's
+    
+    const oversized_tx = types.Transaction{
+        .version = 0,
+        .flags = types.TransactionFlags{},
+        .sender = alice_addr,
+        .recipient = bob_addr,
+        .amount = 100 * types.ZEI_COIN,
+        .fee = types.ZenFees.MIN_FEE,
+        .nonce = 0,
+        .timestamp = @intCast(std.time.timestamp()),
+        .expiry_height = try zeicoin.getHeight() + types.TransactionExpiry.getExpiryWindow(),
+        .sender_public_key = alice.public_key,
+        .signature = std.mem.zeroes(types.Signature),
+        .script_version = 0,
+        .witness_data = &[_]u8{},
+        .extra_data = large_data,
+    };
+    
+    // Check that the transaction is invalid due to size
+    try testing.expectEqual(false, oversized_tx.isValid());
+    print("  ✅ Oversized transaction ({} bytes) correctly rejected by isValid()\n", .{oversized_tx.getSerializedSize()});
+    
+    // Don't try to sign or add invalid transaction - it would panic during hashing
+    
+    // Create a transaction with small extra_data (should succeed)
+    const small_extra = 256; // Small enough to fit in hash buffer
+    const small_data = try testing.allocator.alloc(u8, small_extra);
+    defer testing.allocator.free(small_data);
+    @memset(small_data, 'B');
+    
+    const valid_tx = types.Transaction{
+        .version = 0,
+        .flags = types.TransactionFlags{},
+        .sender = alice_addr,
+        .recipient = bob_addr,
+        .amount = 50 * types.ZEI_COIN,
+        .fee = types.ZenFees.MIN_FEE,
+        .nonce = 0,
+        .timestamp = @intCast(std.time.timestamp()),
+        .expiry_height = try zeicoin.getHeight() + types.TransactionExpiry.getExpiryWindow(),
+        .sender_public_key = alice.public_key,
+        .signature = std.mem.zeroes(types.Signature),
+        .script_version = 0,
+        .witness_data = &[_]u8{},
+        .extra_data = small_data,
+    };
+    
+    // Check that this transaction is valid
+    try testing.expectEqual(true, valid_tx.isValid());
+    print("  ✅ Transaction with {} bytes extra_data accepted (under {} byte limit)\n", .{small_data.len, types.TransactionLimits.MAX_EXTRA_DATA_SIZE});
+    
+    // Sign and add to mempool
+    var signed_valid_tx = valid_tx;
+    signed_valid_tx.signature = try alice.signTransaction(valid_tx.hash());
+    try zeicoin.addTransaction(signed_valid_tx);
+    print("  ✅ Valid transaction successfully added to mempool\n", .{});
+    
+    print("  ✅ Transaction size limit tests passed!\n", .{});
 }

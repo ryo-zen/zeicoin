@@ -1244,6 +1244,11 @@ fn processMessage(network: *NetworkManager, data: []const u8, peer_socket: ?net.
     if (std.mem.eql(u8, command, "version")) {
         handleVersionMessage(network, data[@sizeOf(MessageHeader)..], peer_socket);
     } else if (std.mem.eql(u8, command, "tx")) {
+        // Check transaction message size before processing
+        if (header.length > types.TransactionLimits.MAX_TX_SIZE) {
+            logNetError("Transaction message too large: {} bytes (max: {} bytes)", .{ header.length, types.TransactionLimits.MAX_TX_SIZE });
+            return;
+        }
         handleIncomingTransaction(network, data[@sizeOf(MessageHeader)..]);
     } else if (std.mem.eql(u8, command, "block")) {
         logNetInfo("Block received from network", .{});
