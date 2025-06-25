@@ -677,8 +677,15 @@ pub const ZeiCoin = struct {
             .mainnet => "MainNet",
         };
         const chain_key = randomx.createRandomXKey(network_name);
+        
+        // Convert binary key to hex string for RandomX helper
+        var hex_key: [64]u8 = undefined;
+        for (chain_key, 0..) |byte, i| {
+            _ = std.fmt.bufPrint(hex_key[i*2..i*2+2], "{x:0>2}", .{byte}) catch unreachable;
+        }
+        
         const mode: randomx.RandomXMode = if (types.ZenMining.RANDOMX_MODE) .fast else .light;
-        var rx_ctx = randomx.RandomXContext.init(self.allocator, &chain_key, mode) catch {
+        var rx_ctx = randomx.RandomXContext.init(self.allocator, &hex_key, mode) catch {
             print("❌ Failed to initialize RandomX\n", .{});
             return false;
         };
@@ -694,15 +701,15 @@ pub const ZeiCoin = struct {
             block.header.serialize(stream.writer()) catch return false;
             const header_data = stream.getWritten();
 
-            // Calculate RandomX hash
+            // Calculate RandomX hash with proper difficulty
             var hash: [32]u8 = undefined;
-            rx_ctx.hash(header_data, &hash) catch {
+            const difficulty_target = block.header.getDifficultyTarget();
+            rx_ctx.hashWithDifficulty(header_data, &hash, difficulty_target.base_bytes) catch {
                 print("❌ RandomX hash calculation failed\n", .{});
                 return false;
             };
 
             // Check if hash meets difficulty target
-            const difficulty_target = block.header.getDifficultyTarget();
             if (randomx.hashMeetsDifficultyTarget(hash, difficulty_target)) {
                 print("✨ RandomX nonce found: {} (hash: {s})\n", .{ nonce, std.fmt.fmtSliceHexLower(hash[0..8]) });
                 return true;

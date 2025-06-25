@@ -36,6 +36,12 @@ pub const RandomXContext = struct {
     }
 
     pub fn hash(self: *RandomXContext, input: []const u8, output: *[32]u8) !void {
+        return self.hashWithDifficulty(input, output, 1);
+    }
+    
+    pub fn hashWithDifficulty(self: *RandomXContext, input: []const u8, output: *[32]u8, difficulty_bytes: u8) !void {
+        std.debug.print("RandomX hashWithDifficulty called with input len={}, difficulty_bytes={}\n", .{input.len, difficulty_bytes});
+        
         // Convert input to hex string
         var hex_input = try self.allocator.alloc(u8, input.len * 2);
         defer self.allocator.free(hex_input);
@@ -48,7 +54,9 @@ pub const RandomXContext = struct {
         const mode_str = if (self.mode == .light) "light" else "fast";
         
         // Validate inputs before subprocess execution
-        if (hex_input.len != 192) return RandomXError.InvalidInput; // 96 bytes * 2 hex chars
+        // Block header is 192 bytes = 384 hex chars
+        std.debug.print("Hex input length: {} (expected 384 for block header)\n", .{hex_input.len});
+        if (hex_input.len == 0) return RandomXError.InvalidInput;
         for (hex_input) |c| {
             if (!std.ascii.isHex(c)) return RandomXError.InvalidInput;
         }
@@ -59,27 +67,44 @@ pub const RandomXContext = struct {
             if (!std.ascii.isHex(c)) return RandomXError.InvalidInput;
         }
         
+        // Use absolute path to prevent PATH manipulation
+        const exe_path = std.fs.realpathAlloc(self.allocator, "./randomx/randomx_helper") catch |err| {
+            std.debug.print("Failed to resolve RandomX helper path: {}\n", .{err});
+            return RandomXError.ProcessFailed;
+        };
+        defer self.allocator.free(exe_path);
+        
+        std.debug.print("RandomX helper path: {s}\n", .{exe_path});
+        
+        // Create argv array with proper memory management
+        const argv = try self.allocator.alloc([]const u8, 5);
+        defer self.allocator.free(argv);
+        // Format difficulty bytes as string
+        var difficulty_str: [4]u8 = undefined;
+        _ = std.fmt.bufPrint(&difficulty_str, "{}", .{difficulty_bytes}) catch unreachable;
+        
+        argv[0] = exe_path;
+        argv[1] = hex_input;
+        argv[2] = self.key;
+        argv[3] = difficulty_str[0..std.fmt.count("{}", .{difficulty_bytes})];
+        argv[4] = mode_str;
+        
+        // Debug print the command being executed
+        std.debug.print("RandomX command: {s} {s} {s} {s} {s}\n", .{argv[0], argv[1], argv[2], argv[3], argv[4]});
+        
         // Run RandomX helper subprocess with resource limits
-        var child = std.process.Child.init(&[_][]const u8{
-            "./randomx/randomx_helper",
-            hex_input,
-            self.key,
-            "1", // difficulty bytes (will be passed from caller)
-            mode_str,
-        }, self.allocator);
+        var child = std.process.Child.init(argv, self.allocator);
         
         // Set resource limits for security
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Pipe;
         child.stdin_behavior = .Ignore;
         
-        // Use absolute path to prevent PATH manipulation
-        const exe_path = try std.fs.realpathAlloc(self.allocator, "./randomx/randomx_helper");
-        defer self.allocator.free(exe_path);
-        child.argv[0] = exe_path;
-        
         // Spawn and wait with timeout
-        try child.spawn();
+        child.spawn() catch |err| {
+            std.debug.print("Failed to spawn RandomX helper: {}\n", .{err});
+            return RandomXError.ProcessFailed;
+        };
         
         // Set up timeout (30 seconds max)
         const timeout_ns = 30 * std.time.ns_per_s;
@@ -96,28 +121,36 @@ pub const RandomXContext = struct {
         try stdout.ensureTotalCapacity(max_output);
         try stderr.ensureTotalCapacity(max_output);
         
+        // Read output before wait to avoid deadlock
+        if (child.stdout) |out| {
+            const n = try out.reader().readAll(stdout.unusedCapacitySlice()[0..@min(max_output, stdout.unusedCapacitySlice().len)]);
+            stdout.items.len += n;
+        }
+        if (child.stderr) |err| {
+            const n = try err.reader().readAll(stderr.unusedCapacitySlice()[0..@min(max_output, stderr.unusedCapacitySlice().len)]);
+            stderr.items.len += n;
+        }
+        
         const result = try child.wait();
         
         // Check execution time
         const elapsed = std.time.nanoTimestamp() - start_time;
         if (elapsed > timeout_ns) return RandomXError.ProcessTimeout;
         
-        // Read output with limits
-        if (child.stdout) |out| {
-            _ = try out.reader().readAll(stdout.unusedCapacitySlice()[0..@min(max_output, stdout.unusedCapacitySlice().len)]);
-        }
-        if (child.stderr) |err| {
-            _ = try err.reader().readAll(stderr.unusedCapacitySlice()[0..@min(max_output, stderr.unusedCapacitySlice().len)]);
-        }
-        
         if (result != .Exited or result.Exited != 0) {
-            std.debug.print("RandomX helper failed: {s}\n", .{stderr.items});
+            std.debug.print("RandomX helper failed with exit code: {}\n", .{result});
+            std.debug.print("stderr: {s}\n", .{stderr.items});
+            std.debug.print("stdout: {s}\n", .{stdout.items});
             return RandomXError.ProcessFailed;
         }
         
         // Parse result: hash_hex:meets_difficulty
         const output_str = stdout.items;
-        const colon_pos = std.mem.indexOf(u8, output_str, ":") orelse return RandomXError.HashFailed;
+        std.debug.print("RandomX helper stdout: '{s}' (len={})\n", .{output_str, output_str.len});
+        const colon_pos = std.mem.indexOf(u8, output_str, ":") orelse {
+            std.debug.print("Failed to find colon in RandomX output\n", .{});
+            return RandomXError.HashFailed;
+        };
         const hash_hex = output_str[0..colon_pos];
         
         if (hash_hex.len != 64) return RandomXError.HashFailed;
