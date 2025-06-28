@@ -141,28 +141,14 @@ pub fn main() !void {
     var transaction_count: u32 = 0;
     var block_count: u32 = 0;
 
-    // Main zen loop - network handles P2P, we handle clients and auto-mining
+    // Start the mining thread
+    const miner_keypair = zen_wallet.getZeiCoinKeyPair() orelse return error.WalletLoadFailed;
+    try zeicoin.startMining(miner_keypair);
+    defer zeicoin.stopMining();
+    
+    // Main zen loop - network handles P2P, we handle clients
     while (true) {
-        // Check for auto-mining opportunities (zen mining happens naturally)
-        if (zeicoin.mempool.items.len > 0) {
-            print("⛏️  Zen mining triggered by natural transaction flow...\n", .{});
-
-            // Get ZeiCoin KeyPair from zen wallet for mining
-            const miner_keypair = zen_wallet.getZeiCoinKeyPair() orelse return error.WalletLoadFailed;
-
-            // Mine block with current transactions
-            const new_block = try zeicoin.zenMineBlock(miner_keypair);
-            block_count += 1;
-
-            const block_height = try zeicoin.getHeight() - 1; // Just mined, so current height - 1
-            print("💎 Block #{} mined with zen energy! ({} transactions)\n", .{ block_height, new_block.transactions.len });
-
-            // Broadcast block to all peers (network propagation)
-            if (zeicoin.network) |net_mgr| {
-                net_mgr.broadcastBlock(new_block);
-                print("📡 Block flows to {} peers naturally\n", .{net_mgr.getPeerCount()});
-            }
-        }
+        // Mining now happens in background thread - no blocking!
 
         // Handle client connections (non-blocking)
         if (server.accept()) |connection| {
@@ -198,6 +184,8 @@ pub fn main() !void {
 }
 
 fn handleZeiCoinClient(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, miner_wallet: *wallet.Wallet, transaction_count: *u32, block_count: *u32) !void {
+    _ = miner_wallet; // No longer used - mining happens in background thread
+    _ = block_count; // No longer tracking here - mining is asynchronous
     var buffer: [4096]u8 = undefined;
 
     while (true) {
@@ -247,28 +235,7 @@ fn handleZeiCoinClient(allocator: std.mem.Allocator, connection: net.Server.Conn
             print("📤 Sent default response for unknown command: {s}\n", .{message});
         }
 
-        // Check for pending transactions and auto-mine
-        if (zeicoin.mempool.items.len > 0) {
-            print("⛏️  Found {} pending transactions - auto-mining...\n", .{zeicoin.mempool.items.len});
-
-            // Get ZeiCoin KeyPair from zen wallet for mining
-            const miner_keypair = miner_wallet.getZeiCoinKeyPair() orelse {
-                print("❌ Miner wallet not loaded\n", .{});
-                continue;
-            };
-
-            _ = zeicoin.zenMineBlock(miner_keypair) catch |err| {
-                print("❌ Mining failed: {}\n", .{err});
-                continue;
-            };
-
-            block_count.* += 1;
-            const current_height = zeicoin.getHeight() catch 0;
-            print("⛏️  Block #{} mined! Broadcasting to client...\n", .{current_height});
-
-            // Send new block notification to client
-            try sendNewBlockNotification(connection, zeicoin);
-        }
+        // Mining now happens in background thread - no need to block here!
     }
 }
 

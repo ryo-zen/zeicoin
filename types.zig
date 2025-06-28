@@ -740,6 +740,45 @@ pub const ForkBlock = struct {
     received_time: i64,
 };
 
+/// Mining state for thread-safe mining operations
+pub const MiningState = struct {
+    /// Mutex for thread-safe access to mining-related data
+    mutex: std.Thread.Mutex,
+    /// Condition variable for signaling new work
+    condition: std.Thread.Condition,
+    /// Flag indicating if mining is active
+    active: std.atomic.Value(bool),
+    /// Mining thread handle
+    thread: ?std.Thread,
+    /// Flag to indicate mining should stop current work
+    should_restart: std.atomic.Value(bool),
+    /// Current mining block height
+    current_height: std.atomic.Value(u32),
+    
+    pub fn init() MiningState {
+        return .{
+            .mutex = std.Thread.Mutex{},
+            .condition = std.Thread.Condition{},
+            .active = std.atomic.Value(bool).init(false),
+            .thread = null,
+            .should_restart = std.atomic.Value(bool).init(false),
+            .current_height = std.atomic.Value(u32).init(0),
+        };
+    }
+    
+    pub fn deinit(self: *MiningState) void {
+        // Stop mining if active
+        self.active.store(false, .release);
+        // Signal the condition to wake up the thread if waiting
+        self.condition.signal();
+        // Wait for thread to finish
+        if (self.thread) |thread| {
+            thread.join();
+            self.thread = null;
+        }
+    }
+};
+
 /// Network-specific genesis configurations
 pub const Genesis = struct {
     pub fn getConfig() GenesisConfig {

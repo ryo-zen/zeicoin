@@ -181,6 +181,9 @@ pub const ZeiCoin = struct {
 
     // Fork manager for longest chain consensus
     fork_manager: forkmanager.ForkManager,
+    
+    // Mining state for thread-safe mining operations
+    mining_state: types.MiningState,
 
     /// Initialize new ZeiCoin blockchain with persistent storage
     pub fn init(allocator: std.mem.Allocator) !ZeiCoin {
@@ -205,6 +208,7 @@ pub const ZeiCoin = struct {
             .failed_peers = ArrayList(*net.Peer).init(allocator),
             .processed_transactions = std.ArrayList([32]u8).init(allocator),
             .fork_manager = forkmanager.ForkManager.init(allocator),
+            .mining_state = types.MiningState.init(),
         };
 
         // Always create canonical genesis block if no blockchain exists
@@ -230,6 +234,9 @@ pub const ZeiCoin = struct {
 
     /// Cleanup blockchain resources
     pub fn deinit(self: *ZeiCoin) void {
+        // Stop mining thread first
+        self.mining_state.deinit();
+        
         self.database.deinit();
         
         // Free all transactions in mempool before freeing the mempool itself
@@ -295,8 +302,12 @@ pub const ZeiCoin = struct {
         }
     }
 
-    /// Add transaction to memory pool
+    /// Add transaction to memory pool (thread-safe)
     pub fn addTransaction(self: *ZeiCoin, transaction: Transaction) !void {
+        // Lock mempool for thread-safe access
+        self.mining_state.mutex.lock();
+        defer self.mining_state.mutex.unlock();
+        
         // Check for duplicate in mempool (integrity protection)
         const tx_hash = transaction.hash();
         for (self.mempool.items) |existing_tx| {
@@ -306,7 +317,7 @@ pub const ZeiCoin = struct {
             }
         }
 
-        // Validate transaction
+        // Validate transaction (can be done without lock, but keeping it simple)
         if (!try self.validateTransaction(transaction)) {
             return error.InvalidTransaction;
         }
@@ -354,7 +365,10 @@ pub const ZeiCoin = struct {
             types.MempoolLimits.MAX_TRANSACTIONS
         });
 
-        // Broadcast transaction to network peers
+        // Signal mining thread that new work is available
+        self.mining_state.condition.signal();
+
+        // Broadcast transaction to network peers (after unlocking)
         if (self.network) |*network| {
             network.*.broadcastTransaction(transaction);
         }
@@ -498,6 +512,80 @@ pub const ZeiCoin = struct {
         print("💸 Processed: {s} transferred + {s} fee = {s} total cost\n", .{ amount_display, fee_display, total_display });
     }
 
+    /// Mining thread function that runs in the background
+    fn miningThreadFn(self: *ZeiCoin, miner_keypair: key.KeyPair) void {
+        print("⛏️  Mining thread started\n", .{});
+        
+        while (self.mining_state.active.load(.acquire)) {
+            // Lock for checking mempool
+            self.mining_state.mutex.lock();
+            
+            // Check if we should mine
+            const should_mine = self.mempool.items.len > 0;
+            const current_height = self.getHeight() catch 0;
+            
+            if (!should_mine) {
+                // Wait for new transactions
+                self.mining_state.condition.wait(&self.mining_state.mutex);
+                self.mining_state.mutex.unlock();
+                continue;
+            }
+            
+            // Update current mining height
+            self.mining_state.current_height.store(current_height, .release);
+            
+            // Unlock before mining (mining takes time)
+            self.mining_state.mutex.unlock();
+            
+            // Mine the block
+            const block = self.zenMineBlock(miner_keypair) catch |err| {
+                print("❌ Mining error: {}\n", .{err});
+                std.time.sleep(1 * std.time.ns_per_s); // Wait 1 second before retry
+                continue;
+            };
+            
+            // Successfully mined - the block is already added to chain in zenMineBlock
+            const block_height = self.getHeight() catch 0;
+            print("✅ Block #{} mined by background thread\n", .{block_height});
+            
+            // Broadcast block to network peers
+            if (self.network) |net_mgr| {
+                net_mgr.broadcastBlock(block);
+                print("📡 Block broadcasted to {} peers\n", .{net_mgr.getPeerCount()});
+            }
+        }
+        
+        print("⛏️  Mining thread stopped\n", .{});
+    }
+    
+    /// Start the mining thread
+    pub fn startMining(self: *ZeiCoin, miner_keypair: key.KeyPair) !void {
+        if (self.mining_state.active.load(.acquire)) {
+            return; // Already mining
+        }
+        
+        self.mining_state.active.store(true, .release);
+        self.mining_state.thread = try std.Thread.spawn(.{}, miningThreadFn, .{ self, miner_keypair });
+        print("⛏️  Mining thread started successfully\n", .{});
+    }
+    
+    /// Stop the mining thread
+    pub fn stopMining(self: *ZeiCoin) void {
+        if (!self.mining_state.active.load(.acquire)) {
+            return; // Not mining
+        }
+        
+        self.mining_state.active.store(false, .release);
+        self.mining_state.condition.signal(); // Wake up the thread if it's waiting
+        
+        if (self.mining_state.thread) |thread| {
+            thread.join();
+            self.mining_state.thread = null;
+        }
+        
+        print("⛏️  Mining thread stopped successfully\n", .{});
+    }
+    
     /// Mine a new block with zen proof-of-work (the simplest thing that works)
     pub fn mineBlock(self: *ZeiCoin) !void {
         // Genesis mining with dummy keypair
@@ -507,6 +595,9 @@ pub const ZeiCoin = struct {
 
     /// Mine a new block with zen proof-of-work for a specific miner
     pub fn zenMineBlock(self: *ZeiCoin, miner_keypair: key.KeyPair) !types.Block {
+        // Lock mempool to safely copy transactions
+        self.mining_state.mutex.lock();
+        
         // 💰 Calculate total fees from mempool transactions
         var total_fees: u64 = 0;
         for (self.mempool.items) |tx| {
@@ -567,6 +658,9 @@ pub const ZeiCoin = struct {
 
         const all_transactions = try transactions_to_include.toOwnedSlice();
         defer self.allocator.free(all_transactions);
+        
+        // Unlock mempool before the time-consuming mining operation
+        self.mining_state.mutex.unlock();
 
         // Get previous block hash and calculate next difficulty
         const current_height = try self.getHeight();
@@ -641,9 +735,11 @@ pub const ZeiCoin = struct {
             // Check for matured coinbase rewards
             try self.matureCoinbaseRewards(block_height);
 
-            // Clear mempool
+            // Clear mempool (need to lock again)
+            self.mining_state.mutex.lock();
             self.mempool.clearRetainingCapacity();
             self.mempool_size_bytes = 0;
+            self.mining_state.mutex.unlock();
 
             // Cleanup old processed transactions periodically
             self.cleanupProcessedTransactions();
@@ -2347,6 +2443,7 @@ fn createTestZeiCoin(data_dir: []const u8) !ZeiCoin {
         .failed_peers = ArrayList(*net.Peer).init(testing.allocator),
         .processed_transactions = std.ArrayList([32]u8).init(testing.allocator),
         .fork_manager = forkmanager.ForkManager.init(testing.allocator),
+        .mining_state = types.MiningState.init(),
     };
 
     // Initialize fork manager with genesis (database should be empty now)
