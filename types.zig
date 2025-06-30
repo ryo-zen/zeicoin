@@ -49,7 +49,8 @@ pub const CURRENT_BLOCK_VERSION: u32 = @intFromEnum(BlockVersion.V0);
 
 // Network constants - Bootstrap nodes for peer discovery
 pub const BOOTSTRAP_NODES = [_][]const u8{
-    "134.199.168.129:10801", // Public bootstrap node
+    "134.199.168.129:10801", // Public bootstrap node 1
+    "161.189.98.149:10801",  // Public bootstrap node 2
     // Note: Local/private IPs should not be hardcoded as bootstrap nodes
     // They will be discovered via local network scanning if available
 };
@@ -550,37 +551,85 @@ pub const BlockHeader = struct {
 
     /// Serialize block header to bytes
     pub fn serialize(self: *const BlockHeader, writer: anytype) !void {
+        std.debug.print("🔍 SYNC DEBUG: BlockHeader.serialize() starting\n", .{});
+        std.debug.print("  📦 version: {} (0x{X})\n", .{self.version, self.version});
+        
         try writer.writeInt(u32, self.version, .little);
+        std.debug.print("  ✅ Written version\n", .{});
+        
         try writer.writeAll(&self.previous_hash);
+        std.debug.print("  ✅ Written previous_hash\n", .{});
+        
         try writer.writeAll(&self.merkle_root);
+        std.debug.print("  ✅ Written merkle_root\n", .{});
+        
         try writer.writeInt(u64, self.timestamp, .little);
+        std.debug.print("  ✅ Written timestamp: {}\n", .{self.timestamp});
+        
         try writer.writeInt(u64, self.difficulty, .little);
+        std.debug.print("  ✅ Written difficulty: {}\n", .{self.difficulty});
+        
         try writer.writeInt(u32, self.nonce, .little);
+        std.debug.print("  ✅ Written nonce: {}\n", .{self.nonce});
         
         // New future-proof fields
         try writer.writeAll(&self.witness_root);
+        std.debug.print("  ✅ Written witness_root\n", .{});
+        
         try writer.writeAll(&self.state_root);
+        std.debug.print("  ✅ Written state_root\n", .{});
+        
         try writer.writeInt(u64, self.extra_nonce, .little);
+        std.debug.print("  ✅ Written extra_nonce: {}\n", .{self.extra_nonce});
+        
         try writer.writeAll(&self.extra_data);
+        std.debug.print("  ✅ Written extra_data\n", .{});
+        
+        std.debug.print("🔍 SYNC DEBUG: BlockHeader.serialize() completed\n", .{});
     }
     
     /// Deserialize block header from bytes
     pub fn deserialize(reader: anytype) !BlockHeader {
+        std.debug.print("🔍 SYNC DEBUG: BlockHeader.deserialize() starting\n", .{});
         var header: BlockHeader = undefined;
         
         header.version = try reader.readInt(u32, .little);
+        std.debug.print("  📦 Read version: {} (0x{X})\n", .{header.version, header.version});
+        
+        if (header.version > 1000) {
+            std.debug.print("  ❌ WARNING: Suspicious version number: {} (0x{X})\n", .{header.version, header.version});
+            std.debug.print("  🐛 This might indicate endianness or serialization mismatch!\n", .{});
+        }
+        
         _ = try reader.readAll(&header.previous_hash);
+        std.debug.print("  ✅ Read previous_hash\n", .{});
+        
         _ = try reader.readAll(&header.merkle_root);
+        std.debug.print("  ✅ Read merkle_root\n", .{});
+        
         header.timestamp = try reader.readInt(u64, .little);
+        std.debug.print("  ✅ Read timestamp: {}\n", .{header.timestamp});
+        
         header.difficulty = try reader.readInt(u64, .little);
+        std.debug.print("  ✅ Read difficulty: {}\n", .{header.difficulty});
+        
         header.nonce = try reader.readInt(u32, .little);
+        std.debug.print("  ✅ Read nonce: {}\n", .{header.nonce});
         
         // New future-proof fields
         _ = try reader.readAll(&header.witness_root);
-        _ = try reader.readAll(&header.state_root);
-        header.extra_nonce = try reader.readInt(u64, .little);
-        _ = try reader.readAll(&header.extra_data);
+        std.debug.print("  ✅ Read witness_root\n", .{});
         
+        _ = try reader.readAll(&header.state_root);
+        std.debug.print("  ✅ Read state_root\n", .{});
+        
+        header.extra_nonce = try reader.readInt(u64, .little);
+        std.debug.print("  ✅ Read extra_nonce: {}\n", .{header.extra_nonce});
+        
+        _ = try reader.readAll(&header.extra_data);
+        std.debug.print("  ✅ Read extra_data\n", .{});
+        
+        std.debug.print("🔍 SYNC DEBUG: BlockHeader.deserialize() completed\n", .{});
         return header;
     }
     
@@ -860,7 +909,12 @@ pub const NetworkConfig = struct {
         const initial_difficulty = ZenMining.initialDifficultyTarget();
         std.debug.print("🌐 Network: {s}\n", .{networkName()});
         std.debug.print("⚡ Difficulty: {}-byte range (dynamic)\n", .{initial_difficulty.base_bytes});
-        std.debug.print("🧠 RandomX Mode: {s}\n", .{if (config.randomx_mode) "Fast (2GB)" else "Light (256MB)"});
+        // Show actual mining algorithm based on build mode
+        if (@import("builtin").mode == .Debug) {
+            std.debug.print("🧠 Mining Mode: SHA256 (Debug - Fast blocks)\n", .{});
+        } else {
+            std.debug.print("🧠 Mining Mode: RandomX {s}\n", .{if (config.randomx_mode) "Fast (2GB)" else "Light (256MB)"});
+        }
         std.debug.print("⏰ Block Time: {}s\n", .{config.target_block_time});
         std.debug.print("💰 Block Reward: {d:.8} ZEI\n", .{@as(f64, @floatFromInt(config.block_reward)) / @as(f64, @floatFromInt(ZEI_COIN))});
         std.debug.print("💸 Min Fee: {d:.8} ZEI\n", .{@as(f64, @floatFromInt(config.min_fee)) / @as(f64, @floatFromInt(ZEI_COIN))});
