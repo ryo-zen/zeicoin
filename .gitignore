@@ -30,3 +30,10 @@ tests/
 /sql
 
 scripts/deploy_files_only.sh
+.dockerignore
+docker-compose.debug.yml
+docker-compose.randomx.yml
+DOCKER.md
+Dockerfile.debug
+Dockerfile.randomx
+.gitignore

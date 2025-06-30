@@ -306,19 +306,20 @@ pub const ZeiCoin = struct {
     pub fn addTransaction(self: *ZeiCoin, transaction: Transaction) !void {
         // Lock mempool for thread-safe access
         self.mining_state.mutex.lock();
-        defer self.mining_state.mutex.unlock();
         
         // Check for duplicate in mempool (integrity protection)
         const tx_hash = transaction.hash();
         for (self.mempool.items) |existing_tx| {
             if (std.mem.eql(u8, &existing_tx.hash(), &tx_hash)) {
                 print("🔄 Transaction already in mempool - ignored\n", .{});
+                self.mining_state.mutex.unlock();
                 return; // Silently ignore duplicate
             }
         }
 
         // Validate transaction (can be done without lock, but keeping it simple)
         if (!try self.validateTransaction(transaction)) {
+            self.mining_state.mutex.unlock();
             return error.InvalidTransaction;
         }
 
@@ -331,6 +332,7 @@ pub const ZeiCoin = struct {
                 tx_size, 
                 types.TransactionLimits.MAX_TX_SIZE
             });
+            self.mining_state.mutex.unlock();
             return error.TransactionTooLarge;
         }
         
@@ -340,6 +342,7 @@ pub const ZeiCoin = struct {
                 self.mempool.items.len, 
                 types.MempoolLimits.MAX_TRANSACTIONS
             });
+            self.mining_state.mutex.unlock();
             return error.MempoolFull;
         }
         
@@ -350,6 +353,7 @@ pub const ZeiCoin = struct {
                 tx_size,
                 types.MempoolLimits.MAX_SIZE_BYTES
             });
+            self.mining_state.mutex.unlock();
             return error.MempoolSizeLimitExceeded;
         }
 
@@ -365,10 +369,15 @@ pub const ZeiCoin = struct {
             types.MempoolLimits.MAX_TRANSACTIONS
         });
 
-        // Signal mining thread that new work is available
-        self.mining_state.condition.signal();
+        // Unlock before signaling
+        self.mining_state.mutex.unlock();
 
-        // Broadcast transaction to network peers (after unlocking)
+        // Signal mining thread that new work is available
+        print("🔔 Broadcasting to mining thread (before broadcast)\n", .{});
+        self.mining_state.condition.broadcast();
+        print("🔔 Broadcast sent to mining thread\n", .{});
+
+        // Broadcast transaction to network peers
         if (self.network) |*network| {
             network.*.broadcastTransaction(transaction);
         }
@@ -523,10 +532,16 @@ pub const ZeiCoin = struct {
             // Check if we should mine
             const should_mine = self.mempool.items.len > 0;
             const current_height = self.getHeight() catch 0;
+            print("🔍 Mining thread check: mempool has {} transactions, should_mine={}\n", .{self.mempool.items.len, should_mine});
             
             if (!should_mine) {
                 // Wait for new transactions
+                print("⏳ Mining thread: Waiting for transactions (mempool empty)\n", .{});
+                print("🔐 Mining thread: About to wait on condition variable\n", .{});
                 self.mining_state.condition.wait(&self.mining_state.mutex);
+                print("👀 Mining thread: Woke up from condition wait\n", .{});
+                print("🔍 Mining thread: Rechecking mempool after wake - has {} transactions\n", .{self.mempool.items.len});
+                // Unlock before continuing to avoid double-lock
                 self.mining_state.mutex.unlock();
                 continue;
             }
@@ -538,6 +553,7 @@ pub const ZeiCoin = struct {
             self.mining_state.mutex.unlock();
             
             // Mine the block
+            print("🔨 Mining thread: Calling zenMineBlock (mempool has {} transactions)\n", .{self.mempool.items.len});
             const block = self.zenMineBlock(miner_keypair) catch |err| {
                 print("❌ Mining error: {}\n", .{err});
                 std.time.sleep(1 * std.time.ns_per_s); // Wait 1 second before retry
@@ -595,6 +611,7 @@ pub const ZeiCoin = struct {
 
     /// Mine a new block with zen proof-of-work for a specific miner
     pub fn zenMineBlock(self: *ZeiCoin, miner_keypair: key.KeyPair) !types.Block {
+        print("⛏️  zenMineBlock: Starting to mine new block\n", .{});
         // Lock mempool to safely copy transactions
         self.mining_state.mutex.lock();
         
@@ -787,8 +804,16 @@ pub const ZeiCoin = struct {
         };
         defer rx_ctx.deinit();
 
+        const starting_height = self.mining_state.current_height.load(.acquire);
         var nonce: u32 = 0;
         while (nonce < types.ZenMining.MAX_NONCE) {
+            // Check if blockchain height changed (new block received)
+            const current_height = self.getHeight() catch starting_height;
+            if (current_height > starting_height) {
+                print("🛑 Mining stopped - new block received at height {}\n", .{current_height});
+                return false;
+            }
+
             block.header.nonce = nonce;
 
             // Serialize block header for RandomX input
@@ -816,6 +841,13 @@ pub const ZeiCoin = struct {
             // Progress indicator (every 10k tries due to RandomX being slower)
             if (nonce % types.PROGRESS.RANDOMX_REPORT_INTERVAL == 0) {
                 print("RandomX mining... tried {} nonces\n", .{nonce});
+                
+                // Also check height on progress reports
+                const progress_height = self.getHeight() catch starting_height;
+                if (progress_height > starting_height) {
+                    print("🛑 Mining stopped - new block received during progress check\n", .{});
+                    return false;
+                }
             }
         }
 
@@ -824,9 +856,16 @@ pub const ZeiCoin = struct {
 
     /// Legacy SHA256 proof-of-work for tests (faster)
     fn zenProofOfWorkSHA256(self: *ZeiCoin, block: *Block) bool {
-        _ = self; // suppress unused parameter warning
+        const starting_height = self.mining_state.current_height.load(.acquire);
         var nonce: u32 = 0;
         while (nonce < types.ZenMining.MAX_NONCE) {
+            // Check if blockchain height changed (new block received)
+            const current_height = self.getHeight() catch starting_height;
+            if (current_height > starting_height) {
+                print("🛑 Mining stopped - new block received at height {}\n", .{current_height});
+                return false;
+            }
+
             block.header.nonce = nonce;
 
             // Calculate block hash using SHA256
@@ -840,6 +879,15 @@ pub const ZeiCoin = struct {
             }
 
             nonce += 1;
+
+            // Check more frequently for SHA256 (every 100k nonces)
+            if (nonce % 100000 == 0) {
+                const progress_height = self.getHeight() catch starting_height;
+                if (progress_height > starting_height) {
+                    print("🛑 Mining stopped - new block received during mining\n", .{});
+                    return false;
+                }
+            }
 
             // Progress indicator (every 100k tries)
             if (nonce % types.PROGRESS.SHA256_REPORT_INTERVAL == 0) {
@@ -858,8 +906,15 @@ pub const ZeiCoin = struct {
             .mainnet => "MainNet",
         };
         const chain_key = randomx.createRandomXKey(network_name);
+        
+        // Convert binary key to hex string for RandomX helper
+        var hex_key: [64]u8 = undefined;
+        for (chain_key, 0..) |byte, i| {
+            _ = std.fmt.bufPrint(hex_key[i*2..i*2+2], "{x:0>2}", .{byte}) catch unreachable;
+        }
+        
         const mode: randomx.RandomXMode = if (types.ZenMining.RANDOMX_MODE) .fast else .light;
-        var rx_ctx = randomx.RandomXContext.init(self.allocator, &chain_key, mode) catch {
+        var rx_ctx = randomx.RandomXContext.init(self.allocator, &hex_key, mode) catch {
             print("❌ Failed to initialize RandomX for validation\n", .{});
             return false;
         };
@@ -871,15 +926,15 @@ pub const ZeiCoin = struct {
         try block.header.serialize(stream.writer());
         const header_data = stream.getWritten();
 
-        // Calculate RandomX hash
+        // Calculate RandomX hash with proper difficulty
         var hash: [32]u8 = undefined;
-        rx_ctx.hash(header_data, &hash) catch {
+        const difficulty_target = block.header.getDifficultyTarget();
+        rx_ctx.hashWithDifficulty(header_data, &hash, difficulty_target.base_bytes) catch {
             print("❌ RandomX hash calculation failed during validation\n", .{});
             return false;
         };
 
         // Check if hash meets difficulty target
-        const difficulty_target = block.header.getDifficultyTarget();
         return randomx.hashMeetsDifficultyTarget(hash, difficulty_target);
     }
 
@@ -1583,6 +1638,26 @@ pub const ZeiCoin = struct {
         // Validate and add to mempool if valid
         self.addTransaction(transaction) catch |err| {
             print("⚠️ Rejected network transaction: {}\n", .{err});
+            
+            // Fast catchup: If transaction failed due to insufficient balance,
+            // we might be behind. Trigger sync to catch up with network state.
+            if (err == error.InvalidTransaction) {
+                // Check if we might be behind by querying peer heights
+                if (self.network) |network| {
+                    const highest_peer_height = network.getHighestPeerHeight();
+                    const our_height = self.getHeight() catch 0;
+                    
+                    if (highest_peer_height > our_height) {
+                        print("🔄 Fast catchup: We're behind (height {} vs {}), triggering sync...\n", .{our_height, highest_peer_height});
+                        
+                        // Trigger auto-sync to catch up
+                        self.triggerAutoSyncWithPeerQuery() catch |sync_err| {
+                            print("⚠️  Fast catchup sync failed: {}\n", .{sync_err});
+                        };
+                    }
+                }
+            }
+            
             return err;
         };
 
@@ -1900,7 +1975,10 @@ pub const ZeiCoin = struct {
 
         // Broadcast to network
         if (self.network) |network| {
+            logSuccess("🚀 Broadcasting newly mined block #{} to P2P network", .{target_height});
             network.*.broadcastBlock(block);
+        } else {
+            logInfo("💭 No network connected, block not broadcast", .{});
         }
     }
 
@@ -2058,12 +2136,17 @@ pub const ZeiCoin = struct {
                     continue;
                 }
 
+                // Skip peers with invalid addresses (0.0.0.0)
+                const is_zero_addr = peer.address.ip[0] == 0 and peer.address.ip[1] == 0 and 
+                                   peer.address.ip[2] == 0 and peer.address.ip[3] == 0;
+                if (is_zero_addr) {
+                    print("⚠️  Skipping peer with invalid address 0.0.0.0\n", .{});
+                    continue;
+                }
+                
                 // Format peer address safely with bounds checking
                 var addr_buf: [64]u8 = undefined;
-                const addr_str = std.fmt.bufPrint(&addr_buf, "{s}:{}", .{ peer.address.ip, peer.address.port }) catch {
-                    print("⚠️  Failed to format peer address\n", .{});
-                    continue;
-                };
+                const addr_str = peer.address.toString(&addr_buf);
 
                 print("🔄 Auto-sync triggered - requesting peer height from {s}\n", .{addr_str});
 

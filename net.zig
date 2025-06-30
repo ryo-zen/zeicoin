@@ -36,12 +36,30 @@ fn logNetBroadcast(comptime fmt: []const u8, args: anytype) void {
 
 /// Send message header and payload to socket
 fn sendMessage(socket: net.Stream, header_template: MessageHeader, payload: anytype) !void {
+    // Find the actual command length (before null bytes)
+    var cmd_len: usize = 0;
+    for (header_template.command) |c| {
+        if (c == 0) break;
+        cmd_len += 1;
+    }
+    logNetInfo("📤 P2P: sendMessage called - command={s}, length={}", .{header_template.command[0..cmd_len], header_template.length});
+    
     var header = header_template;
     const payload_bytes = std.mem.asBytes(&payload);
     header.setChecksum(payload_bytes);
     
-    _ = try socket.write(std.mem.asBytes(&header));
-    _ = try socket.write(payload_bytes);
+    logNetInfo("📤 P2P: Calculated checksum: {x}", .{header.checksum});
+    
+    const header_bytes = std.mem.asBytes(&header);
+    logNetInfo("📤 P2P: Writing header ({} bytes)", .{header_bytes.len});
+    const header_written = try socket.write(header_bytes);
+    logNetInfo("📤 P2P: Header written: {} bytes", .{header_written});
+    
+    logNetInfo("📤 P2P: Writing payload ({} bytes)", .{payload_bytes.len});
+    const payload_written = try socket.write(payload_bytes);
+    logNetInfo("📤 P2P: Payload written: {} bytes", .{payload_written});
+    
+    logNetSuccess("📤 P2P: Message sent successfully", .{});
 }
 
 /// Send message header only to socket
@@ -51,40 +69,34 @@ fn sendHeaderOnly(socket: net.Stream, header: MessageHeader) !void {
 
 /// Send block with header + transactions (with checksum)
 fn sendBlock(socket: net.Stream, header_template: MessageHeader, block: types.Block, allocator: std.mem.Allocator) !void {
-    // Calculate total payload size
-    const payload_size = @sizeOf(types.BlockHeader) + @sizeOf(u32) + @sizeOf(types.Transaction) * block.transactions.len;
+    logNetInfo("📤 P2P: sendBlock called", .{});
     
-    // Allocate buffer for entire payload
-    const payload_buffer = try allocator.alloc(u8, payload_size);
-    defer allocator.free(payload_buffer);
+    // Use proper serialization to match deserialize expectations
+    var buffer = std.ArrayList(u8).init(allocator);
+    defer buffer.deinit();
     
-    // Serialize payload into buffer
-    var offset: usize = 0;
-    
-    // Copy block header
-    @memcpy(payload_buffer[offset..offset + @sizeOf(types.BlockHeader)], std.mem.asBytes(&block.header));
-    offset += @sizeOf(types.BlockHeader);
-    
-    // Copy transaction count
-    const tx_count: u32 = @intCast(block.transactions.len);
-    @memcpy(payload_buffer[offset..offset + @sizeOf(u32)], std.mem.asBytes(&tx_count));
-    offset += @sizeOf(u32);
-    
-    // Copy all transactions
-    for (block.transactions) |tx| {
-        @memcpy(payload_buffer[offset..offset + @sizeOf(types.Transaction)], std.mem.asBytes(&tx));
-        offset += @sizeOf(types.Transaction);
-    }
+    logNetInfo("📤 P2P: Serializing block with writeBlock", .{});
+    // Serialize the block using proper serialization
+    try serialize.writeBlock(buffer.writer(), block);
+    logNetInfo("📤 P2P: Block serialized, size={} bytes", .{buffer.items.len});
     
     // Create header with checksum
     var header = header_template;
-    header.setChecksum(payload_buffer);
+    header.length = @intCast(buffer.items.len);
+    header.setChecksum(buffer.items);
+    logNetInfo("📤 P2P: Block header created with checksum={x}, length={}", .{header.checksum, header.length});
     
     // Send header with checksum
-    _ = try socket.write(std.mem.asBytes(&header));
+    const header_bytes = std.mem.asBytes(&header);
+    logNetInfo("📤 P2P: Writing block header ({} bytes)", .{header_bytes.len});
+    const header_written = try socket.write(header_bytes);
+    logNetInfo("📤 P2P: Block header written: {} bytes", .{header_written});
     
     // Send payload
-    _ = try socket.write(payload_buffer);
+    logNetInfo("📤 P2P: Writing block payload ({} bytes)", .{buffer.items.len});
+    const payload_written = try socket.write(buffer.items);
+    logNetInfo("📤 P2P: Block payload written: {} bytes", .{payload_written});
+    logNetSuccess("📤 P2P: Block sent successfully", .{});
 }
 
 
@@ -139,20 +151,36 @@ pub const NetworkAddress = struct {
 
     pub fn fromString(addr_str: []const u8) !NetworkAddress {
         var parts = std.mem.splitScalar(u8, addr_str, ':');
-        const ip_str = parts.next() orelse return error.InvalidAddress;
-
-        // Parse IP address
-        var ip_parts = std.mem.splitScalar(u8, ip_str, '.');
-        var ip: [4]u8 = undefined;
-        for (0..4) |i| {
-            const part = ip_parts.next() orelse return error.InvalidAddress;
-            ip[i] = try std.fmt.parseInt(u8, part, 10);
-        }
-
+        const host_str = parts.next() orelse return error.InvalidAddress;
+        
         // Parse port, use DEFAULT_PORT if not specified
         const port_str_slice = parts.next() orelse ""; // Use empty string if no port part
         const port = if (port_str_slice.len > 0) try std.fmt.parseInt(u16, port_str_slice, 10) else DEFAULT_PORT;
-        return NetworkAddress{ .ip = ip, .port = port };
+
+        // Try to parse as IP address first
+        var ip_parts = std.mem.splitScalar(u8, host_str, '.');
+        var ip: [4]u8 = undefined;
+        
+        // Check if it looks like an IP (has dots)
+        if (std.mem.count(u8, host_str, ".") == 3) {
+            // Try to parse as IP
+            for (0..4) |i| {
+                const part = ip_parts.next() orelse return error.InvalidAddress;
+                ip[i] = std.fmt.parseInt(u8, part, 10) catch {
+                    // Not a valid IP, try hostname resolution
+                    break;
+                };
+            }
+            // If we parsed all 4 parts successfully, it's an IP
+            if (ip_parts.next() == null) {
+                return NetworkAddress{ .ip = ip, .port = port };
+            }
+        }
+        
+        // Not an IP address, for now just fail
+        // TODO: Add proper hostname resolution
+        logNetError("Hostname resolution not yet implemented for: {s}", .{host_str});
+        return error.InvalidAddress;
     }
 
     pub fn toString(self: NetworkAddress, buffer: []u8) []u8 {
@@ -261,6 +289,7 @@ pub const Peer = struct {
     connection_attempts: u32,
     consecutive_failures: u32,
     version: u32,
+    height: u32,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, address: NetworkAddress) Peer {
@@ -274,6 +303,7 @@ pub const Peer = struct {
             .connection_attempts = 0,
             .consecutive_failures = 0,
             .version = 0,
+            .height = 0,
             .allocator = allocator,
         };
     }
@@ -283,8 +313,18 @@ pub const Peer = struct {
     }
 
     pub fn connect(self: *Peer, network_manager: ?*NetworkManager) !void {
-        if (self.state == .connected) return;
-        if (self.state == .connecting or self.state == .handshaking) return;
+        var addr_buf: [32]u8 = undefined;
+        const addr_str = formatPeerAddress(self.address, &addr_buf);
+        logNetInfo("🔌 peer.connect: Attempting connection to {s}", .{addr_str});
+        
+        if (self.state == .connected) {
+            logNetInfo("🔌 peer.connect: Already connected to {s}", .{addr_str});
+            return;
+        }
+        if (self.state == .connecting or self.state == .handshaking) {
+            logNetInfo("🔌 peer.connect: Already connecting/handshaking with {s}", .{addr_str});
+            return;
+        }
 
         // Limit connection attempts with exponential backoff
         const MAX_ATTEMPTS = 5;
@@ -305,6 +345,7 @@ pub const Peer = struct {
 
         // Create socket address
         const addr = net.Address.initIp4(self.address.ip, self.address.port);
+        logNetInfo("🔌 peer.connect: Connecting to {d}.{d}.{d}.{d}:{}", .{self.address.ip[0], self.address.ip[1], self.address.ip[2], self.address.ip[3], self.address.port});
 
         // Connection attempt
         self.socket = net.tcpConnectToAddress(addr) catch |err| {
@@ -315,9 +356,9 @@ pub const Peer = struct {
             // Only log connection errors for significant failures (not routine retries)
             if (err == error.ConnectionRefused and self.consecutive_failures <= 2) {
                 // Suppress routine connection refused messages for first few attempts
-                var addr_buf: [32]u8 = undefined;
-                const addr_str = formatPeerAddress(self.address, &addr_buf);
-                logNetInfo("Connection to {s} refused (peer may be offline)", .{addr_str});
+                var addr_buf2: [32]u8 = undefined;
+                const addr_str2 = formatPeerAddress(self.address, &addr_buf2);
+                logNetInfo("Connection to {s} refused (peer may be offline)", .{addr_str2});
             } else {
                 handlePeerError(self.address, err, "Connection");
             }
@@ -328,22 +369,29 @@ pub const Peer = struct {
         self.consecutive_failures = 0;
         self.state = .handshaking;
         self.last_seen = util.getTime();
+        
+        logNetSuccess("🔌 peer.connect: TCP connection established to {s}", .{addr_str});
 
         // Send version message with height
         const our_height = if (network_manager) |network| 
             if (network.blockchain) |blockchain| blockchain.getHeight() catch 0 else 0
         else 
             0;
+        
+        logNetInfo("🔌 peer.connect: Sending version message (our height: {})", .{our_height});
         try self.sendVersion(our_height);
         
         // Start message handling thread for outgoing connection
         if (network_manager) |network| {
-            const thread = Thread.spawn(.{}, handlePeerConnection, .{ network, self.socket.? }) catch |err| {
-                logNetError("Failed to spawn peer handler thread: {}", .{err});
+            const socket_handle = self.socket.?.handle;
+            logNetInfo("🔌 peer.connect: Spawning handler thread for outgoing connection", .{});
+            const thread = Thread.spawn(.{}, handleOutgoingPeerConnection, .{ network, socket_handle, self }) catch |err| {
+                logNetError("🔌 peer.connect: Failed to spawn peer handler thread: {}", .{err});
                 self.disconnect();
                 return err;
             };
             thread.detach();
+            logNetInfo("🔌 peer.connect: Handler thread spawned successfully", .{});
         }
         
         // Connection success logged during handshake completion
@@ -359,7 +407,20 @@ pub const Peer = struct {
     }
 
     pub fn sendVersion(self: *Peer, blockchain_height: u32) !void {
-        if (self.socket == null) return error.NotConnected;
+        logNetInfo("📨 P2P: sendVersion called, blockchain_height={}", .{blockchain_height});
+        
+        if (self.socket == null) {
+            logNetError("📨 P2P: sendVersion failed - socket is null", .{});
+            return error.NotConnected;
+        }
+        
+        // Don't try to send to invalid addresses
+        const is_zero_addr = self.address.ip[0] == 0 and self.address.ip[1] == 0 and 
+                           self.address.ip[2] == 0 and self.address.ip[3] == 0;
+        if (is_zero_addr and self.state != .connected) {
+            logNetError("📨 P2P: sendVersion failed - invalid peer address 0.0.0.0", .{});
+            return error.InvalidAddress;
+        }
 
         // Version message with blockchain height
         const version_payload = struct {
@@ -376,10 +437,13 @@ pub const Peer = struct {
             .software_version = SOFTWARE_VERSION,
         };
 
+        logNetInfo("📨 P2P: Creating version message - version={}, height={}, software_version={}", .{VERSION, blockchain_height, SOFTWARE_VERSION});
+        
         const header = MessageHeader.create(.version, @sizeOf(@TypeOf(version_payload)));
+        logNetInfo("📨 P2P: Version header created - length={}", .{header.length});
         
         try sendMessage(self.socket.?, header, version_payload);
-        // Version sent silently
+        logNetSuccess("📨 P2P: Version message sent successfully", .{});
     }
 
     pub fn sendPing(self: *Peer) !void {
@@ -432,19 +496,42 @@ pub const Peer = struct {
         logNetInfo("Height query sent to peer", .{});
     }
 
-    pub fn broadcastTransaction(self: *Peer, tx: types.Transaction) !void {
+    pub fn broadcastTransaction(self: *Peer, tx: types.Transaction, allocator: std.mem.Allocator) !void {
         if (!isConnectionValid(self.socket, self.state)) return;
-
-        const header = MessageHeader.create(.tx, @sizeOf(types.Transaction));
-        try sendMessage(self.socket.?, header, tx);
-        logNetBroadcast("Broadcasted transaction to peer", .{});
+        
+        logNetInfo("Broadcasting transaction to peer", .{});
+        
+        // Serialize transaction properly
+        var buffer = std.ArrayList(u8).init(allocator);
+        defer buffer.deinit();
+        
+        try serialize.writeTransaction(buffer.writer(), tx);
+        
+        // Create header with actual serialized size
+        var header = MessageHeader.create(.tx, @intCast(buffer.items.len));
+        header.setChecksum(buffer.items);
+        
+        // Send header
+        const header_bytes = std.mem.asBytes(&header);
+        _ = try self.socket.?.write(header_bytes);
+        
+        // Send serialized transaction
+        _ = try self.socket.?.write(buffer.items);
+        
+        logNetBroadcast("Broadcasted transaction to peer ({}  bytes)", .{buffer.items.len});
     }
 
     pub fn broadcastBlock(self: *Peer, block: types.Block, allocator: std.mem.Allocator) !void {
-        if (!isConnectionValid(self.socket, self.state)) return;
+        if (!isConnectionValid(self.socket, self.state)) {
+            logNetError("Cannot broadcast block - peer not connected (state={s})", .{@tagName(self.state)});
+            return;
+        }
 
-        const payload_size = @sizeOf(types.BlockHeader) + @sizeOf(u32) + @sizeOf(types.Transaction) * block.transactions.len;
-        const header = MessageHeader.create(.block, @intCast(payload_size));
+        logNetInfo("Broadcasting block #{} to peer", .{block.header.timestamp}); // Using timestamp as proxy for height
+        
+        // We'll calculate the actual size in sendBlock since we're using proper serialization
+        // Pass 0 as placeholder - sendBlock will update it
+        const header = MessageHeader.create(.block, 0);
         
         try sendBlock(self.socket.?, header, block, allocator);
         logNetBroadcast("Broadcasted block to peer", .{});
@@ -512,6 +599,9 @@ pub const NetworkManager = struct {
         // Set up listening address
         self.listen_address = net.Address.initIp4([4]u8{ 0, 0, 0, 0 }, port);
 
+        // Set is_running BEFORE spawning threads to avoid race condition
+        self.is_running = true;
+
         // Only start accept thread if we can serve blocks (full node)
         if (self.node_type.canServeBlocks()) {
             self.accept_thread = try Thread.spawn(.{}, acceptConnections, .{self});
@@ -522,8 +612,6 @@ pub const NetworkManager = struct {
 
         // Start maintenance thread
         self.maintenance_thread = try Thread.spawn(.{}, maintainConnections, .{self});
-
-        self.is_running = true;
     }
 
     pub fn stop(self: *NetworkManager) void {
@@ -553,7 +641,23 @@ pub const NetworkManager = struct {
         logNetInfo("ZeiCoin network stopped", .{});
     }
 
+    pub fn getHighestPeerHeight(self: *NetworkManager) u32 {
+        self.peers_mutex.lock();
+        defer self.peers_mutex.unlock();
+        
+        var highest_height: u32 = 0;
+        for (self.peers.items) |*peer| {
+            if (peer.state == .connected and peer.height > highest_height) {
+                highest_height = peer.height;
+            }
+        }
+        
+        return highest_height;
+    }
+
     pub fn addPeer(self: *NetworkManager, address_str: []const u8) !void {
+        logNetInfo("🔍 addPeer: Called with address '{s}'", .{address_str});
+        
         self.peers_mutex.lock();
         defer self.peers_mutex.unlock();
         
@@ -562,7 +666,9 @@ pub const NetworkManager = struct {
             return;
         }
 
+        logNetInfo("🔍 addPeer: Parsing address '{s}'", .{address_str});
         const address = try NetworkAddress.fromString(address_str);
+        logNetInfo("🔍 addPeer: Parsed to IP={d}.{d}.{d}.{d} port={}", .{address.ip[0], address.ip[1], address.ip[2], address.ip[3], address.port});
         
         // Check if peer already exists to prevent duplicates
         for (self.peers.items) |*existing_peer| {
@@ -581,8 +687,10 @@ pub const NetworkManager = struct {
         
         // Now connect using the peer that's in the list
         const peer_ptr = &self.peers.items[self.peers.items.len - 1];
+        logNetInfo("🔍 addPeer: Calling peer.connect() for {s}", .{address_str});
         try peer_ptr.connect(self);
 
+        logNetInfo("🔍 addPeer: Connection initiated for {s}", .{address_str});
         // Peer addition success logged after handshake
     }
 
@@ -590,24 +698,51 @@ pub const NetworkManager = struct {
         self.peers_mutex.lock();
         defer self.peers_mutex.unlock();
         
+        var broadcast_count: usize = 0;
         for (self.peers.items) |*peer| {
-            peer.broadcastTransaction(tx) catch {
-                logNetError("Failed to broadcast transaction to peer", .{});
-            };
+            if (peer.state == .connected) {
+                peer.broadcastTransaction(tx, self.allocator) catch |err| {
+                    logNetError("Failed to broadcast transaction to peer: {}", .{err});
+                    continue;
+                };
+                broadcast_count += 1;
+            }
         }
-        logNetBroadcast("Transaction broadcasted to {} peers", .{self.peers.items.len});
+        logNetBroadcast("Transaction broadcasted to {} peers", .{broadcast_count});
     }
 
     pub fn broadcastBlock(self: *NetworkManager, block: types.Block) void {
+        logNetBroadcast("📡 Broadcasting new block to network", .{});
+        
         self.peers_mutex.lock();
         defer self.peers_mutex.unlock();
         
-        for (self.peers.items) |*peer| {
-            peer.broadcastBlock(block, self.allocator) catch {
-                logNetError("Failed to broadcast block to peer", .{});
-            };
+        var broadcast_count: usize = 0;
+        var connected_count: usize = 0;
+        
+        // Count connected peers
+        for (self.peers.items) |peer| {
+            if (peer.state == .connected) connected_count += 1;
         }
-        logNetBroadcast("Block broadcasted to {} peers", .{self.peers.items.len});
+        
+        logNetInfo("📡 Network has {} connected peers out of {} total", .{connected_count, self.peers.items.len});
+        
+        for (self.peers.items, 0..) |*peer, i| {
+            if (peer.state == .connected) {
+                var addr_buf: [32]u8 = undefined;
+                const addr_str = peer.address.toString(&addr_buf);
+                logNetInfo("📡 Broadcasting to peer {} ({s})", .{i, addr_str});
+                
+                peer.broadcastBlock(block, self.allocator) catch |err| {
+                    logNetError("📡 Failed to broadcast block to peer {}: {}", .{i, err});
+                    continue;
+                };
+                broadcast_count += 1;
+            } else {
+                logNetInfo("📡 Skipping peer {} - state={s}", .{i, @tagName(peer.state)});
+            }
+        }
+        logNetBroadcast("📡 Block broadcasted to {} peers", .{broadcast_count});
     }
 
     pub fn getConnectedPeers(self: *NetworkManager) usize {
@@ -667,7 +802,9 @@ pub const NetworkManager = struct {
 
         for (self.peers.items) |peer| {
             var addr_buf: [32]u8 = undefined;
-            const addr_str = peer.address.toString(&addr_buf);
+            const is_zero_addr = peer.address.ip[0] == 0 and peer.address.ip[1] == 0 and 
+                               peer.address.ip[2] == 0 and peer.address.ip[3] == 0;
+            const addr_str = if (is_zero_addr) "(incoming)" else peer.address.toString(&addr_buf);
             const status_icon = switch (peer.state) {
                 .connected => "🟢",
                 .connecting => "🟡",
@@ -707,13 +844,18 @@ pub const NetworkManager = struct {
         // Try environment variable first
         if (std.process.getEnvVarOwned(self.allocator, "ZEICOIN_BOOTSTRAP")) |env_value| {
             defer self.allocator.free(env_value);
+            logNetInfo("🔗 BOOTSTRAP: Found ZEICOIN_BOOTSTRAP={s}", .{env_value});
 
             // Parse comma-separated list and connect to each
             var it = std.mem.splitScalar(u8, env_value, ',');
             while (it.next()) |node_addr| {
                 const trimmed = std.mem.trim(u8, node_addr, " \t\n");
                 if (trimmed.len > 0) {
-                    self.connectToBootstrapNode(trimmed) catch continue;
+                    logNetInfo("🔗 BOOTSTRAP: Attempting connection to '{s}'", .{trimmed});
+                    self.connectToBootstrapNode(trimmed) catch |err| {
+                        logNetError("🔗 BOOTSTRAP: Failed to connect to '{s}': {}", .{trimmed, err});
+                        continue;
+                    };
                 }
             }
         } else |_| {
@@ -726,6 +868,8 @@ pub const NetworkManager = struct {
 
     /// Connect to a single bootstrap node
     fn connectToBootstrapNode(self: *NetworkManager, addr_str: []const u8) !void {
+        logNetInfo("🔗 BOOTSTRAP: connectToBootstrapNode called with '{s}'", .{addr_str});
+        
         // Skip bootstrap nodes that match our local IP (prevent self-connection)
         if (self.getLocalIP()) |local_ip| {
             // Parse bootstrap address to check if it's our local IP
@@ -742,10 +886,12 @@ pub const NetworkManager = struct {
         }
 
         // Use standard addPeer method instead of custom connection handling
-        self.addPeer(addr_str) catch {
-            // Silently ignore bootstrap connection failures
-            return;
+        logNetInfo("🔗 BOOTSTRAP: Calling addPeer for '{s}'", .{addr_str});
+        self.addPeer(addr_str) catch |err| {
+            logNetError("🔗 BOOTSTRAP: addPeer failed for '{s}': {}", .{addr_str, err});
+            return err;
         };
+        logNetSuccess("🔗 BOOTSTRAP: Successfully added peer '{s}'", .{addr_str});
         // Connection success will be logged when handshake completes
     }
 
@@ -857,9 +1003,10 @@ pub const NetworkManager = struct {
         const local_ip = self.getLocalIPOrDefault();
 
         // Scan the same subnet
-        var ip: u8 = 1;
+        var ip: u8 = 2; // Start from 2 to skip .1 (gateway)
         while (ip < 255) : (ip += 1) {
             if (ip == local_ip[3]) continue; // Skip our own IP
+            if (ip == 1) continue; // Skip gateway IP
 
             var addr_str: [32]u8 = undefined;
             const peer_addr_str = std.fmt.bufPrint(&addr_str, "{}.{}.{}.{}:{}", .{ local_ip[0], local_ip[1], local_ip[2], ip, our_port }) catch continue;
@@ -939,6 +1086,15 @@ pub const NetworkManager = struct {
     /// Detect if this node is behind NAT or can accept incoming connections
     fn detectNodeType(self: *NetworkManager, port: u16) types.NodeType {
         _ = port; // Port not used in current implementation
+        
+        // Check for Docker environment (containers should act as full nodes)
+        const in_docker = std.process.getEnvVarOwned(self.allocator, "HOSTNAME") catch null;
+        if (in_docker) |hostname| {
+            self.allocator.free(hostname);
+            logNetInfo("Running in Docker container - forcing full node mode", .{});
+            return .full_node;
+        }
+        
         // Check if we have a private IP address
         const local_ip = self.getLocalIP() catch {
             logNetError("Cannot determine node type - IP detection failed", .{});
@@ -994,6 +1150,7 @@ fn acceptConnections(network: *NetworkManager) void {
     };
 
     logNetInfo("Server listening for connections on {}", .{addr});
+    logNetInfo("Accept loop starting, is_running={}", .{network.is_running});
 
     while (network.is_running) {
         // Accept incoming connection
@@ -1013,10 +1170,20 @@ fn acceptConnections(network: *NetworkManager) void {
             },
         };
 
-        logNetSuccess("New peer connected!", .{});
+        // Extract peer IP address
+        const client_addr_in = @as(*const std.posix.sockaddr.in, @alignCast(@ptrCast(&client_addr)));
+        const ip_bytes = @as(*const [4]u8, @ptrCast(&client_addr_in.addr));
+        const peer_port = std.mem.bigToNative(u16, client_addr_in.port);
+        logNetSuccess("New peer connected from {}.{}.{}.{}:{}!", .{ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3], peer_port});
+        
+        // Create NetworkAddress for the peer
+        const peer_address = NetworkAddress{
+            .ip = ip_bytes.*,
+            .port = peer_port,
+        };
 
         // Handle this connection in a separate thread
-        const thread = Thread.spawn(.{}, handleIncomingPeer, .{ network, client_socket }) catch |err| {
+        const thread = Thread.spawn(.{}, handleIncomingPeer, .{ network, client_socket, peer_address }) catch |err| {
             logNetError("Failed to spawn peer thread: {}", .{err});
             std.posix.close(client_socket);
             continue;
@@ -1024,12 +1191,16 @@ fn acceptConnections(network: *NetworkManager) void {
         thread.detach(); // Let it run independently
     }
 
-    logNetInfo("Accept thread stopped", .{});
+    logNetInfo("Accept thread stopped (is_running={})", .{network.is_running});
 }
 
 // Handle incoming peer connection
-fn handleIncomingPeer(network: *NetworkManager, client_socket: std.posix.socket_t) void {
-    defer std.posix.close(client_socket);
+fn handleIncomingPeer(network: *NetworkManager, client_socket: std.posix.socket_t, peer_address: NetworkAddress) void {
+    logNetInfo("👥 P2P: handleIncomingPeer started for socket={}", .{client_socket});
+    defer {
+        logNetInfo("👥 P2P: handleIncomingPeer closing socket={}", .{client_socket});
+        std.posix.close(client_socket);
+    }
 
     // Send version message to incoming peer
     const stream = net.Stream{ .handle = client_socket };
@@ -1037,6 +1208,35 @@ fn handleIncomingPeer(network: *NetworkManager, client_socket: std.posix.socket_
         blockchain.getHeight() catch 0 
     else 
         0;
+    
+    // Use the actual peer address passed from acceptConnections
+    
+    // Create a Peer object for the incoming connection
+    const incoming_peer = Peer{
+        .address = peer_address,
+        .state = .handshaking,
+        .socket = stream,
+        .last_seen = util.getTime(),
+        .last_ping = util.getTime(),
+        .connection_attempts = 0,
+        .consecutive_failures = 0,
+        .version = 0,
+        .height = 0,
+        .allocator = network.allocator,
+    };
+    
+    // Add the peer to our list
+    network.peers_mutex.lock();
+    network.peers.append(incoming_peer) catch |err| {
+        network.peers_mutex.unlock();
+        logNetError("👥 P2P: Failed to add incoming peer: {}", .{err});
+        return;
+    };
+    const peer_index = network.peers.items.len - 1;
+    logNetInfo("👥 P2P: Added incoming peer at index {} with socket={}", .{peer_index, client_socket});
+    network.peers_mutex.unlock();
+    
+    logNetInfo("👥 P2P: Preparing version message for incoming peer, our height={}", .{our_height});
     
     // Send version message
     const version_payload = struct {
@@ -1055,10 +1255,10 @@ fn handleIncomingPeer(network: *NetworkManager, client_socket: std.posix.socket_
     
     const header = MessageHeader.create(.version, @sizeOf(@TypeOf(version_payload)));
     sendMessage(stream, header, version_payload) catch |err| {
-        logNetError("Failed to send version to incoming peer: {}", .{err});
+        logNetError("👥 P2P: Failed to send version to incoming peer: {}", .{err});
         return;
     };
-    logNetBroadcast("Sent version to incoming peer", .{});
+    logNetBroadcast("👥 P2P: Sent version to incoming peer", .{});
 
     var buffer: [4096]u8 = undefined;
     var message_buffer = MessageBuffer.init(network.allocator);
@@ -1066,18 +1266,22 @@ fn handleIncomingPeer(network: *NetworkManager, client_socket: std.posix.socket_
 
     while (network.is_running) {
         // Read data from peer
+        logNetInfo("👥 P2P: Waiting to recv data from socket={}", .{client_socket});
         const bytes_read = std.posix.recv(client_socket, &buffer, 0) catch |err| switch (err) {
             error.WouldBlock => {
+                logNetInfo("👥 P2P: recv would block, sleeping", .{});
                 std.time.sleep(10 * std.time.ns_per_ms);
                 continue;
             },
             else => {
                 if (network.is_running) {
-                    logNetError("Read error from peer: {}", .{err});
+                    logNetError("👥 P2P: Read error from peer: {}", .{err});
                 }
                 break;
             },
         };
+        
+        logNetInfo("👥 P2P: Received {} bytes from socket={}", .{bytes_read, client_socket});
 
         if (bytes_read == 0) break;
 
@@ -1086,14 +1290,33 @@ fn handleIncomingPeer(network: *NetworkManager, client_socket: std.posix.socket_
 
         // Process complete messages
         while (message_buffer.hasCompleteMessage()) {
+            logNetInfo("👥 P2P: Extracting complete message from buffer", .{});
             const complete_message = message_buffer.extractMessage();
             if (complete_message.len > 0) {
+                logNetInfo("👥 P2P: Processing extracted message ({} bytes)", .{complete_message.len});
                 processMessage(network, complete_message, stream);
+            } else {
+                logNetError("👥 P2P: Extracted empty message", .{});
             }
         }
     }
 
     logNetInfo("Incoming peer disconnected", .{});
+    
+    // Remove the peer from our list when disconnected
+    network.peers_mutex.lock();
+    defer network.peers_mutex.unlock();
+    
+    // Find and remove the peer by socket handle
+    var i: usize = 0;
+    while (i < network.peers.items.len) : (i += 1) {
+        if (network.peers.items[i].socket != null and 
+            network.peers.items[i].socket.?.handle == client_socket) {
+            _ = network.peers.swapRemove(i);
+            logNetInfo("👥 P2P: Removed disconnected peer from index {}", .{i});
+            break;
+        }
+    }
 }
 
 // Handle individual peer connection (for outgoing connections)
@@ -1126,14 +1349,76 @@ fn handlePeerConnection(network: *NetworkManager, stream: net.Stream) void {
 
         // Process complete messages
         while (message_buffer.hasCompleteMessage()) {
+            logNetInfo("👥 P2P: Extracting complete message from buffer", .{});
             const complete_message = message_buffer.extractMessage();
             if (complete_message.len > 0) {
+                logNetInfo("👥 P2P: Processing extracted message ({} bytes)", .{complete_message.len});
                 processMessage(network, complete_message, stream);
+            } else {
+                logNetError("👥 P2P: Extracted empty message", .{});
             }
         }
     }
 
     logNetInfo("Peer disconnected", .{});
+}
+
+/// Handle outgoing peer connection (runs in separate thread)
+fn handleOutgoingPeerConnection(network: *NetworkManager, socket: std.posix.socket_t, peer: *Peer) void {
+    logNetInfo("👤 P2P: handleOutgoingPeerConnection started for socket={}", .{socket});
+    defer {
+        logNetInfo("👤 P2P: handleOutgoingPeerConnection closing socket={}", .{socket});
+        std.posix.close(socket);
+        peer.state = .disconnected;
+        peer.socket = null;
+    }
+
+    const stream = net.Stream{ .handle = socket };
+    var buffer: [4096]u8 = undefined;
+    var message_buffer = MessageBuffer.init(network.allocator);
+    defer message_buffer.deinit();
+
+    while (network.is_running and peer.state != .disconnected) {
+        // Read data from peer
+        logNetInfo("👤 P2P: Waiting to recv data from outgoing peer socket={}", .{socket});
+        const bytes_read = std.posix.recv(socket, &buffer, 0) catch |err| switch (err) {
+            error.WouldBlock => {
+                logNetInfo("👤 P2P: recv would block, sleeping", .{});
+                std.time.sleep(10 * std.time.ns_per_ms);
+                continue;
+            },
+            else => {
+                if (network.is_running) {
+                    logNetError("👤 P2P: Read error from outgoing peer: {}", .{err});
+                }
+                break;
+            },
+        };
+        
+        logNetInfo("👤 P2P: Received {} bytes from outgoing peer socket={}", .{bytes_read, socket});
+
+        if (bytes_read == 0) {
+            logNetInfo("👤 P2P: Peer closed connection (0 bytes read)", .{});
+            break;
+        }
+
+        // Add data to buffer
+        message_buffer.addData(buffer[0..bytes_read]);
+
+        // Process complete messages
+        while (message_buffer.hasCompleteMessage()) {
+            logNetInfo("👥 P2P: Extracting complete message from buffer", .{});
+            const complete_message = message_buffer.extractMessage();
+            if (complete_message.len > 0) {
+                logNetInfo("👥 P2P: Processing extracted message ({} bytes)", .{complete_message.len});
+                processMessage(network, complete_message, stream);
+            } else {
+                logNetError("👥 P2P: Extracted empty message", .{});
+            }
+        }
+    }
+
+    logNetInfo("👤 P2P: Outgoing peer disconnected", .{});
 }
 
 // Message buffer for handling TCP fragmentation
@@ -1171,13 +1456,20 @@ const MessageBuffer = struct {
     }
 
     fn hasCompleteMessage(self: *MessageBuffer) bool {
-        if (self.data.items.len < @sizeOf(MessageHeader)) return false;
+        if (self.data.items.len < @sizeOf(MessageHeader)) {
+            logNetInfo("📦 P2P: Buffer has {} bytes, need {} for header", .{self.data.items.len, @sizeOf(MessageHeader)});
+            return false;
+        }
 
         const header = std.mem.bytesToValue(MessageHeader, self.data.items[0..@sizeOf(MessageHeader)]);
         const total_size = @sizeOf(MessageHeader) + header.length;
+        
+        logNetInfo("📦 P2P: Buffer check - have {} bytes, need {} total (header.length={})", .{
+            self.data.items.len, total_size, header.length
+        });
 
         if (total_size > MAX_MESSAGE_SIZE) {
-            logNetError("Message too large as per header: {} bytes, max allowed: {}. Clearing buffer.", .{total_size, MAX_MESSAGE_SIZE});
+            logNetError("📦 P2P: Message too large as per header: {} bytes, max allowed: {}. Clearing buffer.", .{total_size, MAX_MESSAGE_SIZE});
             self.data.clearAndFree(); // Clear buffer to prevent processing invalid message
             return false;
         }
@@ -1218,20 +1510,31 @@ fn processIncomingMessage(network: *NetworkManager, client_socket: std.posix.soc
 
 // Process incoming network messages
 fn processMessage(network: *NetworkManager, data: []const u8, peer_socket: ?net.Stream) void {
-    if (data.len < @sizeOf(MessageHeader)) return;
+    logNetInfo("📥 P2P: processMessage called with {} bytes", .{data.len});
+    
+    if (data.len < @sizeOf(MessageHeader)) {
+        logNetError("📥 P2P: Message too small ({} bytes), need at least {}", .{data.len, @sizeOf(MessageHeader)});
+        return;
+    }
 
     // Parse message header
     const header = std.mem.bytesToValue(MessageHeader, data[0..@sizeOf(MessageHeader)]);
+    logNetInfo("📥 P2P: Header parsed - magic={x} {x} {x} {x}, length={}, checksum={x}", .{
+        header.magic[0], header.magic[1], header.magic[2], header.magic[3],
+        header.length, header.checksum
+    });
 
     // Verify magic bytes
     if (!std.mem.eql(u8, &header.magic, &MAGIC_BYTES)) {
-        logNetError("Invalid magic bytes", .{});
+        logNetError("📥 P2P: Invalid magic bytes: {x} {x} {x} {x}", .{
+            header.magic[0], header.magic[1], header.magic[2], header.magic[3]
+        });
         return;
     }
 
     // Verify message length matches data
     if (data.len != @sizeOf(MessageHeader) + header.length) {
-        logNetError("Message length mismatch: expected {}, got {}", .{ @sizeOf(MessageHeader) + header.length, data.len });
+        logNetError("📥 P2P: Message length mismatch: expected {}, got {}", .{ @sizeOf(MessageHeader) + header.length, data.len });
         return;
     }
 
@@ -1239,37 +1542,48 @@ fn processMessage(network: *NetworkManager, data: []const u8, peer_socket: ?net.
     // Skip verification for checksum = 0 (v5 and earlier, or block messages)
     if (header.length > 0 and header.checksum != 0) {
         const payload = data[@sizeOf(MessageHeader)..];
-        if (!header.verifyChecksum(payload)) {
-            logNetError("Message checksum verification failed", .{});
+        const calculated_checksum = MessageHeader.calculateChecksum(payload);
+        if (header.checksum != calculated_checksum) {
+            logNetError("📥 P2P: Checksum verification failed: expected {x}, got {x}", .{header.checksum, calculated_checksum});
             return;
         }
+        logNetInfo("📥 P2P: Checksum verified: {x}", .{header.checksum});
     }
 
     // Get command name
     const command_end = std.mem.indexOf(u8, &header.command, "\x00") orelse header.command.len;
     const command = header.command[0..command_end];
+    logNetInfo("📥 P2P: Processing command: '{s}'", .{command});
 
     // Handle different message types
     if (std.mem.eql(u8, command, "version")) {
+        logNetInfo("📥 P2P: Handling version message", .{});
         handleVersionMessage(network, data[@sizeOf(MessageHeader)..], peer_socket);
     } else if (std.mem.eql(u8, command, "tx")) {
         // Check transaction message size before processing
         if (header.length > types.TransactionLimits.MAX_TX_SIZE) {
-            logNetError("Transaction message too large: {} bytes (max: {} bytes)", .{ header.length, types.TransactionLimits.MAX_TX_SIZE });
+            logNetError("📥 P2P: Transaction message too large: {} bytes (max: {} bytes)", .{ header.length, types.TransactionLimits.MAX_TX_SIZE });
             return;
         }
+        logNetInfo("📥 P2P: Handling transaction message", .{});
         handleIncomingTransaction(network, data[@sizeOf(MessageHeader)..]);
     } else if (std.mem.eql(u8, command, "block")) {
-        logNetInfo("Block received from network", .{});
+        logNetInfo("📥 P2P: Block received from network", .{});
         processIncomingBlock(network, data[@sizeOf(MessageHeader)..]);
     } else if (std.mem.eql(u8, command, "getblocks")) {
+        logNetInfo("📥 P2P: Handling getblocks message", .{});
         handleGetBlocksMessage(network, data[@sizeOf(MessageHeader)..], peer_socket);
     } else if (std.mem.eql(u8, command, "blocks")) {
+        logNetInfo("📥 P2P: Handling blocks message", .{});
         handleBlocksMessage(network, data[@sizeOf(MessageHeader)..]);
     } else if (std.mem.eql(u8, command, "ping")) {
+        logNetInfo("📥 P2P: Handling ping message", .{});
         handlePingMessage(network, peer_socket);
     } else if (std.mem.eql(u8, command, "pong")) {
+        logNetInfo("📥 P2P: Handling pong message", .{});
         handlePongMessage(network, peer_socket);
+    } else {
+        logNetError("📥 P2P: Unknown command: '{s}'", .{command});
     }
 }
 
@@ -1326,6 +1640,8 @@ fn handleIncomingTransaction(network: *NetworkManager, tx_data: []const u8) void
 
 // Handle version message
 fn handleVersionMessage(network: *NetworkManager, version_data: []const u8, peer_socket: ?net.Stream) void {
+    logNetInfo("🤝 P2P: handleVersionMessage called with {} bytes", .{version_data.len});
+    
     // Parse version payload
     const version_payload = struct {
         version: u32,
@@ -1338,12 +1654,14 @@ fn handleVersionMessage(network: *NetworkManager, version_data: []const u8, peer
     // Handle both old and new version formats
     const old_version_size = @sizeOf(version_payload) - @sizeOf(u32);
     if (version_data.len < old_version_size) {
-        logNetError("Version message incomplete", .{});
+        logNetError("🤝 P2P: Version message incomplete: {} bytes, need at least {}", .{version_data.len, old_version_size});
         return;
     }
 
     // Check if we have the new format with software version
     const has_software_version = version_data.len >= @sizeOf(version_payload);
+    
+    logNetInfo("🤝 P2P: has_software_version={}", .{has_software_version});
     
     const peer_version = if (has_software_version)
         std.mem.bytesToValue(version_payload, version_data[0..@sizeOf(version_payload)])
@@ -1360,7 +1678,9 @@ fn handleVersionMessage(network: *NetworkManager, version_data: []const u8, peer
         break :blk result;
     };
     
-    // Version details logged silently
+    logNetInfo("🤝 P2P: Parsed version - v={}, height={}, software_v={}, services={}", .{
+        peer_version.version, peer_version.block_height, peer_version.software_version, peer_version.services
+    });
 
     // Only respond to version queries (not responses) to prevent message loops
     // A version query has block_height = 0, while responses have actual height
@@ -1394,10 +1714,17 @@ fn handleVersionMessage(network: *NetworkManager, version_data: []const u8, peer
     var version_peer: ?*Peer = null;
     network.peers_mutex.lock();
     
+    logNetInfo("🤝 P2P: Looking for peer to mark as connected (total peers: {})", .{network.peers.items.len});
+    
     if (peer_socket) |socket| {
+        logNetInfo("🤝 P2P: Searching by socket handle={}", .{socket.handle});
         // First try to find by socket handle (most reliable)
-        for (network.peers.items) |*peer| {
+        for (network.peers.items, 0..) |*peer, i| {
+            logNetInfo("🤝 P2P: Checking peer {} - state={s}, has_socket={}", .{
+                i, @tagName(peer.state), peer.socket != null
+            });
             if (peer.socket != null and peer.socket.?.handle == socket.handle) {
+                logNetInfo("🤝 P2P: Found peer by socket handle at index {}", .{i});
                 version_peer = peer;
                 break;
             }
@@ -1406,8 +1733,11 @@ fn handleVersionMessage(network: *NetworkManager, version_data: []const u8, peer
     
     // If we didn't find by socket, fall back to first handshaking peer
     if (version_peer == null) {
-        for (network.peers.items) |*peer| {
+        logNetInfo("🤝 P2P: Couldn't find by socket, looking for handshaking peer", .{});
+        for (network.peers.items, 0..) |*peer, i| {
+            logNetInfo("🤝 P2P: Peer {} state: {s}", .{i, @tagName(peer.state)});
             if (peer.state == .handshaking) {
+                logNetInfo("🤝 P2P: Found handshaking peer at index {}", .{i});
                 version_peer = peer;
                 break;
             }
@@ -1416,13 +1746,15 @@ fn handleVersionMessage(network: *NetworkManager, version_data: []const u8, peer
     
     // Mark the identified peer as connected and log success
     if (version_peer) |peer| {
+        logNetInfo("🤝 P2P: Marking peer as connected (was: {s})", .{@tagName(peer.state)});
         peer.state = .connected;
         peer.last_seen = util.getTime();
+        peer.height = peer_version.block_height;
         
         // Show simple connection success message
         var addr_buf: [32]u8 = undefined;
         const addr_str = peer.address.toString(&addr_buf);
-        logNetSuccess("Connected to {s}", .{addr_str});
+        logNetSuccess("🤝 P2P: Connected to {s}", .{addr_str});
         
         // Initialize blockchain after first peer connection if not already done
         if (network.blockchain) |blockchain| {
@@ -1434,6 +1766,8 @@ fn handleVersionMessage(network: *NetworkManager, version_data: []const u8, peer
                 };
             }
         }
+    } else {
+        logNetError("🤝 P2P: Could not find peer to mark as connected!", .{});
     }
     
     network.peers_mutex.unlock();
@@ -1610,6 +1944,8 @@ fn handleBlocksMessage(network: *NetworkManager, message_data: []const u8) void 
 
 // Send blocks response to peer
 fn sendBlocksResponse(network: *NetworkManager, start_height: u32, count: u32, peer_socket: ?net.Stream) !void {
+    std.debug.print("🔍 SYNC DEBUG: sendBlocksResponse() starting - height: {}, count: {}\n", .{start_height, count});
+    
     if (peer_socket == null) {
         logNetError("No socket provided to send blocks response", .{});
         return;
@@ -1648,9 +1984,18 @@ fn sendBlocksResponse(network: *NetworkManager, start_height: u32, count: u32, p
     defer payload_list.deinit();
     
     // Serialize all blocks into payload buffer
-    for (validated_blocks.items) |block| {
+    for (validated_blocks.items, 0..) |block, idx| {
+        std.debug.print("🔍 SYNC DEBUG: Serializing block {} of {}\n", .{idx + 1, validated_blocks.items.len});
+        std.debug.print("  📦 Block height: {}\n", .{start_height + @as(u32, @intCast(idx))});
+        std.debug.print("  📦 Block version: {}\n", .{block.header.version});
+        std.debug.print("  📦 Block timestamp: {}\n", .{block.header.timestamp});
+        std.debug.print("  📦 Transaction count: {}\n", .{block.transactions.len});
+        
         // Serialize block using proper serialization
+        const before_size = payload_list.items.len;
         try serialize.writeBlock(payload_list.writer(), block);
+        const after_size = payload_list.items.len;
+        std.debug.print("  ✅ Serialized {} bytes for this block\n", .{after_size - before_size});
     }
     
     const payload_buffer = payload_list.items;
@@ -1688,65 +2033,34 @@ fn sendBlocksResponse(network: *NetworkManager, start_height: u32, count: u32, p
 
 // Process batch of blocks received during sync
 fn processBlocksBatch(network: *NetworkManager, start_height: u32, count: u32, blocks_data: []const u8) !void {
+    std.debug.print("🔍 SYNC DEBUG: processBlocksBatch() starting - height: {}, count: {}, data_len: {}\n", .{start_height, count, blocks_data.len});
+    
     const blockchain = network.blockchain.?;
     var data_offset: usize = 0;
     
     for (0..count) |i| {
         const block_height = start_height + @as(u32, @intCast(i));
+        std.debug.print("🔍 SYNC DEBUG: Processing block {} of {} (height: {})\n", .{i + 1, count, block_height});
+        std.debug.print("  📍 Current data_offset: {}\n", .{data_offset});
         
-        // Parse block header
-        if (data_offset + @sizeOf(types.BlockHeader) > blocks_data.len) {
-            logNetError("Block {} header beyond data boundary", .{i});
+        // Create a stream for the remaining data and use serialize.readBlock
+        var stream = std.io.fixedBufferStream(blocks_data[data_offset..]);
+        const start_pos = try stream.getPos();
+        
+        // Use the proper deserialization function that matches writeBlock
+        const block = serialize.readBlock(stream.reader(), network.allocator) catch |err| {
+            std.debug.print("  ❌ Block deserialization failed: {}\n", .{err});
+            logNetError("Block {} deserialize failed: {}", .{i, err});
             return;
-        }
-        
-        const header = std.mem.bytesToValue(types.BlockHeader, blocks_data[data_offset..data_offset + @sizeOf(types.BlockHeader)]);
-        data_offset += @sizeOf(types.BlockHeader);
-        
-        // Parse transaction count
-        if (data_offset + @sizeOf(u32) > blocks_data.len) {
-            logNetError("Block {} tx count beyond data boundary", .{i});
-            return;
-        }
-        
-        const tx_count = std.mem.bytesToValue(u32, blocks_data[data_offset..data_offset + @sizeOf(u32)]);
-        data_offset += @sizeOf(u32);
-        
-        // Parse transactions
-        const transactions = try network.allocator.alloc(types.Transaction, tx_count);
-        // NOTE: Ownership of transactions array is transferred to handleSyncBlock
-        // Do NOT free here - the blockchain will take ownership and free it
-        
-        var tx_idx: usize = 0;
-        errdefer {
-            // Clean up transactions on error
-            for (transactions[0..tx_idx]) |*tx| {
-                tx.deinit(network.allocator);
-            }
-            network.allocator.free(transactions);
-        }
-        
-        for (transactions) |*tx| {
-            // Create a stream for the remaining data
-            var stream = std.io.fixedBufferStream(blocks_data[data_offset..]);
-            const start_pos = try stream.getPos();
-            
-            tx.* = serialize.readTransaction(stream.reader(), network.allocator) catch |err| {
-                logNetError("Block {} transaction deserialize failed: {}", .{i, err});
-                return;
-            };
-            
-            // Update data_offset based on how much was read
-            const bytes_read = try stream.getPos() - start_pos;
-            data_offset += bytes_read;
-            tx_idx += 1;
-        }
-        
-        // Create block and add to blockchain
-        const block = types.Block{
-            .header = header,
-            .transactions = transactions,
         };
+        
+        // Update data_offset based on how much was read
+        const bytes_read = try stream.getPos() - start_pos;
+        data_offset += bytes_read;
+        std.debug.print("  ✅ Deserialized {} bytes for block\n", .{bytes_read});
+        std.debug.print("  📦 Block version: {}\n", .{block.header.version});
+        std.debug.print("  📦 Block timestamp: {}\n", .{block.header.timestamp});
+        std.debug.print("  📦 Transaction count: {}\n", .{block.transactions.len});
         
         blockchain.handleSyncBlock(block_height, block) catch |err| {
             logNetError("🚨 handleSyncBlock FAILED for height {}: {}", .{block_height, err});
@@ -1776,9 +2090,17 @@ fn maintainConnections(network: *NetworkManager) void {
     while (network.is_running) {
         const now = util.getTime();
 
+        logNetInfo("🔧 Maintenance: Starting maintenance cycle", .{});
+        
         // Health check - examine each peer
         network.peers_mutex.lock();
-        for (network.peers.items) |*peer| {
+        logNetInfo("🔧 Maintenance: Checking {} peers", .{network.peers.items.len});
+        for (network.peers.items, 0..) |*peer, i| {
+            var addr_buf: [32]u8 = undefined;
+            const addr_str = peer.address.toString(&addr_buf);
+            logNetInfo("🔧 Maintenance: Peer {} ({s}) - state={s}, last_seen={}", .{
+                i, addr_str, @tagName(peer.state), peer.last_seen
+            });
             const time_since_seen = now - peer.last_seen;
 
             // Peer timeout detection
