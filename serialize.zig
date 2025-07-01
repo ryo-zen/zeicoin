@@ -248,6 +248,16 @@ pub fn deserializeFromBytes(data: []const u8, comptime T: type, allocator: std.m
     return deserialize(stream.reader(), T, allocator);
 }
 
+/// Serialize a BlockHeader to a writer
+pub fn writeBlockHeader(writer: anytype, header: types.BlockHeader) !void {
+    try header.serialize(writer);
+}
+
+/// Deserialize a BlockHeader from a reader
+pub fn readBlockHeader(reader: anytype) !types.BlockHeader {
+    return try types.BlockHeader.deserialize(reader);
+}
+
 /// Serialize a Block to a writer
 pub fn writeBlock(writer: anytype, block: types.Block) !void {
     std.debug.print("🔍 SYNC DEBUG: writeBlock() starting\n", .{});

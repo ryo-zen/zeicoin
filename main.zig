@@ -17,6 +17,7 @@ const net = @import("net.zig");
 const randomx = @import("randomx.zig");
 const genesis = @import("genesis.zig");
 const forkmanager = @import("forkmanager.zig");
+const headerchain = @import("headerchain.zig");
 
 // Type aliases for clarity
 const Transaction = types.Transaction;
@@ -82,6 +83,39 @@ pub const SyncProgress = struct {
         const elapsed = util.getTime() - self.start_time;
         if (elapsed == 0) return 0.0;
         return @as(f64, @floatFromInt(self.blocks_downloaded)) / @as(f64, @floatFromInt(elapsed));
+    }
+};
+
+/// Progress tracking for headers-first synchronization
+pub const HeadersProgress = struct {
+    target_height: u32,
+    current_height: u32,
+    headers_downloaded: u32,
+    start_time: i64,
+    last_header_time: i64,
+    
+    pub fn init(current: u32, target: u32) HeadersProgress {
+        const now = util.getTime();
+        return .{
+            .target_height = target,
+            .current_height = current,
+            .headers_downloaded = 0,
+            .start_time = now,
+            .last_header_time = now,
+        };
+    }
+    
+    pub fn getProgress(self: *const HeadersProgress) f64 {
+        if (self.target_height <= self.current_height) return 100.0;
+        const total = self.target_height - self.current_height;
+        if (total == 0) return 100.0;
+        return (@as(f64, @floatFromInt(self.headers_downloaded)) / @as(f64, @floatFromInt(total))) * 100.0;
+    }
+    
+    pub fn getHeadersPerSecond(self: *const HeadersProgress) f64 {
+        const elapsed = util.getTime() - self.start_time;
+        if (elapsed == 0) return 0.0;
+        return @as(f64, @floatFromInt(self.headers_downloaded)) / @as(f64, @floatFromInt(elapsed));
     }
 };
 
@@ -184,6 +218,12 @@ pub const ZeiCoin = struct {
     
     // Mining state for thread-safe mining operations
     mining_state: types.MiningState,
+    
+    // Headers-first sync fields
+    header_chain: ?*headerchain.HeaderChain,
+    blocks_to_download: ArrayList(u32),
+    active_block_downloads: std.AutoHashMap(u32, i64), // height -> timestamp
+    headers_progress: ?HeadersProgress,
 
     /// Initialize new ZeiCoin blockchain with persistent storage
     pub fn init(allocator: std.mem.Allocator) !ZeiCoin {
@@ -209,6 +249,10 @@ pub const ZeiCoin = struct {
             .processed_transactions = std.ArrayList([32]u8).init(allocator),
             .fork_manager = forkmanager.ForkManager.init(allocator),
             .mining_state = types.MiningState.init(),
+            .header_chain = null,
+            .blocks_to_download = ArrayList(u32).init(allocator),
+            .active_block_downloads = std.AutoHashMap(u32, i64).init(allocator),
+            .headers_progress = null,
         };
 
         // Always create canonical genesis block if no blockchain exists
@@ -248,6 +292,15 @@ pub const ZeiCoin = struct {
         self.failed_peers.deinit();
         self.processed_transactions.deinit();
         self.fork_manager.deinit();
+        
+        // Clean up headers-first sync fields
+        if (self.header_chain) |chain| {
+            chain.deinit();
+            self.allocator.destroy(chain);
+        }
+        self.blocks_to_download.deinit();
+        self.active_block_downloads.deinit();
+        
         // Note: network is managed externally
     }
 
@@ -2504,6 +2557,237 @@ pub const ZeiCoin = struct {
 
         print("❌ No peers available for sync retry\n", .{});
     }
+    
+    // ================== Headers-First Sync Functions ==================
+    
+    /// Initialize header chain for headers-first sync
+    pub fn initHeaderChain(self: *ZeiCoin) !void {
+        if (self.header_chain != null) {
+            return; // Already initialized
+        }
+        
+        self.header_chain = try self.allocator.create(headerchain.HeaderChain);
+        self.header_chain.?.* = headerchain.HeaderChain.init(self.allocator);
+        
+        // Initialize with our current blockchain headers
+        const height = try self.getHeight();
+        for (0..height) |h| {
+            const block = try self.database.getBlock(@intCast(h + 1));
+            try self.header_chain.?.addHeader(block.header, @intCast(h + 1));
+        }
+        
+        logInfo("Header chain initialized with {} headers", .{height});
+    }
+    
+    /// Get a range of block headers for headers response
+    pub fn getHeadersRange(self: *ZeiCoin, start_height: u32, count: u32) ![]BlockHeader {
+        const headers = try self.allocator.alloc(BlockHeader, count);
+        errdefer self.allocator.free(headers);
+        
+        var retrieved: usize = 0;
+        for (0..count) |i| {
+            const height = start_height + @as(u32, @intCast(i));
+            if (height > try self.getHeight()) break;
+            
+            const block = try self.database.getBlock(height);
+            headers[retrieved] = block.header;
+            retrieved += 1;
+        }
+        
+        if (retrieved < count) {
+            const actual_headers = try self.allocator.alloc(BlockHeader, retrieved);
+            @memcpy(actual_headers, headers[0..retrieved]);
+            self.allocator.free(headers);
+            return actual_headers;
+        }
+        
+        return headers;
+    }
+    
+    /// Process incoming headers from peer
+    pub fn processIncomingHeaders(self: *ZeiCoin, headers: []const BlockHeader, from_height: u32) !void {
+        if (self.header_chain == null) {
+            try self.initHeaderChain();
+        }
+        
+        const chain = self.header_chain.?;
+        
+        // Validate and add headers to our header chain
+        var height = from_height;
+        var valid_count: u32 = 0;
+        
+        for (headers) |header| {
+            if (try chain.validateHeader(header, height)) {
+                try chain.addHeader(header, height);
+                valid_count += 1;
+                height += 1;
+            } else {
+                logError("Invalid header at height {}", .{height});
+                break;
+            }
+        }
+        
+        logSuccess("Validated {} headers starting from height {}", .{valid_count, from_height});
+        
+        // Update headers progress
+        if (self.headers_progress) |*progress| {
+            progress.headers_downloaded += valid_count;
+            progress.last_header_time = util.getTime();
+            progress.current_height = height - 1;
+        }
+        
+        // If we have all headers, start downloading blocks
+        if (self.headers_progress) |progress| {
+            if (progress.current_height >= progress.target_height) {
+                logSuccess("All headers downloaded! Starting block download phase", .{});
+                try self.startBlockDownloads();
+            }
+        }
+    }
+    
+    /// Start downloading blocks after headers are validated
+    fn startBlockDownloads(self: *ZeiCoin) !void {
+        const current_block_height = try self.getHeight();
+        const header_height = self.header_chain.?.validated_height;
+        
+        if (current_block_height >= header_height) {
+            logInfo("Already have all blocks", .{});
+            self.completeHeadersSync();
+            return;
+        }
+        
+        // Queue blocks for download
+        self.blocks_to_download.clearRetainingCapacity();
+        for (current_block_height + 1..header_height + 1) |height| {
+            try self.blocks_to_download.append(@intCast(height));
+        }
+        
+        logInfo("Queued {} blocks for download", .{self.blocks_to_download.items.len});
+        
+        // Start parallel downloads
+        try self.requestNextBlocks();
+    }
+    
+    /// Request next batch of blocks in parallel
+    fn requestNextBlocks(self: *ZeiCoin) !void {
+        if (self.network == null) return;
+        
+        const network = self.network.?;
+        const now = util.getTime();
+        
+        // Clean up timed out downloads
+        var iter = self.active_block_downloads.iterator();
+        while (iter.next()) |entry| {
+            if (now - entry.value_ptr.* > types.HEADERS_SYNC.BLOCK_DOWNLOAD_TIMEOUT) {
+                // Re-queue timed out block
+                try self.blocks_to_download.append(entry.key_ptr.*);
+                _ = self.active_block_downloads.remove(entry.key_ptr.*);
+                logError("Block {} download timed out, re-queuing", .{entry.key_ptr.*});
+            }
+        }
+        
+        // Start new downloads up to concurrent limit
+        while (self.active_block_downloads.count() < types.HEADERS_SYNC.MAX_CONCURRENT_DOWNLOADS and
+               self.blocks_to_download.items.len > 0) {
+            
+            const height = self.blocks_to_download.orderedRemove(0);
+            
+            // Find available peer
+            var sent = false;
+            for (network.peers.items) |*peer| {
+                if (peer.state == .connected) {
+                    peer.sendGetBlock(height) catch continue;
+                    try self.active_block_downloads.put(height, now);
+                    logProcess("Requested block {}", .{height});
+                    sent = true;
+                    break;
+                }
+            }
+            
+            if (!sent) {
+                // No peers available, re-queue
+                try self.blocks_to_download.insert(0, height);
+                break;
+            }
+        }
+    }
+    
+    /// Process a downloaded block during headers-first sync
+    pub fn processDownloadedBlock(self: *ZeiCoin, block: Block, height: u32) !void {
+        // Verify block matches expected header
+        if (self.header_chain) |chain| {
+            const expected_header = chain.getHeader(height);
+            if (expected_header == null or !std.mem.eql(u8, &block.header.hash(), &expected_header.?.hash())) {
+                logError("Block header mismatch at height {}", .{height});
+                return error.BlockHeaderMismatch;
+            }
+        }
+        
+        // Process the block
+        try self.handleSyncBlock(height, block);
+        
+        // Remove from active downloads
+        _ = self.active_block_downloads.remove(height);
+        
+        // Request more blocks
+        try self.requestNextBlocks();
+        
+        // Check if sync is complete
+        if (self.blocks_to_download.items.len == 0 and self.active_block_downloads.count() == 0) {
+            self.completeHeadersSync();
+        }
+    }
+    
+    /// Complete headers-first sync
+    fn completeHeadersSync(self: *ZeiCoin) void {
+        logSuccess("Headers-first sync completed!", .{});
+        
+        if (self.headers_progress) |progress| {
+            const elapsed = util.getTime() - progress.start_time;
+            const headers_per_sec = progress.getHeadersPerSecond();
+            logInfo("Downloaded {} headers in {}s ({:.2} headers/sec)", .{
+                progress.headers_downloaded, elapsed, headers_per_sec
+            });
+        }
+        
+        // Clean up
+        self.headers_progress = null;
+        if (self.header_chain) |chain| {
+            chain.deinit();
+            self.allocator.destroy(chain);
+            self.header_chain = null;
+        }
+        
+        self.sync_state = .synced;
+    }
+    
+    /// Start headers-first sync with a peer
+    pub fn startHeadersSync(self: *ZeiCoin, peer: *net.Peer, target_height: u32) !void {
+        const current_height = try self.getHeight();
+        
+        if (target_height <= current_height) {
+            logInfo("Already up to date (height {})", .{current_height});
+            return;
+        }
+        
+        logProcess("Starting headers-first sync: {} -> {} ({} blocks behind)", .{
+            current_height, target_height, target_height - current_height
+        });
+        
+        // Initialize header chain
+        try self.initHeaderChain();
+        
+        // Initialize sync state
+        self.sync_state = .syncing;
+        self.headers_progress = HeadersProgress.init(current_height, target_height);
+        self.sync_peer = peer;
+        
+        // Request first batch of headers
+        peer.sendGetHeaders(current_height + 1, types.HEADERS_SYNC.HEADERS_BATCH_SIZE) catch |err| {
+            logError("Failed to request headers: {}", .{err});
+            self.failSync("Failed to request headers");
+        };
+    }
 };
 
 // Tests
@@ -2527,6 +2811,10 @@ fn createTestZeiCoin(data_dir: []const u8) !ZeiCoin {
         .processed_transactions = std.ArrayList([32]u8).init(testing.allocator),
         .fork_manager = forkmanager.ForkManager.init(testing.allocator),
         .mining_state = types.MiningState.init(),
+        .header_chain = null,
+        .blocks_to_download = ArrayList(u32).init(testing.allocator),
+        .active_block_downloads = std.AutoHashMap(u32, i64).init(testing.allocator),
+        .headers_progress = null,
     };
 
     // Initialize fork manager with genesis (database should be empty now)

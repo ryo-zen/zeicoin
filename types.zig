@@ -541,6 +541,19 @@ pub const DifficultyTarget = struct {
             .threshold = @intCast(value & 0xFFFFFFFF),
         };
     }
+    
+    /// Calculate work contribution of this difficulty target
+    pub fn toWork(self: DifficultyTarget) ChainWork {
+        // Work = 2^128 / (target_value + 1)
+        // For simplicity, use approximation: work = base_bytes * 256^28 + inverse(threshold)
+        const base_work: ChainWork = (@as(ChainWork, self.base_bytes) << 112); // Heavy weight for zero bytes
+        const threshold_work: ChainWork = if (self.threshold > 0) 
+            @as(ChainWork, 0xFFFFFFFF) / @as(ChainWork, self.threshold)
+        else 
+            @as(ChainWork, 0xFFFFFFFF);
+            
+        return base_work + threshold_work;
+    }
 };
 
 /// Block header containing essential block information

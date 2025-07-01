@@ -123,6 +123,9 @@ pub const MessageType = enum(u12) {
     blocks = 8, // Batch of blocks for sync
     ping = 9,
     pong = 10,
+    getheaders = 11, // Request headers for headers-first sync
+    headers = 12,    // Response with headers
+    getblock = 13,   // Request single block by height
 };
 
 // Discovery message for UDP broadcast
@@ -548,6 +551,33 @@ pub const Peer = struct {
         const header = MessageHeader.create(.getblocks, @sizeOf(GetBlocksMessage));
         try sendMessage(self.socket.?, header, getblocks_msg);
         logNetBroadcast("Requested {} blocks starting from height {}", .{ count, start_height });
+    }
+    
+    pub fn sendGetHeaders(self: *Peer, start_height: u32, count: u32) !void {
+        if (!isConnectionValid(self.socket, self.state)) return error.NotConnected;
+
+        const getheaders_msg = GetBlocksMessage{  // Reuse same structure as getblocks
+            .start_height = start_height,
+            .count = count,
+        };
+
+        const header = MessageHeader.create(.getheaders, @sizeOf(GetBlocksMessage));
+        try sendMessage(self.socket.?, header, getheaders_msg);
+        logNetBroadcast("Requested {} headers starting from height {}", .{ count, start_height });
+    }
+    
+    pub fn sendGetBlock(self: *Peer, height: u32) !void {
+        if (!isConnectionValid(self.socket, self.state)) return error.NotConnected;
+
+        const getblock_msg = struct {
+            height: u32,
+        }{
+            .height = height,
+        };
+
+        const header = MessageHeader.create(.getblock, @sizeOf(@TypeOf(getblock_msg)));
+        try sendMessage(self.socket.?, header, getblock_msg);
+        logNetBroadcast("Requested block at height {}", .{height});
     }
 };
 
@@ -1582,6 +1612,15 @@ fn processMessage(network: *NetworkManager, data: []const u8, peer_socket: ?net.
     } else if (std.mem.eql(u8, command, "pong")) {
         logNetInfo("📥 P2P: Handling pong message", .{});
         handlePongMessage(network, peer_socket);
+    } else if (std.mem.eql(u8, command, "getheaders")) {
+        logNetInfo("📥 P2P: Handling getheaders message", .{});
+        handleGetHeadersMessage(network, data[@sizeOf(MessageHeader)..], peer_socket);
+    } else if (std.mem.eql(u8, command, "headers")) {
+        logNetInfo("📥 P2P: Handling headers message", .{});
+        handleHeadersMessage(network, data[@sizeOf(MessageHeader)..]);
+    } else if (std.mem.eql(u8, command, "getblock")) {
+        logNetInfo("📥 P2P: Handling getblock message", .{});
+        handleGetBlockMessage(network, data[@sizeOf(MessageHeader)..], peer_socket);
     } else {
         logNetError("📥 P2P: Unknown command: '{s}'", .{command});
     }
@@ -2268,4 +2307,158 @@ test "Duplicate peer prevention" {
     try std.testing.expect(network.peers.items.len == 2);
     
     std.debug.print("\n✅ Duplicate peer prevention verified\n", .{});
+}
+
+// ================== Headers-First Sync Handlers ==================
+
+// Handle getheaders request - send headers to peer
+fn handleGetHeadersMessage(network: *NetworkManager, message_data: []const u8, peer_socket: ?net.Stream) void {
+    if (message_data.len < @sizeOf(GetBlocksMessage)) {
+        logNetError("GetHeaders message too small", .{});
+        return;
+    }
+    
+    if (peer_socket == null) {
+        logNetError("No socket provided for headers response", .{});
+        return;
+    }
+    
+    const getheaders_msg = std.mem.bytesToValue(GetBlocksMessage, message_data[0..@sizeOf(GetBlocksMessage)]);
+    logNetInfo("GetHeaders request: {} headers starting from height {}", .{ getheaders_msg.count, getheaders_msg.start_height });
+    
+    // Get blockchain reference
+    if (network.blockchain == null) {
+        logNetError("GetHeaders received but no blockchain connection", .{});
+        return;
+    }
+    
+    const blockchain = network.blockchain.?;
+    
+    // Get requested headers
+    const headers = blockchain.getHeadersRange(getheaders_msg.start_height, getheaders_msg.count) catch |err| {
+        logNetError("Failed to get headers: {}", .{err});
+        return;
+    };
+    defer blockchain.allocator.free(headers);
+    
+    // Send headers response
+    sendHeadersResponse(network, getheaders_msg.start_height, headers, peer_socket.?) catch |err| {
+        logNetError("Failed to send headers: {}", .{err});
+    };
+}
+
+// Handle headers response - process headers for sync
+fn handleHeadersMessage(network: *NetworkManager, message_data: []const u8) void {
+    if (message_data.len < @sizeOf(u32) * 2) { // start_height + count
+        logNetError("Headers message too small", .{});
+        return;
+    }
+    
+    var offset: usize = 0;
+    const start_height = std.mem.readInt(u32, message_data[offset..][0..4], .little);
+    offset += 4;
+    const count = std.mem.readInt(u32, message_data[offset..][0..4], .little);
+    offset += 4;
+    
+    logNetInfo("Headers response: {} headers starting from height {}", .{ count, start_height });
+    
+    // Validate count
+    if (count > types.HEADERS_SYNC.MAX_HEADERS_PER_MESSAGE) {
+        logNetError("Too many headers in message: {}", .{count});
+        return;
+    }
+    
+    // Get blockchain reference
+    if (network.blockchain == null) {
+        logNetError("Headers received but no blockchain connection", .{});
+        return;
+    }
+    
+    const blockchain = network.blockchain.?;
+    
+    // Parse headers
+    var headers = std.ArrayList(types.BlockHeader).init(network.allocator);
+    defer headers.deinit();
+    
+    var stream = std.io.fixedBufferStream(message_data[offset..]);
+    for (0..count) |_| {
+        const header = serialize.readBlockHeader(stream.reader()) catch |err| {
+            logNetError("Failed to deserialize header: {}", .{err});
+            break;
+        };
+        headers.append(header) catch |err| {
+            logNetError("Failed to append header: {}", .{err});
+            break;
+        };
+    }
+    
+    // Process headers
+    blockchain.processIncomingHeaders(headers.items, start_height) catch |err| {
+        logNetError("Failed to process headers: {}", .{err});
+    };
+}
+
+// Handle getblock request - send single block to peer
+fn handleGetBlockMessage(network: *NetworkManager, message_data: []const u8, peer_socket: ?net.Stream) void {
+    if (message_data.len < @sizeOf(u32)) {
+        logNetError("GetBlock message too small", .{});
+        return;
+    }
+    
+    if (peer_socket == null) {
+        logNetError("No socket provided for block response", .{});
+        return;
+    }
+    
+    const height = std.mem.bytesToValue(u32, message_data[0..@sizeOf(u32)]);
+    logNetInfo("GetBlock request for height {}", .{height});
+    
+    // Get blockchain reference
+    if (network.blockchain == null) {
+        logNetError("GetBlock received but no blockchain connection", .{});
+        return;
+    }
+    
+    const blockchain = network.blockchain.?;
+    
+    // Get the block
+    var block = blockchain.getBlock(height) catch |err| {
+        logNetError("Block {} not available: {}", .{ height, err });
+        return;
+    };
+    defer block.deinit(blockchain.allocator);
+    
+    // Send block response (reuse existing block message format)
+    const header = MessageHeader.create(.block, 0);
+    sendBlock(peer_socket.?, header, block, network.allocator) catch |err| {
+        logNetError("Failed to send block: {}", .{err});
+    };
+}
+
+// Send headers response to peer
+fn sendHeadersResponse(network: *NetworkManager, start_height: u32, headers: []const types.BlockHeader, socket: net.Stream) !void {
+    // Create response with start_height, count, then serialized headers
+    var buffer = std.ArrayList(u8).init(network.allocator);
+    defer buffer.deinit();
+    
+    // Write start_height and count
+    try buffer.writer().writeInt(u32, start_height, .little);
+    try buffer.writer().writeInt(u32, @intCast(headers.len), .little);
+    
+    // Serialize headers
+    for (headers) |header| {
+        try serialize.writeBlockHeader(buffer.writer(), header);
+    }
+    
+    // Create message header with checksum
+    var msg_header = MessageHeader.create(.headers, @intCast(buffer.items.len));
+    msg_header.setChecksum(buffer.items);
+    
+    // Send header
+    _ = try socket.write(std.mem.asBytes(&msg_header));
+    
+    // Send payload
+    _ = try socket.write(buffer.items);
+    
+    logNetSuccess("Sent {} headers to peer", .{headers.len});
 }
