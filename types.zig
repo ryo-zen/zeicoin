@@ -27,7 +27,17 @@ pub const PROGRESS = struct {
     pub const DECIMAL_PRECISION_MULTIPLIER: u64 = 100_000;
 };
 
-// Sync protocol constants - ZeiCoin blockchain synchronization
+// Headers-first sync protocol constants
+pub const HEADERS_SYNC = struct {
+    pub const MAX_HEADERS_PER_MESSAGE: u32 = 2000; // Max headers in one message
+    pub const HEADER_SIZE: usize = @sizeOf(BlockHeader); // 192 bytes
+    pub const MAX_HEADERS_IN_MEMORY: u32 = 100_000; // ~19MB RAM
+    pub const HEADERS_BATCH_SIZE: u32 = 2000; // Headers per request
+    pub const BLOCK_DOWNLOAD_TIMEOUT: i64 = 30; // Timeout for single block
+    pub const MAX_CONCURRENT_DOWNLOADS: u32 = 5; // Parallel block downloads
+};
+
+// OLD sync protocol constants - will be removed when main.zig is updated
 pub const SYNC = struct {
     pub const BATCH_SIZE: u32 = 10; // Blocks per sync request (small for responsiveness)
     pub const SYNC_TIMEOUT_SECONDS: i64 = 30; // Timeout for sync requests

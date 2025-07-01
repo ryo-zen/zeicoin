@@ -29,6 +29,9 @@ tests/
 # SQL Scripts
 /sql
 
+# Reference repositories
+/reference
+
 scripts/deploy_files_only.sh
 .dockerignore
 docker-compose.debug.yml

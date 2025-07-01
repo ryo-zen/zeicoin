@@ -19,6 +19,16 @@ pub fn build(b: *std.Build) void {
     });
     zen_server.linkLibC();
     b.installArtifact(zen_server);
+    
+    // 🚀 Zen Server V2 (Headers-First)
+    const zen_server_v2 = b.addExecutable(.{
+        .name = "zen_server_v2",
+        .root_source_file = b.path("server_v2.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    zen_server_v2.linkLibC();
+    b.installArtifact(zen_server_v2);
 
     // ZeiCoin CLI - Zen command line interface
     const zeicoin_cli = b.addExecutable(.{
@@ -63,6 +73,12 @@ pub fn build(b: *std.Build) void {
 
     const net_tests = b.addTest(.{
         .root_source_file = b.path("net.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    const headerchain_tests = b.addTest(.{
+        .root_source_file = b.path("headerchain.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -112,6 +128,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&types_tests.step);
     test_step.dependOn(&db_tests.step);
     test_step.dependOn(&net_tests.step);
+    test_step.dependOn(&headerchain_tests.step);
     test_step.dependOn(&serialize_tests.step);
     test_step.dependOn(&key_tests.step);
     test_step.dependOn(&genesis_tests.step);
