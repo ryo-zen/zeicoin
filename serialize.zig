@@ -86,8 +86,15 @@ pub fn serialize(writer: anytype, value: anytype) SerializeError!void {
 
         // Structs - serialize each field
         .@"struct" => |struct_info| {
-            inline for (struct_info.fields) |field| {
-                try serialize(writer, @field(value, field.name));
+            // For extern structs with fixed layout, write raw bytes
+            if (struct_info.layout == .@"extern") {
+                const bytes = std.mem.asBytes(&value);
+                try writer.writeAll(bytes);
+            } else {
+                // For regular structs, serialize each field
+                inline for (struct_info.fields) |field| {
+                    try serialize(writer, @field(value, field.name));
+                }
             }
         },
 
@@ -181,11 +188,20 @@ pub fn deserialize(reader: anytype, comptime T: type, allocator: std.mem.Allocat
 
         // Structs - deserialize each field
         .@"struct" => |struct_info| {
-            var result: T = undefined;
-            inline for (struct_info.fields) |field| {
-                @field(result, field.name) = try deserialize(reader, field.type, allocator);
+            // For extern structs with fixed layout, read raw bytes
+            if (struct_info.layout == .@"extern") {
+                var result: T = undefined;
+                const bytes = std.mem.asBytes(&result);
+                _ = try reader.readAll(bytes);
+                return result;
+            } else {
+                // For regular structs, deserialize each field
+                var result: T = undefined;
+                inline for (struct_info.fields) |field| {
+                    @field(result, field.name) = try deserialize(reader, field.type, allocator);
+                }
+                return result;
             }
-            return result;
         },
 
         // Optional types

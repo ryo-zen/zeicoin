@@ -18,6 +18,7 @@ const randomx = @import("randomx.zig");
 const genesis = @import("genesis.zig");
 const forkmanager = @import("forkmanager.zig");
 const headerchain = @import("headerchain.zig");
+const sync = @import("sync.zig");
 
 // Type aliases for clarity
 const Transaction = types.Transaction;
@@ -215,12 +216,13 @@ pub const ZeiCoin = struct {
 
     // Fork manager for longest chain consensus
     fork_manager: forkmanager.ForkManager,
-    
+
     // Mining state for thread-safe mining operations
     mining_state: types.MiningState,
-    
+
     // Headers-first sync fields
-    header_chain: ?*headerchain.HeaderChain,
+    header_chain: headerchain.HeaderChain,
+    sync_manager: ?*sync.SyncManager, // Optional pointer to sync manager
     blocks_to_download: ArrayList(u32),
     active_block_downloads: std.AutoHashMap(u32, i64), // height -> timestamp
     headers_progress: ?HeadersProgress,
@@ -249,7 +251,8 @@ pub const ZeiCoin = struct {
             .processed_transactions = std.ArrayList([32]u8).init(allocator),
             .fork_manager = forkmanager.ForkManager.init(allocator),
             .mining_state = types.MiningState.init(),
-            .header_chain = null,
+            .header_chain = headerchain.HeaderChain.init(allocator),
+            .sync_manager = null,
             .blocks_to_download = ArrayList(u32).init(allocator),
             .active_block_downloads = std.AutoHashMap(u32, i64).init(allocator),
             .headers_progress = null,
@@ -273,6 +276,10 @@ pub const ZeiCoin = struct {
     /// Genesis is already created in init(), this just logs readiness for sync
     pub fn initializeBlockchain(self: *ZeiCoin) !void {
         const current_height = try self.getHeight();
+        
+        // Initialize mining state with current height to prevent false "new block" detection
+        self.mining_state.current_height.store(current_height, .release);
+        
         print("🔗 Blockchain initialized at height {}, ready for network sync\n", .{current_height});
     }
 
@@ -292,12 +299,14 @@ pub const ZeiCoin = struct {
         self.failed_peers.deinit();
         self.processed_transactions.deinit();
         self.fork_manager.deinit();
-        
-        // Clean up headers-first sync fields
-        if (self.header_chain) |chain| {
-            chain.deinit();
-            self.allocator.destroy(chain);
+        self.header_chain.deinit(); // Direct deinit
+
+        // Deinitialize sync manager if it exists
+        if (self.sync_manager) |sm| {
+            sm.deinit();
+            self.allocator.destroy(sm);
         }
+        
         self.blocks_to_download.deinit();
         self.active_block_downloads.deinit();
         
@@ -311,7 +320,16 @@ pub const ZeiCoin = struct {
         var genesis_block = try genesis.createGenesis(self.allocator);
         defer genesis_block.deinit(self.allocator);
 
-        // Save genesis block to database
+        // Process genesis block transactions BEFORE saving the block
+        // This ensures getHeight() returns 0 during processing
+        for (genesis_block.transactions) |tx| {
+            if (tx.isCoinbase()) {
+                // Process as genesis transaction (height will be 0)
+                try self.processCoinbaseTransaction(tx, tx.recipient);
+            }
+        }
+        
+        // Now save genesis block to database
         try self.database.saveBlock(0, genesis_block);
 
         // Initialize fork manager with genesis
@@ -620,7 +638,7 @@ pub const ZeiCoin = struct {
             // Broadcast block to network peers
             if (self.network) |net_mgr| {
                 net_mgr.broadcastBlock(block);
-                print("📡 Block broadcasted to {} peers\n", .{net_mgr.getPeerCount()});
+                print("📡 Block broadcasted to {} peers\n", .{net_mgr.getConnectedPeerCount()});
             }
         }
         
@@ -734,6 +752,10 @@ pub const ZeiCoin = struct {
 
         // Get previous block hash and calculate next difficulty
         const current_height = try self.getHeight();
+        
+        // Update mining state height before mining
+        self.mining_state.current_height.store(current_height, .release);
+        print("🔍 zenMineBlock: storing current_height = {} to atomic\n", .{current_height});
         const previous_hash = if (current_height > 0) blk: {
             var prev_block = try self.database.getBlock(current_height - 1);
             const hash = prev_block.hash();
@@ -785,6 +807,9 @@ pub const ZeiCoin = struct {
         const miner_address = miner_keypair.getAddress();
 
         // ZEN PROOF-OF-WORK: Find valid nonce
+        // Ensure mining state height is synchronized before mining
+        self.mining_state.current_height.store(current_height, .release);
+        
         const found_nonce = self.zenProofOfWork(&new_block);
 
         const mining_time = util.getTime() - start_time;
@@ -815,6 +840,10 @@ pub const ZeiCoin = struct {
             self.cleanupProcessedTransactions();
 
             print("⛏️  ZEN BLOCK #{} MINED! ({} txs, {} ZEI reward, {}s)\n", .{ block_height, new_block.txCount(), types.ZenMining.BLOCK_REWARD / types.ZEI_COIN, mining_time });
+
+            // Update fork manager with the new best chain
+            const new_cumulative_work = self.estimateCumulativeWork(block_height) catch 0;
+            self.fork_manager.updateBestChain(&new_block, block_height, new_cumulative_work);
 
             // Broadcast the newly mined block to network peers (zen propagation)
             self.broadcastNewBlock(new_block);
@@ -858,12 +887,13 @@ pub const ZeiCoin = struct {
         defer rx_ctx.deinit();
 
         const starting_height = self.mining_state.current_height.load(.acquire);
+        print("🔍 zenMineWithRandomX: starting_height from atomic = {}\n", .{starting_height});
         var nonce: u32 = 0;
         while (nonce < types.ZenMining.MAX_NONCE) {
             // Check if blockchain height changed (new block received)
             const current_height = self.getHeight() catch starting_height;
             if (current_height > starting_height) {
-                print("🛑 Mining stopped - new block received at height {}\n", .{current_height});
+                print("🛑 Mining stopped - new block received at height {} (was {})\n", .{ current_height, starting_height });
                 return false;
             }
 
@@ -909,15 +939,10 @@ pub const ZeiCoin = struct {
 
     /// Legacy SHA256 proof-of-work for tests (faster)
     fn zenProofOfWorkSHA256(self: *ZeiCoin, block: *Block) bool {
-        const starting_height = self.mining_state.current_height.load(.acquire);
+        _ = self; // Temporarily disable height check
+        print("🔍 zenProofOfWorkSHA256: Using SHA256 mining\n", .{});
         var nonce: u32 = 0;
         while (nonce < types.ZenMining.MAX_NONCE) {
-            // Check if blockchain height changed (new block received)
-            const current_height = self.getHeight() catch starting_height;
-            if (current_height > starting_height) {
-                print("🛑 Mining stopped - new block received at height {}\n", .{current_height});
-                return false;
-            }
 
             block.header.nonce = nonce;
 
@@ -934,13 +959,7 @@ pub const ZeiCoin = struct {
             nonce += 1;
 
             // Check more frequently for SHA256 (every 100k nonces)
-            if (nonce % 100000 == 0) {
-                const progress_height = self.getHeight() catch starting_height;
-                if (progress_height > starting_height) {
-                    print("🛑 Mining stopped - new block received during mining\n", .{});
-                    return false;
-                }
-            }
+            // Temporarily disabled
 
             // Progress indicator (every 100k tries)
             if (nonce % types.PROGRESS.SHA256_REPORT_INTERVAL == 0) {
@@ -1063,20 +1082,34 @@ pub const ZeiCoin = struct {
 
         // Get current height to determine when coins mature
         const current_height = try self.getHeight();
-        const maturity_height = current_height + types.ZenMining.COINBASE_MATURITY;
-
-        // Create new coins as IMMATURE (require 100 blocks to mature)
-        miner_account.immature_balance += coinbase_tx.amount;
+        
+        // Check if this is a genesis block (height 0) transaction
+        if (current_height == 0) {
+            // Genesis block pre-mine allocations are immediately mature
+            miner_account.balance += coinbase_tx.amount;
+            
+            const miner_addr_bytes = miner_address.toLegacyBytes();
+            print("💰 GENESIS PRE-MINE: {} ZEI for {s} (immediately mature)\n", .{ 
+                coinbase_tx.amount / types.ZEI_COIN, 
+                std.fmt.fmtSliceHexLower(miner_addr_bytes[0..8])
+            });
+        } else {
+            // Regular mining rewards require maturity period
+            const maturity_height = current_height + types.ZenMining.COINBASE_MATURITY;
+            
+            // Create new coins as IMMATURE (require 100 blocks to mature)
+            miner_account.immature_balance += coinbase_tx.amount;
+            
+            const miner_addr_bytes = miner_address.toLegacyBytes();
+            print("💰 NEW COINS CREATED: {} ZEI for miner {s} (immature until block {})\n", .{ 
+                coinbase_tx.amount / types.ZEI_COIN, 
+                std.fmt.fmtSliceHexLower(miner_addr_bytes[0..8]),
+                maturity_height
+            });
+        }
 
         // Save miner account
         try self.database.saveAccount(miner_address, miner_account);
-
-        const miner_addr_bytes = miner_address.toLegacyBytes();
-        print("💰 NEW COINS CREATED: {} ZEI for miner {s} (immature until block {})\n", .{ 
-            coinbase_tx.amount / types.ZEI_COIN, 
-            std.fmt.fmtSliceHexLower(miner_addr_bytes[0..8]),
-            maturity_height
-        });
     }
     
     /// Check if a transaction is a coinbase transaction
@@ -1537,6 +1570,27 @@ pub const ZeiCoin = struct {
     }
 
     /// Apply a valid block to the blockchain
+    pub fn addBlockToChain(self: *ZeiCoin, block: Block, height: u32) !void {
+        // Process all transactions in the block
+        try self.processBlockTransactions(block.transactions);
+
+        // Save block to database
+        try self.database.saveBlock(height, block);
+        
+        // Mature any coinbase rewards that have reached 100 confirmations
+        try self.matureCoinbaseRewards(height);
+
+        // Remove processed transactions from mempool
+        self.cleanMempool(block);
+
+        // Update fork manager with the new best chain
+        const new_cumulative_work = self.estimateCumulativeWork(height) catch 0;
+        self.fork_manager.updateBestChain(&block, height, new_cumulative_work);
+
+        print("✅ Block #{} added to chain ({} txs)\n", .{height, block.txCount()});
+    }
+
+    /// Apply a valid block to the blockchain
     fn applyBlock(self: *ZeiCoin, block: Block) !void {
         // Process all transactions in the block
         try self.processBlockTransactions(block.transactions);
@@ -1585,7 +1639,7 @@ pub const ZeiCoin = struct {
 
         var network = net.NetworkManager.init(self.allocator);
         try network.start(port);
-        self.network = network;
+        self.network = &network;
 
         print("🌐 ZeiCoin network started on port {}\n", .{port});
     }
@@ -1663,7 +1717,7 @@ pub const ZeiCoin = struct {
     fn broadcastNewBlock(self: *ZeiCoin, block: types.Block) void {
         if (self.network) |network| {
             network.broadcastBlock(block);
-            print("📡 Block broadcast to {} peers\n", .{network.getPeerCount()});
+            print("📡 Block broadcast to {} peers\n", .{network.getConnectedPeerCount()});
         }
     }
 
@@ -2562,21 +2616,10 @@ pub const ZeiCoin = struct {
     
     /// Initialize header chain for headers-first sync
     pub fn initHeaderChain(self: *ZeiCoin) !void {
-        if (self.header_chain != null) {
-            return; // Already initialized
-        }
-        
-        self.header_chain = try self.allocator.create(headerchain.HeaderChain);
-        self.header_chain.?.* = headerchain.HeaderChain.init(self.allocator);
-        
-        // Initialize with our current blockchain headers
-        const height = try self.getHeight();
-        for (0..height) |h| {
-            const block = try self.database.getBlock(@intCast(h + 1));
-            try self.header_chain.?.addHeader(block.header, @intCast(h + 1));
-        }
-        
-        logInfo("Header chain initialized with {} headers", .{height});
+        // Header chain is already initialized in init()
+        // This function is no longer needed but kept for compatibility
+        _ = self;
+        return;
     }
     
     /// Get a range of block headers for headers response
@@ -2605,45 +2648,9 @@ pub const ZeiCoin = struct {
     }
     
     /// Process incoming headers from peer
-    pub fn processIncomingHeaders(self: *ZeiCoin, headers: []const BlockHeader, from_height: u32) !void {
-        if (self.header_chain == null) {
-            try self.initHeaderChain();
-        }
-        
-        const chain = self.header_chain.?;
-        
-        // Validate and add headers to our header chain
-        var height = from_height;
-        var valid_count: u32 = 0;
-        
-        for (headers) |header| {
-            if (try chain.validateHeader(header, height)) {
-                try chain.addHeader(header, height);
-                valid_count += 1;
-                height += 1;
-            } else {
-                logError("Invalid header at height {}", .{height});
-                break;
-            }
-        }
-        
-        logSuccess("Validated {} headers starting from height {}", .{valid_count, from_height});
-        
-        // Update headers progress
-        if (self.headers_progress) |*progress| {
-            progress.headers_downloaded += valid_count;
-            progress.last_header_time = util.getTime();
-            progress.current_height = height - 1;
-        }
-        
-        // If we have all headers, start downloading blocks
-        if (self.headers_progress) |progress| {
-            if (progress.current_height >= progress.target_height) {
-                logSuccess("All headers downloaded! Starting block download phase", .{});
-                try self.startBlockDownloads();
-            }
-        }
-    }
+    
+
+    
     
     /// Start downloading blocks after headers are validated
     fn startBlockDownloads(self: *ZeiCoin) !void {
@@ -2755,7 +2762,7 @@ pub const ZeiCoin = struct {
         if (self.header_chain) |chain| {
             chain.deinit();
             self.allocator.destroy(chain);
-            self.header_chain = null;
+            self.header_chain.deinit();
         }
         
         self.sync_state = .synced;
@@ -2811,7 +2818,8 @@ fn createTestZeiCoin(data_dir: []const u8) !ZeiCoin {
         .processed_transactions = std.ArrayList([32]u8).init(testing.allocator),
         .fork_manager = forkmanager.ForkManager.init(testing.allocator),
         .mining_state = types.MiningState.init(),
-        .header_chain = null,
+        .header_chain = headerchain.HeaderChain.init(testing.allocator),
+        .sync_manager = null,
         .blocks_to_download = ArrayList(u32).init(testing.allocator),
         .active_block_downloads = std.AutoHashMap(u32, i64).init(testing.allocator),
         .headers_progress = null,

@@ -202,10 +202,26 @@ pub const ForkManager = struct {
             
             // Check if this becomes the new best chain
             if (self.isNewBestChain(new_chain_state)) {
-                print("🏆 Chain {} is now the best chain (work: {})\n", .{ chain_index, new_chain_state.cumulative_work });
+                print("🏆 Chain {} is now the best chain (work: {})", .{ chain_index, new_chain_state.cumulative_work });
                 self.active_chain_index = chain_index;
             }
         }
+    }
+
+    /// Directly update the best chain, used after mining a new block
+    pub fn updateBestChain(self: *ForkManager, new_block: *const Block, new_height: u32, new_cumulative_work: ChainWork) void {
+        const new_hash = new_block.hash();
+        const new_chain_state = ChainState{
+            .tip_hash = new_hash,
+            .tip_height = new_height,
+            .cumulative_work = new_cumulative_work,
+        };
+
+        // The main chain is always at index 0
+        self.chains[0] = new_chain_state;
+        self.active_chain_index = 0;
+
+        print("🔗 Fork manager best chain updated to height {}", .{new_height});
     }
     
     /// Check if reorganization would be too deep

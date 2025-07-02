@@ -60,7 +60,7 @@ pub const CURRENT_BLOCK_VERSION: u32 = @intFromEnum(BlockVersion.V0);
 // Network constants - Bootstrap nodes for peer discovery
 pub const BOOTSTRAP_NODES = [_][]const u8{
     "134.199.168.129:10801", // Public bootstrap node 1
-    "161.189.98.149:10801",  // Public bootstrap node 2
+    "161.189.98.149:10801", // Public bootstrap node 2
     // Note: Local/private IPs should not be hardcoded as bootstrap nodes
     // They will be discovered via local network scanning if available
 };
@@ -74,14 +74,14 @@ pub const NETWORK_PORTS = struct {
 
 // Node types for asymmetric networking
 pub const NodeType = enum {
-    full_node,     // Can accept incoming connections (public IP)
+    full_node, // Can accept incoming connections (public IP)
     outbound_only, // Behind NAT, outbound connections only (private IP)
-    unknown,       // Not yet determined
-    
+    unknown, // Not yet determined
+
     pub fn canServeBlocks(self: NodeType) bool {
         return self == .full_node;
     }
-    
+
     pub fn canReceiveBlocks(self: NodeType) bool {
         _ = self; // All node types can receive blocks
         return true; // All nodes can receive blocks
@@ -90,12 +90,12 @@ pub const NodeType = enum {
 
 // Address versioning for future extensibility
 pub const AddressVersion = enum(u8) {
-    P2PKH = 0,           // Pay to Public Key Hash (current)
-    Multisig = 1,        // M-of-N multisignature (future)
-    P2SH = 2,            // Pay to Script Hash (future)
-    P2WSH = 3,           // Pay to Witness Script Hash (future)
-    Taproot = 4,         // Taproot for privacy + smart contracts (future)
-    PostQuantum = 5,     // Quantum-resistant addresses (future)
+    P2PKH = 0, // Pay to Public Key Hash (current)
+    Multisig = 1, // M-of-N multisignature (future)
+    P2SH = 2, // Pay to Script Hash (future)
+    P2WSH = 3, // Pay to Witness Script Hash (future)
+    Taproot = 4, // Taproot for privacy + smart contracts (future)
+    PostQuantum = 5, // Quantum-resistant addresses (future)
     // 6-127 reserved for future standard types
     // 128-255 reserved for experimental/custom
     _,
@@ -103,9 +103,9 @@ pub const AddressVersion = enum(u8) {
 
 // Future-proof versioned address structure (maintains 32-byte size)
 pub const Address = extern struct {
-    version: u8,         // Address type/version
-    hash: [31]u8,        // Address hash (1 byte less to fit version)
-    
+    version: u8, // Address type/version
+    hash: [31]u8, // Address hash (1 byte less to fit version)
+
     /// Create a P2PKH address from a public key
     pub fn fromPublicKey(public_key: [32]u8) Address {
         const full_hash = util.hash256(&public_key);
@@ -116,7 +116,7 @@ pub const Address = extern struct {
         @memcpy(&addr.hash, full_hash[0..31]);
         return addr;
     }
-    
+
     /// Create a zero address (for coinbase transactions)
     pub fn zero() Address {
         return Address{
@@ -124,22 +124,22 @@ pub const Address = extern struct {
             .hash = std.mem.zeroes([31]u8),
         };
     }
-    
+
     /// Check if this is a zero address
     pub fn isZero(self: Address) bool {
         return self.version == 0 and std.mem.eql(u8, &self.hash, &std.mem.zeroes([31]u8));
     }
-    
+
     /// Compare two addresses for equality
     pub fn equals(self: Address, other: Address) bool {
         return self.version == other.version and std.mem.eql(u8, &self.hash, &other.hash);
     }
-    
+
     /// Get the address version as enum (with unknown handling)
     pub fn getVersion(self: Address) AddressVersion {
         return @enumFromInt(self.version);
     }
-    
+
     /// Convert to legacy format for display (temporary compatibility)
     pub fn toLegacyBytes(self: Address) [32]u8 {
         var result: [32]u8 = undefined;
@@ -147,7 +147,7 @@ pub const Address = extern struct {
         @memcpy(result[1..], &self.hash);
         return result;
     }
-    
+
     /// Create from legacy bytes (for migration)
     pub fn fromLegacyBytes(bytes: [32]u8) Address {
         return Address{
@@ -155,13 +155,13 @@ pub const Address = extern struct {
             .hash = bytes[0..31].*,
         };
     }
-    
+
     /// Encode address to bech32 string
     pub fn toBech32(self: Address, allocator: std.mem.Allocator, network: NetworkType) ![]u8 {
         const bech32 = @import("bech32.zig");
         return bech32.encodeAddress(allocator, self, network);
     }
-    
+
     /// Parse address from string (bech32 or hex)
     pub fn fromString(allocator: std.mem.Allocator, str: []const u8) !Address {
         const bech32 = @import("bech32.zig");
@@ -183,45 +183,45 @@ pub const ScriptOpcode = enum(u8) {
     // Constants
     OP_0 = 0x00,
     OP_PUSHDATA1 = 0x4c,
-    
+
     // Crypto
     OP_CHECKSIG = 0xac,
     OP_CHECKMULTISIG = 0xae,
     OP_CHECKSIGVERIFY = 0xad,
-    
+
     // Reserved for future opcodes
     _,
 };
 
 // Transaction flags for soft fork activation
 pub const TransactionFlags = packed struct(u16) {
-    witness_enabled: bool = false,      // Bit 0: Witness data present
-    script_enabled: bool = false,       // Bit 1: Script execution enabled
-    multisig_enabled: bool = false,     // Bit 2: Multisig support
-    taproot_enabled: bool = false,      // Bit 3: Taproot support
+    witness_enabled: bool = false, // Bit 0: Witness data present
+    script_enabled: bool = false, // Bit 1: Script execution enabled
+    multisig_enabled: bool = false, // Bit 2: Multisig support
+    taproot_enabled: bool = false, // Bit 3: Taproot support
     // Bits 4-15: Reserved for future features
     reserved: u12 = 0,
 };
 
-/// ZeiCoin transaction v2 - Future-proof design
+/// ZeiCoin Transaction- Future Proof Design
 pub const Transaction = struct {
     // Core fields (existing)
-    version: u16,                       // Transaction version for protocol upgrades
-    flags: TransactionFlags,            // Feature flags for soft forks
-    sender: Address,                    // Versioned sender address
-    recipient: Address,                 // Versioned recipient address
-    amount: u64,                        // Amount in zei (base unit)
-    fee: u64,                          // Transaction fee paid to miner
-    nonce: u64,                        // Sender's transaction counter
-    timestamp: u64,                    // Unix timestamp when created
-    expiry_height: u64,                // Block height after which expires
-    sender_public_key: [32]u8,         // Public key of sender
-    signature: Signature,               // Ed25519 signature (moves to witness later)
-    
+    version: u16, // Transaction version for protocol upgrades
+    flags: TransactionFlags, // Feature flags for soft forks
+    sender: Address, // Versioned sender address
+    recipient: Address, // Versioned recipient address
+    amount: u64, // Amount in zei (base unit)
+    fee: u64, // Transaction fee paid to miner
+    nonce: u64, // Sender's transaction counter
+    timestamp: u64, // Unix timestamp when created
+    expiry_height: u64, // Block height after which expires
+    sender_public_key: [32]u8, // Public key of sender
+    signature: Signature, // Ed25519 signature (moves to witness later)
+
     // Future-proofing fields
-    script_version: ScriptVersion,      // Script language version (0 = none)
-    witness_data: []const u8,          // Signatures, scripts, proofs (empty for now)
-    extra_data: []const u8,            // Arbitrary data for soft forks (empty for now)
+    script_version: ScriptVersion, // Script language version (0 = none)
+    witness_data: []const u8, // Signatures, scripts, proofs (empty for now)
+    extra_data: []const u8, // Arbitrary data for soft forks (empty for now)
 
     /// Calculate the hash of this transaction (used as transaction ID)
     pub fn hash(self: *const Transaction) TxHash {
@@ -277,7 +277,7 @@ pub const Transaction = struct {
         writer.writeInt(u64, tx_for_hash.expiry_height, .little) catch unreachable;
         writer.writeAll(&tx_for_hash.sender_public_key) catch unreachable;
         writer.writeInt(u16, tx_for_hash.script_version, .little) catch unreachable;
-        
+
         // Include witness_data and extra_data in hash
         writer.writeInt(u32, @intCast(self.witness_data.len), .little) catch unreachable;
         writer.writeAll(self.witness_data) catch unreachable;
@@ -300,25 +300,25 @@ pub const Transaction = struct {
             std.debug.print("❌ Transaction invalid: unsupported version {}\n", .{self.version});
             return false;
         }
-        
+
         // Size validation - prevent DoS with oversized transactions
         const tx_size = self.getSerializedSize();
         if (tx_size > TransactionLimits.MAX_TX_SIZE) {
             std.debug.print("❌ Transaction invalid: size {} bytes exceeds maximum {} bytes\n", .{ tx_size, TransactionLimits.MAX_TX_SIZE });
             return false;
         }
-        
+
         // Validate field sizes
         if (self.witness_data.len > TransactionLimits.MAX_WITNESS_SIZE) {
             std.debug.print("❌ Transaction invalid: witness_data size {} bytes exceeds maximum {} bytes\n", .{ self.witness_data.len, TransactionLimits.MAX_WITNESS_SIZE });
             return false;
         }
-        
+
         if (self.extra_data.len > TransactionLimits.MAX_EXTRA_DATA_SIZE) {
             std.debug.print("❌ Transaction invalid: extra_data size {} bytes exceeds maximum {} bytes\n", .{ self.extra_data.len, TransactionLimits.MAX_EXTRA_DATA_SIZE });
             return false;
         }
-        
+
         // Coinbase transactions have simpler validation rules
         if (self.isCoinbase()) {
             // Coinbase validation: amount > 0, timestamp > 0
@@ -347,13 +347,13 @@ pub const Transaction = struct {
             std.debug.print("❌ Transaction invalid: sender equals recipient\n", .{});
             return false;
         }
-        
+
         // Validate future-proof fields
         if (self.script_version != 0) {
             std.debug.print("❌ Transaction invalid: unsupported script version {}\n", .{self.script_version});
             return false;
         }
-        
+
         // Note: witness_data and extra_data are allowed but size-limited
         // The size limits were already checked above in the size validation section
 
@@ -366,7 +366,7 @@ pub const Transaction = struct {
 
         return true;
     }
-    
+
     /// Get the serialized size of this transaction in bytes
     pub fn getSerializedSize(self: *const Transaction) usize {
         // Base size for fixed fields
@@ -383,23 +383,23 @@ pub const Transaction = struct {
         size += @sizeOf([32]u8); // sender_public_key
         size += @sizeOf(Signature); // signature
         size += @sizeOf(ScriptVersion); // script_version
-        
+
         // Variable length fields
         size += @sizeOf(u32); // witness_data length prefix
         size += self.witness_data.len;
         size += @sizeOf(u32); // extra_data length prefix
         size += self.extra_data.len;
-        
+
         return size;
     }
-    
+
     /// Free all dynamically allocated memory in this transaction
     /// Safe to call on any transaction - will only free heap-allocated memory
     pub fn deinit(self: *Transaction, allocator: std.mem.Allocator) void {
         // For empty slices, check if they're the static empty slice by comparing the pointer
         // The static empty slice &[_]u8{} has a special sentinel address
         const empty_slice = &[_]u8{};
-        
+
         // Only free if the slices are non-empty and not pointing to the static empty slice
         if (self.witness_data.len > 0 and self.witness_data.ptr != empty_slice.ptr) {
             allocator.free(self.witness_data);
@@ -408,21 +408,21 @@ pub const Transaction = struct {
             allocator.free(self.extra_data);
         }
     }
-    
+
     /// Create a deep copy of the transaction, allocating new memory for slices
     pub fn dupe(self: *const Transaction, allocator: std.mem.Allocator) !Transaction {
         var new_tx = self.*;
-        
+
         // Deep copy witness_data if not empty
         if (self.witness_data.len > 0) {
             new_tx.witness_data = try allocator.dupe(u8, self.witness_data);
         }
-        
+
         // Deep copy extra_data if not empty
         if (self.extra_data.len > 0) {
             new_tx.extra_data = try allocator.dupe(u8, self.extra_data);
         }
-        
+
         return new_tx;
     }
 };
@@ -433,17 +433,17 @@ pub const Account = struct {
     balance: u64, // Current balance in zei (mature, spendable)
     nonce: u64, // Next expected transaction nonce
     immature_balance: u64 = 0, // Balance from recent coinbase transactions (not spendable)
-    
+
     /// Check if account can afford a transaction (only considers mature balance)
     pub fn canAfford(self: *const Account, amount: u64) bool {
         return self.balance >= amount;
     }
-    
+
     /// Get expected nonce for next transaction
     pub fn nextNonce(self: *const Account) u64 {
         return self.nonce;
     }
-    
+
     /// Get total balance (mature + immature)
     pub fn totalBalance(self: *const Account) u64 {
         return self.balance + self.immature_balance;
@@ -465,9 +465,9 @@ pub const ImmatureCoinEntry = struct {
 
 /// Dynamic difficulty target for constrained adjustment
 pub const DifficultyTarget = struct {
-    base_bytes: u8,    // 1 for TestNet, 2 for MainNet (never changes)
-    threshold: u32,    // Value within the remaining bytes (0x00000000 to 0xFFFFFFFF)
-    
+    base_bytes: u8, // 1 for TestNet, 2 for MainNet (never changes)
+    threshold: u32, // Value within the remaining bytes (0x00000000 to 0xFFFFFFFF)
+
     /// Create initial difficulty target for network
     pub fn initial(network: NetworkType) DifficultyTarget {
         return switch (network) {
@@ -481,59 +481,59 @@ pub const DifficultyTarget = struct {
             },
         };
     }
-    
+
     /// Check if hash meets this difficulty target
     pub fn meetsDifficulty(self: DifficultyTarget, hash: [32]u8) bool {
         // First check required zero bytes
         for (0..self.base_bytes) |i| {
             if (hash[i] != 0) return false;
         }
-        
+
         // Then check threshold in next 4 bytes
         if (self.base_bytes + 4 > 32) return true; // Edge case: not enough bytes
-        
+
         var hash_value: u32 = 0;
         for (0..4) |i| {
             if (self.base_bytes + i < 32) {
                 hash_value = (hash_value << 8) | @as(u32, hash[self.base_bytes + i]);
             }
         }
-        
+
         return hash_value < self.threshold;
     }
-    
+
     /// Adjust difficulty by factor, constrained to network limits
     pub fn adjust(self: DifficultyTarget, factor: f64, network: NetworkType) DifficultyTarget {
         // Clamp factor to prevent extreme changes
         const clamped_factor = @max(0.5, @min(2.0, factor));
-        
+
         // Calculate new threshold (inverse relationship: higher factor = higher threshold = easier)
         const new_threshold_f64 = @as(f64, @floatFromInt(self.threshold)) * clamped_factor;
         var new_threshold = @as(u32, @intFromFloat(@max(1.0, @min(0xFFFFFFFF, new_threshold_f64))));
-        
+
         // Ensure we stay within network constraints
         const min_threshold: u32 = switch (network) {
-            .testnet => 0x00010000,  // Hardest 1-byte difficulty
-            .mainnet => 0x00000001,  // Hardest 2-byte difficulty
+            .testnet => 0x00010000, // Hardest 1-byte difficulty
+            .mainnet => 0x00000001, // Hardest 2-byte difficulty
         };
         const max_threshold: u32 = switch (network) {
-            .testnet => 0xFF000000,  // Easiest 1-byte difficulty
-            .mainnet => 0x00FF0000,  // Easiest 2-byte difficulty
+            .testnet => 0xFF000000, // Easiest 1-byte difficulty
+            .mainnet => 0x00FF0000, // Easiest 2-byte difficulty
         };
-        
+
         new_threshold = @max(min_threshold, @min(max_threshold, new_threshold));
-        
+
         return DifficultyTarget{
             .base_bytes = self.base_bytes,
             .threshold = new_threshold,
         };
     }
-    
+
     /// Serialize difficulty target to u64 for storage compatibility
     pub fn toU64(self: DifficultyTarget) u64 {
         return (@as(u64, self.base_bytes) << 32) | @as(u64, self.threshold);
     }
-    
+
     /// Deserialize difficulty target from u64
     pub fn fromU64(value: u64) DifficultyTarget {
         return DifficultyTarget{
@@ -541,17 +541,17 @@ pub const DifficultyTarget = struct {
             .threshold = @intCast(value & 0xFFFFFFFF),
         };
     }
-    
+
     /// Calculate work contribution of this difficulty target
     pub fn toWork(self: DifficultyTarget) ChainWork {
         // Work = 2^128 / (target_value + 1)
         // For simplicity, use approximation: work = base_bytes * 256^28 + inverse(threshold)
         const base_work: ChainWork = (@as(ChainWork, self.base_bytes) << 112); // Heavy weight for zero bytes
-        const threshold_work: ChainWork = if (self.threshold > 0) 
+        const threshold_work: ChainWork = if (self.threshold > 0)
             @as(ChainWork, 0xFFFFFFFF) / @as(ChainWork, self.threshold)
-        else 
+        else
             @as(ChainWork, 0xFFFFFFFF);
-            
+
         return base_work + threshold_work;
     }
 };
@@ -559,103 +559,103 @@ pub const DifficultyTarget = struct {
 /// Block header containing essential block information
 pub const BlockHeader = struct {
     // Core fields (existing)
-    version: u32,              // Block version for protocol upgrades
-    previous_hash: BlockHash,  // Hash of previous block
-    merkle_root: Hash,         // Root of transaction merkle tree
-    timestamp: u64,            // Unix timestamp when block was created
-    difficulty: u64,           // Dynamic difficulty target
-    nonce: u32,                // Proof-of-work nonce
-    
+    version: u32, // Block version for protocol upgrades
+    previous_hash: BlockHash, // Hash of previous block
+    merkle_root: Hash, // Root of transaction merkle tree
+    timestamp: u64, // Unix timestamp when block was created
+    difficulty: u64, // Dynamic difficulty target
+    nonce: u32, // Proof-of-work nonce
+
     // Future-proofing fields
-    witness_root: Hash,        // Merkle root of witness data (unused for now)
-    state_root: Hash,          // For future state commitments (unused for now)
-    extra_nonce: u64,          // Extra nonce for mining pools
-    extra_data: [32]u8,        // For soft fork signaling and future use
+    witness_root: Hash, // Merkle root of witness data (unused for now)
+    state_root: Hash, // For future state commitments (unused for now)
+    extra_nonce: u64, // Extra nonce for mining pools
+    extra_data: [32]u8, // For soft fork signaling and future use
 
     /// Serialize block header to bytes
     pub fn serialize(self: *const BlockHeader, writer: anytype) !void {
         std.debug.print("🔍 SYNC DEBUG: BlockHeader.serialize() starting\n", .{});
-        std.debug.print("  📦 version: {} (0x{X})\n", .{self.version, self.version});
-        
+        std.debug.print("  📦 version: {} (0x{X})\n", .{ self.version, self.version });
+
         try writer.writeInt(u32, self.version, .little);
         std.debug.print("  ✅ Written version\n", .{});
-        
+
         try writer.writeAll(&self.previous_hash);
         std.debug.print("  ✅ Written previous_hash\n", .{});
-        
+
         try writer.writeAll(&self.merkle_root);
         std.debug.print("  ✅ Written merkle_root\n", .{});
-        
+
         try writer.writeInt(u64, self.timestamp, .little);
         std.debug.print("  ✅ Written timestamp: {}\n", .{self.timestamp});
-        
+
         try writer.writeInt(u64, self.difficulty, .little);
         std.debug.print("  ✅ Written difficulty: {}\n", .{self.difficulty});
-        
+
         try writer.writeInt(u32, self.nonce, .little);
         std.debug.print("  ✅ Written nonce: {}\n", .{self.nonce});
-        
+
         // New future-proof fields
         try writer.writeAll(&self.witness_root);
         std.debug.print("  ✅ Written witness_root\n", .{});
-        
+
         try writer.writeAll(&self.state_root);
         std.debug.print("  ✅ Written state_root\n", .{});
-        
+
         try writer.writeInt(u64, self.extra_nonce, .little);
         std.debug.print("  ✅ Written extra_nonce: {}\n", .{self.extra_nonce});
-        
+
         try writer.writeAll(&self.extra_data);
         std.debug.print("  ✅ Written extra_data\n", .{});
-        
+
         std.debug.print("🔍 SYNC DEBUG: BlockHeader.serialize() completed\n", .{});
     }
-    
+
     /// Deserialize block header from bytes
     pub fn deserialize(reader: anytype) !BlockHeader {
         std.debug.print("🔍 SYNC DEBUG: BlockHeader.deserialize() starting\n", .{});
         var header: BlockHeader = undefined;
-        
+
         header.version = try reader.readInt(u32, .little);
-        std.debug.print("  📦 Read version: {} (0x{X})\n", .{header.version, header.version});
-        
+        std.debug.print("  📦 Read version: {} (0x{X})\n", .{ header.version, header.version });
+
         if (header.version > 1000) {
-            std.debug.print("  ❌ WARNING: Suspicious version number: {} (0x{X})\n", .{header.version, header.version});
+            std.debug.print("  ❌ WARNING: Suspicious version number: {} (0x{X})\n", .{ header.version, header.version });
             std.debug.print("  🐛 This might indicate endianness or serialization mismatch!\n", .{});
         }
-        
+
         _ = try reader.readAll(&header.previous_hash);
         std.debug.print("  ✅ Read previous_hash\n", .{});
-        
+
         _ = try reader.readAll(&header.merkle_root);
         std.debug.print("  ✅ Read merkle_root\n", .{});
-        
+
         header.timestamp = try reader.readInt(u64, .little);
         std.debug.print("  ✅ Read timestamp: {}\n", .{header.timestamp});
-        
+
         header.difficulty = try reader.readInt(u64, .little);
         std.debug.print("  ✅ Read difficulty: {}\n", .{header.difficulty});
-        
+
         header.nonce = try reader.readInt(u32, .little);
         std.debug.print("  ✅ Read nonce: {}\n", .{header.nonce});
-        
+
         // New future-proof fields
         _ = try reader.readAll(&header.witness_root);
         std.debug.print("  ✅ Read witness_root\n", .{});
-        
+
         _ = try reader.readAll(&header.state_root);
         std.debug.print("  ✅ Read state_root\n", .{});
-        
+
         header.extra_nonce = try reader.readInt(u64, .little);
         std.debug.print("  ✅ Read extra_nonce: {}\n", .{header.extra_nonce});
-        
+
         _ = try reader.readAll(&header.extra_data);
         std.debug.print("  ✅ Read extra_data\n", .{});
-        
+
         std.debug.print("🔍 SYNC DEBUG: BlockHeader.deserialize() completed\n", .{});
         return header;
     }
-    
+
     /// Get difficulty target from header
     pub fn getDifficultyTarget(self: *const BlockHeader) DifficultyTarget {
         return DifficultyTarget.fromU64(self.difficulty);
@@ -674,19 +674,19 @@ pub const BlockHeader = struct {
         const data = stream.getWritten();
         return util.hash256(data);
     }
-    
+
     /// Calculate the work contribution of this block
     pub fn getWork(self: *const BlockHeader) ChainWork {
         const target = self.getDifficultyTarget();
-        
+
         // Work = 2^128 / (target_value + 1)
         // For simplicity, use approximation: work = base_bytes * 256^28 + inverse(threshold)
         const base_work: ChainWork = (@as(ChainWork, target.base_bytes) << 112); // Heavy weight for zero bytes
-        const threshold_work: ChainWork = if (target.threshold > 0) 
+        const threshold_work: ChainWork = if (target.threshold > 0)
             @as(ChainWork, 0xFFFFFFFF) / @as(ChainWork, target.threshold)
-        else 
+        else
             @as(ChainWork, 0xFFFFFFFF);
-            
+
         return base_work + threshold_work;
     }
 };
@@ -709,26 +709,26 @@ pub const Block = struct {
     /// Calculate the serialized size of this block in bytes
     pub fn getSize(self: *const Block) usize {
         var size: usize = 0;
-        
+
         // Header size (fixed): 4 + 32 + 32 + 8 + 8 + 4 = 88 bytes
-        size += @sizeOf(u32);          // version: 4 bytes
-        size += @sizeOf(BlockHash);    // previous_hash: 32 bytes
-        size += @sizeOf(Hash);         // merkle_root: 32 bytes  
-        size += @sizeOf(u64);          // timestamp: 8 bytes
-        size += @sizeOf(u64);          // difficulty: 8 bytes
-        size += @sizeOf(u32);          // nonce: 4 bytes
-        
+        size += @sizeOf(u32); // version: 4 bytes
+        size += @sizeOf(BlockHash); // previous_hash: 32 bytes
+        size += @sizeOf(Hash); // merkle_root: 32 bytes
+        size += @sizeOf(u64); // timestamp: 8 bytes
+        size += @sizeOf(u64); // difficulty: 8 bytes
+        size += @sizeOf(u32); // nonce: 4 bytes
+
         // Transaction count: 4 bytes
         size += @sizeOf(u32);
-        
+
         // Each transaction size (approximate)
         for (self.transactions) |_| {
             // Transaction structure:
-            // version: 2, sender: 32, recipient: 32, amount: 8, fee: 8, nonce: 8, 
+            // version: 2, sender: 32, recipient: 32, amount: 8, fee: 8, nonce: 8,
             // timestamp: 8, sender_public_key: 32, signature: 64
             size += 2 + 32 + 32 + 8 + 8 + 8 + 8 + 32 + 64; // 194 bytes per transaction
         }
-        
+
         return size;
     }
 
@@ -739,10 +739,10 @@ pub const Block = struct {
             std.debug.print("❌ Block invalid: unsupported version {}\n", .{self.header.version});
             return false;
         }
-        
+
         // Genesis blocks can have transactions (they contain coinbase)
         // Regular blocks must have at least one transaction
-        
+
         // Regular blocks must have transactions
         if (self.transactions.len == 0) {
             std.debug.print("❌ Block invalid: no transactions\n", .{});
@@ -759,7 +759,7 @@ pub const Block = struct {
 
         return true;
     }
-    
+
     /// Free all dynamically allocated memory in this block
     /// This includes the transactions array and any nested allocations
     /// IMPORTANT: Only call this on blocks loaded from disk/database
@@ -789,7 +789,7 @@ pub const ChainState = struct {
     tip_hash: BlockHash,
     tip_height: u32,
     cumulative_work: ChainWork,
-    
+
     pub fn init(genesis_hash: BlockHash, genesis_work: ChainWork) ChainState {
         return .{
             .tip_hash = genesis_hash,
@@ -797,7 +797,7 @@ pub const ChainState = struct {
             .cumulative_work = genesis_work,
         };
     }
-    
+
     /// Compare two chains by cumulative work
     pub fn hasMoreWork(self: ChainState, other: ChainState) bool {
         return self.cumulative_work > other.cumulative_work;
@@ -826,7 +826,7 @@ pub const MiningState = struct {
     should_restart: std.atomic.Value(bool),
     /// Current mining block height
     current_height: std.atomic.Value(u32),
-    
+
     pub fn init() MiningState {
         return .{
             .mutex = std.Thread.Mutex{},
@@ -837,7 +837,7 @@ pub const MiningState = struct {
             .current_height = std.atomic.Value(u32).init(0),
         };
     }
-    
+
     pub fn deinit(self: *MiningState) void {
         // Stop mining if active
         self.active.store(false, .release);
@@ -953,7 +953,7 @@ pub const ZenMining = struct {
     pub const DIFFICULTY_ADJUSTMENT_PERIOD: u64 = 20; // Adjust every 20 blocks
     pub const MAX_ADJUSTMENT_FACTOR: f64 = 2.0; // Maximum 2x change per adjustment
     pub const COINBASE_MATURITY: u32 = 100; // Coinbase rewards require 100 confirmations
-    
+
     /// Get initial difficulty target for current network
     pub fn initialDifficultyTarget() DifficultyTarget {
         return DifficultyTarget.initial(CURRENT_NETWORK);
@@ -971,17 +971,17 @@ pub const ZenFees = struct {
 pub const BlockLimits = struct {
     /// Maximum block size in bytes (16MB) - hard consensus limit
     pub const MAX_BLOCK_SIZE: usize = 16 * 1024 * 1024; // 16MB
-    
+
     /// Soft limit for miners (2MB) - can be adjusted without fork
     pub const SOFT_BLOCK_SIZE: usize = 2 * 1024 * 1024; // 2MB
-    
+
     /// Average transaction size estimate for capacity planning
     pub const AVG_TX_SIZE: usize = 2048; // 2KB average
-    
+
     /// Estimated transactions per block at soft limit
     pub const SOFT_TXS_PER_BLOCK: usize = SOFT_BLOCK_SIZE / AVG_TX_SIZE; // ~1000 txs
-    
-    /// Estimated transactions per block at hard limit  
+
+    /// Estimated transactions per block at hard limit
     pub const MAX_TXS_PER_BLOCK: usize = MAX_BLOCK_SIZE / AVG_TX_SIZE; // ~8000 txs
 };
 
@@ -989,10 +989,10 @@ pub const BlockLimits = struct {
 pub const MempoolLimits = struct {
     /// Maximum number of transactions in mempool
     pub const MAX_TRANSACTIONS: usize = 10_000;
-    
+
     /// Maximum total size of mempool in bytes (50MB)
     pub const MAX_SIZE_BYTES: usize = 50 * 1024 * 1024;
-    
+
     /// Transaction size for serialization (includes all fields)
     pub const TRANSACTION_SIZE: usize = 214; // Base fields + version(2) + flags(2) + script_version(2) + witness_data_len(4) + extra_data_len(4)
 };
@@ -1001,10 +1001,10 @@ pub const MempoolLimits = struct {
 pub const TransactionLimits = struct {
     /// Maximum size of a single transaction in bytes (100KB)
     pub const MAX_TX_SIZE: usize = 100 * 1024; // 100KB
-    
+
     /// Maximum witness_data size (for future use)
     pub const MAX_WITNESS_SIZE: usize = 10 * 1024; // 10KB
-    
+
     /// Maximum extra_data size (for messages/future use)
     pub const MAX_EXTRA_DATA_SIZE: usize = 1024; // 1KB
 };
@@ -1013,8 +1013,8 @@ pub const TransactionLimits = struct {
 pub const TransactionExpiry = struct {
     /// Default expiry window in blocks (24 hours worth)
     pub const EXPIRY_WINDOW_TESTNET: u64 = 8_640; // 24 hours * 60 minutes * 6 blocks/minute
-    pub const EXPIRY_WINDOW_MAINNET: u64 = 720;   // 24 hours * 60 minutes * 0.5 blocks/minute
-    
+    pub const EXPIRY_WINDOW_MAINNET: u64 = 720; // 24 hours * 60 minutes * 0.5 blocks/minute
+
     /// Get expiry window for current network
     pub fn getExpiryWindow() u64 {
         return switch (CURRENT_NETWORK) {
@@ -1028,19 +1028,19 @@ pub const TransactionExpiry = struct {
 pub const TimestampValidation = struct {
     /// Maximum allowed timestamp in the future (seconds)
     pub const MAX_FUTURE_TIME: i64 = 2 * 60 * 60; // 2 hours
-    
+
     /// Minimum blocks for median time past calculation
     pub const MTP_BLOCK_COUNT: u32 = 11; // Use last 11 blocks for median
-    
+
     /// Maximum timestamp adjustment per block (seconds)
     pub const MAX_TIME_ADJUSTMENT: i64 = 90 * 60; // 90 minutes
-    
+
     /// Validate a block timestamp against current time
     pub fn isTimestampValid(timestamp: u64, current_time: i64) bool {
         const block_time = @as(i64, @intCast(timestamp));
         return block_time <= current_time + MAX_FUTURE_TIME;
     }
-    
+
     /// Check if timestamp is not too far in the past
     pub fn isNotTooOld(timestamp: u64, previous_timestamp: u64) bool {
         // Block timestamp must be greater than previous block
@@ -1155,7 +1155,7 @@ test "transaction hash" {
     // Create test public key and address
     const public_key = std.mem.zeroes([32]u8);
     const sender_addr = Address.fromPublicKey(public_key);
-    
+
     var recipient_hash: [31]u8 = undefined;
     @memset(&recipient_hash, 0);
     recipient_hash[0] = 1;
@@ -1367,7 +1367,7 @@ test "block hash delegated to header hash" {
 
 test "block version validation" {
     const allocator = testing.allocator;
-    
+
     // Create a valid transaction
     const tx = Transaction{
         .version = 0,
@@ -1385,12 +1385,12 @@ test "block version validation" {
         .witness_data = &[_]u8{},
         .extra_data = &[_]u8{},
     };
-    
+
     // Create transactions array
     const txs = try allocator.alloc(Transaction, 1);
     defer allocator.free(txs);
     txs[0] = tx;
-    
+
     // Test version 0 block (should be valid)
     var block_v0 = Block{
         .header = BlockHeader{
@@ -1408,7 +1408,7 @@ test "block version validation" {
         .transactions = txs,
     };
     try testing.expect(block_v0.isValid());
-    
+
     // Test version 1 block (should be invalid)
     var block_v1 = Block{
         .header = BlockHeader{
@@ -1426,7 +1426,7 @@ test "block version validation" {
         .transactions = txs,
     };
     try testing.expect(!block_v1.isValid());
-    
+
     // Test high version block (should be invalid)
     var block_v999 = Block{
         .header = BlockHeader{

@@ -292,9 +292,8 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     
     // Show bech32 address
     const bech32_addr = address.toBech32(allocator, types.CURRENT_NETWORK) catch {
-        // Fallback to hex if bech32 fails
-        const addr_bytes = address.toLegacyBytes();
-        print("🆔 Address: {s}\n", .{std.fmt.fmtSliceHexLower(&addr_bytes)});
+        // Show error if bech32 encoding fails
+        print("🆔 Address: <encoding error>\n", .{});
         print("💡 Use 'zeicoin fund' to get test ZEI for this wallet\n", .{});
         return;
     };
@@ -345,10 +344,6 @@ fn loadWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     
     if (bech32_addr) |addr| {
         print("🆔 Address: {s}\n", .{addr});
-    } else {
-        // Fallback to hex if bech32 fails
-        const addr_bytes = address.toLegacyBytes();
-        print("🆔 Address (hex): {s}\n", .{std.fmt.fmtSliceHexLower(&addr_bytes)});
     }
 }
 
@@ -440,9 +435,8 @@ fn handleBalanceCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     
     // Show bech32 address (truncated for display)
     const bech32_addr = address.toBech32(allocator, types.CURRENT_NETWORK) catch {
-        // Fallback to hex if bech32 fails
-        const addr_bytes = address.toLegacyBytes();
-        print("🆔 Address: {s}\n", .{std.fmt.fmtSliceHexLower(addr_bytes[0..16])});
+        // Show error if bech32 encoding fails
+        print("🆔 Address: <encoding error>\n", .{});
         return;
     };
     defer allocator.free(bech32_addr);
@@ -458,7 +452,7 @@ fn handleBalanceCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 fn handleSendCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     if (args.len < 2) {
         print("❌ Usage: zeicoin send <amount> <recipient_address> [wallet_name]\n", .{});
-        print("💡 Example: zeicoin send 10 a1b2c3d4e5f6... alice\n", .{});
+        print("💡 Example: zeicoin send 10 tzei1qr2qge3sdeq... alice\n", .{});
         return;
     }
 
@@ -642,12 +636,8 @@ fn handleAddressCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     defer if (bech32_addr) |addr| allocator.free(addr);
     
     if (bech32_addr) |addr| {
-        print("   {s}\n", .{addr});
+        print("   📬 {s}\n", .{addr});
     }
-    
-    // Also show hex format for compatibility
-    const addr_bytes = address.toLegacyBytes();
-    print("📋 Hex format: {s}\n", .{std.fmt.fmtSliceHexLower(&addr_bytes)});
 }
 
 fn handleSyncCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
@@ -753,9 +743,11 @@ fn handleFundCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     };
     defer connection.close();
 
-    // Send funding request
-    const addr_bytes = address.toLegacyBytes();
-    const fund_request = try std.fmt.allocPrint(allocator, "FUND_WALLET:{s}", .{std.fmt.fmtSliceHexLower(&addr_bytes)});
+    // Send funding request with bech32 address
+    const bech32_addr = try address.toBech32(allocator, types.CURRENT_NETWORK);
+    defer allocator.free(bech32_addr);
+    
+    const fund_request = try std.fmt.allocPrint(allocator, "FUND_WALLET:{s}", .{bech32_addr});
     defer allocator.free(fund_request);
 
     try connection.writeAll(fund_request);
@@ -856,9 +848,11 @@ fn getBalanceFromServer(allocator: std.mem.Allocator, address: types.Address) !B
     };
     defer connection.close();
 
-    // Send balance request
-    const addr_bytes = address.toLegacyBytes();
-    const balance_request = try std.fmt.allocPrint(allocator, "CHECK_BALANCE:{s}", .{std.fmt.fmtSliceHexLower(&addr_bytes)});
+    // Send balance request with bech32 address
+    const bech32_addr = try address.toBech32(allocator, types.CURRENT_NETWORK);
+    defer allocator.free(bech32_addr);
+    
+    const balance_request = try std.fmt.allocPrint(allocator, "CHECK_BALANCE:{s}", .{bech32_addr});
     defer allocator.free(balance_request);
 
     try connection.writeAll(balance_request);
@@ -879,12 +873,12 @@ fn getBalanceFromServer(allocator: std.mem.Allocator, address: types.Address) !B
     };
     const response = buffer[0..bytes_read];
 
-    // Parse BALANCE:mature:immature response
+    // Parse BALANCE:mature,immature response
     if (std.mem.startsWith(u8, response, "BALANCE:")) {
         const balance_str = response[8..];
         
-        // Split by colon to get mature and immature
-        var parts = std.mem.splitScalar(u8, balance_str, ':');
+        // Split by comma to get mature and immature
+        var parts = std.mem.splitScalar(u8, balance_str, ',');
         const mature_str = parts.next() orelse "0";
         const immature_str = parts.next() orelse "0";
         
@@ -974,9 +968,10 @@ fn sendTransaction(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
     defer connection.close();
 
     // Get current nonce from server using the same connection
-    const sender_addr_bytes = sender_address.toLegacyBytes();
-    const recipient_addr_bytes = recipient_address.toLegacyBytes();
-    const nonce_request = try std.fmt.allocPrint(allocator, "GET_NONCE:{s}", .{std.fmt.fmtSliceHexLower(&sender_addr_bytes)});
+    const sender_bech32_for_nonce = try sender_address.toBech32(allocator, types.CURRENT_NETWORK);
+    defer allocator.free(sender_bech32_for_nonce);
+    
+    const nonce_request = try std.fmt.allocPrint(allocator, "GET_NONCE:{s}", .{sender_bech32_for_nonce});
     defer allocator.free(nonce_request);
 
     try connection.writeAll(nonce_request);
@@ -1055,10 +1050,17 @@ fn sendTransaction(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
         return error.NetworkError;
     };
 
-    // Send transaction to server
+    // Convert addresses to bech32 for sending
+    const sender_bech32 = try sender_address.toBech32(allocator, types.CURRENT_NETWORK);
+    defer allocator.free(sender_bech32);
+    
+    const recipient_bech32 = try recipient_address.toBech32(allocator, types.CURRENT_NETWORK);
+    defer allocator.free(recipient_bech32);
+    
+    // Send transaction to server with bech32 addresses
     const tx_message = try std.fmt.allocPrint(allocator, "CLIENT_TRANSACTION:{s}:{s}:{}:{}:{}:{}:{}:{s}:{s}", .{
-        std.fmt.fmtSliceHexLower(&sender_addr_bytes),
-        std.fmt.fmtSliceHexLower(&recipient_addr_bytes),
+        sender_bech32,
+        recipient_bech32,
         amount,
         fee,
         transaction.nonce,
@@ -1087,7 +1089,7 @@ fn sendTransaction(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
     };
     const response = buffer[0..bytes_read];
 
-    if (!std.mem.startsWith(u8, response, "CLIENT_TRANSACTION_ACCEPTED")) {
+    if (!std.mem.startsWith(u8, response, "OK:")) {
         // Provide helpful error messages based on server response
         if (std.mem.startsWith(u8, response, "ERROR: Insufficient balance")) {
             print("❌ Insufficient balance! You don't have enough ZEI for this transaction.\n", .{});
@@ -1146,7 +1148,7 @@ fn printHelp() void {
     print("  zeicoin wallet create alice      # Create wallet named 'alice'\n", .{});
     print("  zeicoin fund alice               # Get test funds for alice\n", .{});
     print("  zeicoin balance alice            # Check alice's balance\n", .{});
-    print("  zeicoin send 50 a1b2c3d4...      # Send 50 ZEI to address\n", .{});
+    print("  zeicoin send 50 tzei1qr2q...      # Send 50 ZEI to address\n", .{});
     print("  zeicoin status                   # Check network status\n\n", .{});
     print("ENVIRONMENT:\n", .{});
     print("  ZEICOIN_SERVER=ip               Set server IP (default: 127.0.0.1)\n\n", .{});

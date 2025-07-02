@@ -10,7 +10,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // 🖥️ Zen Server
+    // 🖥️ Zen Server with Headers-First sync
     const zen_server = b.addExecutable(.{
         .name = "zen_server",
         .root_source_file = b.path("server.zig"),
@@ -19,16 +19,6 @@ pub fn build(b: *std.Build) void {
     });
     zen_server.linkLibC();
     b.installArtifact(zen_server);
-    
-    // 🚀 Zen Server V2 (Headers-First) - temporarily disabled for main build
-    // const zen_server_v2 = b.addExecutable(.{
-    //     .name = "zen_server_v2",
-    //     .root_source_file = b.path("server_v2.zig"),
-    //     .target = target,
-    //     .optimize = optimize,
-    // });
-    // zen_server_v2.linkLibC();
-    // b.installArtifact(zen_server_v2);
 
     // ZeiCoin CLI - Zen command line interface
     const zeicoin_cli = b.addExecutable(.{

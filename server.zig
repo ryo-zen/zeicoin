@@ -1,19 +1,19 @@
-// server.zig - ZeiCoin Multi-Peer Network Server
-// Minimalist blockchain node: P2P networking + client API server
-// Ports:10800 (UDP Discovery) 10801 (P2P), 10802 (Client API)
-// Features: Auto-mining, peer discovery, transaction broadcasting
+// server.zig - Blockchain node server with headers-first sync
+// Production implementation with headers-first protocol
 
 const std = @import("std");
-const net = std.net;
-const print = std.debug.print;
-
-const zeicoin_main = @import("main.zig");
-const zen_net = @import("net.zig");
+const zen = @import("main.zig");
 const types = @import("types.zig");
-const key = @import("key.zig");
+const net = @import("net.zig");
 const util = @import("util.zig");
-const db = @import("db.zig");
+const genesis = @import("genesis.zig");
+const headerchain = @import("headerchain.zig");
+const key = @import("key.zig");
+const sync = @import("sync.zig");
 const wallet = @import("wallet.zig");
+const serialize = @import("serialize.zig");
+
+const print = std.debug.print;
 
 // Global log file
 var log_file: ?std.fs.File = null;
@@ -26,178 +26,207 @@ fn logMessage(comptime fmt: []const u8, args: anytype) void {
         file.writer().print("\n", .{}) catch {};
     }
     print(fmt, args);
-}
-
-// Compact banner for server startup
-fn printCompactBanner() void {
-    print("\n", .{});
-    print("╔══════════════════════════════════════════════════════════════════════╗\n", .{});
-    print("║                                                                      ║\n", .{});
-    print("║            ███████╗███████╗██╗ ██████╗ ██████╗ ██╗███╗   ██╗         ║\n", .{});
-    print("║            ╚══███╔╝██╔════╝██║██╔════╝██╔═══██╗██║████╗  ██║         ║\n", .{});
-    print("║              ███╔╝ █████╗  ██║██║     ██║   ██║██║██╔██╗ ██║         ║\n", .{});
-    print("║             ███╔╝  ██╔══╝  ██║██║     ██║   ██║██║██║╚██╗██║         ║\n", .{});
-    print("║            ███████╗███████╗██║╚██████╗╚██████╔╝██║██║ ╚████║         ║\n", .{});
-    print("║            ╚══════╝╚══════╝╚═╝ ╚═════╝ ╚═════╝ ╚═╝╚═╝  ╚═══╝         ║\n", .{});
-    print("║                                                                      ║\n", .{});
-    print("║                    Zen Digital Currency CLI Tool                     ║\n", .{});
-    print("║                                                                      ║\n", .{});
-    print("║                   Pure minimalism meets blockchain                   ║\n", .{});
-    print("║                    The simplest thing that works                     ║\n", .{});
-    print("║                    ⚡ Fast • Secure • Minimal ⚡                     ║\n", .{});
-    print("║                                                                      ║\n", .{});
-    print("╚══════════════════════════════════════════════════════════════════════╝\n", .{});
     print("\n", .{});
 }
 
 pub fn main() !void {
+    print("\n", .{});
+    print("╔═══════════════════════════════════════════════════════════════════╗\n", .{});
+    print("║                  ⚡ ZeiCoin Node Server ⚡                     ║\n", .{});
+    print("║                    Headers-First Protocol                         ║\n", .{});
+    print("╚═══════════════════════════════════════════════════════════════════╝\n", .{});
+    print("\n", .{});
+
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     // Initialize logging
+    std.fs.cwd().makeDir("logs") catch {}; // Create logs directory if it doesn't exist
     log_file = std.fs.cwd().createFile("logs/server.log", .{}) catch null;
     defer if (log_file) |file| file.close();
 
-    // Show compact banner
-    printCompactBanner();
+    // Initialize blockchain
+    var blockchain = try zen.ZeiCoin.init(allocator);
+    defer blockchain.deinit();
 
-    // Initialize ZeiCoin blockchain with networking
-    print("🫡  Initializing Zei Blockchain...\n", .{});
-    var zeicoin = try zeicoin_main.ZeiCoin.init(allocator);
-    defer zeicoin.deinit();
+    // Initialize blockchain (will create genesis if needed)
+    try blockchain.initializeBlockchain();
+    print("✅ Blockchain initialized\n", .{});
 
-    // Initialize network manager (zen flow)
-    print("🌊 Creating network flow...\n", .{});
-    var network = zen_net.NetworkManager.init(allocator);
+    // Initialize network
+    var network = net.NetworkManager.init(allocator);
     defer network.deinit();
 
-    // Connect blockchain to network (zen unity - bidirectional flow)
-    zeicoin.network = &network;
-    network.blockchain = &zeicoin;
+    // Connect blockchain to network
+    network.setBlockchain(&blockchain);
+    blockchain.network = &network;
 
-    print("✅ ZeiCoin zen blockchain loaded!\n", .{});
-    print("\n📋 Network Configuration:\n", .{});
-    types.NetworkConfig.displayInfo();
-    zeicoin.printStatus();
+    // Initialize SyncManager
+    blockchain.sync_manager = try allocator.create(sync.SyncManager);
+    blockchain.sync_manager.?.* = sync.SyncManager.init(allocator, &blockchain);
 
-    // 🖥️ Create/load persistent server miner wallet
-    var zen_wallet = wallet.Wallet.init(allocator);
-    defer zen_wallet.deinit();
+    // Parse command line arguments
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
 
-    const wallet_path = try zeicoin.database.getWalletPath("server_miner");
-    defer allocator.free(wallet_path);
+    var port: u16 = net.DEFAULT_PORT;
+    var bootstrap_nodes = std.ArrayList(net.NetworkAddress).init(allocator);
+    defer bootstrap_nodes.deinit();
 
-    if (zeicoin.database.walletExists("server_miner")) {
-        // Load existing miner wallet
-        const password = "zen_miner"; // Simple password for demo
-        try zen_wallet.loadFromFile(wallet_path, password);
-        print("🔓 Loaded existing zen miner wallet\n", .{});
-    } else {
-        // Create new persistent miner wallet
-        try zen_wallet.createNew();
-        const password = "zen_miner"; // Simple password for demo
-        try zen_wallet.saveToFile(wallet_path, password);
-        print("💾 Created new persistent zen miner wallet\n", .{});
+    // Parse arguments
+    var enable_mining = false;
+    var miner_wallet_name: ?[]const u8 = null;
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--port") and i + 1 < args.len) {
+            port = try std.fmt.parseInt(u16, args[i + 1], 10);
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--bootstrap") and i + 1 < args.len) {
+            // Parse bootstrap nodes
+            var iter = std.mem.tokenizeScalar(u8, args[i + 1], ',');
+            while (iter.next()) |node| {
+                var parts = std.mem.tokenizeScalar(u8, node, ':');
+                const ip = parts.next() orelse continue;
+                const node_port = if (parts.next()) |p| try std.fmt.parseInt(u16, p, 10) else net.DEFAULT_PORT;
+
+                try bootstrap_nodes.append(.{
+                    .ip = try allocator.dupe(u8, ip),
+                    .port = node_port,
+                });
+            }
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--mine")) {
+            enable_mining = true;
+            // Check if next argument is a wallet name
+            if (i + 1 < args.len and !std.mem.startsWith(u8, args[i + 1], "--")) {
+                miner_wallet_name = args[i + 1];
+                i += 1;
+            }
+        }
     }
 
-    const miner_address = zen_wallet.getAddress() orelse return error.WalletLoadFailed;
-    const miner_addr_bytes = miner_address.toLegacyBytes();
-    print("⛏️  Zen miner: {s}\n", .{std.fmt.fmtSliceHexLower(miner_addr_bytes[0..8])});
+    // Start network
+    try network.start(port);
+    print("✅ Network.start() completed\n", .{});
 
-    // Get our ports (zen port separation)
-    const p2p_port: u16 = 10801; // P2P network port
-    const client_port: u16 = 10802; // Client API port
+    // Connect to bootstrap nodes
+    if (bootstrap_nodes.items.len == 0) {
+        // Default bootstrap nodes
+        // TODO: Re-enable when bootstrap nodes are available
+        // try bootstrap_nodes.append(.{ .ip = "134.199.168.129", .port = 10801 });
+        // try bootstrap_nodes.append(.{ .ip = "161.189.98.149", .port = 10801 });
+        print("📝 Running in standalone mode (no bootstrap nodes)\n", .{});
+    }
 
-    // Create TCP server for client connections (separate from P2P)
-    const address = net.Address.parseIp4("0.0.0.0", client_port) catch |err| {
+    for (bootstrap_nodes.items) |node| {
+        network.connectToPeer(node) catch |err| {
+            print("⚠️ Failed to connect to bootstrap node {}: {}\n", .{ node, err });
+        };
+    }
+    print("✅ Bootstrap connection attempts completed\n", .{});
+
+    // Start sync process
+    print("🔄 Starting sync process...\n", .{});
+    try blockchain.sync_manager.?.startSync();
+    print("✅ Sync process started\n", .{});
+
+    // Main loop
+    print("\n🌐 Node running on port {}. Press Ctrl+C to stop.\n", .{port});
+    print("📊 Current height: {}\n", .{try blockchain.getHeight()});
+
+    // Start mining thread if enabled
+    print("🔍 DEBUG: enable_mining = {}\n", .{enable_mining});
+    if (enable_mining) {
+        const miner_keypair = if (miner_wallet_name) |wallet_name| blk: {
+            // Load wallet for mining
+            var miner_wallet = wallet.Wallet.init(allocator);
+            defer miner_wallet.deinit();
+
+            const wallet_path = try std.fmt.allocPrint(allocator, "wallets/{s}.wallet", .{wallet_name});
+            defer allocator.free(wallet_path);
+            try miner_wallet.loadFromFile(wallet_path, "");
+            const keypair = miner_wallet.getZeiCoinKeyPair() orelse {
+                print("❌ Failed to load miner wallet '{s}'\n", .{wallet_name});
+                return error.WalletLoadFailed;
+            };
+            print("⛏️ Mining enabled with wallet '{s}'\n", .{wallet_name});
+            break :blk keypair;
+        } else blk: {
+            print("⛏️ Mining enabled with default address\n", .{});
+            break :blk key.KeyPair.fromPrivateKey(std.mem.zeroes([64]u8));
+        };
+
+        try blockchain.startMining(miner_keypair);
+    }
+
+    // Start client API listener thread
+    print("🚀 Spawning client API thread...\n", .{});
+    const client_thread = try std.Thread.spawn(.{}, clientApiListener, .{ allocator, &blockchain });
+    defer client_thread.join();
+    print("✅ Client API thread spawned\n", .{});
+
+    // Status loop
+    while (true) {
+        std.time.sleep(10 * std.time.ns_per_s); // Every 10 seconds
+
+        const height = try blockchain.getHeight();
+        const peers = network.getConnectedPeerCount();
+        const mempool_count = blockchain.mempool.items.len;
+
+        print("\n📊 Status: Height={} | Peers={} | Mempool={}\n", .{ height, peers, mempool_count });
+    }
+}
+
+fn clientApiListener(allocator: std.mem.Allocator, blockchain: *zen.ZeiCoin) !void {
+    const client_port: u16 = 10802;
+    print("🔧 Starting client API listener on port {}\n", .{client_port});
+
+    // Create TCP server for client API connections
+    const address = std.net.Address.parseIp4("0.0.0.0", client_port) catch |err| {
         print("❌ Failed to parse client address: {}\n", .{err});
         return;
     };
 
-    print("🕸️  Starting zen multi-peer network on port {}...\n", .{p2p_port});
-
-    // Start P2P networking for peer connections
-    try network.start(p2p_port);
-
-    // Peer discovery handled automatically by maintenance thread
-
-    // Create TCP server for client API connections (separate port)
     var server = address.listen(.{ .reuse_address = true }) catch |err| {
         print("❌ Failed to create client TCP server: {}\n", .{err});
         return;
     };
     defer server.deinit();
 
-    print("✅ ZeiCoin server ready!\n", .{});
-    print("🌐 P2P Network: Port {} ACTIVE\n", .{p2p_port});
     print("🔗 Client API: Port {} ACCEPTING\n", .{client_port});
-    print("⚡ Auto-discovery: ENABLED\n", .{});
-    network.printStatus();
-    print("\n💎 Server running. Press Ctrl+C to stop.\n\n", .{});
 
-    // Server statistics
     var connection_count: u32 = 0;
     var transaction_count: u32 = 0;
-    var block_count: u32 = 0;
 
-    // Start the mining thread
-    const miner_keypair = zen_wallet.getZeiCoinKeyPair() orelse return error.WalletLoadFailed;
-    try zeicoin.startMining(miner_keypair);
-    defer zeicoin.stopMining();
-    
-    // Main zen loop - network handles P2P, we handle clients
     while (true) {
-        // Mining now happens in background thread - no blocking!
-
-        // Handle client connections (non-blocking)
+        // Handle client connections
         if (server.accept()) |connection| {
             defer connection.stream.close();
             connection_count += 1;
-            print("🎉 ZeiCoin client #{} connected!\n", .{connection_count});
+            print("🎉 Client #{} connected!\n", .{connection_count});
 
-            // Handle ZeiCoin protocol
-            handleZeiCoinClient(allocator, connection, &zeicoin, &zen_wallet, &transaction_count, &block_count) catch |err| {
-                print("❌ Client handling error: {}\n", .{err});
+            // Handle client request
+            handleClientConnection(allocator, connection, blockchain, &transaction_count) catch |err| {
+                print("❌ Error handling client: {}\n", .{err});
+                if (@errorReturnTrace()) |trace| {
+                    std.debug.dumpStackTrace(trace.*);
+                }
             };
-
-            print("👋 ZeiCoin client #{} disconnected\n", .{connection_count});
-        } else |err| switch (err) {
-            error.WouldBlock => {
-                // No client connection, continue with zen flow
-            },
-            else => {
-                print("⚠️  Accept error: {}\n", .{err});
-            },
-        }
-
-        // Brief meditation pause for zen flow (reduced for better responsiveness)
-        std.time.sleep(types.TIMING.SERVER_SLEEP_MS * std.time.ns_per_ms);
-
-        // Occasional network status (pure information)
-        if (block_count % 10 == 0 and block_count > 0) {
-            print("\n🌐 Zen Network Status:\n", .{});
-            network.printStatus();
-            zeicoin.printStatus();
+        } else |err| {
+            if (err != error.WouldBlock) {
+                print("❌ Accept error: {}\n", .{err});
+            }
+            std.time.sleep(100 * std.time.ns_per_ms); // 100ms
         }
     }
 }
 
-fn handleZeiCoinClient(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, miner_wallet: *wallet.Wallet, transaction_count: *u32, block_count: *u32) !void {
-    _ = miner_wallet; // No longer used - mining happens in background thread
-    _ = block_count; // No longer tracking here - mining is asynchronous
+fn handleClientConnection(allocator: std.mem.Allocator, connection: std.net.Server.Connection, blockchain: *zen.ZeiCoin, transaction_count: *u32) !void {
     var buffer: [4096]u8 = undefined;
 
     while (true) {
-        // Read message from client
-        const bytes_read = connection.stream.read(&buffer) catch |err| {
-            if (err == error.EndOfStream) {
-                print("🔚 Client disconnected gracefully\n", .{});
-                break;
-            }
-            print("❌ Read error: {}\n", .{err});
-            break;
-        };
+        const bytes_read = try connection.stream.read(&buffer);
 
         if (bytes_read == 0) {
             print("🔚 Client closed connection\n", .{});
@@ -207,242 +236,118 @@ fn handleZeiCoinClient(allocator: std.mem.Allocator, connection: net.Server.Conn
         const message = buffer[0..bytes_read];
         print("📨 Received: '{s}' ({} bytes)\n", .{ message, bytes_read });
 
-        // Parse ZeiCoin protocol messages
-        if (std.mem.eql(u8, message, "BLOCKCHAIN_STATUS")) {
-            print("🔍 Processing BLOCKCHAIN_STATUS command\n", .{});
-            try sendBlockchainStatus(connection, zeicoin);
-        } else if (std.mem.startsWith(u8, message, "FUND_WALLET:")) {
-            try handleWalletFunding(allocator, connection, zeicoin, message);
-        } else if (std.mem.startsWith(u8, message, "CHECK_BALANCE:")) {
-            try handleBalanceCheck(allocator, connection, zeicoin, message);
-        } else if (std.mem.startsWith(u8, message, "GET_NONCE:")) {
-            try handleNonceCheck(allocator, connection, zeicoin, message);
-        } else if (std.mem.startsWith(u8, message, "CLIENT_TRANSACTION:")) {
-            try handleClientTransaction(allocator, connection, zeicoin, message, transaction_count);
-        } else if (std.mem.startsWith(u8, message, "SEND_TRANSACTION:")) {
-            try handleTransaction(allocator, connection, zeicoin, message, transaction_count);
-        } else if (std.mem.eql(u8, message, "PING")) {
-            const response = "PONG from ZeiCoin Bootstrap";
-            try connection.stream.writeAll(response);
-            print("🏓 Responded to PING\n", .{});
-        } else if (std.mem.eql(u8, message, "TRIGGER_SYNC")) {
-            print("🔄 Manual sync trigger received\n", .{});
-            try handleSyncTrigger(connection, zeicoin);
-        } else {
-            // Default response for unknown messages
-            const response = "ZeiCoin Bootstrap Server Ready";
-            try connection.stream.writeAll(response);
-            print("📤 Sent default response for unknown command: {s}\n", .{message});
+        // Debug: print first few chars
+        if (message.len >= 12) {
+            print("🔍 First 12 chars: '{s}'\n", .{message[0..12]});
         }
 
-        // Mining now happens in background thread - no need to block here!
+        // Parse messages
+        if (std.mem.eql(u8, message, "BLOCKCHAIN_STATUS")) {
+            try sendBlockchainStatus(connection, blockchain);
+        } else if (std.mem.startsWith(u8, message, "CHECK_BALANCE:")) {
+            print("🔍 Handling CHECK_BALANCE request\n", .{});
+            try handleBalanceCheck(allocator, connection, blockchain, message);
+        } else if (std.mem.startsWith(u8, message, "GET_NONCE:")) {
+            try handleNonceCheck(allocator, connection, blockchain, message);
+        } else if (std.mem.startsWith(u8, message, "CLIENT_TRANSACTION:")) {
+            try handleClientTransaction(allocator, connection, blockchain, message, transaction_count);
+        } else if (std.mem.startsWith(u8, message, "FUND_WALLET:")) {
+            print("🔍 Handling FUND_WALLET request\n", .{});
+            try handleWalletFunding(allocator, connection, blockchain, message);
+        } else if (std.mem.eql(u8, message, "GET_HEIGHT")) {
+            try handleGetHeight(connection, blockchain);
+        } else if (std.mem.eql(u8, message, "PING")) {
+            try connection.stream.writeAll("PONG");
+            print("🏓 Responded to PING\n", .{});
+        } else {
+            try connection.stream.writeAll("ZeiCoin Server Ready");
+        }
     }
 }
 
-fn sendBlockchainStatus(connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin) !void {
-    const height = zeicoin.getHeight() catch 0;
-    const pending = zeicoin.mempool.items.len;
+fn sendBlockchainStatus(connection: std.net.Server.Connection, blockchain: *zen.ZeiCoin) !void {
+    const height = blockchain.getHeight() catch 0;
+    const pending = blockchain.mempool.items.len;
 
-    // Create status message
     var status_buffer: [256]u8 = undefined;
     const status_msg = try std.fmt.bufPrint(&status_buffer, "STATUS:HEIGHT={},PENDING={},READY=true", .{ height, pending });
 
-    print("🔄 Preparing to send blockchain status: {s}\n", .{status_msg});
     try connection.stream.writeAll(status_msg);
-    print("📊 Sent blockchain status successfully: {s}\n", .{status_msg});
+    print("📊 Sent blockchain status\n", .{});
 }
 
-fn handleTransaction(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, message: []const u8, transaction_count: *u32) !void {
-    _ = allocator; // For future JSON parsing
-    _ = message; // For future transaction parsing
+fn handleBalanceCheck(allocator: std.mem.Allocator, connection: std.net.Server.Connection, blockchain: *zen.ZeiCoin, message: []const u8) !void {
+    print("🔎 In handleBalanceCheck, message len: {}\n", .{message.len});
+    if (message.len < 15) {
+        try connection.stream.writeAll("ERROR:Invalid format");
+        return;
+    }
 
-    print("💰 Creating valid test transaction with funded wallet...\n", .{});
+    const address_str = message[14..];
+    print("🔍 Looking up balance for address: {s}\n", .{address_str});
 
-    // Create a funded sender wallet (server test wallet)
-    var test_sender_wallet = try key.KeyPair.generateNew();
-    const sender_address = test_sender_wallet.getAddress();
-
-    // Create a recipient wallet (for testing)
-    var test_recipient_wallet = try key.KeyPair.generateNew();
-    const recipient_address = test_recipient_wallet.getAddress();
-
-    const sender_bytes = sender_address.toLegacyBytes();
-    const recipient_bytes = recipient_address.toLegacyBytes();
-    print("📝 Sender: {s}\n", .{std.fmt.fmtSliceHexLower(sender_bytes[0..8])});
-    print("📝 Recipient: {s}\n", .{std.fmt.fmtSliceHexLower(recipient_bytes[0..8])});
-
-    // Fund the sender account (create account with balance)
-    const sender_balance = 100 * types.ZEI_COIN; // Give sender 100 ZEI
-    const sender_account = types.Account{
-        .address = sender_address,
-        .balance = sender_balance,
-        .nonce = 0,
-    };
-
-    // Save funded sender account to database
-    try zeicoin.database.saveAccount(sender_address, sender_account);
-    print("💰 Funded sender with {} ZEI\n", .{sender_balance / types.ZEI_COIN});
-
-    // Get current blockchain height for expiry calculation
-    const current_height = zeicoin.getHeight() catch 0;
-    const expiry_window = types.TransactionExpiry.getExpiryWindow();
-    
-    // Create valid transaction with zen fee
-    const send_amount = 10 * types.ZEI_COIN; // Send 10 ZEI
-    const zen_fee = types.ZenFees.STANDARD_FEE; // 💰 Pay standard fee
-    var test_tx = types.Transaction{
-        .version = 0, // Version 0 for initial protocol
-        .flags = .{}, // Default flags
-        .sender = sender_address,
-        .sender_public_key = test_sender_wallet.public_key,
-        .recipient = recipient_address,
-        .amount = send_amount,
-        .fee = zen_fee, // 💰 Include fee for complete crypto
-        .nonce = sender_account.nonce, // Use current account nonce
-        .timestamp = @intCast(util.getTime()),
-        .expiry_height = current_height + expiry_window,
-        .signature = std.mem.zeroes(types.Signature), // Will be filled below
-        .script_version = 0,
-        .witness_data = &[_]u8{},
-        .extra_data = &[_]u8{},
-    };
-
-    // Sign the transaction properly
-    const tx_hash = test_tx.hash();
-    test_tx.signature = try test_sender_wallet.signTransaction(tx_hash);
-
-    print("✍️  Transaction signed with valid Ed25519 signature\n", .{});
-    print("📊 Transaction details: {} ZEI from {s} to {s}\n", .{ send_amount / types.ZEI_COIN, std.fmt.fmtSliceHexLower(sender_bytes[0..8]), std.fmt.fmtSliceHexLower(recipient_bytes[0..8]) });
-
-    // Add to mempool
-    zeicoin.addTransaction(test_tx) catch |err| {
-        print("❌ Failed to add transaction: {}\n", .{err});
-        const error_msg = "ERROR: Transaction validation failed";
-        try connection.stream.writeAll(error_msg);
+    // Parse address (supports both bech32 and hex)
+    const address = types.Address.fromString(allocator, address_str) catch {
+        try connection.stream.writeAll("ERROR:Invalid address format");
         return;
     };
 
-    transaction_count.* += 1;
-    print("✅ Valid transaction #{} added to mempool successfully!\n", .{transaction_count.*});
-    print("🎯 Transaction ready for mining\n", .{});
-
-    const success_msg = "TRANSACTION_ACCEPTED_AND_VALID";
-    try connection.stream.writeAll(success_msg);
-    print("📤 Confirmed valid transaction acceptance to client\n", .{});
-}
-
-fn handleWalletFunding(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, message: []const u8) !void {
-
-    // Parse FUND_WALLET:address message
-    const prefix = "FUND_WALLET:";
-    if (!std.mem.startsWith(u8, message, prefix)) return;
-
-    const address_hex = message[prefix.len..];
-    print("💰 Funding request for client address: {s}\n", .{address_hex});
-
-    // Parse hex address
-    const client_address = types.Address.fromString(allocator, address_hex) catch |err| {
-        print("❌ Failed to parse address: {}\n", .{err});
-        const error_msg = "ERROR: Invalid address format";
-        try connection.stream.writeAll(error_msg);
-        return;
+    // Get balance
+    const account = blockchain.getAccount(address) catch |err| {
+        if (err == error.AccountNotFound) {
+            print("❌ Account not found for address {s}\n", .{address_str});
+            try connection.stream.writeAll("BALANCE:0,0");
+            return;
+        }
+        print("❌ Error getting account: {}\n", .{err});
+        return err;
     };
 
-    // Create funded account for client
-    const client_balance = 100 * types.ZEI_COIN; // Give client 100 ZEI
-    const client_account = types.Account{
-        .address = client_address,
-        .balance = client_balance,
-        .nonce = 0,
-    };
+    print("📊 Account found - Balance: {} zei ({} ZEI), Immature: {} zei ({} ZEI)\n", .{ account.balance, account.balance / types.ZEI_COIN, account.immature_balance, account.immature_balance / types.ZEI_COIN });
+    print("🔍 Account address version: {}\n", .{account.address.version});
 
-    // Save client account to database
-    try zeicoin.database.saveAccount(client_address, client_account);
-
-    print("✅ Funded client {s} with {} ZEI\n", .{ address_hex[0..16], client_balance / types.ZEI_COIN });
-
-    const success_msg = "WALLET_FUNDED_100ZEI";
-    try connection.stream.writeAll(success_msg);
-    print("📤 Confirmed wallet funding to client\n", .{});
-}
-
-fn handleBalanceCheck(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, message: []const u8) !void {
-    // Parse CHECK_BALANCE:address message
-    const prefix = "CHECK_BALANCE:";
-    if (!std.mem.startsWith(u8, message, prefix)) return;
-
-    const address_hex = message[prefix.len..];
-    print("💰 Balance check for address: {s}\n", .{address_hex});
-
-    // Parse hex address
-    const client_address = types.Address.fromString(allocator, address_hex) catch |err| {
-        print("❌ Failed to parse address: {}\n", .{err});
-        const error_msg = "ERROR: Invalid address format";
-        try connection.stream.writeAll(error_msg);
-        return;
-    };
-
-    // Get account balance
-    const account = zeicoin.database.getAccount(client_address) catch |err| {
-        print("⚠️  Account not found: {}\n", .{err});
-        // Send zeros for both mature and immature balance
-        const error_msg = "BALANCE:0:0";
-        try connection.stream.writeAll(error_msg);
-        return;
-    };
-
-    // Send both mature and immature balance
-    const response = try std.fmt.allocPrint(allocator, "BALANCE:{}:{}", .{account.balance, account.immature_balance});
-    defer allocator.free(response);
-
+    var response_buffer: [256]u8 = undefined;
+    const response = try std.fmt.bufPrint(&response_buffer, "BALANCE:{},{}", .{ account.balance, account.immature_balance });
     try connection.stream.writeAll(response);
-
-    // Format display for server logs
-    const mature_display = util.formatZEI(allocator, account.balance) catch "? ZEI";
-    defer if (!std.mem.eql(u8, mature_display, "? ZEI")) allocator.free(mature_display);
-    const immature_display = util.formatZEI(allocator, account.immature_balance) catch "? ZEI";
-    defer if (!std.mem.eql(u8, immature_display, "? ZEI")) allocator.free(immature_display);
-    
-    print("📤 Sent balance: {s} mature + {s} immature for {s}\n", .{ 
-        mature_display, 
-        immature_display, 
-        address_hex[0..16] 
-    });
 }
 
-fn handleNonceCheck(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, message: []const u8) !void {
-    // Parse GET_NONCE:address message
-    const prefix = "GET_NONCE:";
-    if (!std.mem.startsWith(u8, message, prefix)) return;
+fn handleGetHeight(connection: std.net.Server.Connection, blockchain: *zen.ZeiCoin) !void {
+    const height = blockchain.getHeight() catch 0;
 
-    const address_hex = message[prefix.len..];
-    print("🔢 Nonce check for address: {s}\n", .{address_hex});
-
-    // Parse hex address
-    const client_address = types.Address.fromString(allocator, address_hex) catch |err| {
-        print("❌ Failed to parse address: {}\n", .{err});
-        const error_msg = "ERROR: Invalid address format";
-        try connection.stream.writeAll(error_msg);
-        return;
-    };
-
-    // Get account nonce
-    const account = zeicoin.database.getAccount(client_address) catch |err| {
-        print("⚠️  Account not found: {}, returning nonce 0\n", .{err});
-        const error_msg = "NONCE:0";
-        try connection.stream.writeAll(error_msg);
-        return;
-    };
-
-    const current_nonce = account.nextNonce();
-    const response = try std.fmt.allocPrint(allocator, "NONCE:{}", .{current_nonce});
-    defer allocator.free(response);
-
+    var response_buffer: [64]u8 = undefined;
+    const response = try std.fmt.bufPrint(&response_buffer, "HEIGHT:{}", .{height});
     try connection.stream.writeAll(response);
-    print("📤 Sent nonce: {} for {s}\n", .{ current_nonce, address_hex[0..16] });
 }
 
-fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin, message: []const u8, transaction_count: *u32) !void {
+fn handleNonceCheck(allocator: std.mem.Allocator, connection: std.net.Server.Connection, blockchain: *zen.ZeiCoin, message: []const u8) !void {
+    if (message.len < 11) {
+        try connection.stream.writeAll("ERROR:Invalid format");
+        return;
+    }
+
+    const address_str = message[10..];
+
+    // Parse address (supports both bech32 and hex)
+    const address = types.Address.fromString(allocator, address_str) catch {
+        try connection.stream.writeAll("ERROR:Invalid address format");
+        return;
+    };
+
+    // Get nonce
+    const account = blockchain.getAccount(address) catch |err| {
+        if (err == error.AccountNotFound) {
+            try connection.stream.writeAll("NONCE:0");
+            return;
+        }
+        return err;
+    };
+
+    var response_buffer: [64]u8 = undefined;
+    const response = try std.fmt.bufPrint(&response_buffer, "NONCE:{}", .{account.nonce});
+    try connection.stream.writeAll(response);
+}
+
+fn handleClientTransaction(allocator: std.mem.Allocator, connection: std.net.Server.Connection, blockchain: *zen.ZeiCoin, message: []const u8, transaction_count: *u32) !void {
 
     // Parse CLIENT_TRANSACTION:sender:recipient:amount:fee:nonce:signature:public_key
     const prefix = "CLIENT_TRANSACTION:";
@@ -499,14 +404,14 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
         return;
     };
 
-    // Parse sender address
+    // Parse sender address (supports both bech32 and hex)
     const sender_address = types.Address.fromString(allocator, sender_hex) catch {
         const error_msg = "ERROR: Invalid sender address format";
         try connection.stream.writeAll(error_msg);
         return;
     };
 
-    // Parse recipient address
+    // Parse recipient address (supports both bech32 and hex)
     const recipient_address = types.Address.fromString(allocator, recipient_hex) catch {
         const error_msg = "ERROR: Invalid recipient address format";
         try connection.stream.writeAll(error_msg);
@@ -556,18 +461,24 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
         return;
     };
 
-    // Get sender account from database
-    const sender_account = zeicoin.database.getAccount(sender_address) catch |err| {
+    // Debug: Print sender address details
+    print("🔍 Sender address: {s}\n", .{sender_hex});
+
+    // Get sender account from blockchain
+    const sender_account = blockchain.getAccount(sender_address) catch |err| {
         print("❌ Sender account not found: {}\n", .{err});
         const error_msg = "ERROR: Sender account not found";
         try connection.stream.writeAll(error_msg);
         return;
     };
 
+    // Debug: Print account details
+    print("📊 Found sender account - Balance: {} zei ({} ZEI), Nonce: {}\n", .{ sender_account.balance, sender_account.balance / types.ZEI_COIN, sender_account.nonce });
+
     // 💰 Validate transaction (amount + fee)
     const total_cost = amount + fee;
     if (sender_account.balance < total_cost) {
-        print("❌ Insufficient balance: {} < {} (amount: {} + fee: {})\n", .{ sender_account.balance, total_cost, amount, fee });
+        print("❌ Insufficient balance: {} < {} (amount: {} + fee: {})", .{ sender_account.balance, total_cost, amount, fee });
         const error_msg = "ERROR: Insufficient balance for amount + fee";
         try connection.stream.writeAll(error_msg);
         return;
@@ -604,13 +515,12 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
     const fee_display = util.formatZEI(allocator, fee) catch "? ZEI";
     defer if (!std.mem.eql(u8, fee_display, "? ZEI")) allocator.free(fee_display);
 
-    const sender_bytes = sender_address.toLegacyBytes();
-    const recipient_bytes = recipient_address.toLegacyBytes();
-    logMessage("📝 Client transaction: {s} + {s} fee from {s} to {s}", .{ amount_display, fee_display, std.fmt.fmtSliceHexLower(sender_bytes[0..8]), std.fmt.fmtSliceHexLower(recipient_bytes[0..8]) });
+    // Use the bech32 addresses we already have for logging
+    logMessage("📝 Client transaction: {s} + {s} fee from {s} to {s}", .{ amount_display, fee_display, sender_hex, recipient_hex });
 
     logMessage("🔄 About to call zeicoin.addTransaction...", .{});
     // Add to mempool (ZeiCoin will handle balance updates after validation)
-    zeicoin.addTransaction(client_tx) catch |err| {
+    blockchain.addTransaction(client_tx) catch |err| {
         logMessage("❌ Failed to add client transaction: {}", .{err});
         const error_msg = "ERROR: Client transaction rejected";
         try connection.stream.writeAll(error_msg);
@@ -622,40 +532,64 @@ fn handleClientTransaction(allocator: std.mem.Allocator, connection: net.Server.
     print("✅ Client transaction #{} added to mempool\n", .{transaction_count.*});
 
     // Broadcast transaction to network peers
-    if (zeicoin.network) |network| {
+    if (blockchain.network) |network| {
         network.*.broadcastTransaction(client_tx);
         const peer_count = network.*.peers.items.len;
         print("📡 Transaction broadcast to {} peers\n", .{peer_count});
     }
 
     logMessage("📤 About to send success response to client", .{});
-    const success_msg = "CLIENT_TRANSACTION_ACCEPTED";
+    const success_msg = "OK:Transaction accepted";
     try connection.stream.writeAll(success_msg);
-    logMessage("✅ Sent CLIENT_TRANSACTION_ACCEPTED to client", .{});
+    logMessage("✅ Sent OK:Transaction accepted to client", .{});
 }
 
-fn handleSyncTrigger(connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin) !void {
-    print("🔄 Processing manual sync trigger request\n", .{});
+fn handleWalletFunding(allocator: std.mem.Allocator, connection: std.net.Server.Connection, blockchain: *zen.ZeiCoin, message: []const u8) !void {
+    if (message.len < 13) {
+        try connection.stream.writeAll("ERROR:Invalid format");
+        return;
+    }
 
-    // Trigger auto-sync logic (the same logic used for orphan blocks)
-    zeicoin.triggerAutoSyncWithPeerQuery() catch |err| {
-        print("❌ Failed to trigger sync: {}\n", .{err});
-        const error_msg = "SYNC_FAILED";
-        try connection.stream.writeAll(error_msg);
+    const address_str = message[12..];
+
+    // Only allow funding on TestNet
+    if (types.CURRENT_NETWORK != .testnet) {
+        try connection.stream.writeAll("ERROR:Funding only available on TestNet");
+        return;
+    }
+
+    // Parse address (supports both bech32 and hex)
+    const recipient = types.Address.fromString(allocator, address_str) catch {
+        try connection.stream.writeAll("ERROR:Invalid address format");
         return;
     };
 
-    const success_msg = "SYNC_TRIGGERED";
-    try connection.stream.writeAll(success_msg);
-    print("✅ Manual sync triggered successfully\n", .{});
-}
+    // Create a special funding transaction
+    const funding_amount = 100 * types.ZEI_COIN; // 100 ZEI
 
-fn sendNewBlockNotification(connection: net.Server.Connection, zeicoin: *zeicoin_main.ZeiCoin) !void {
-    const height = zeicoin.getHeight() catch 0;
+    // For simplicity, we'll just update the account balance directly
+    // In a real implementation, this would create a proper transaction
+    var account = blockchain.getAccount(recipient) catch |err| {
+        if (err == error.AccountNotFound) {
+            // Create new account
+            const new_account = types.Account{
+                .address = recipient,
+                .balance = funding_amount,
+                .immature_balance = 0,
+                .nonce = 0,
+            };
+            try blockchain.database.saveAccount(recipient, new_account);
+            try connection.stream.writeAll("WALLET_FUNDED_100ZEI");
+            print("💰 Funded new account with 100 ZEI\n", .{});
+            return;
+        }
+        return err;
+    };
 
-    var block_buffer: [256]u8 = undefined;
-    const block_msg = try std.fmt.bufPrint(&block_buffer, "NEW_BLOCK:HEIGHT={},MINED=true", .{height});
+    // Add to existing balance
+    account.balance += funding_amount;
+    try blockchain.database.saveAccount(recipient, account);
 
-    try connection.stream.writeAll(block_msg);
-    print("📡 Broadcasted new block notification: {s}\n", .{block_msg});
+    try connection.stream.writeAll("WALLET_FUNDED_100ZEI");
+    print("💰 Funded existing account with 100 ZEI (new balance: {} ZEI)\n", .{account.balance / types.ZEI_COIN});
 }

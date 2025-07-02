@@ -40,3 +40,5 @@ DOCKER.md
 Dockerfile.debug
 Dockerfile.randomx
 .gitignore
+.env
+GEMINI.md

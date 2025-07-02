@@ -160,8 +160,28 @@ pub const Database = struct {
         // Deserialize account
         var stream = std.io.fixedBufferStream(buffer);
         const reader = stream.reader();
+        
+        // Debug: print raw bytes
+        std.debug.print("🔍 Raw account bytes ({} bytes):\n", .{buffer.len});
+        for (buffer[0..@min(64, buffer.len)], 0..) |byte, i| {
+            std.debug.print("{x:0>2} ", .{byte});
+            if ((i + 1) % 16 == 0) std.debug.print("\n", .{});
+        }
+        std.debug.print("\n", .{});
 
-        return serialize.deserialize(reader, Account, self.allocator) catch DatabaseError.SerializationFailed;
+        const account = serialize.deserialize(reader, Account, self.allocator) catch |err| {
+            std.debug.print("❌ Deserialization failed: {}\n", .{err});
+            return DatabaseError.SerializationFailed;
+        };
+        
+        // Debug: print deserialized account
+        std.debug.print("📊 Deserialized account: balance={}, nonce={}, immature={}\n", .{
+            account.balance,
+            account.nonce,
+            account.immature_balance,
+        });
+        
+        return account;
     }
 
     /// Get blockchain height (count block files)
