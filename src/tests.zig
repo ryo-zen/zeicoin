@@ -20,7 +20,10 @@ const Block = types.Block;
 fn createTestZeiCoin(data_dir: []const u8) !*ZeiCoin {
     _ = data_dir; // ZeiCoin.init doesn't take data_dir parameter
     var zeicoin = try ZeiCoin.init(testing.allocator);
-    errdefer zeicoin.deinit();
+    errdefer {
+        zeicoin.deinit();
+        testing.allocator.destroy(zeicoin);
+    }
     
     // Ensure we have a genesis block
     const current_height = zeicoin.getHeight() catch 0;
@@ -86,7 +89,10 @@ fn createTestTransaction(
 
 test "blockchain initialization" {
     var zeicoin = try createTestZeiCoin("test_zeicoin_data_init");
-    defer zeicoin.deinit();
+    defer {
+        zeicoin.deinit();
+        testing.allocator.destroy(zeicoin);
+    }
 
     // Should have genesis block (height starts at 1 after genesis creation)
     const height = try zeicoin.getHeight();
@@ -102,7 +108,10 @@ test "blockchain initialization" {
 
 test "transaction processing" {
     var zeicoin = try createTestZeiCoin("test_zeicoin_data_tx");
-    defer zeicoin.deinit();
+    defer {
+        zeicoin.deinit();
+        testing.allocator.destroy(zeicoin);
+    }
 
     // Create a test keypair for the transaction
     var sender_keypair = try key.KeyPair.generateNew();
@@ -169,7 +178,10 @@ test "transaction processing" {
 
 test "block retrieval by height" {
     var zeicoin = try createTestZeiCoin("test_zeicoin_data_retrieval");
-    defer zeicoin.deinit();
+    defer {
+        zeicoin.deinit();
+        testing.allocator.destroy(zeicoin);
+    }
 
     // Should have genesis block at height 0
     var genesis_block = try zeicoin.getBlockByHeight(0);
@@ -184,7 +196,10 @@ test "block retrieval by height" {
 
 test "block validation" {
     var zeicoin = try createTestZeiCoin("test_zeicoin_data_validation");
-    defer zeicoin.deinit();
+    defer {
+        zeicoin.deinit();
+        testing.allocator.destroy(zeicoin);
+    }
 
     // Create a valid test block that extends the genesis
     const current_height = try zeicoin.getHeight();
@@ -261,7 +276,10 @@ test "block validation" {
 
 test "mempool cleaning after block application" {
     var zeicoin = try createTestZeiCoin("test_zeicoin_data_mempool");
-    defer zeicoin.deinit();
+    defer {
+        zeicoin.deinit();
+        testing.allocator.destroy(zeicoin);
+    }
 
     // Create test keypair and transaction
     var sender_keypair = try key.KeyPair.generateNew();
@@ -325,7 +343,10 @@ test "mempool cleaning after block application" {
 
 test "block broadcasting integration" {
     var zeicoin = try ZeiCoin.init(testing.allocator);
-    defer zeicoin.deinit();
+    defer {
+        zeicoin.deinit();
+        testing.allocator.destroy(zeicoin);
+    }
 
     // This test verifies that broadcastNewBlock doesn't crash when no network is present
     const transactions = try testing.allocator.alloc(types.Transaction, 0);
@@ -351,7 +372,10 @@ test "block broadcasting integration" {
 
 test "timestamp validation - future blocks rejected" {
     var zeicoin = try createTestZeiCoin("test_zeicoin_timestamp_future");
-    defer zeicoin.deinit();
+    defer {
+        zeicoin.deinit();
+        testing.allocator.destroy(zeicoin);
+    }
     defer std.fs.cwd().deleteTree("test_zeicoin_timestamp_future") catch {};
 
     // Create a block with timestamp too far in future
@@ -376,7 +400,10 @@ test "timestamp validation - future blocks rejected" {
 
 test "timestamp validation - median time past" {
     var zeicoin = try createTestZeiCoin("test_zeicoin_mtp");
-    defer zeicoin.deinit();
+    defer {
+        zeicoin.deinit();
+        testing.allocator.destroy(zeicoin);
+    }
     defer std.fs.cwd().deleteTree("test_zeicoin_mtp") catch {};
 
     // Mine some blocks with increasing timestamps
@@ -438,7 +465,10 @@ test "coinbase maturity basic" {
     defer std.fs.cwd().deleteTree(test_dir) catch {};
     
     var zeicoin = try createTestZeiCoin(test_dir);
-    defer zeicoin.deinit();
+    defer {
+        zeicoin.deinit();
+        testing.allocator.destroy(zeicoin);
+    }
 
     // Create a test miner
     const miner_keypair = try key.KeyPair.generateNew();
@@ -462,7 +492,10 @@ test "mempool limits enforcement" {
     defer std.fs.cwd().deleteTree(test_dir) catch {};
     
     var zeicoin = try createTestZeiCoin(test_dir);
-    defer zeicoin.deinit();
+    defer {
+        zeicoin.deinit();
+        testing.allocator.destroy(zeicoin);
+    }
 
     // Test 1: Test reaching transaction count limit
     print("\n🧪 Testing mempool transaction count limit...\n", .{});
@@ -614,7 +647,10 @@ test "transaction expiration" {
     defer std.fs.cwd().deleteTree(test_dir) catch {};
     
     var zeicoin = try createTestZeiCoin(test_dir);
-    defer zeicoin.deinit();
+    defer {
+        zeicoin.deinit();
+        testing.allocator.destroy(zeicoin);
+    }
 
     // Create test wallets
     const sender_keypair = try key.KeyPair.generateNew();
@@ -737,7 +773,10 @@ test "reorganization with coinbase maturity" {
     defer std.fs.cwd().deleteTree(test_dir) catch {};
     
     var zeicoin = try createTestZeiCoin(test_dir);
-    defer zeicoin.deinit();
+    defer {
+        zeicoin.deinit();
+        testing.allocator.destroy(zeicoin);
+    }
 
     // Create test accounts
     const miner1 = try key.KeyPair.generateNew();
@@ -850,7 +889,10 @@ test "transaction size limit" {
     
     // Create test blockchain
     var zeicoin = try createTestZeiCoin("test_zeicoin_data_tx_size");
-    defer zeicoin.deinit();
+    defer {
+        zeicoin.deinit();
+        testing.allocator.destroy(zeicoin);
+    }
     
     // Create test keypairs
     var alice = try key.KeyPair.generateNew();
@@ -942,7 +984,10 @@ test "memory leak detection - block operations" {
     {
         print("  Testing block load/free cycle...\n", .{});
         var zeicoin = try createTestZeiCoin("test_memory_leak_blocks");
-        defer zeicoin.deinit();
+        defer {
+        zeicoin.deinit();
+        testing.allocator.destroy(zeicoin);
+    }
         
         // Create and mine a block with multiple transactions
         const alice = try key.KeyPair.generateNew();
@@ -986,7 +1031,10 @@ test "memory leak detection - block operations" {
     {
         print("  Testing sync block memory management...\n", .{});
         var zeicoin = try createTestZeiCoin("test_memory_leak_sync");
-        defer zeicoin.deinit();
+        defer {
+        zeicoin.deinit();
+        testing.allocator.destroy(zeicoin);
+    }
         
         // Create a block with transactions containing extra_data
         const miner = try key.KeyPair.generateNew();

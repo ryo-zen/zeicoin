@@ -56,29 +56,61 @@ pub const ZeiCoin = struct {
     difficulty_calculator: DifficultyCalculator,
     status_reporter: StatusReporter,
 
-    pub fn init(allocator: std.mem.Allocator) !ZeiCoin {
+    pub fn init(allocator: std.mem.Allocator) !*ZeiCoin {
         const data_dir = switch (types.CURRENT_NETWORK) {
             .testnet => "zeicoin_data_testnet",
             .mainnet => "zeicoin_data_mainnet",
         };
+        
+        // PHASE 1: Create core resources with guaranteed cleanup
         const database = try allocator.create(db.Database);
+        errdefer allocator.destroy(database);
+        
         database.* = try db.Database.init(allocator, data_dir);
-        const chain_state = @import("chain/state.zig").ChainState.init(allocator, database.*);
-
-        var instance = ZeiCoin{
+        errdefer database.deinit();
+        
+        if (!database.validate()) {
+            print("❌ Database validation failed during initialization\n", .{});
+            return error.DatabaseCorrupted;
+        }
+        
+        // Pre-allocate ZeiCoin on heap to get stable memory address
+        const instance_ptr = try allocator.create(ZeiCoin);
+        errdefer allocator.destroy(instance_ptr);
+        
+        // Initialize all collections with proper cleanup
+        var failed_peers = ArrayList(*net.Peer).init(allocator);
+        errdefer failed_peers.deinit();
+        
+        var blocks_to_download = ArrayList(u32).init(allocator);
+        errdefer blocks_to_download.deinit();
+        
+        var active_block_downloads = std.AutoHashMap(u32, i64).init(allocator);
+        errdefer active_block_downloads.deinit();
+        
+        var fork_manager = forkmanager.ForkManager.init(allocator);
+        errdefer fork_manager.deinit();
+        
+        var header_chain = headerchain.HeaderChain.init(allocator);
+        errdefer header_chain.deinit();
+        
+        const chain_state = @import("chain/state.zig").ChainState.init(allocator, database);
+        
+        // PHASE 2: Initialize struct in stable memory location
+        instance_ptr.* = ZeiCoin{
             .database = database,
             .chain_state = chain_state,
             .network = null,
             .allocator = allocator,
-            .fork_manager = forkmanager.ForkManager.init(allocator),
-            .header_chain = headerchain.HeaderChain.init(allocator),
+            .fork_manager = fork_manager,
+            .header_chain = header_chain,
             .sync_manager = null,
             .sync_state = .synced,
             .sync_progress = null,
             .sync_peer = null,
-            .failed_peers = ArrayList(*net.Peer).init(allocator),
-            .blocks_to_download = ArrayList(u32).init(allocator),
-            .active_block_downloads = std.AutoHashMap(u32, i64).init(allocator),
+            .failed_peers = failed_peers,
+            .blocks_to_download = blocks_to_download,
+            .active_block_downloads = active_block_downloads,
             .headers_progress = null,
             .message_handler = undefined,
             .chain_validator = undefined,
@@ -87,26 +119,89 @@ pub const ZeiCoin = struct {
             .difficulty_calculator = undefined,
             .status_reporter = undefined,
         };
+        
+        // Custom cleanup function for partial initialization
+        var components_initialized: u8 = 0;
+        errdefer {
+            // Clean up components in reverse order
+            if (components_initialized >= 6) instance_ptr.status_reporter.deinit();
+            if (components_initialized >= 5) instance_ptr.difficulty_calculator.deinit();
+            if (components_initialized >= 4) instance_ptr.chain_processor.deinit();
+            if (components_initialized >= 3) instance_ptr.chain_query.deinit();
+            if (components_initialized >= 2) instance_ptr.chain_validator.deinit();
+            if (components_initialized >= 1) instance_ptr.message_handler.deinit();
+        }
 
-        instance.message_handler = message_handler.NetworkMessageHandler.init(allocator, &instance);
-        instance.chain_validator = validator_mod.ChainValidator.init(allocator, &instance);
+        // PHASE 3: Initialize components with stable instance address
+        // Now &instance_ptr points to stable memory, safe to pass to components
+        
+        instance_ptr.message_handler = message_handler.NetworkMessageHandler.init(allocator, instance_ptr);
+        components_initialized = 1;
+        
+        if (!database.validate()) {
+            print("❌ Database corrupted after message_handler init\n", .{});
+            return error.DatabaseCorrupted;
+        }
 
-        // Initialize new modular components
-        instance.chain_query = ChainQuery.init(allocator, instance.database, &instance.chain_state);
-        instance.chain_processor = ChainProcessor.init(allocator, instance.database, &instance.chain_state, &instance.fork_manager, &instance.chain_validator);
-        instance.difficulty_calculator = DifficultyCalculator.init(allocator, instance.database);
-        instance.status_reporter = StatusReporter.init(allocator, instance.database, &instance.network);
+        instance_ptr.chain_validator = validator_mod.ChainValidator.init(allocator, instance_ptr);
+        components_initialized = 2;
+        
+        if (!database.validate()) {
+            print("❌ Database corrupted after chain_validator init\n", .{});
+            return error.DatabaseCorrupted;
+        }
 
-        if (try instance.getHeight() == 0) {
+        instance_ptr.chain_query = ChainQuery.init(allocator, instance_ptr.database, &instance_ptr.chain_state);
+        components_initialized = 3;
+        
+        if (!database.validate()) {
+            print("❌ Database corrupted after chain_query init\n", .{});
+            return error.DatabaseCorrupted;
+        }
+
+        instance_ptr.chain_processor = ChainProcessor.init(allocator, instance_ptr.database, &instance_ptr.chain_state, &instance_ptr.fork_manager, &instance_ptr.chain_validator);
+        components_initialized = 4;
+        
+        if (!database.validate()) {
+            print("❌ Database corrupted after chain_processor init\n", .{});
+            return error.DatabaseCorrupted;
+        }
+
+        instance_ptr.difficulty_calculator = DifficultyCalculator.init(allocator, instance_ptr.database);
+        components_initialized = 5;
+        
+        if (!database.validate()) {
+            print("❌ Database corrupted after difficulty_calculator init\n", .{});
+            return error.DatabaseCorrupted;
+        }
+
+        instance_ptr.status_reporter = StatusReporter.init(allocator, instance_ptr.database, &instance_ptr.network);
+        components_initialized = 6;
+        
+        if (!database.validate()) {
+            print("❌ Database corrupted after status_reporter init\n", .{});
+            return error.DatabaseCorrupted;
+        }
+
+        // PHASE 4: Initialize blockchain data
+        if (try instance_ptr.getHeight() == 0) {
             print("🌐 No blockchain found - creating canonical genesis block\n", .{});
-            try instance.createCanonicalGenesis();
+            try instance_ptr.createCanonicalGenesis();
             print("✅ Genesis block created successfully!\n", .{});
         } else {
-            const height = try instance.getHeight();
+            const height = try instance_ptr.getHeight();
             print("📊 Existing blockchain found with {} blocks\n", .{height});
         }
 
-        return instance;
+        if (!database.validate()) {
+            print("❌ Database corrupted after full initialization\n", .{});
+            return error.DatabaseCorrupted;
+        }
+
+        print("✅ ZeiCoin initialization completed successfully\n", .{});
+        
+        // Return pointer directly, transferring ownership to caller
+        return instance_ptr;
     }
 
     pub fn initializeBlockchain(self: *ZeiCoin) !void {
@@ -115,24 +210,48 @@ pub const ZeiCoin = struct {
     }
 
     pub fn deinit(self: *ZeiCoin) void {
-        self.database.deinit();
-        self.allocator.destroy(self.database);
-        self.chain_state.deinit();
-        self.fork_manager.deinit();
-        self.header_chain.deinit();
-        self.failed_peers.deinit();
-        self.blocks_to_download.deinit();
-        self.active_block_downloads.deinit();
-        self.message_handler.deinit();
-        self.chain_validator.deinit();
-        self.chain_query.deinit();
-        self.chain_processor.deinit();
-        self.difficulty_calculator.deinit();
+        print("🧹 Starting ZeiCoin cleanup...\n", .{});
+        
+        // Validate Database integrity before cleanup
+        if (!self.database.validate()) {
+            print("⚠️ Database corruption detected during cleanup!\n", .{});
+        }
+        
+        // Clean up in REVERSE order of initialization
+        // Components first (they may access Database during cleanup)
+        
+        // Step 1: Clean up high-level components
         self.status_reporter.deinit();
+        self.difficulty_calculator.deinit();
+        self.chain_processor.deinit();
+        self.chain_query.deinit();
+        self.chain_validator.deinit();
+        self.message_handler.deinit();
+        
+        // Step 2: Clean up collections
+        self.active_block_downloads.deinit();
+        self.blocks_to_download.deinit();
+        self.failed_peers.deinit();
+        
+        // Step 3: Clean up core components
+        self.header_chain.deinit();
+        self.fork_manager.deinit();
+        
+        // Step 4: Clean up sync manager if allocated
         if (self.sync_manager) |sm| {
             sm.deinit();
             self.allocator.destroy(sm);
         }
+        
+        // Step 5: Clean up ChainState (does NOT touch Database)
+        self.chain_state.deinit();
+        
+        // Step 6: Finally clean up Database (owned by ZeiCoin)
+        // Use defer to ensure this happens even if something above fails
+        defer self.allocator.destroy(self.database);
+        defer self.database.deinit();
+        
+        print("✅ ZeiCoin cleanup completed\n", .{});
     }
 
     fn createCanonicalGenesis(self: *ZeiCoin) !void {
@@ -165,6 +284,14 @@ pub const ZeiCoin = struct {
     }
 
     pub fn getAccount(self: *ZeiCoin, address: Address) !Account {
+        // Validate Database before delegating to chain_query
+        if (!self.database.validate()) {
+            print("❌ Database corruption detected in ZeiCoin.getAccount()!\n", .{});
+            print("  ZeiCoin ptr: {*}\n", .{self});
+            print("  Database ptr: {*}\n", .{self.database});
+            return error.DatabaseCorrupted;
+        }
+        
         return try self.chain_query.getAccount(address);
     }
 

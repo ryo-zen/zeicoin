@@ -25,53 +25,75 @@ pub const DatabaseError = error{
 /// ZeiCoin zen minimal database
 /// File-based storage with pure Zig - no dependencies
 pub const Database = struct {
-    blocks_dir: []const u8,
-    accounts_dir: []const u8,
-    wallets_dir: []const u8,
+    // Magic numbers for corruption detection
+    magic_start: u32 = 0xDEADBEEF,
+    
+    blocks_dir: [256]u8,
+    blocks_dir_len: usize,
+    accounts_dir: [256]u8,
+    accounts_dir_len: usize,
+    wallets_dir: [256]u8,
+    wallets_dir_len: usize,
     allocator: std.mem.Allocator,
+    
+    // End magic number
+    magic_end: u32 = 0xFEEDFACE,
+
+    /// Validate Database structure integrity
+    pub fn validate(self: *const Database) bool {
+        return self.magic_start == 0xDEADBEEF and 
+               self.magic_end == 0xFEEDFACE and
+               self.blocks_dir_len < 256 and
+               self.accounts_dir_len < 256 and
+               self.wallets_dir_len < 256;
+    }
 
     /// Initialize ZeiCoin database directories
     pub fn init(allocator: std.mem.Allocator, base_path: []const u8) !Database {
-        // Create directories - zen minimalism
-        const blocks_dir = try std.fs.path.join(allocator, &[_][]const u8{ base_path, "blocks" });
-        const accounts_dir = try std.fs.path.join(allocator, &[_][]const u8{ base_path, "accounts" });
-        const wallets_dir = try std.fs.path.join(allocator, &[_][]const u8{ base_path, "wallets" });
-
-        // Ensure directories exist - bamboo grows
-        std.fs.cwd().makePath(blocks_dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
-
-        std.fs.cwd().makePath(accounts_dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
-
-        std.fs.cwd().makePath(wallets_dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
-
-        return Database{
-            .blocks_dir = blocks_dir,
-            .accounts_dir = accounts_dir,
-            .wallets_dir = wallets_dir,
+        var db = Database{
+            .blocks_dir = undefined,
+            .blocks_dir_len = 0,
+            .accounts_dir = undefined,
+            .accounts_dir_len = 0,
+            .wallets_dir = undefined,
+            .wallets_dir_len = 0,
             .allocator = allocator,
         };
+
+        // Create directory paths using static buffers
+        db.blocks_dir_len = (std.fmt.bufPrint(&db.blocks_dir, "{s}/blocks", .{base_path}) catch return error.InvalidPath).len;
+        db.accounts_dir_len = (std.fmt.bufPrint(&db.accounts_dir, "{s}/accounts", .{base_path}) catch return error.InvalidPath).len;
+        db.wallets_dir_len = (std.fmt.bufPrint(&db.wallets_dir, "{s}/wallets", .{base_path}) catch return error.InvalidPath).len;
+
+        // Ensure directories exist - bamboo grows
+        std.fs.cwd().makePath(db.blocks_dir[0..db.blocks_dir_len]) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+
+        std.fs.cwd().makePath(db.accounts_dir[0..db.accounts_dir_len]) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+
+        std.fs.cwd().makePath(db.wallets_dir[0..db.wallets_dir_len]) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+
+        return db;
     }
 
     /// Cleanup database resources
     pub fn deinit(self: *Database) void {
-        self.allocator.free(self.blocks_dir);
-        self.allocator.free(self.accounts_dir);
-        self.allocator.free(self.wallets_dir);
+        // No cleanup needed for static buffers
+        _ = self;
     }
 
     /// Save block to file
     pub fn saveBlock(self: *Database, height: u32, block: Block) !void {
         // Create filename: blocks/000012.block
-        const filename = try std.fmt.allocPrint(self.allocator, "{s}/{:0>6}.block", .{ self.blocks_dir, height });
+        const filename = try std.fmt.allocPrint(self.allocator, "{s}/{:0>6}.block", .{ self.blocks_dir[0..self.blocks_dir_len], height });
         defer self.allocator.free(filename);
 
         // Serialize block to buffer
@@ -91,7 +113,7 @@ pub const Database = struct {
     /// Load block from file
     pub fn getBlock(self: *Database, height: u32) !Block {
         // Create filename
-        const filename = try std.fmt.allocPrint(self.allocator, "{s}/{:0>6}.block", .{ self.blocks_dir, height });
+        const filename = try std.fmt.allocPrint(self.allocator, "{s}/{:0>6}.block", .{ self.blocks_dir[0..self.blocks_dir_len], height });
         defer self.allocator.free(filename);
 
         // Read file
@@ -119,7 +141,7 @@ pub const Database = struct {
         _ = std.fmt.bufPrint(&hex_buffer, "{}", .{std.fmt.fmtSliceHexLower(&addr_bytes)}) catch unreachable;
         
         // Create filename: accounts/1a2b3c4d...hex.account
-        const filename = try std.fmt.allocPrint(self.allocator, "{s}/{s}.account", .{ self.accounts_dir, hex_buffer });
+        const filename = try std.fmt.allocPrint(self.allocator, "{s}/{s}.account", .{ self.accounts_dir[0..self.accounts_dir_len], hex_buffer });
         defer self.allocator.free(filename);
 
         // Serialize account to buffer
@@ -138,13 +160,26 @@ pub const Database = struct {
 
     /// Load account from file
     pub fn getAccount(self: *Database, address: Address) !Account {
+        // Validate Database integrity before use
+        if (!self.validate()) {
+            std.debug.print("ERROR: Database corruption detected in getAccount!\n", .{});
+            std.debug.print("  magic_start: 0x{X} (expected: 0xDEADBEEF)\n", .{self.magic_start});
+            std.debug.print("  magic_end: 0x{X} (expected: 0xFEEDFACE)\n", .{self.magic_end});
+            std.debug.print("  accounts_dir_len: {} (max: 255)\n", .{self.accounts_dir_len});
+            return DatabaseError.InvalidPath;
+        }
+        
+        std.debug.print("DEBUG getAccount: Database ptr={*}, accounts_dir_len={}\n", .{self, self.accounts_dir_len});
+        const accounts_dir_slice = self.accounts_dir[0..self.accounts_dir_len];
+        std.debug.print("DEBUG getAccount: accounts_dir='{s}' len={}\n", .{accounts_dir_slice, accounts_dir_slice.len});
+        
         // Create hex representation of address
         var hex_buffer: [64]u8 = undefined;
         const addr_bytes = address.toLegacyBytes();
         _ = std.fmt.bufPrint(&hex_buffer, "{}", .{std.fmt.fmtSliceHexLower(&addr_bytes)}) catch unreachable;
         
         // Create filename
-        const filename = try std.fmt.allocPrint(self.allocator, "{s}/{s}.account", .{ self.accounts_dir, hex_buffer });
+        const filename = try std.fmt.allocPrint(self.allocator, "{s}/{s}.account", .{ accounts_dir_slice, hex_buffer });
         defer self.allocator.free(filename);
 
         // Read file
@@ -186,7 +221,7 @@ pub const Database = struct {
 
     /// Get blockchain height (count block files)
     pub fn getHeight(self: *Database) !u32 {
-        var dir = std.fs.cwd().openDir(self.blocks_dir, .{ .iterate = true }) catch return 0;
+        var dir = std.fs.cwd().openDir(self.blocks_dir[0..self.blocks_dir_len], .{ .iterate = true }) catch return 0;
         defer dir.close();
 
         var count: u32 = 0;
@@ -202,7 +237,7 @@ pub const Database = struct {
 
     /// Get number of accounts (count account files)
     pub fn getAccountCount(self: *Database) !u32 {
-        var dir = std.fs.cwd().openDir(self.accounts_dir, .{ .iterate = true }) catch return 0;
+        var dir = std.fs.cwd().openDir(self.accounts_dir[0..self.accounts_dir_len], .{ .iterate = true }) catch return 0;
         defer dir.close();
 
         var count: u32 = 0;
@@ -231,7 +266,7 @@ pub const Database = struct {
             return DatabaseError.InvalidPath;
         }
         
-        return std.fmt.allocPrint(self.allocator, "{s}/{s}.wallet", .{ self.wallets_dir, wallet_name });
+        return std.fmt.allocPrint(self.allocator, "{s}/{s}.wallet", .{ self.wallets_dir[0..self.wallets_dir_len], wallet_name });
     }
 
     /// Get default wallet path - zen default

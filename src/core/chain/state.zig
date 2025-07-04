@@ -22,14 +22,14 @@ const Hash = types.Hash;
 /// - State rollback and replay operations
 pub const ChainState = struct {
     // Core state storage
-    database: db.Database,
+    database: *db.Database,
     processed_transactions: std.ArrayList([32]u8),
     allocator: std.mem.Allocator,
 
     const Self = @This();
 
     /// Initialize ChainState with database and allocator
-    pub fn init(allocator: std.mem.Allocator, database: db.Database) Self {
+    pub fn init(allocator: std.mem.Allocator, database: *db.Database) Self {
         return .{
             .database = database,
             .processed_transactions = std.ArrayList([32]u8).init(allocator),
@@ -38,9 +38,9 @@ pub const ChainState = struct {
     }
 
     /// Cleanup resources
+    /// Note: Database is owned by ZeiCoin, we only clean up our own resources
     pub fn deinit(self: *Self) void {
         self.processed_transactions.deinit();
-        // Note: Database is owned by ZeiCoin, don't deinit here
     }
 
     // Account Management Methods (to be extracted from node.zig)

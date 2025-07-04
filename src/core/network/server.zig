@@ -46,9 +46,12 @@ pub fn main() !void {
     log_file = std.fs.cwd().createFile("logs/server.log", .{}) catch null;
     defer if (log_file) |file| file.close();
 
-    // Initialize blockchain
+    // Initialize blockchain with heap allocation for stable memory addresses
     var blockchain = try zen.ZeiCoin.init(allocator);
-    defer blockchain.deinit();
+    defer {
+        blockchain.deinit();
+        allocator.destroy(blockchain);
+    }
 
     // Initialize blockchain (will create genesis if needed)
     try blockchain.initializeBlockchain();
@@ -59,12 +62,12 @@ pub fn main() !void {
     defer network.deinit();
 
     // Connect blockchain to network
-    network.setBlockchain(&blockchain);
+    network.setBlockchain(blockchain);
     blockchain.network = &network;
 
     // Initialize SyncManager
     blockchain.sync_manager = try allocator.create(sync.SyncManager);
-    blockchain.sync_manager.?.* = sync.SyncManager.init(allocator, &blockchain);
+    blockchain.sync_manager.?.* = sync.SyncManager.init(allocator, blockchain);
 
     // Parse command line arguments
     const args = try std.process.argsAlloc(allocator);
@@ -148,7 +151,7 @@ pub fn main() !void {
 
     // Start client API listener thread
     print("🚀 Spawning client API thread...\n", .{});
-    const client_thread = try std.Thread.spawn(.{}, clientApiListener, .{ allocator, &blockchain });
+    const client_thread = try std.Thread.spawn(.{}, clientApiListener, .{ allocator, blockchain });
     defer client_thread.join();
     print("✅ Client API thread spawned\n", .{});
 
