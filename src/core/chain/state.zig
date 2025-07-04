@@ -40,7 +40,7 @@ pub const ChainState = struct {
     /// Cleanup resources
     pub fn deinit(self: *Self) void {
         self.processed_transactions.deinit();
-        self.database.deinit();
+        // Note: Database is owned by ZeiCoin, don't deinit here
     }
 
     // Account Management Methods (to be extracted from node.zig)

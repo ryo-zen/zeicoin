@@ -35,7 +35,7 @@ const DifficultyCalculator = @import("chain/difficulty.zig").DifficultyCalculato
 const StatusReporter = @import("monitoring/status.zig").StatusReporter;
 
 pub const ZeiCoin = struct {
-    database: db.Database,
+    database: *db.Database,
     chain_state: @import("chain/state.zig").ChainState,
     network: ?*net.NetworkManager,
     allocator: std.mem.Allocator,
@@ -61,8 +61,9 @@ pub const ZeiCoin = struct {
             .testnet => "zeicoin_data_testnet",
             .mainnet => "zeicoin_data_mainnet",
         };
-        const database = try db.Database.init(allocator, data_dir);
-        const chain_state = @import("chain/state.zig").ChainState.init(allocator, database);
+        const database = try allocator.create(db.Database);
+        database.* = try db.Database.init(allocator, data_dir);
+        const chain_state = @import("chain/state.zig").ChainState.init(allocator, database.*);
 
         var instance = ZeiCoin{
             .database = database,
@@ -91,10 +92,10 @@ pub const ZeiCoin = struct {
         instance.chain_validator = validator_mod.ChainValidator.init(allocator, &instance);
 
         // Initialize new modular components
-        instance.chain_query = ChainQuery.init(allocator, &instance.database, &instance.chain_state);
-        instance.chain_processor = ChainProcessor.init(allocator, &instance.database, &instance.chain_state, &instance.fork_manager, &instance.chain_validator);
-        instance.difficulty_calculator = DifficultyCalculator.init(allocator, &instance.database);
-        instance.status_reporter = StatusReporter.init(allocator, &instance.database, &instance.network);
+        instance.chain_query = ChainQuery.init(allocator, instance.database, &instance.chain_state);
+        instance.chain_processor = ChainProcessor.init(allocator, instance.database, &instance.chain_state, &instance.fork_manager, &instance.chain_validator);
+        instance.difficulty_calculator = DifficultyCalculator.init(allocator, instance.database);
+        instance.status_reporter = StatusReporter.init(allocator, instance.database, &instance.network);
 
         if (try instance.getHeight() == 0) {
             print("🌐 No blockchain found - creating canonical genesis block\n", .{});
@@ -115,6 +116,7 @@ pub const ZeiCoin = struct {
 
     pub fn deinit(self: *ZeiCoin) void {
         self.database.deinit();
+        self.allocator.destroy(self.database);
         self.chain_state.deinit();
         self.fork_manager.deinit();
         self.header_chain.deinit();
