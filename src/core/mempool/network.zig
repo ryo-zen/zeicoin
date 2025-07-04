@@ -24,7 +24,7 @@ const Hash = types.Hash;
 /// - Manages network-specific validation
 /// - Provides duplicate detection for network transactions
 pub const NetworkHandler = struct {
-    // Component references
+    // Component references (owned by parent MempoolManager)
     storage: *MempoolStorage,
     validator: *TransactionValidator,
     limits: *MempoolLimits,

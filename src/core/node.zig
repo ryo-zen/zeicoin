@@ -56,7 +56,7 @@ pub const ZeiCoin = struct {
     chain_processor: ChainProcessor,
     difficulty_calculator: DifficultyCalculator,
     status_reporter: StatusReporter,
-    mempool_manager: MempoolManager,
+    mempool_manager: *MempoolManager,
 
     pub fn init(allocator: std.mem.Allocator) !*ZeiCoin {
         const data_dir = switch (types.CURRENT_NETWORK) {
@@ -127,7 +127,9 @@ pub const ZeiCoin = struct {
         var components_initialized: u8 = 0;
         errdefer {
             // Clean up components in reverse order
-            if (components_initialized >= 7) instance_ptr.mempool_manager.deinit();
+            if (components_initialized >= 7) {
+                instance_ptr.mempool_manager.deinit(); // This will also free the mempool_manager
+            }
             if (components_initialized >= 6) instance_ptr.status_reporter.deinit();
             if (components_initialized >= 5) instance_ptr.difficulty_calculator.deinit();
             if (components_initialized >= 4) instance_ptr.chain_processor.deinit();
@@ -233,7 +235,7 @@ pub const ZeiCoin = struct {
         // Components first (they may access Database during cleanup)
         
         // Step 1: Clean up high-level components
-        self.mempool_manager.deinit();
+        self.mempool_manager.deinit(); // This will also free self.mempool_manager
         self.status_reporter.deinit();
         self.difficulty_calculator.deinit();
         self.chain_processor.deinit();

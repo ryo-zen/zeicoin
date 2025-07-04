@@ -52,30 +52,41 @@ pub const MempoolManager = struct {
     const Self = @This();
 
     /// Initialize MempoolManager with chain state and allocator
-    pub fn init(allocator: std.mem.Allocator, chain_state: *ChainState) !Self {
-        // Initialize components in dependency order
-        var storage = MempoolStorage.init(allocator);
-        var validator = TransactionValidator.init(allocator, chain_state);
-        var limits = MempoolLimits.init();
-        const network_handler = NetworkHandler.init(allocator, &storage, &validator, &limits);
-        const cleaner = MempoolCleaner.init(allocator, &storage, &validator);
+    /// Returns a heap-allocated MempoolManager to ensure stable addresses
+    pub fn init(allocator: std.mem.Allocator, chain_state: *ChainState) !*Self {
         
-        return .{
-            .storage = storage,
-            .validator = validator,
-            .limits = limits,
-            .network_handler = network_handler,
-            .cleaner = cleaner,
+        // Allocate on heap to ensure stable addresses
+        const self = try allocator.create(Self);
+        errdefer allocator.destroy(self);
+        
+        // Initialize components in dependency order
+        self.* = Self{
+            .storage = MempoolStorage.init(allocator),
+            .validator = TransactionValidator.init(allocator, chain_state),
+            .limits = MempoolLimits.init(),
+            .network_handler = undefined,
+            .cleaner = undefined,
             .mining_state = null,
             .allocator = allocator,
         };
+        
+        
+        // Initialize components that need pointers to other components
+        self.network_handler = NetworkHandler.init(allocator, &self.storage, &self.validator, &self.limits);
+        self.cleaner = MempoolCleaner.init(allocator, &self.storage, &self.validator);
+        
+        
+        return self;
     }
 
-    /// Cleanup resources
+    /// Cleanup resources and free self
     pub fn deinit(self: *Self) void {
         self.storage.deinit();
         self.validator.deinit();
         // Other components don't need cleanup
+        
+        // Free self (allocated in init)
+        self.allocator.destroy(self);
     }
 
     /// Set network manager for broadcasting

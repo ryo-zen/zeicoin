@@ -93,6 +93,7 @@ pub const MempoolStorage = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         
+        
         for (self.transactions.items) |tx| {
             if (std.mem.eql(u8, &tx.hash(), &tx_hash)) {
                 return true;
