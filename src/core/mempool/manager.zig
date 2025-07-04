@@ -56,7 +56,7 @@ pub const MempoolManager = struct {
         // Initialize components in dependency order
         var storage = MempoolStorage.init(allocator);
         var validator = TransactionValidator.init(allocator, chain_state);
-        const limits = MempoolLimits.init();
+        var limits = MempoolLimits.init();
         const network_handler = NetworkHandler.init(allocator, &storage, &validator, &limits);
         const cleaner = MempoolCleaner.init(allocator, &storage, &validator);
         
@@ -96,6 +96,7 @@ pub const MempoolManager = struct {
         
         if (!result.accepted) {
             switch (result.reason) {
+                .accepted => {}, // This shouldn't happen when !result.accepted, but required for completeness
                 .duplicate_in_mempool => return error.DuplicateTransaction,
                 .validation_failed => return error.InvalidTransaction,
                 .mempool_limits_exceeded => return error.MempoolFull,

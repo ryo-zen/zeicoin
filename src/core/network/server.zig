@@ -64,6 +64,9 @@ pub fn main() !void {
     // Connect blockchain to network
     network.setBlockchain(blockchain);
     blockchain.network = &network;
+    
+    // Connect mempool to network for broadcasting
+    blockchain.mempool_manager.setNetworkManager(&network);
 
     // Initialize SyncManager
     blockchain.sync_manager = try allocator.create(sync.SyncManager);

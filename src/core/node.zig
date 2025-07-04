@@ -19,6 +19,7 @@ const sync_mod = @import("sync/sync.zig");
 const message_handler = @import("network/message_handler.zig");
 const validator_mod = @import("validation/validator.zig");
 const miner_mod = @import("miner/main.zig");
+const MempoolManager = @import("mempool/manager.zig").MempoolManager;
 
 // Type aliases
 const Transaction = types.Transaction;
@@ -55,6 +56,7 @@ pub const ZeiCoin = struct {
     chain_processor: ChainProcessor,
     difficulty_calculator: DifficultyCalculator,
     status_reporter: StatusReporter,
+    mempool_manager: MempoolManager,
 
     pub fn init(allocator: std.mem.Allocator) !*ZeiCoin {
         const data_dir = switch (types.CURRENT_NETWORK) {
@@ -118,12 +120,14 @@ pub const ZeiCoin = struct {
             .chain_processor = undefined,
             .difficulty_calculator = undefined,
             .status_reporter = undefined,
+            .mempool_manager = undefined,
         };
         
         // Custom cleanup function for partial initialization
         var components_initialized: u8 = 0;
         errdefer {
             // Clean up components in reverse order
+            if (components_initialized >= 7) instance_ptr.mempool_manager.deinit();
             if (components_initialized >= 6) instance_ptr.status_reporter.deinit();
             if (components_initialized >= 5) instance_ptr.difficulty_calculator.deinit();
             if (components_initialized >= 4) instance_ptr.chain_processor.deinit();
@@ -183,6 +187,14 @@ pub const ZeiCoin = struct {
             return error.DatabaseCorrupted;
         }
 
+        instance_ptr.mempool_manager = try MempoolManager.init(allocator, &instance_ptr.chain_state);
+        components_initialized = 7;
+        
+        if (!database.validate()) {
+            print("❌ Database corrupted after mempool_manager init\n", .{});
+            return error.DatabaseCorrupted;
+        }
+
         // PHASE 4: Initialize blockchain data
         if (try instance_ptr.getHeight() == 0) {
             print("🌐 No blockchain found - creating canonical genesis block\n", .{});
@@ -221,6 +233,7 @@ pub const ZeiCoin = struct {
         // Components first (they may access Database during cleanup)
         
         // Step 1: Clean up high-level components
+        self.mempool_manager.deinit();
         self.status_reporter.deinit();
         self.difficulty_calculator.deinit();
         self.chain_processor.deinit();
@@ -296,9 +309,7 @@ pub const ZeiCoin = struct {
     }
 
     pub fn addTransaction(self: *ZeiCoin, transaction: Transaction) !void {
-        _ = self;
-        _ = transaction;
-        return error.MovedToMempoolManager;
+        try self.mempool_manager.addTransaction(transaction);
     }
 
     pub fn getHeight(self: *ZeiCoin) !u32 {
