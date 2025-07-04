@@ -452,8 +452,10 @@ fn handleBalanceCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
 fn handleSendCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     if (args.len < 2) {
-        print("❌ Usage: zeicoin send <amount> <recipient_address> [wallet_name]\n", .{});
+        print("❌ Usage: zeicoin send <amount> <recipient> [wallet_name]\n", .{});
+        print("💡 Recipient can be a bech32 address or wallet name\n", .{});
         print("💡 Example: zeicoin send 10 tzei1qr2qge3sdeq... alice\n", .{});
+        print("💡 Example: zeicoin send 10 bob alice\n", .{});
         return;
     }
 
@@ -474,11 +476,28 @@ fn handleSendCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         return;
     };
 
-    // Parse recipient address
-    const recipient_address = types.Address.fromString(allocator, recipient_hex) catch {
-        print("❌ Invalid recipient address format\n", .{});
-        print("💡 Address must be 64 hex characters or valid bech32 address\n", .{});
-        return;
+    // Try to parse recipient as bech32 address first, then as wallet name
+    const recipient_address = types.Address.fromString(allocator, recipient_hex) catch blk: {
+        // If parsing as address fails, try to resolve as wallet name
+        const recipient_wallet = loadWalletForOperation(allocator, recipient_hex) catch {
+            print("❌ Invalid recipient: '{s}'\n", .{recipient_hex});
+            print("💡 Recipient must be a valid bech32 address or wallet name\n", .{});
+            print("💡 Example: zeicoin send 10 tzei1qr2q... alice\n", .{});
+            print("💡 Example: zeicoin send 10 bob alice\n", .{});
+            return;
+        };
+        defer {
+            recipient_wallet.deinit();
+            allocator.destroy(recipient_wallet);
+        }
+        
+        const addr = recipient_wallet.getAddress() orelse {
+            print("❌ Could not get address from wallet '{s}'\n", .{recipient_hex});
+            return;
+        };
+        
+        print("💡 Resolved wallet '{s}' to address\n", .{recipient_hex});
+        break :blk addr;
     };
 
     // Load wallet
@@ -1139,7 +1158,7 @@ fn printHelp() void {
     print("  zeicoin wallet list              List all wallets\n\n", .{});
     print("TRANSACTION COMMANDS:\n", .{});
     print("  zeicoin balance [wallet]         Check wallet balance\n", .{});
-    print("  zeicoin send <amount> <address>  Send ZEI to address\n", .{});
+    print("  zeicoin send <amount> <recipient> Send ZEI to address or wallet\n", .{});
     print("  zeicoin fund [wallet]            Request test funds\n\n", .{});
     print("NETWORK COMMANDS:\n", .{});
     print("  zeicoin status                   Show network status\n", .{});
@@ -1150,6 +1169,7 @@ fn printHelp() void {
     print("  zeicoin fund alice               # Get test funds for alice\n", .{});
     print("  zeicoin balance alice            # Check alice's balance\n", .{});
     print("  zeicoin send 50 tzei1qr2q...      # Send 50 ZEI to address\n", .{});
+    print("  zeicoin send 50 bob               # Send 50 ZEI to wallet 'bob'\n", .{});
     print("  zeicoin status                   # Check network status\n\n", .{});
     print("ENVIRONMENT:\n", .{});
     print("  ZEICOIN_SERVER=ip               Set server IP (default: 127.0.0.1)\n\n", .{});
