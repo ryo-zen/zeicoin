@@ -1,0 +1,204 @@
+// core.zig - Core Mining Logic
+// Handles block creation, transaction selection, and mining orchestration
+
+const std = @import("std");
+const print = std.debug.print;
+const ArrayList = std.ArrayList;
+
+const types = @import("../types/types.zig");
+const util = @import("../util/util.zig");
+const serialize = @import("../storage/serialize.zig");
+const key = @import("../crypto/key.zig");
+const MiningContext = @import("context.zig").MiningContext;
+const sha256_algo = @import("algorithms/sha256.zig");
+const randomx_algo = @import("algorithms/randomx.zig");
+
+// Type aliases for clarity
+const Transaction = types.Transaction;
+const Block = types.Block;
+const BlockHeader = types.BlockHeader;
+const Hash = types.Hash;
+const Address = types.Address;
+
+/// Mine a new block with transactions from mempool
+pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair) !types.Block {
+    print("⛏️  zenMineBlock: Starting to mine new block\n", .{});
+    
+    // Get transactions from mempool manager
+    const mempool_transactions = try ctx.mempool_manager.getTransactionsForMining();
+    defer ctx.mempool_manager.freeTransactionArray(mempool_transactions);
+    
+    // 💰 Calculate total fees from mempool transactions
+    var total_fees: u64 = 0;
+    for (mempool_transactions) |tx| {
+        total_fees += tx.fee;
+    }
+
+    // Create coinbase transaction (miner reward + fees)
+    const miner_reward = types.ZenMining.BLOCK_REWARD + total_fees;
+    const coinbase_tx = Transaction{
+        .version = 0, // Version 0 for coinbase
+        .flags = .{}, // Default flags
+        .sender = types.Address.zero(), // From thin air (coinbase)
+        .sender_public_key = std.mem.zeroes([32]u8), // No sender for coinbase
+        .recipient = miner_keypair.getAddress(),
+        .amount = miner_reward, // 💰 Block reward + all transaction fees
+        .fee = 0, // Coinbase has no fee
+        .nonce = 0, // Coinbase always nonce 0
+        .timestamp = @intCast(util.getTime()),
+        .expiry_height = std.math.maxInt(u64), // Coinbase transactions never expire
+        .signature = std.mem.zeroes(types.Signature), // No signature needed for coinbase
+        .script_version = 0,
+        .witness_data = &[_]u8{},
+        .extra_data = &[_]u8{},
+    };
+
+    // Format miner reward display
+    const base_reward_display = util.formatZEI(ctx.allocator, types.ZenMining.BLOCK_REWARD) catch "? ZEI";
+    defer if (!std.mem.eql(u8, base_reward_display, "? ZEI")) ctx.allocator.free(base_reward_display);
+    const fees_display = util.formatZEI(ctx.allocator, total_fees) catch "? ZEI";
+    defer if (!std.mem.eql(u8, fees_display, "? ZEI")) ctx.allocator.free(fees_display);
+    const total_reward_display = util.formatZEI(ctx.allocator, miner_reward) catch "? ZEI";
+    defer if (!std.mem.eql(u8, total_reward_display, "? ZEI")) ctx.allocator.free(total_reward_display);
+
+    print("💰 Miner reward: {s} (base) + {s} (fees) = {s} total\n", .{ base_reward_display, fees_display, total_reward_display });
+
+    // Apply soft limit for mining (2MB default, configurable)
+    var transactions_to_include = std.ArrayList(Transaction).init(ctx.allocator);
+    defer transactions_to_include.deinit();
+
+    // Always include coinbase
+    try transactions_to_include.append(coinbase_tx);
+
+    // Calculate running block size
+    var current_block_size: usize = 84 + 4; // Header + tx count
+    current_block_size += 192; // Coinbase transaction
+
+    // Add transactions from mempool until we hit soft limit
+    for (mempool_transactions) |tx| {
+        const tx_size: usize = 192; // Approximate transaction size
+        if (current_block_size + tx_size > types.BlockLimits.SOFT_BLOCK_SIZE) {
+            print("📦 Soft block size limit reached: {} bytes (limit: {} bytes)\n", .{ current_block_size, types.BlockLimits.SOFT_BLOCK_SIZE });
+            print("📊 Including {} of {} mempool transactions\n", .{ transactions_to_include.items.len - 1, mempool_transactions.len });
+            break;
+        }
+        try transactions_to_include.append(tx);
+        current_block_size += tx_size;
+    }
+
+    const all_transactions = try transactions_to_include.toOwnedSlice();
+    defer ctx.allocator.free(all_transactions);
+
+    // Get previous block hash and calculate next difficulty
+    const current_height = try ctx.blockchain.getHeight();
+    
+    // Update mining state height before mining
+    ctx.mining_state.current_height.store(current_height, .release);
+    print("🔍 zenMineBlock: storing current_height = {} to atomic\n", .{current_height});
+    const previous_hash = if (current_height > 0) blk: {
+        var prev_block = try ctx.database.getBlock(current_height - 1);
+        const hash = prev_block.hash();
+        prev_block.deinit(ctx.allocator);
+        break :blk hash;
+    } else std.mem.zeroes(Hash);
+
+    // Calculate difficulty for new block
+    const next_difficulty_target = try ctx.blockchain.calculateNextDifficulty();
+
+    // Create block with dynamic difficulty
+    var new_block = Block{
+        .header = BlockHeader{
+            .version = types.CURRENT_BLOCK_VERSION,
+            .previous_hash = previous_hash,
+            .merkle_root = std.mem.zeroes(Hash), // Zen simplicity
+            .timestamp = @intCast(util.getTime()),
+            .difficulty = next_difficulty_target.toU64(),
+            .nonce = 0,
+            .witness_root = std.mem.zeroes(Hash), // No witness data yet
+            .state_root = std.mem.zeroes(Hash), // No state yet
+            .extra_nonce = 0,
+            .extra_data = std.mem.zeroes([32]u8), // No extra data
+        },
+        // Deep copy all transactions to ensure the block owns its memory.
+        // This prevents double-frees or invalid frees when the block is deinitialized.
+        .transactions = blk: {
+            const allocated_txs = try ctx.allocator.alloc(types.Transaction, all_transactions.len);
+            var copied_count: usize = 0;
+            errdefer {
+                // Clean up any transactions we've already copied if an error occurs
+                for (allocated_txs[0..copied_count]) |*tx| {
+                    tx.deinit(ctx.allocator);
+                }
+                ctx.allocator.free(allocated_txs);
+            }
+            
+            for (all_transactions, 0..) |tx, i| {
+                allocated_txs[i] = try tx.dupe(ctx.allocator);
+                copied_count += 1;
+            }
+            break :blk allocated_txs;
+        },
+    };
+
+    print("👌 Starting mining\n", .{});
+    const start_time = util.getTime();
+
+    const miner_address = miner_keypair.getAddress();
+
+    // ZEN PROOF-OF-WORK: Find valid nonce
+    // Ensure mining state height is synchronized before mining
+    ctx.mining_state.current_height.store(current_height, .release);
+    
+    const found_nonce = zenProofOfWork(ctx, &new_block);
+
+    const mining_time = util.getTime() - start_time;
+
+    if (found_nonce) {
+        // Process coinbase transaction (create new coins!)
+        try ctx.blockchain.processCoinbaseTransaction(coinbase_tx, miner_address);
+
+        // Process regular transactions
+        for (new_block.transactions[1..]) |tx| {
+            try ctx.blockchain.processTransaction(tx);
+        }
+
+        // Save block to database
+        const block_height = try ctx.blockchain.getHeight();
+        try ctx.database.saveBlock(block_height, new_block);
+        
+        // Check for matured coinbase rewards
+        try ctx.blockchain.matureCoinbaseRewards(block_height);
+
+        // Clean mempool of confirmed transactions
+        try ctx.mempool_manager.cleanAfterBlock(new_block);
+
+        print("⛏️  ZEN BLOCK #{} MINED! ({} txs, {} ZEI reward, {}s)\n", .{ block_height, new_block.txCount(), types.ZenMining.BLOCK_REWARD / types.ZEI_COIN, mining_time });
+
+        // Update fork manager with the new best chain
+        const new_cumulative_work = ctx.blockchain.estimateCumulativeWork(block_height) catch 0;
+        ctx.fork_manager.updateBestChain(&new_block, block_height, new_cumulative_work);
+
+        // Broadcast the newly mined block to network peers (zen propagation)
+        ctx.blockchain.broadcastNewBlock(new_block);
+
+        print("📡 Block propagates through zen network like ripples in water\n", .{});
+
+        return new_block;
+    } else {
+        print("😔 Zen mining failed - nonce not found (the universe wasn't ready)\n", .{});
+        // Free block memory and return error
+        new_block.deinit(ctx.allocator);
+        return error.MiningFailed;
+    }
+}
+
+/// Zen Proof-of-Work: Now with RandomX ASIC resistance
+pub fn zenProofOfWork(ctx: MiningContext, block: *Block) bool {
+    if (@import("builtin").mode == .Debug) {
+        // Use fast SHA256 mining for tests
+        return sha256_algo.zenProofOfWorkSHA256(ctx, block);
+    } else {
+        // Use RandomX for production
+        return randomx_algo.zenProofOfWorkRandomX(ctx, block);
+    }
+}

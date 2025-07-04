@@ -1,0 +1,278 @@
+// network.zig - Network Integration for Mempool
+// Handles network-related mempool operations
+// Manages incoming transactions and broadcasting
+
+const std = @import("std");
+const types = @import("../types/types.zig");
+const util = @import("../util/util.zig");
+const net = @import("../network/peer.zig");
+
+const print = std.debug.print;
+
+// Forward declarations for components
+const MempoolStorage = @import("pool.zig").MempoolStorage;
+const TransactionValidator = @import("validator.zig").TransactionValidator;
+const MempoolLimits = @import("limits.zig").MempoolLimits;
+
+// Type aliases for clarity
+const Transaction = types.Transaction;
+const Hash = types.Hash;
+
+/// Network handler for mempool operations
+/// - Processes incoming transactions from network peers
+/// - Handles transaction broadcasting
+/// - Manages network-specific validation
+/// - Provides duplicate detection for network transactions
+pub const NetworkHandler = struct {
+    // Component references
+    storage: *MempoolStorage,
+    validator: *TransactionValidator,
+    limits: *MempoolLimits,
+    
+    // Network manager reference (optional)
+    network: ?*net.NetworkManager,
+    
+    // Statistics
+    received_count: u64,
+    broadcast_count: u64,
+    duplicate_count: u64,
+    rejected_count: u64,
+    
+    // Resource management
+    allocator: std.mem.Allocator,
+    
+    const Self = @This();
+    
+    /// Initialize network handler with component references
+    pub fn init(
+        allocator: std.mem.Allocator,
+        storage: *MempoolStorage,
+        validator: *TransactionValidator,
+        limits: *MempoolLimits
+    ) Self {
+        return .{
+            .storage = storage,
+            .validator = validator,
+            .limits = limits,
+            .network = null,
+            .received_count = 0,
+            .broadcast_count = 0,
+            .duplicate_count = 0,
+            .rejected_count = 0,
+            .allocator = allocator,
+        };
+    }
+    
+    /// Set network manager reference
+    pub fn setNetworkManager(self: *Self, network: *net.NetworkManager) void {
+        self.network = network;
+    }
+    
+    /// Handle incoming transaction from network peer
+    pub fn handleIncomingTransaction(self: *Self, transaction: Transaction) !NetworkTransactionResult {
+        self.received_count += 1;
+        
+        const tx_hash = transaction.hash();
+        
+        // 1. Check if already in mempool (duplicate detection)
+        if (self.storage.containsTransaction(tx_hash)) {
+            self.duplicate_count += 1;
+            print("🌊 Transaction already flows in our zen mempool - gracefully ignored\\n", .{});
+            return NetworkTransactionResult{
+                .accepted = false,
+                .reason = .duplicate_in_mempool,
+                .should_broadcast = false,
+            };
+        }
+        
+        // 2. Check if already processed (replay protection handled by validator)
+        if (self.validator.isReplayTransaction(transaction)) {
+            self.rejected_count += 1;
+            return NetworkTransactionResult{
+                .accepted = false,
+                .reason = .already_processed,
+                .should_broadcast = false,
+            };
+        }
+        
+        // 3. Validate transaction using network-specific validation
+        if (!try self.validator.validateNetworkTransaction(transaction)) {
+            self.rejected_count += 1;
+            print("⚠️ Rejected network transaction: validation failed\\n", .{});
+            return NetworkTransactionResult{
+                .accepted = false,
+                .reason = .validation_failed,
+                .should_broadcast = false,
+            };
+        }
+        
+        // 4. Check mempool limits
+        const current_count = self.storage.getTransactionCount();
+        const current_size = self.storage.getTotalSize();
+        const limit_result = try self.limits.canAcceptTransaction(transaction, current_count, current_size);
+        
+        if (!limit_result.can_accept) {
+            self.rejected_count += 1;
+            self.limits.printLimitCheckResult(limit_result);
+            return NetworkTransactionResult{
+                .accepted = false,
+                .reason = .mempool_limits_exceeded,
+                .should_broadcast = false,
+            };
+        }
+        
+        // 5. Add to mempool storage
+        try self.storage.addTransactionToPool(transaction);
+        
+        // 6. Mark as processed for replay protection
+        try self.validator.markAsProcessed(transaction);
+        
+        print("✅ Network transaction flows into zen mempool\\n", .{});
+        
+        return NetworkTransactionResult{
+            .accepted = true,
+            .reason = .accepted,
+            .should_broadcast = true,
+        };
+    }
+    
+    /// Broadcast transaction to network peers
+    pub fn broadcastTransaction(self: *Self, transaction: Transaction) void {
+        if (self.network) |network| {
+            network.broadcastTransaction(transaction);
+            self.broadcast_count += 1;
+            print("📡 Transaction broadcast to network peers\\n", .{});
+        } else {
+            print("⚠️ No network manager available for broadcasting\\n", .{});
+        }
+    }
+    
+    /// Check if we should trigger auto-sync based on transaction failures
+    pub fn checkAutoSyncTrigger(self: *Self, transaction: Transaction) !void {
+        if (self.network) |network| {
+            // If transaction failed due to insufficient balance or invalid nonce,
+            // we might be behind. Check peer heights and trigger sync if needed.
+            const highest_peer_height = network.getHighestPeerHeight();
+            
+            // For this check, we'd need access to chain state
+            // This is a placeholder for the logic
+            _ = transaction;
+            _ = highest_peer_height;
+            
+            // TODO: Implement auto-sync trigger logic
+            print("🔄 Auto-sync trigger check (placeholder)\\n", .{});
+        }
+    }
+    
+    /// Process transaction from local source (CLI, RPC, etc.)
+    pub fn processLocalTransaction(self: *Self, transaction: Transaction) !LocalTransactionResult {
+        const tx_hash = transaction.hash();
+        
+        // 1. Check if already in mempool
+        if (self.storage.containsTransaction(tx_hash)) {
+            return LocalTransactionResult{
+                .accepted = false,
+                .reason = .duplicate_in_mempool,
+                .should_broadcast = false,
+            };
+        }
+        
+        // 2. Validate transaction
+        if (!try self.validator.validateTransaction(transaction)) {
+            return LocalTransactionResult{
+                .accepted = false,
+                .reason = .validation_failed,
+                .should_broadcast = false,
+            };
+        }
+        
+        // 3. Check mempool limits
+        const current_count = self.storage.getTransactionCount();
+        const current_size = self.storage.getTotalSize();
+        const limit_result = try self.limits.canAcceptTransaction(transaction, current_count, current_size);
+        
+        if (!limit_result.can_accept) {
+            self.limits.printLimitCheckResult(limit_result);
+            return LocalTransactionResult{
+                .accepted = false,
+                .reason = .mempool_limits_exceeded,
+                .should_broadcast = false,
+            };
+        }
+        
+        // 4. Add to mempool storage
+        try self.storage.addTransactionToPool(transaction);
+        
+        // 5. Mark as processed for replay protection
+        try self.validator.markAsProcessed(transaction);
+        
+        print("✅ Local transaction added to mempool\\n", .{});
+        
+        return LocalTransactionResult{
+            .accepted = true,
+            .reason = .accepted,
+            .should_broadcast = true,
+        };
+    }
+    
+    /// Get network statistics
+    pub fn getNetworkStats(self: *Self) NetworkStats {
+        return NetworkStats{
+            .received_count = self.received_count,
+            .broadcast_count = self.broadcast_count,
+            .duplicate_count = self.duplicate_count,
+            .rejected_count = self.rejected_count,
+            .acceptance_rate = if (self.received_count > 0)
+                (@as(f64, @floatFromInt(self.received_count - self.rejected_count)) / @as(f64, @floatFromInt(self.received_count))) * 100.0
+            else 0.0,
+        };
+    }
+    
+    /// Reset network statistics
+    pub fn resetStats(self: *Self) void {
+        self.received_count = 0;
+        self.broadcast_count = 0;
+        self.duplicate_count = 0;
+        self.rejected_count = 0;
+    }
+};
+
+/// Result of processing a network transaction
+pub const NetworkTransactionResult = struct {
+    accepted: bool,
+    reason: NetworkTransactionReason,
+    should_broadcast: bool,
+};
+
+/// Reason for network transaction result
+pub const NetworkTransactionReason = enum {
+    accepted,
+    duplicate_in_mempool,
+    already_processed,
+    validation_failed,
+    mempool_limits_exceeded,
+};
+
+/// Result of processing a local transaction
+pub const LocalTransactionResult = struct {
+    accepted: bool,
+    reason: LocalTransactionReason,
+    should_broadcast: bool,
+};
+
+/// Reason for local transaction result
+pub const LocalTransactionReason = enum {
+    accepted,
+    duplicate_in_mempool,
+    validation_failed,
+    mempool_limits_exceeded,
+};
+
+/// Network statistics for monitoring
+pub const NetworkStats = struct {
+    received_count: u64,
+    broadcast_count: u64,
+    duplicate_count: u64,
+    rejected_count: u64,
+    acceptance_rate: f64,
+};
