@@ -272,7 +272,7 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     // Check if wallet already exists
     if (database.walletExists(wallet_name)) {
         print("❌ Wallet '{s}' already exists\n", .{wallet_name});
-        return;
+        std.process.exit(1);
     }
 
     // Create new wallet
@@ -463,28 +463,29 @@ fn handleSendCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const recipient_hex = args[1];
     const wallet_name = if (args.len > 2) args[2] else "default";
 
-    // Parse amount
-    const amount_zei = std.fmt.parseInt(u64, amount_str, 10) catch {
+    // Parse amount (supports decimals)
+    const amount = parseZeiAmount(amount_str) catch {
         print("❌ Invalid amount: {s}\n", .{amount_str});
-        print("💡 Amount must be a positive number (in ZEI)\n", .{});
-        return;
-    };
-    // Check for overflow when converting to zei units
-    const amount = std.math.mul(u64, amount_zei, types.ZEI_COIN) catch {
-        print("❌ Amount too large: {s} ZEI\n", .{amount_str});
-        print("💡 Maximum amount is {} ZEI\n", .{std.math.maxInt(u64) / types.ZEI_COIN});
-        return;
+        print("💡 Amount must be a positive number (supports up to 8 decimal places)\n", .{});
+        std.process.exit(1);
     };
 
     // Try to parse recipient as bech32 address first, then as wallet name
     const recipient_address = types.Address.fromString(allocator, recipient_hex) catch blk: {
-        // If parsing as address fails, try to resolve as wallet name
+        // Check if this looks like a bech32 address but is invalid
+        if (std.mem.startsWith(u8, recipient_hex, "tzei1") or std.mem.startsWith(u8, recipient_hex, "mzei1")) {
+            print("❌ Invalid bech32 address: '{s}'\n", .{recipient_hex});
+            print("💡 Address format is invalid or has wrong checksum\n", .{});
+            std.process.exit(1);
+        }
+        
+        // If not a bech32 format, try to resolve as wallet name
         const recipient_wallet = loadWalletForOperation(allocator, recipient_hex) catch {
             print("❌ Invalid recipient: '{s}'\n", .{recipient_hex});
             print("💡 Recipient must be a valid bech32 address or wallet name\n", .{});
             print("💡 Example: zeicoin send 10 tzei1qr2q... alice\n", .{});
             print("💡 Example: zeicoin send 10 bob alice\n", .{});
-            return;
+            std.process.exit(1);
         };
         defer {
             recipient_wallet.deinit();
@@ -518,7 +519,11 @@ fn handleSendCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const sender_address = zen_wallet.getAddress() orelse return error.WalletNotLoaded;
     const sender_public_key = zen_wallet.getPublicKey() orelse return error.WalletNotLoaded;
 
-    print("💸 Sending {} ZEI from wallet '{s}'...\n", .{ amount_zei, wallet_name });
+    // Format amount for display
+    const amount_display = util.formatZEI(allocator, amount) catch "? ZEI";
+    defer if (!std.mem.eql(u8, amount_display, "? ZEI")) allocator.free(amount_display);
+    
+    print("💸 Sending {s} from wallet '{s}'...\n", .{ amount_display, wallet_name });
     
     // Format addresses for display
     const sender_bech32 = sender_address.toBech32(allocator, types.CURRENT_NETWORK) catch null;
@@ -802,6 +807,42 @@ fn handleFundCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 }
 
 // Helper functions
+
+// Parse ZEI amount supporting decimals up to 8 places
+fn parseZeiAmount(amount_str: []const u8) !u64 {
+    if (amount_str.len == 0) return error.InvalidAmount;
+    
+    // Check for decimal point
+    if (std.mem.indexOfScalar(u8, amount_str, '.')) |decimal_pos| {
+        // Has decimal point
+        const integer_part = amount_str[0..decimal_pos];
+        const fractional_part = amount_str[decimal_pos + 1..];
+        
+        // Check decimal places limit (8 max)
+        if (fractional_part.len > 8) return error.InvalidAmount;
+        
+        // Parse integer part
+        const integer_zei = if (integer_part.len == 0) 0 else std.fmt.parseInt(u64, integer_part, 10) catch return error.InvalidAmount;
+        
+        // Parse fractional part and pad to 8 decimal places
+        var fractional_str: [8]u8 = "00000000".*;
+        if (fractional_part.len > 0) {
+            @memcpy(fractional_str[0..fractional_part.len], fractional_part);
+        }
+        
+        const fractional_units = std.fmt.parseInt(u64, &fractional_str, 10) catch return error.InvalidAmount;
+        
+        // Convert to base units
+        const integer_units = std.math.mul(u64, integer_zei, types.ZEI_COIN) catch return error.InvalidAmount;
+        const total_units = std.math.add(u64, integer_units, fractional_units) catch return error.InvalidAmount;
+        
+        return total_units;
+    } else {
+        // No decimal point - integer ZEI
+        const zei_amount = std.fmt.parseInt(u64, amount_str, 10) catch return error.InvalidAmount;
+        return std.math.mul(u64, zei_amount, types.ZEI_COIN) catch return error.InvalidAmount;
+    }
+}
 
 fn loadWalletForOperation(allocator: std.mem.Allocator, wallet_name: []const u8) !*wallet.Wallet {
     // Initialize database with network-specific directory

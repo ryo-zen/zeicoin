@@ -266,6 +266,11 @@ pub const Database = struct {
             return DatabaseError.InvalidPath;
         }
         
+        // Reject wallet names starting with hyphen (command line safety)
+        if (wallet_name[0] == '-') {
+            return DatabaseError.InvalidPath;
+        }
+        
         return std.fmt.allocPrint(self.allocator, "{s}/{s}.wallet", .{ self.wallets_dir[0..self.wallets_dir_len], wallet_name });
     }
 
