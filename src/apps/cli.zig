@@ -320,7 +320,7 @@ fn loadWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     if (!database.walletExists(wallet_name)) {
         print("❌ Wallet '{s}' not found\n", .{wallet_name});
         print("💡 Use 'zeicoin wallet create {s}' to create it\n", .{wallet_name});
-        return;
+        std.process.exit(1);
     }
 
     // Load wallet
@@ -393,7 +393,7 @@ fn handleBalanceCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         switch (err) {
             error.WalletNotFound => {
                 // Error message already printed in loadWalletForOperation
-                return;
+                std.process.exit(1);
             },
             else => return err,
         }
@@ -469,6 +469,12 @@ fn handleSendCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         print("💡 Amount must be a positive number (supports up to 8 decimal places)\n", .{});
         std.process.exit(1);
     };
+
+    // Validate amount is not zero
+    if (amount == 0) {
+        print("❌ Invalid amount: cannot send zero ZEI\n", .{});
+        std.process.exit(1);
+    }
 
     // Try to parse recipient as bech32 address first, then as wallet name
     const recipient_address = types.Address.fromString(allocator, recipient_hex) catch blk: {
@@ -1165,7 +1171,7 @@ fn sendTransaction(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
         } else {
             print("❌ Transaction failed: {s}\n", .{response});
         }
-        return error.TransactionFailed;
+        std.process.exit(1);
     }
 }
 
