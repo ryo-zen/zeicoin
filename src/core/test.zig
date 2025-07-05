@@ -32,7 +32,7 @@ const Address = types.Address;
 const Hash = types.Hash;
 
 // Test helper functions for blockchain testing
-// Note: Basic helper functions are in /home/iliya/zeicoin/src/tests.zig to avoid duplication
+// Note: Basic helper functions are in src/tests.zig to avoid duplication
 
 // Test wrapper function for mining (delegates to miner module)
 pub fn zenMineBlockForTesting(zeicoin: *ZeiCoin, miner_keypair: key.KeyPair) !types.Block {
