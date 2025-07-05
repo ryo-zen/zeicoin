@@ -169,9 +169,7 @@ pub const Database = struct {
             return DatabaseError.InvalidPath;
         }
         
-        std.debug.print("DEBUG getAccount: Database ptr={*}, accounts_dir_len={}\n", .{self, self.accounts_dir_len});
         const accounts_dir_slice = self.accounts_dir[0..self.accounts_dir_len];
-        std.debug.print("DEBUG getAccount: accounts_dir='{s}' len={}\n", .{accounts_dir_slice, accounts_dir_slice.len});
         
         // Create hex representation of address
         var hex_buffer: [64]u8 = undefined;
@@ -196,25 +194,13 @@ pub const Database = struct {
         var stream = std.io.fixedBufferStream(buffer);
         const reader = stream.reader();
         
-        // Debug: print raw bytes
-        std.debug.print("🔍 Raw account bytes ({} bytes):\n", .{buffer.len});
-        for (buffer[0..@min(64, buffer.len)], 0..) |byte, i| {
-            std.debug.print("{x:0>2} ", .{byte});
-            if ((i + 1) % 16 == 0) std.debug.print("\n", .{});
-        }
-        std.debug.print("\n", .{});
+        // Deserialize account from buffer
 
-        const account = serialize.deserialize(reader, Account, self.allocator) catch |err| {
-            std.debug.print("❌ Deserialization failed: {}\n", .{err});
+        const account = serialize.deserialize(reader, Account, self.allocator) catch {
             return DatabaseError.SerializationFailed;
         };
         
-        // Debug: print deserialized account
-        std.debug.print("📊 Deserialized account: balance={}, nonce={}, immature={}\n", .{
-            account.balance,
-            account.nonce,
-            account.immature_balance,
-        });
+        // Account successfully loaded
         
         return account;
     }
