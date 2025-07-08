@@ -130,7 +130,7 @@ pub const NetworkMessageHandler = struct {
     pub fn broadcastNewBlock(self: *Self, block: Block) !void {
         if (self.blockchain.network) |network| {
             print("📡 Broadcasting new block to {} peers\n", .{network.peers.items.len});
-            try network.broadcastBlock(block);
+            network.broadcastBlock(block);
         } else {
             print("⚠️  No network manager - block not broadcasted\n", .{});
         }

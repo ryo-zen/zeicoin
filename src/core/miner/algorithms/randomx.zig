@@ -31,7 +31,7 @@ pub fn zenProofOfWorkRandomX(ctx: MiningContext, block: *types.Block) bool {
     };
     defer rx_ctx.deinit();
 
-    print("🔍 Starting RandomX mining with {} threads, difficulty {x}\n", .{ types.ZenMining.THREADS, block.header.difficulty });
+    print("🔍 Starting RandomX mining, difficulty {x}\n", .{block.header.difficulty});
 
     // Capture the starting height to detect if a new block arrives from network
     const starting_height = ctx.mining_state.current_height.load(.acquire);

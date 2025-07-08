@@ -12,8 +12,8 @@ pub const RandomXError = error{
 };
 
 pub const RandomXMode = enum {
-    light, // 256MB memory
-    fast,  // 2GB memory (not implemented yet)
+    light, // 256MB memory - used for TestNet
+    fast,  // 2GB memory - used for MainNet
 };
 
 // RandomX context using subprocess approach
@@ -40,7 +40,6 @@ pub const RandomXContext = struct {
     }
     
     pub fn hashWithDifficulty(self: *RandomXContext, input: []const u8, output: *[32]u8, difficulty_bytes: u8) !void {
-        std.debug.print("RandomX hashWithDifficulty called with input len={}, difficulty_bytes={}\n", .{input.len, difficulty_bytes});
         
         // Convert input to hex string
         var hex_input = try self.allocator.alloc(u8, input.len * 2);
@@ -54,8 +53,6 @@ pub const RandomXContext = struct {
         const mode_str = if (self.mode == .light) "light" else "fast";
         
         // Validate inputs before subprocess execution
-        // Block header is 192 bytes = 384 hex chars
-        std.debug.print("Hex input length: {} (expected 384 for block header)\n", .{hex_input.len});
         if (hex_input.len == 0) return RandomXError.InvalidInput;
         for (hex_input) |c| {
             if (!std.ascii.isHex(c)) return RandomXError.InvalidInput;
@@ -74,8 +71,6 @@ pub const RandomXContext = struct {
         };
         defer self.allocator.free(exe_path);
         
-        std.debug.print("RandomX helper path: {s}\n", .{exe_path});
-        
         // Create argv array with proper memory management
         const argv = try self.allocator.alloc([]const u8, 5);
         defer self.allocator.free(argv);
@@ -88,9 +83,6 @@ pub const RandomXContext = struct {
         argv[2] = self.key;
         argv[3] = difficulty_str[0..std.fmt.count("{}", .{difficulty_bytes})];
         argv[4] = mode_str;
-        
-        // Debug print the command being executed
-        std.debug.print("RandomX command: {s} {s} {s} {s} {s}\n", .{argv[0], argv[1], argv[2], argv[3], argv[4]});
         
         // Run RandomX helper subprocess with resource limits
         var child = std.process.Child.init(argv, self.allocator);
@@ -176,7 +168,7 @@ pub fn hashMeetsDifficulty(hash: [32]u8, difficulty_bytes: u8) bool {
 }
 
 // Check if hash meets new dynamic difficulty target
-pub fn hashMeetsDifficultyTarget(hash: [32]u8, target: @import("zeicoin").types.DifficultyTarget) bool {
+pub fn hashMeetsDifficultyTarget(hash: [32]u8, target: @import("../types/types.zig").DifficultyTarget) bool {
     return target.meetsDifficulty(hash);
 }
 

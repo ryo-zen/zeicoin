@@ -57,6 +57,8 @@ pub const ZeiCoin = struct {
     difficulty_calculator: DifficultyCalculator,
     status_reporter: StatusReporter,
     mempool_manager: *MempoolManager,
+    mining_state: types.MiningState,
+    mining_manager: ?*miner_mod.MiningManager,
 
     pub fn init(allocator: std.mem.Allocator) !*ZeiCoin {
         const data_dir = switch (types.CURRENT_NETWORK) {
@@ -121,6 +123,8 @@ pub const ZeiCoin = struct {
             .difficulty_calculator = undefined,
             .status_reporter = undefined,
             .mempool_manager = undefined,
+            .mining_state = types.MiningState.init(),
+            .mining_manager = null,
         };
         
         // Custom cleanup function for partial initialization
@@ -192,6 +196,9 @@ pub const ZeiCoin = struct {
         instance_ptr.mempool_manager = try MempoolManager.init(allocator, &instance_ptr.chain_state);
         components_initialized = 7;
         
+        // Connect MempoolManager to MiningState
+        instance_ptr.mempool_manager.setMiningState(&instance_ptr.mining_state);
+        
         if (!database.validate()) {
             print("❌ Database corrupted after mempool_manager init\n", .{});
             return error.DatabaseCorrupted;
@@ -234,7 +241,14 @@ pub const ZeiCoin = struct {
         // Clean up in REVERSE order of initialization
         // Components first (they may access Database during cleanup)
         
-        // Step 1: Clean up high-level components
+        // Step 1: Stop mining if active
+        if (self.mining_manager) |manager| {
+            manager.stopMining();
+            self.allocator.destroy(manager);
+        }
+        self.mining_state.deinit();
+        
+        // Step 2: Clean up high-level components
         self.mempool_manager.deinit(); // This will also free self.mempool_manager
         self.status_reporter.deinit();
         self.difficulty_calculator.deinit();
@@ -243,25 +257,25 @@ pub const ZeiCoin = struct {
         self.chain_validator.deinit();
         self.message_handler.deinit();
         
-        // Step 2: Clean up collections
+        // Step 3: Clean up collections
         self.active_block_downloads.deinit();
         self.blocks_to_download.deinit();
         self.failed_peers.deinit();
         
-        // Step 3: Clean up core components
+        // Step 4: Clean up core components
         self.header_chain.deinit();
         self.fork_manager.deinit();
         
-        // Step 4: Clean up sync manager if allocated
+        // Step 5: Clean up sync manager if allocated
         if (self.sync_manager) |sm| {
             sm.deinit();
             self.allocator.destroy(sm);
         }
         
-        // Step 5: Clean up ChainState (does NOT touch Database)
+        // Step 6: Clean up ChainState (does NOT touch Database)
         self.chain_state.deinit();
         
-        // Step 6: Finally clean up Database (owned by ZeiCoin)
+        // Step 7: Finally clean up Database (owned by ZeiCoin)
         // Use defer to ensure this happens even if something above fails
         defer self.allocator.destroy(self.database);
         defer self.database.deinit();

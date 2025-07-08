@@ -14,6 +14,8 @@ CLAUDE.md
 .claude
 README.md
 server.log
+.vscode
+logs
 
 # RandomX build files
 randomx/randomx_build/
@@ -44,3 +46,4 @@ Dockerfile.randomx
 GEMINI.md
 launch.json
 tasks.json
+.vscode/settings.json

@@ -155,19 +155,19 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair) !types.Block
 
     if (found_nonce) {
         // Process coinbase transaction (create new coins!)
-        try ctx.blockchain.processCoinbaseTransaction(coinbase_tx, miner_address);
+        try ctx.blockchain.chain_state.processCoinbaseTransaction(coinbase_tx, miner_address, current_height);
 
         // Process regular transactions
         for (new_block.transactions[1..]) |tx| {
-            try ctx.blockchain.processTransaction(tx);
+            try ctx.blockchain.chain_state.processTransaction(tx);
         }
 
         // Save block to database
         const block_height = try ctx.blockchain.getHeight();
         try ctx.database.saveBlock(block_height, new_block);
         
-        // Check for matured coinbase rewards
-        try ctx.blockchain.matureCoinbaseRewards(block_height);
+        // TODO: Check for matured coinbase rewards when implemented
+        // try ctx.blockchain.matureCoinbaseRewards(block_height);
 
         // Clean mempool of confirmed transactions
         try ctx.mempool_manager.cleanAfterBlock(new_block);
@@ -179,7 +179,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair) !types.Block
         ctx.fork_manager.updateBestChain(&new_block, block_height, new_cumulative_work);
 
         // Broadcast the newly mined block to network peers (zen propagation)
-        ctx.blockchain.broadcastNewBlock(new_block);
+        try ctx.blockchain.broadcastNewBlock(new_block);
 
         print("📡 Block propagates through zen network like ripples in water\n", .{});
 

@@ -12,6 +12,7 @@ const key = @import("../crypto/key.zig");
 const sync = @import("sync.zig");
 const wallet = @import("../wallet/wallet.zig");
 const serialize = @import("../storage/serialize.zig");
+const miner_mod = @import("../miner/main.zig");
 
 const print = std.debug.print;
 
@@ -32,7 +33,7 @@ fn logMessage(comptime fmt: []const u8, args: anytype) void {
 pub fn main() !void {
     print("\n", .{});
     print("╔═══════════════════════════════════════════════════════════════════╗\n", .{});
-    print("║                  ⚡ ZeiCoin Node Server ⚡                     ║\n", .{});
+    print("║                  ⚡ ZeiCoin Node Server ⚡                        ║\n", .{});
     print("║                    Headers-First Protocol                         ║\n", .{});
     print("╚═══════════════════════════════════════════════════════════════════╝\n", .{});
     print("\n", .{});
@@ -64,7 +65,7 @@ pub fn main() !void {
     // Connect blockchain to network
     network.setBlockchain(blockchain);
     blockchain.network = &network;
-    
+
     // Connect mempool to network for broadcasting
     blockchain.mempool_manager.setNetworkManager(&network);
 
@@ -144,11 +145,53 @@ pub fn main() !void {
     // Start mining thread if enabled
     print("🔍 DEBUG: enable_mining = {}\n", .{enable_mining});
     if (enable_mining) {
-        // TODO: Integrate mining with MempoolManager
+        // Create mining context
+        const mining_context = miner_mod.MiningContext{
+            .allocator = allocator,
+            .database = blockchain.database,
+            .mempool_manager = blockchain.mempool_manager,
+            .mining_state = &blockchain.mining_state,
+            .network = blockchain.network,
+            .fork_manager = &blockchain.fork_manager,
+            .blockchain = blockchain,
+        };
+        
+        // Create and store mining manager
+        blockchain.mining_manager = try allocator.create(miner_mod.MiningManager);
+        blockchain.mining_manager.?.* = miner_mod.MiningManager.init(mining_context);
+        
+        // Start mining with wallet
         if (miner_wallet_name) |wallet_name| {
-            print("⛏️ Mining with wallet '{s}' - integration with MempoolManager needed\n", .{wallet_name});
+            // Check if wallet exists
+            if (blockchain.database.walletExists(wallet_name)) {
+                // Load existing wallet
+                const zen_wallet = try allocator.create(wallet.Wallet);
+                defer {
+                    zen_wallet.deinit();
+                    allocator.destroy(zen_wallet);
+                }
+                zen_wallet.* = wallet.Wallet.init(allocator);
+                
+                const wallet_path = try blockchain.database.getWalletPath(wallet_name);
+                defer allocator.free(wallet_path);
+                
+                try zen_wallet.loadFromFile(wallet_path, "zen");
+                
+                if (zen_wallet.getZeiCoinKeyPair()) |miner_keypair| {
+                    try blockchain.mining_manager.?.startMining(miner_keypair);
+                    print("⛏️ Mining started with wallet '{s}'\n", .{wallet_name});
+                } else {
+                    return error.WalletKeyPairNotFound;
+                }
+            } else {
+                print("❌ Wallet '{s}' not found. Create it first with 'zeicoin wallet create {s}'\n", .{ wallet_name, wallet_name });
+                return error.WalletNotFound;
+            }
         } else {
-            print("⛏️ Mining with default address - integration with MempoolManager needed\n", .{});
+            // Use default miner address
+            const default_keypair = try key.KeyPair.generateNew();
+            try blockchain.mining_manager.?.startMining(default_keypair);
+            print("⛏️ Mining started with default address\n", .{});
         }
     }
 
@@ -164,7 +207,7 @@ pub fn main() !void {
 
         const height = try blockchain.getHeight();
         const peers = network.getConnectedPeerCount();
-        const mempool_count = 0; // TODO: Get from MempoolManager
+        const mempool_count = blockchain.mempool_manager.getTransactionCount();
 
         print("\n📊 Status: Height={} | Peers={} | Mempool={}\n", .{ height, peers, mempool_count });
     }
@@ -259,7 +302,7 @@ fn handleClientConnection(allocator: std.mem.Allocator, connection: std.net.Serv
 
 fn sendBlockchainStatus(connection: std.net.Server.Connection, blockchain: *zen.ZeiCoin) !void {
     const height = blockchain.getHeight() catch 0;
-    const pending = 0; // TODO: Get from MempoolManager
+    const pending = blockchain.mempool_manager.getTransactionCount();
 
     var status_buffer: [256]u8 = undefined;
     const status_msg = try std.fmt.bufPrint(&status_buffer, "STATUS:HEIGHT={},PENDING={},READY=true", .{ height, pending });
