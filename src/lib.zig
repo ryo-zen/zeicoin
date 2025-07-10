@@ -29,7 +29,7 @@ pub const mempool = struct {
 
 // Network components
 pub const peer = @import("core/network/peer.zig");
-pub const server = @import("core/network/server.zig");
+pub const server = @import("core/server/server.zig");
 
 // Sync components (new modular system)
 pub const sync = @import("core/sync/sync.zig");

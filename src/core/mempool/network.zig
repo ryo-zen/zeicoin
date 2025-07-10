@@ -141,9 +141,9 @@ pub const NetworkHandler = struct {
         if (self.network) |network| {
             network.broadcastTransaction(transaction);
             self.broadcast_count += 1;
-            print("📡 Transaction broadcast to network peers\\n", .{});
+            print("📡 Transaction broadcasted to network peers\n", .{});
         } else {
-            print("⚠️ No network manager available for broadcasting\\n", .{});
+            print("⚠️  No network manager available for transaction broadcast\n", .{});
         }
     }
     
@@ -174,15 +174,24 @@ pub const NetworkHandler = struct {
                 .accepted = false,
                 .reason = .duplicate_in_mempool,
                 .should_broadcast = false,
+                .validation_error = null,
             };
         }
         
         // 2. Validate transaction
         if (!try self.validator.validateTransaction(transaction)) {
+            // Try to get specific validation error
+            const validation_error: ?anyerror = blk: {
+                self.validator.validateTransactionWithError(transaction) catch |err| {
+                    break :blk err;
+                };
+                break :blk null;
+            };
             return LocalTransactionResult{
                 .accepted = false,
                 .reason = .validation_failed,
                 .should_broadcast = false,
+                .validation_error = validation_error,
             };
         }
         
@@ -197,6 +206,7 @@ pub const NetworkHandler = struct {
                 .accepted = false,
                 .reason = .mempool_limits_exceeded,
                 .should_broadcast = false,
+                .validation_error = null,
             };
         }
         
@@ -212,6 +222,7 @@ pub const NetworkHandler = struct {
             .accepted = true,
             .reason = .accepted,
             .should_broadcast = true,
+            .validation_error = null,
         };
     }
     
@@ -258,6 +269,7 @@ pub const LocalTransactionResult = struct {
     accepted: bool,
     reason: LocalTransactionReason,
     should_broadcast: bool,
+    validation_error: ?anyerror = null,
 };
 
 /// Reason for local transaction result

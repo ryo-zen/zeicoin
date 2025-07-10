@@ -65,9 +65,9 @@ pub const SyncManager = struct {
 
         // Find a peer to sync with
         if (self.blockchain.network) |network| {
-            if (network.getRandomPeer()) |peer| {
+            if (network.peer_manager.getBestPeerForSync()) |peer| {
                 self.sync_peer = peer;
-                self.target_height = peer.start_height;
+                self.target_height = peer.height;
                 
                 // Use the new modular sync manager
                 try self.core_sync_manager.startSync(peer, self.target_height);
@@ -75,7 +75,7 @@ pub const SyncManager = struct {
                 // Update legacy state for compatibility
                 self.is_syncing = self.core_sync_manager.isActive();
                 
-                std.debug.print("Starting sync with peer {s}:{} to height {}\n", .{ peer.address.ip, peer.address.port, self.target_height });
+                std.debug.print("Starting sync with peer {} to height {}\n", .{ peer.address, self.target_height });
             } else {
                 std.debug.print("No connected peers to sync with.\n", .{});
             }

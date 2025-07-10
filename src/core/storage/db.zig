@@ -273,6 +273,84 @@ pub const Database = struct {
         std.fs.cwd().access(wallet_path, .{}) catch return false;
         return true;
     }
+
+    /// Get block by hash - searches all blocks
+    pub fn getBlockByHash(self: *Database, hash: [32]u8) !Block {
+        var dir = std.fs.cwd().openDir(self.blocks_dir[0..self.blocks_dir_len], .{ .iterate = true }) catch return DatabaseError.NotFound;
+        defer dir.close();
+
+        var iterator = dir.iterate();
+        while (try iterator.next()) |entry| {
+            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".block")) {
+                // Parse height from filename
+                const dot_pos = std.mem.indexOf(u8, entry.name, ".") orelse continue;
+                const height = std.fmt.parseInt(u32, entry.name[0..dot_pos], 10) catch continue;
+                
+                // Load block and check hash
+                var block = self.getBlock(height) catch continue;
+                defer block.deinit(self.allocator);
+                
+                if (std.mem.eql(u8, &block.hash(), &hash)) {
+                    // Return a copy of the block by serializing and deserializing
+                    var buffer = std.ArrayList(u8).init(self.allocator);
+                    defer buffer.deinit();
+                    
+                    try serialize.serialize(buffer.writer(), block);
+                    var stream = std.io.fixedBufferStream(buffer.items);
+                    return try serialize.deserialize(stream.reader(), types.Block, self.allocator);
+                }
+            }
+        }
+        
+        return DatabaseError.NotFound;
+    }
+
+    /// Get transaction by hash - searches all blocks
+    pub fn getTransactionByHash(self: *Database, hash: [32]u8) !types.Transaction {
+        var dir = std.fs.cwd().openDir(self.blocks_dir[0..self.blocks_dir_len], .{ .iterate = true }) catch return DatabaseError.NotFound;
+        defer dir.close();
+
+        var iterator = dir.iterate();
+        while (try iterator.next()) |entry| {
+            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".block")) {
+                // Parse height from filename
+                const dot_pos = std.mem.indexOf(u8, entry.name, ".") orelse continue;
+                const height = std.fmt.parseInt(u32, entry.name[0..dot_pos], 10) catch continue;
+                
+                // Load block and search transactions
+                var block = self.getBlock(height) catch continue;
+                defer block.deinit(self.allocator);
+                
+                for (block.transactions) |tx| {
+                    if (std.mem.eql(u8, &tx.hash(), &hash)) {
+                        // Return a copy of the transaction by serializing and deserializing
+                        var buffer = std.ArrayList(u8).init(self.allocator);
+                        defer buffer.deinit();
+                        
+                        try serialize.serialize(buffer.writer(), tx);
+                        var stream = std.io.fixedBufferStream(buffer.items);
+                        return try serialize.deserialize(stream.reader(), types.Transaction, self.allocator);
+                    }
+                }
+            }
+        }
+        
+        return DatabaseError.NotFound;
+    }
+
+    /// Check if block exists by hash
+    pub fn hasBlock(self: *Database, hash: [32]u8) bool {
+        var block = self.getBlockByHash(hash) catch return false;
+        block.deinit(self.allocator);
+        return true;
+    }
+
+    /// Check if transaction exists by hash
+    pub fn hasTransaction(self: *Database, hash: [32]u8) bool {
+        var tx = self.getTransactionByHash(hash) catch return false;
+        tx.deinit(self.allocator);
+        return true;
+    }
 };
 
 // Tests

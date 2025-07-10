@@ -103,6 +103,21 @@ pub const MempoolStorage = struct {
         return false;
     }
     
+    /// Get transaction from pool by hash
+    pub fn getTransaction(self: *Self, tx_hash: Hash) ?Transaction {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        
+        for (self.transactions.items) |tx| {
+            if (std.mem.eql(u8, &tx.hash(), &tx_hash)) {
+                // Return a copy of the transaction
+                return tx.dupe(self.allocator) catch null;
+            }
+        }
+        
+        return null;
+    }
+    
     /// Get transaction count
     pub fn getTransactionCount(self: *Self) usize {
         self.mutex.lock();

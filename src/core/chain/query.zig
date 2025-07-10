@@ -73,4 +73,20 @@ pub const ChainQuery = struct {
         const account = try self.getAccount(address);
         return account.balance;
     }
+    
+    pub fn getBlockByHash(self: *ChainQuery, hash: [32]u8) !types.Block {
+        return try self.database.getBlockByHash(hash);
+    }
+    
+    pub fn getTransactionByHash(self: *ChainQuery, hash: [32]u8) !types.Transaction {
+        return try self.database.getTransactionByHash(hash);
+    }
+    
+    pub fn hasBlock(self: *ChainQuery, hash: [32]u8) bool {
+        return self.database.hasBlock(hash);
+    }
+    
+    pub fn hasTransaction(self: *ChainQuery, hash: [32]u8) bool {
+        return self.database.hasTransaction(hash);
+    }
 };

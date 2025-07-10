@@ -1,0 +1,105 @@
+// messages.zig - Message type registry and union
+// Central place for all protocol messages
+
+const std = @import("std");
+const protocol = @import("../protocol.zig");
+
+// Import all message types
+pub const HandshakeMessage = @import("handshake.zig").HandshakeMessage;
+pub const PingMessage = @import("ping.zig").PingMessage;
+pub const PongMessage = @import("pong.zig").PongMessage;
+pub const GetHeadersMessage = @import("get_headers.zig").GetHeadersMessage;
+pub const HeadersMessage = @import("headers.zig").HeadersMessage;
+pub const GetBlocksMessage = @import("get_blocks.zig").GetBlocksMessage;
+pub const BlockMessage = @import("block.zig").BlockMessage;
+pub const TransactionMessage = @import("transaction.zig").TransactionMessage;
+pub const AnnounceMessage = @import("announce.zig").AnnounceMessage;
+pub const InventoryItem = @import("announce.zig").InventoryItem;
+pub const RequestMessage = @import("request.zig").RequestMessage;
+pub const NotFoundMessage = @import("not_found.zig").NotFoundMessage;
+pub const GetPeersMessage = @import("get_peers.zig").GetPeersMessage;
+pub const PeersMessage = @import("peers.zig").PeersMessage;
+pub const PeerAddress = @import("peers.zig").PeerAddress;
+pub const RejectMessage = @import("reject.zig").RejectMessage;
+
+/// Union of all message types
+pub const Message = union(protocol.MessageType) {
+    handshake: HandshakeMessage,
+    handshake_ack: void, // Simple ack, no payload
+    ping: PingMessage,
+    pong: PongMessage,
+    get_headers: GetHeadersMessage,
+    headers: HeadersMessage,
+    get_blocks: GetBlocksMessage,
+    blocks: void, // Uses streaming for large payloads
+    announce: AnnounceMessage,
+    request: RequestMessage,
+    not_found: NotFoundMessage,
+    transaction: TransactionMessage,
+    block: BlockMessage,
+    get_peers: GetPeersMessage,
+    peers: PeersMessage,
+    reject: RejectMessage,
+    
+    /// Encode any message type
+    pub fn encode(self: Message, writer: anytype) !void {
+        switch (self) {
+            .handshake_ack => {}, // Empty message
+            .blocks => {}, // Handled separately
+            inline else => |msg| try msg.encode(writer),
+        }
+    }
+    
+    /// Decode message based on type
+    pub fn decode(
+        msg_type: protocol.MessageType,
+        allocator: std.mem.Allocator,
+        reader: anytype,
+    ) !Message {
+        return switch (msg_type) {
+            .handshake => .{ .handshake = try HandshakeMessage.decode(allocator, reader) },
+            .handshake_ack => .{ .handshake_ack = {} },
+            .ping => .{ .ping = try PingMessage.decode(reader) },
+            .pong => .{ .pong = try PongMessage.decode(reader) },
+            .get_headers => .{ .get_headers = try GetHeadersMessage.decode(allocator, reader) },
+            .headers => .{ .headers = try HeadersMessage.decode(allocator, reader) },
+            .get_blocks => .{ .get_blocks = try GetBlocksMessage.decode(allocator, reader) },
+            .blocks => .{ .blocks = {} }, // Handled separately
+            .announce => .{ .announce = try AnnounceMessage.decode(allocator, reader) },
+            .request => .{ .request = try RequestMessage.decode(allocator, reader) },
+            .not_found => .{ .not_found = try NotFoundMessage.decode(allocator, reader) },
+            .transaction => .{ .transaction = try TransactionMessage.decode(allocator, reader) },
+            .block => .{ .block = try BlockMessage.decode(allocator, reader) },
+            .get_peers => .{ .get_peers = try GetPeersMessage.decode(reader) },
+            .peers => .{ .peers = try PeersMessage.decode(allocator, reader) },
+            .reject => .{ .reject = try RejectMessage.decode(allocator, reader) },
+            _ => error.UnknownMessageType,
+        };
+    }
+    
+    /// Estimate encoded size
+    pub fn estimateSize(self: Message) usize {
+        return switch (self) {
+            .handshake_ack => 0,
+            .blocks => 0,
+            inline else => |msg| msg.estimateSize(),
+        };
+    }
+    
+    /// Clean up any allocated memory
+    pub fn deinit(self: *Message, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .handshake_ack, .blocks => {},
+            inline else => |*msg| {
+                if (@hasDecl(@TypeOf(msg.*), "deinit")) {
+                    msg.deinit(allocator);
+                }
+            },
+        }
+    }
+    
+    /// Get the message type
+    pub fn getType(self: Message) protocol.MessageType {
+        return @as(protocol.MessageType, self);
+    }
+};

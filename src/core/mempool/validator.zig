@@ -16,6 +16,18 @@ const Account = types.Account;
 const Address = types.Address;
 const Hash = types.Hash;
 
+/// Specific validation error types for detailed error reporting
+pub const ValidationError = error{
+    InvalidStructure,
+    ReplayTransaction,
+    TransactionExpired,
+    InvalidAmount,
+    InvalidNonce,
+    InsufficientBalance,
+    FeeTooLow,
+    InvalidSignature,
+};
+
 /// Transaction validator for mempool operations
 /// - Validates transaction structure and cryptographic signatures
 /// - Checks nonce sequences and account balances
@@ -91,6 +103,50 @@ pub const TransactionValidator = struct {
         }
         
         return true;
+    }
+    
+    /// Validate transaction with specific error reporting
+    pub fn validateTransactionWithError(self: *Self, tx: Transaction) !void {
+        // 1. Basic structure validation
+        if (!tx.isValid()) {
+            return ValidationError.InvalidStructure;
+        }
+        
+        // 2. Check replay protection
+        if (self.isReplayTransaction(tx)) {
+            print("❌ Transaction already processed - replay attempt blocked\\n", .{});
+            return ValidationError.ReplayTransaction;
+        }
+        
+        // 3. Check expiry
+        if (!(self.validateExpiry(tx) catch false)) {
+            return ValidationError.TransactionExpired;
+        }
+        
+        // 4. Check amount sanity
+        if (!self.validateAmount(tx)) {
+            return ValidationError.InvalidAmount;
+        }
+        
+        // 5. Check self-transfer (warn but allow)
+        if (tx.sender.equals(tx.recipient)) {
+            print("⚠️ Self-transfer detected (wasteful but allowed)\\n", .{});
+        }
+        
+        // 6. Validate nonce
+        if (!(self.validateNonce(tx) catch false)) {
+            return ValidationError.InvalidNonce;
+        }
+        
+        // 7. Validate balance and fees
+        self.validateBalanceWithError(tx) catch |err| {
+            return err;
+        };
+        
+        // 8. Validate signature
+        if (!self.validateSignature(tx)) {
+            return ValidationError.InvalidSignature;
+        }
     }
     
     /// Check if transaction is a replay attempt
@@ -176,6 +232,30 @@ pub const TransactionValidator = struct {
         }
         
         return true;
+    }
+    
+    /// Validate sender balance and fees with specific error reporting
+    pub fn validateBalanceWithError(self: *Self, tx: Transaction) !void {
+        const sender_account = self.chain_state.getAccount(tx.sender) catch {
+            return ValidationError.InvalidNonce; // Account not found, treat as invalid nonce
+        };
+        
+        // Check minimum fee
+        if (tx.fee < types.ZenFees.MIN_FEE) {
+            print("❌ Fee too low: {} (minimum: {})\\n", .{
+                tx.fee, types.ZenFees.MIN_FEE
+            });
+            return ValidationError.FeeTooLow;
+        }
+        
+        // Check if sender has sufficient balance
+        const total_cost = tx.amount + tx.fee;
+        if (sender_account.balance < total_cost) {
+            print("❌ Insufficient balance: {} needed, {} available\\n", .{
+                total_cost, sender_account.balance
+            });
+            return ValidationError.InsufficientBalance;
+        }
     }
     
     /// Validate transaction signature

@@ -109,7 +109,19 @@ pub const MempoolManager = struct {
             switch (result.reason) {
                 .accepted => {}, // This shouldn't happen when !result.accepted, but required for completeness
                 .duplicate_in_mempool => return error.DuplicateTransaction,
-                .validation_failed => return error.InvalidTransaction,
+                .validation_failed => {
+                    // Check if we have a specific validation error
+                    if (result.validation_error) |validation_error| {
+                        switch (validation_error) {
+                            error.InsufficientBalance => return error.InsufficientBalance,
+                            error.FeeTooLow => return error.FeeTooLow,
+                            error.InvalidNonce => return error.InvalidNonce,
+                            error.TransactionExpired => return error.TransactionExpired,
+                            else => return error.InvalidTransaction,
+                        }
+                    }
+                    return error.InvalidTransaction;
+                },
                 .mempool_limits_exceeded => return error.MempoolFull,
             }
         }
@@ -172,6 +184,16 @@ pub const MempoolManager = struct {
     /// Check if transaction exists in mempool
     pub fn isTransactionInMempool(self: *Self, tx_hash: Hash) bool {
         return self.storage.containsTransaction(tx_hash);
+    }
+    
+    /// Check if transaction exists in mempool (alias for initialization.zig)
+    pub fn hasTransaction(self: *Self, tx_hash: Hash) bool {
+        return self.storage.containsTransaction(tx_hash);
+    }
+    
+    /// Get transaction from mempool by hash
+    pub fn getTransaction(self: *Self, tx_hash: Hash) ?Transaction {
+        return self.storage.getTransaction(tx_hash);
     }
 
     /// Get current mempool state information

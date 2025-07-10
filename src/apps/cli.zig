@@ -981,8 +981,11 @@ fn getNonceFromServer(allocator: std.mem.Allocator, address: types.Address) !u64
     };
     defer connection.close();
 
-    // Send nonce request
-    const nonce_request = try std.fmt.allocPrint(allocator, "GET_NONCE:{s}", .{std.fmt.fmtSliceHexLower(&address)});
+    // Send nonce request using bech32 format
+    const bech32_addr = try address.toBech32(allocator, types.CURRENT_NETWORK);
+    defer allocator.free(bech32_addr);
+    
+    const nonce_request = try std.fmt.allocPrint(allocator, "GET_NONCE:{s}", .{bech32_addr});
     defer allocator.free(nonce_request);
 
     try connection.writeAll(nonce_request);

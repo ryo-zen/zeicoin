@@ -28,7 +28,6 @@ pub const ChainValidator = struct {
     chain_state: *ChainState,
     allocator: std.mem.Allocator,
     // Additional dependencies for comprehensive validation
-    network: ?*@import("../network/server.zig").Server,
     fork_manager: ?*@import("../fork/manager.zig").ForkManager,
 
     const Self = @This();
@@ -38,7 +37,6 @@ pub const ChainValidator = struct {
         return .{
             .chain_state = chain_state,
             .allocator = allocator,
-            .network = null,
             .fork_manager = null,
         };
     }
@@ -47,13 +45,11 @@ pub const ChainValidator = struct {
     pub fn initWithDependencies(
         allocator: std.mem.Allocator,
         chain_state: *ChainState,
-        network: ?*@import("../network/server.zig").Server,
         fork_manager: ?*@import("../fork/manager.zig").ForkManager,
     ) Self {
         return .{
             .chain_state = chain_state,
             .allocator = allocator,
-            .network = network,
             .fork_manager = fork_manager,
         };
     }

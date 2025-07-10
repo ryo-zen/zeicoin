@@ -21,7 +21,7 @@ pub const DecisionEngine = struct {
     /// Evaluate a new block and decide what to do with it
     pub fn evaluateBlock(
         chain_tracker: *const chains.ChainTracker,
-        orphan_manager: *const orphans.OrphanManager,
+        orphan_manager: *orphans.OrphanManager,
         block: Block,
         block_height: u32,
         cumulative_work: ChainWork,

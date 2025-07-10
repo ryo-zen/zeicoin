@@ -104,7 +104,9 @@ pub fn miningThreadFn(ctx: MiningContext, miner_keypair: key.KeyPair) void {
         
         // Broadcast block to network peers
         if (ctx.network) |net_mgr| {
-            net_mgr.broadcastBlock(block);
+            net_mgr.broadcastBlock(block) catch |err| {
+                print("⚠️  Failed to broadcast block: {}\n", .{err});
+            };
             print("📡 Block broadcasted to {} peers\n", .{net_mgr.getConnectedPeerCount()});
         }
     }

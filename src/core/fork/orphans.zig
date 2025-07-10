@@ -82,6 +82,8 @@ pub const OrphanManager = struct {
         const block_hash = block.hash();
         const fork_block = ForkBlock{
             .block = block,
+            .height = 0, // Unknown height for orphan
+            .cumulative_work = 0, // Unknown cumulative work for orphan
             .received_time = received_time,
         };
         

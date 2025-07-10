@@ -61,7 +61,7 @@ pub const ForkManager = struct {
     
     /// Evaluate a new block and decide how to handle it
     pub fn evaluateBlock(self: *ForkManager, block: Block, block_height: u32, cumulative_work: ChainWork) !ForkDecision {
-        const decision = self.decision_engine.evaluateBlock(
+        const decision = decisions.DecisionEngine.evaluateBlock(
             &self.chain_tracker,
             &self.orphan_manager,
             block,

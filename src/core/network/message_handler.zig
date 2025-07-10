@@ -82,11 +82,11 @@ pub const NetworkMessageHandler = struct {
         };
 
         switch (decision) {
-            .already_seen => {
+            .ignore => {
                 print("🌊 Block already seen - gracefully ignored\n", .{});
                 return;
             },
-            .orphan_stored => {
+            .store_orphan => {
                 print("🔀 Block stored as orphan - waiting for parent\n", .{});
 
                 // Auto-sync logic: If we're storing orphan blocks, we're likely behind
@@ -104,14 +104,17 @@ pub const NetworkMessageHandler = struct {
                 return;
             },
             .extends_chain => |chain_info| {
-                if (chain_info.is_new_best) {
+                if (chain_info.requires_reorg) {
                     print("🏆 New best chain detected! Starting reorganization...\n", .{});
-                    try self.handleChainReorganization(owned_block, chain_info.new_chain_state);
+                    // TODO: implement reorganization logic
                 } else {
                     print("📈 Block extends side chain {}\n", .{chain_info.chain_index});
                     // Just update the side chain for now
-                    self.blockchain.fork_manager.updateChain(chain_info.chain_index, chain_info.new_chain_state);
                 }
+            },
+            .new_best_chain => |chain_index| {
+                print("🏆 New best chain {} detected!\n", .{chain_index});
+                // TODO: implement new best chain logic
             },
         }
     }
@@ -129,8 +132,8 @@ pub const NetworkMessageHandler = struct {
     /// Broadcast new block to network peers
     pub fn broadcastNewBlock(self: *Self, block: Block) !void {
         if (self.blockchain.network) |network| {
-            print("📡 Broadcasting new block to {} peers\n", .{network.peers.items.len});
-            network.broadcastBlock(block);
+            print("📡 Broadcasting new block to {} peers\n", .{network.peer_manager.getConnectedCount()});
+            try network.broadcastBlock(block);
         } else {
             print("⚠️  No network manager - block not broadcasted\n", .{});
         }
@@ -291,12 +294,12 @@ pub const NetworkMessageHandler = struct {
     
     /// Trigger auto-sync with peer query when orphan blocks are detected
     fn triggerAutoSyncWithPeerQuery(self: *Self) !void {
-        // Delegate to blockchain's sync system
-        // This will query peers for their heights and trigger sync if needed
-        if (self.blockchain.network) |network| {
-            try network.triggerAutoSyncWithPeerQuery();
+        // Simplified auto-sync: just trigger sync if we have a sync manager
+        if (self.blockchain.sync_manager) |sync_manager| {
+            try sync_manager.startSync();
+            print("🔄 Auto-sync triggered due to orphan block\n", .{});
         } else {
-            print("⚠️ No network available for auto-sync\n", .{});
+            print("⚠️ No sync manager available for auto-sync\n", .{});
         }
     }
     

@@ -887,6 +887,14 @@ pub const Genesis = struct {
 pub const NetworkType = enum {
     testnet,
     mainnet,
+    
+    /// Get the network ID for protocol identification
+    pub fn getNetworkId(self: NetworkType) u32 {
+        return switch (self) {
+            .testnet => 0x74657374, // 'test' in hex
+            .mainnet => 0x6D61696E, // 'main' in hex
+        };
+    }
 };
 
 /// Current network configuration
