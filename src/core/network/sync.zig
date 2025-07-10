@@ -9,9 +9,8 @@ const headerchain = @import("headerchain.zig");
 const net = @import("peer.zig");
 
 // Import the new modular sync system
-const sync_manager = @import("../sync/manager.zig");
+const sync_mod = @import("../sync/sync.zig");
 const sync_protocols = @import("../sync/protocol/lib.zig");
-const sync_state = @import("../sync/state.zig");
 
 const ZeiCoin = @import("../node.zig").ZeiCoin;
 
@@ -21,12 +20,10 @@ pub const SyncManager = struct {
     allocator: std.mem.Allocator,
     blockchain: *ZeiCoin,
     
-    // New modular sync manager components (avoid nested struct)
-    sync_allocator: std.mem.Allocator,
-    sync_blockchain: *ZeiCoin,
-    sync_failed_peers: std.ArrayList(*net.Peer),
-    sync_blocks_to_download: std.ArrayList(u32),
-    sync_active_downloads: std.AutoHashMap(u32, i64),
+    // Sync management collections
+    failed_peers: std.ArrayList(*net.Peer),
+    blocks_to_download: std.ArrayList(u32),
+    active_downloads: std.AutoHashMap(u32, i64),
     
     // Protocol instances
     block_sync_protocol: ?sync_protocols.BlockSyncProtocol,
@@ -41,11 +38,9 @@ pub const SyncManager = struct {
         return .{
             .allocator = allocator,
             .blockchain = blockchain,
-            .sync_allocator = allocator,
-            .sync_blockchain = blockchain,
-            .sync_failed_peers = std.ArrayList(*net.Peer).init(allocator),
-            .sync_blocks_to_download = std.ArrayList(u32).init(allocator),
-            .sync_active_downloads = std.AutoHashMap(u32, i64).init(allocator),
+            .failed_peers = std.ArrayList(*net.Peer).init(allocator),
+            .blocks_to_download = std.ArrayList(u32).init(allocator),
+            .active_downloads = std.AutoHashMap(u32, i64).init(allocator),
             .block_sync_protocol = null,
             .headers_first_protocol = null,
             .is_syncing = false,
@@ -75,15 +70,9 @@ pub const SyncManager = struct {
         }
         
         // 3. Clean up collections in reverse order of initialization
-        // Clear contents first to ensure no dangling references
-        self.sync_active_downloads.clearAndFree();
-        self.sync_blocks_to_download.clearAndFree();
-        self.sync_failed_peers.clearAndFree();
-        
-        // Then deinit the collections themselves
-        self.sync_active_downloads.deinit();
-        self.sync_blocks_to_download.deinit();
-        self.sync_failed_peers.deinit();
+        self.active_downloads.deinit();
+        self.blocks_to_download.deinit();
+        self.failed_peers.deinit();
     }
 
     /// Start sync operation (legacy compatibility)
@@ -99,13 +88,8 @@ pub const SyncManager = struct {
                 self.sync_peer = peer;
                 self.target_height = peer.height;
                 
-                // Use the new modular sync manager
-                // Simple sync implementation
-                self.sync_peer = peer;
+                // Mark as syncing
                 self.is_syncing = true;
-                
-                // Update legacy state for compatibility
-                // Sync state already set above
                 
                 std.debug.print("Starting sync with peer {} to height {}\n", .{ peer.address, self.target_height });
             } else {
@@ -118,15 +102,9 @@ pub const SyncManager = struct {
 
     /// Start headers-first sync specifically
     pub fn startHeadersFirstSync(self: *SyncManager, peer: *net.Peer, target_height: u32) !void {
-        // Simple headers sync implementation
         self.sync_peer = peer;
         self.target_height = target_height;
         self.is_syncing = true;
-        
-        // Update legacy state
-        self.sync_peer = peer;
-        self.target_height = target_height;
-        // Sync state already set above
     }
 
     /// Process incoming headers (legacy compatibility)
@@ -136,13 +114,9 @@ pub const SyncManager = struct {
             return;
         }
 
-        // Delegate to the modular sync manager
-        // Simple headers processing
+        // TODO: Implement headers processing
         _ = headers;
         _ = start_height;
-        
-        // Update legacy state
-        // Sync state already set above
     }
 
     /// Process incoming block (legacy compatibility)
@@ -153,33 +127,28 @@ pub const SyncManager = struct {
             return;
         }
 
-        // Delegate to the modular sync manager
-        // Simple block handling - block is already being cleaned up above
-        
-        // Update legacy state
-        // Sync state already set above
+        // TODO: Implement block processing
     }
 
     /// Handle failed download (legacy compatibility)
     pub fn handleFailedDownload(self: *SyncManager, height: u32) !void {
         std.debug.print("Block download failed for height {}. Re-queueing.\n", .{height});
         
-        // For now, delegate to blockchain for compatibility
-        // TODO: Move this logic to the download management module
-        try self.blockchain.blocks_to_download.append(height);
-        _ = self.blockchain.active_block_downloads.remove(height);
+        // Re-queue the failed download
+        try self.blocks_to_download.append(height);
+        _ = self.active_downloads.remove(height);
     }
 
-    /// Get sync progress (new method)
+    /// Get sync progress percentage
     pub fn getProgress(self: *const SyncManager) f64 {
-        // Simple progress stub
-        return sync_manager.SyncProgress{ .current_height = 0, .target_height = self.target_height, .downloaded_blocks = 0, .is_complete = false };
+        if (self.target_height == 0) return 100.0;
+        const current = self.blockchain.getHeight() catch 0;
+        return @as(f64, @floatFromInt(current)) / @as(f64, @floatFromInt(self.target_height)) * 100.0;
     }
 
-    /// Get sync state (new method)
-    pub fn getSyncState(self: *const SyncManager) sync_state.SyncState {
-        // Simple state stub
-        return if (self.is_syncing) sync_manager.SyncState.syncing else sync_manager.SyncState.idle;
+    /// Get sync state
+    pub fn getSyncState(self: *const SyncManager) sync_mod.SyncState {
+        return if (self.is_syncing) .syncing else .synced;
     }
 
     /// Check if should sync with peer (new method)
@@ -193,26 +162,19 @@ pub const SyncManager = struct {
         // Simple progress reporting - no-op
     }
 
-    /// Complete sync operation (new method)
+    /// Complete sync operation
     pub fn completeSync(self: *SyncManager) !void {
-        // Complete sync
         self.is_syncing = false;
         self.sync_peer = null;
-        
-        // Update legacy state
-        self.is_syncing = false;
-        self.sync_peer = null;
+        self.target_height = 0;
     }
 
-    /// Fail sync operation (new method)
+    /// Fail sync operation
     pub fn failSync(self: *SyncManager) void {
-        // Fail sync
         self.is_syncing = false;
         self.sync_peer = null;
-        
-        // Update legacy state
-        self.is_syncing = false;
-        self.sync_peer = null;
+        self.target_height = 0;
+        self.failed_peers.clearRetainingCapacity();
     }
 
     // Legacy compatibility methods that may still be called by existing code
