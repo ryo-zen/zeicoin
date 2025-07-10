@@ -15,16 +15,31 @@ pub const NodeComponents = struct {
     blockchain: *zen.ZeiCoin,
     network_manager: *network.NetworkManager,
     sync_manager: *sync.SyncManager,
+    message_handler_impl: *MessageHandlerImpl,
     allocator: std.mem.Allocator,
     
     pub fn deinit(self: *NodeComponents) void {
+        // CRITICAL: Order matters for thread safety!
+        // 1. Stop network first (this waits for threads)
+        self.network_manager.stop();
+        
+        // 2. Then clean up sync manager (no threads accessing it now)
         self.sync_manager.deinit();
         self.allocator.destroy(self.sync_manager);
+        // Clear the pointer in blockchain to prevent double-free
+        self.blockchain.sync_manager = null;
         
+        // 3. Now fully deinit network
         self.network_manager.deinit();
         self.allocator.destroy(self.network_manager);
         
+        // 4. Clean up message handler
+        @import("message_handlers.zig").clearGlobalHandler();
+        self.allocator.destroy(self.message_handler_impl);
+        
+        // 5. Finally blockchain
         self.blockchain.deinit();
+        self.allocator.destroy(self.blockchain);
     }
 };
 
@@ -39,11 +54,12 @@ pub fn initializeNode(allocator: std.mem.Allocator, config: command_line.Config)
     std.log.info("Blockchain initialized", .{});
     
     // Create message handler
-    const handler = createMessageHandler(blockchain);
+    const handler_result = try createMessageHandler(allocator, blockchain);
+    errdefer allocator.destroy(handler_result.impl);
     
     // Initialize network
     var network_manager = try allocator.create(network.NetworkManager);
-    network_manager.* = network.NetworkManager.init(allocator, handler);
+    network_manager.* = network.NetworkManager.init(allocator, handler_result.handler);
     errdefer {
         network_manager.deinit();
         allocator.destroy(network_manager);
@@ -53,7 +69,7 @@ pub fn initializeNode(allocator: std.mem.Allocator, config: command_line.Config)
     blockchain.network = network_manager;
     blockchain.mempool_manager.setNetworkManager(network_manager);
     
-    // Initialize sync manager
+    // Initialize sync manager following ZeiCoin ownership principles
     const sync_manager = try allocator.create(sync.SyncManager);
     sync_manager.* = sync.SyncManager.init(allocator, blockchain);
     blockchain.sync_manager = sync_manager;
@@ -83,21 +99,27 @@ pub fn initializeNode(allocator: std.mem.Allocator, config: command_line.Config)
         .blockchain = blockchain,
         .network_manager = network_manager,
         .sync_manager = sync_manager,
+        .message_handler_impl = handler_result.impl,
         .allocator = allocator,
     };
 }
 
 const MessageHandlerImpl = @import("message_handlers.zig").MessageHandlerImpl;
 
-fn createMessageHandler(blockchain: *zen.ZeiCoin) network.MessageHandler {
+const HandlerResult = struct {
+    impl: *MessageHandlerImpl,
+    handler: network.MessageHandler,
+};
+
+fn createMessageHandler(allocator: std.mem.Allocator, blockchain: *zen.ZeiCoin) !HandlerResult {
     // Create message handler implementation
-    var handler_impl = blockchain.allocator.create(MessageHandlerImpl) catch {
-        std.log.err("Failed to allocate message handler", .{});
-        std.process.exit(1);
-    };
+    const handler_impl = try allocator.create(MessageHandlerImpl);
     handler_impl.* = MessageHandlerImpl.init(blockchain);
     
-    return handler_impl.createHandler();
+    return HandlerResult{
+        .impl = handler_impl,
+        .handler = handler_impl.createHandler(),
+    };
 }
 
 fn initializeMining(blockchain: *zen.ZeiCoin, miner_wallet_name: ?[]const u8) !void {
@@ -110,10 +132,10 @@ fn initializeMining(blockchain: *zen.ZeiCoin, miner_wallet_name: ?[]const u8) !v
     if (miner_wallet_name) |wallet_name| {
         // Load specified wallet
         var wallet_obj = wallet.Wallet.init(allocator);
-        const wallet_path = try std.fmt.allocPrint(allocator, "{s}.wallet", .{wallet_name});
+        const wallet_path = try std.fmt.allocPrint(allocator, "{s}/wallets/{s}.wallet", .{types.CURRENT_NETWORK.getDataDir(), wallet_name});
         defer allocator.free(wallet_path);
         
-        wallet_obj.loadFromFile(wallet_path, "") catch |err| {
+        wallet_obj.loadFromFile(wallet_path, "zen") catch |err| {
             std.log.err("Failed to load mining wallet", .{});
             return err;
         };
@@ -124,9 +146,9 @@ fn initializeMining(blockchain: *zen.ZeiCoin, miner_wallet_name: ?[]const u8) !v
         // Create default mining wallet
         var wallet_obj = wallet.Wallet.init(allocator);
         try wallet_obj.createNew();
-        const wallet_path = try std.fmt.allocPrint(allocator, "default_miner.wallet", .{});
+        const wallet_path = try std.fmt.allocPrint(allocator, "{s}/wallets/default_miner.wallet", .{types.CURRENT_NETWORK.getDataDir()});
         defer allocator.free(wallet_path);
-        try wallet_obj.saveToFile(wallet_path, "");
+        try wallet_obj.saveToFile(wallet_path, "zen_miner");
         wallet_instance = wallet_obj;
         mining_address = wallet_instance.?.address.?;
         std.log.info("Created default mining wallet", .{});

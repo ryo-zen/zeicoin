@@ -57,9 +57,12 @@ pub fn main() !void {
     std.log.info("✅ ZeiCoin node started successfully", .{});
     std.log.info("Press Ctrl+C to shutdown", .{});
     
-    // Main loop
+    // Main loop - wait for shutdown signal
     var last_status_time = std.time.timestamp();
     while (running) {
+        // Check if still running before maintenance
+        if (!running) break;
+        
         // Periodic maintenance
         components.network_manager.maintenance();
         
@@ -80,15 +83,13 @@ pub fn main() !void {
         mining_manager.stopMining();
     }
     
-    // Stop network
-    components.network_manager.stop();
-    
     // Stop client API
     if (api_server) |*server| {
         server.stop();
     }
     
-    std.log.info("✅ Shutdown complete", .{});
+    // Note: Network stop is handled in components.deinit()
+    // to ensure proper ordering with sync manager cleanup
 }
 
 fn printBanner() void {

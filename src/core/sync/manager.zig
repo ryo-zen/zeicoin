@@ -60,6 +60,19 @@ pub const SyncManager = struct {
         };
     }
 
+    /// Initialize sync manager in-place following ZeiCoin ownership principles
+    pub fn initInPlace(self: *Self, allocator: std.mem.Allocator, blockchain: *ZeiCoin) void {
+        // Initialize each field directly to avoid struct copying
+        self.allocator = allocator;
+        self.blockchain = blockchain;
+        self.state_manager = SyncStateManager.init();
+        self.sync_peer = null;
+        self.failed_peers = std.ArrayList(*net.Peer).init(allocator);
+        self.blocks_to_download = std.ArrayList(u32).init(allocator);
+        self.active_block_downloads = std.AutoHashMap(u32, i64).init(allocator);
+        self.header_chain = null;
+    }
+
     /// Cleanup sync manager resources
     pub fn deinit(self: *Self) void {
         self.failed_peers.deinit();

@@ -895,6 +895,14 @@ pub const NetworkType = enum {
             .mainnet => 0x6D61696E, // 'main' in hex
         };
     }
+    
+    /// Get the data directory name for the network
+    pub fn getDataDir(self: NetworkType) []const u8 {
+        return switch (self) {
+            .testnet => "zeicoin_data_testnet",
+            .mainnet => "zeicoin_data_mainnet",
+        };
+    }
 };
 
 /// Current network configuration

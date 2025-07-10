@@ -330,7 +330,7 @@ fn loadWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const wallet_path = try database.getWalletPath(wallet_name);
     defer allocator.free(wallet_path);
 
-    const password = "zen";
+    const password = if (std.mem.eql(u8, wallet_name, "default_miner")) "zen_miner" else "zen";
     try zen_wallet.loadFromFile(wallet_path, password);
 
     const address = zen_wallet.getAddress() orelse return error.WalletLoadFailed;
@@ -430,7 +430,7 @@ fn handleBalanceCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     print("💰 Wallet '{s}' balance:\n", .{wallet_name});
     print("   ✅ Mature (spendable): {s}\n", .{mature_display});
     if (balance_info.immature > 0) {
-        print("   ⏳ Immature (pending): {s}\n", .{immature_display});
+        print("   ⏳ Immature (not spendable): {s}\n", .{immature_display});
         print("   📊 Total balance: {s}\n", .{total_display});
     }
     
@@ -878,7 +878,7 @@ fn loadWalletForOperation(allocator: std.mem.Allocator, wallet_name: []const u8)
     defer allocator.free(wallet_path);
 
     // Use appropriate password based on wallet name
-    const password = if (std.mem.eql(u8, wallet_name, "server_miner")) "zen_miner" else "zen";
+    const password = if (std.mem.eql(u8, wallet_name, "server_miner") or std.mem.eql(u8, wallet_name, "default_miner")) "zen_miner" else "zen";
     zen_wallet.loadFromFile(wallet_path, password) catch |err| {
         print("❌ Failed to load wallet '{s}': {}\n", .{wallet_name, err});
         return error.WalletNotFound;

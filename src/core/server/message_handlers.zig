@@ -9,6 +9,11 @@ const types = @import("../types/types.zig");
 // Global handler for function pointer access
 var global_handler: ?*MessageHandlerImpl = null;
 
+// Clear global handler (call during cleanup)
+pub fn clearGlobalHandler() void {
+    global_handler = null;
+}
+
 /// Message handler implementation that holds blockchain reference
 pub const MessageHandlerImpl = struct {
     blockchain: *zen.ZeiCoin,

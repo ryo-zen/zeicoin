@@ -27,6 +27,7 @@ pub const NetworkManager = struct {
     server: ?net.Server,
     message_handler: MessageHandler,
     running: bool,
+    stopped: bool,
     
     const Self = @This();
     
@@ -41,6 +42,7 @@ pub const NetworkManager = struct {
             .server = null,
             .message_handler = handler,
             .running = false,
+            .stopped = false,
         };
     }
     
@@ -78,18 +80,51 @@ pub const NetworkManager = struct {
     
     /// Run peer connection in thread
     fn runPeerConnection(self: *Self, peer: *Peer) void {
+        // Check if we're shutting down at the very start
+        if (!self.running) {
+            std.log.debug("Peer connection aborted - network shutting down", .{});
+            return;
+        }
+        
+        // Attempt connection
         const stream = net.tcpConnectToAddress(peer.address) catch |err| {
+            // Check running state before ANY access to self
+            if (!self.running) {
+                std.log.debug("Connection failed during shutdown, skipping cleanup", .{});
+                return;
+            }
+            
+            // Only log and remove if still running
             std.log.err("Failed to connect to {}: {}", .{ peer.address, err });
             self.peer_manager.removePeer(peer.id);
             return;
         };
         
+        // Check again before initializing connection
+        if (!self.running) {
+            stream.close();
+            return;
+        }
+        
         var conn = PeerConnection.init(self.allocator, peer, stream, self.message_handler);
         defer conn.deinit();
         
+        // Run connection loop
         conn.run() catch |err| {
+            // Check running state before logging
+            if (!self.running) {
+                std.log.debug("Peer error during shutdown, skipping log", .{});
+                return;
+            }
+            
             std.log.err("Peer {} connection error: {}", .{ peer, err });
         };
+        
+        // Final check before peer removal
+        if (!self.running) {
+            std.log.debug("Skipping peer removal during shutdown", .{});
+            return;
+        }
         
         self.peer_manager.removePeer(peer.id);
     }
@@ -124,19 +159,57 @@ pub const NetworkManager = struct {
     }
     
     fn handleIncomingConnection(self: *Self, peer: *Peer, stream: net.Stream) void {
+        // Check if shutting down
+        if (!self.running) {
+            stream.close();
+            return;
+        }
+        
         var conn = PeerConnection.init(self.allocator, peer, stream, self.message_handler);
         defer conn.deinit();
         
         conn.run() catch |err| {
-            std.log.err("Incoming peer {} error: {}", .{ peer, err });
+            // Only log if still running
+            if (self.running) {
+                std.log.err("Incoming peer {} error: {}", .{ peer, err });
+            }
         };
         
-        self.peer_manager.removePeer(peer.id);
+        // Only remove peer if still running
+        if (self.running) {
+            self.peer_manager.removePeer(peer.id);
+        }
     }
     
     /// Stop network manager
     pub fn stop(self: *Self) void {
+        // Prevent multiple stop calls
+        if (self.stopped) return;
+        self.stopped = true;
+        
+        // Signal shutdown first - this must happen before ANY cleanup
         self.running = false;
+        
+        // Give threads a moment to see the running flag change
+        std.time.sleep(100 * std.time.ns_per_ms);
+        
+        // Stop peer manager to close all peer connections
+        // This will set all peers to disconnected state
+        self.peer_manager.stop();
+        
+        // Deinit the server to unblock accept()
+        // Do this AFTER peer manager stop so existing connections can finish
+        if (self.server) |*server| {
+            server.deinit();
+            self.server = null;
+        }
+        
+        // CRITICAL: Must wait for all detached threads to finish
+        // Network threads check self.running before accessing peer_manager
+        // 3 seconds should be enough for all threads to exit cleanly
+        std.log.info("Waiting for network threads to finish...", .{});
+        std.time.sleep(3000 * std.time.ns_per_ms);
+        std.log.info("Network shutdown complete", .{});
     }
     
     /// Broadcast to all peers

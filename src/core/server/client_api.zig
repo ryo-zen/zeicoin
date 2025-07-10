@@ -623,10 +623,10 @@ pub const ClientApiServer = struct {
         var wallet_instance = wallet.Wallet.init(self.allocator);
         defer wallet_instance.deinit();
         
-        const wallet_path = try std.fmt.allocPrint(self.allocator, "{s}.wallet", .{wallet_name});
+        const wallet_path = try std.fmt.allocPrint(self.allocator, "{s}/wallets/{s}.wallet", .{types.CURRENT_NETWORK.getDataDir(), wallet_name});
         defer self.allocator.free(wallet_path);
         
-        wallet_instance.loadFromFile(wallet_path, "") catch |err| {
+        wallet_instance.loadFromFile(wallet_path, "zen") catch |err| {
             const error_msg = try std.fmt.allocPrint(
                 self.allocator,
                 "ERROR: Failed to load wallet '{s}': {}\n",

@@ -144,6 +144,17 @@ pub const PeerManager = struct {
         self.known_addresses.deinit();
     }
     
+    /// Stop all peer connections gracefully
+    pub fn stop(self: *Self) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        
+        // Mark all peers as disconnected
+        for (self.peers.items) |peer| {
+            peer.state = .disconnected;
+        }
+    }
+    
     /// Add a new peer connection
     pub fn addPeer(self: *Self, address: net.Address) !*Peer {
         self.mutex.lock();
