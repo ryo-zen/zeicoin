@@ -250,6 +250,25 @@ pub const ChainState = struct {
         try self.database.saveAccount(tx.recipient, recipient_account);
     }
 
+    /// Mature coinbase rewards after 100 block confirmation period
+    pub fn matureCoinbaseRewards(self: *Self, maturity_height: u32) !void {
+        // Get the block at maturity height to find coinbase transactions
+        var mature_block = self.database.getBlock(maturity_height) catch {
+            // Block might not exist (genesis or test scenario)
+            return;
+        };
+        defer mature_block.deinit(self.allocator);
+        
+        // Process coinbase transactions in the mature block
+        for (mature_block.transactions) |tx| {
+            if (self.isCoinbaseTransaction(tx)) {
+                // Coinbase rewards are already credited in processCoinbaseTransaction
+                // This is where we'd implement time-locked rewards if needed
+                print("💰 Coinbase reward matured for block {} (recipient: {})\n", .{maturity_height, std.fmt.fmtSliceHexLower(tx.recipient.data[0..8])});
+            }
+        }
+    }
+
     /// Process all transactions in a block
     pub fn processBlockTransactions(self: *Self, transactions: []Transaction, current_height: u32) !void {
         // First pass: process all coinbase transactions

@@ -75,10 +75,16 @@ pub const StatusReporter = struct {
     }
     
     pub fn getStatus(self: *StatusReporter) !types.BlockchainStatus {
+        // Get mempool count from blockchain's mempool manager
+        const mempool_count = if (self.blockchain.mempool_manager) |mempool| 
+            mempool.getTransactionCount() 
+        else 
+            0;
+            
         return types.BlockchainStatus{
             .height = try self.database.getHeight(),
             .account_count = try self.database.getAccountCount(),
-            .mempool_count = 0, // TODO: Get from MempoolManager
+            .mempool_count = mempool_count,
             .network_peers = if (self.network.*) |n| n.peers.items.len else 0,
             .connected_peers = if (self.network.*) |n| n.getConnectedPeers() else 0,
         };

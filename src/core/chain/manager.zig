@@ -3,6 +3,7 @@
 // Provides high-level API for blockchain operations
 
 const std = @import("std");
+const print = std.debug.print;
 const types = @import("../types/types.zig");
 const util = @import("../util/util.zig");
 const db = @import("../storage/db.zig");
@@ -109,9 +110,9 @@ pub const ChainManager = struct {
     pub fn getChainState(self: *Self) !ChainStateInfo {
         return ChainStateInfo{
             .height = try self.operations.getHeight(),
-            .total_work = 0, // TODO: implement in operations
+            .total_work = try self.operations.calculateTotalWork(),
             .current_difficulty = try self.operations.calculateNextDifficulty(),
-            .mempool_size = 0, // TODO: implement mempool size tracking
+            .mempool_size = try self.getMempoolSize(),
         };
     }
 
@@ -135,11 +136,28 @@ pub const ChainManager = struct {
         try self.reorganization.handleChainReorganization(new_tip);
     }
 
+    /// Get current mempool size
+    fn getMempoolSize(self: *Self) !usize {
+        // Get mempool size from blockchain if available
+        if (self.blockchain.mempool_manager) |mempool| {
+            return mempool.getTransactionCount();
+        }
+        return 0;
+    }
+
     /// Initialize blockchain with genesis block
     pub fn initializeWithGenesis(self: *Self, network: types.Network) !void {
-        _ = self;
-        _ = network;
-        // TODO: Use Genesis component to initialize chain
-        return error.NotImplemented;
+        // Use the Genesis component to create and save genesis block
+        const genesis = @import("genesis.zig");
+        const genesis_block = try genesis.createGenesisBlock(self.allocator, network);
+        defer genesis_block.deinit(self.allocator);
+        
+        // Save genesis block at height 0
+        try self.database.saveBlock(0, genesis_block);
+        
+        // Process genesis transactions to initialize accounts
+        try self.chain_state.processBlockTransactions(genesis_block.transactions, 0);
+        
+        print("✅ Genesis block initialized for network {}\n", .{network});
     }
 };

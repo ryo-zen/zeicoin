@@ -265,17 +265,55 @@ pub const SyncManager = struct {
     
     /// Start traditional block-by-block sync
     fn startTraditionalSync(self: *Self) !void {
-        _ = self; // TODO: Implement traditional sync protocol integration
-        // Implementation will be extracted to protocol/block_sync.zig
         print("🔄 Starting traditional sync...\n", .{});
-        // TODO: Extract traditional sync logic from node.zig
+        
+        // Find best peer for sync
+        if (self.blockchain.network) |network| {
+            if (network.peer_manager.getBestPeerForSync()) |peer| {
+                self.sync_peer = peer;
+                self.target_height = peer.height;
+                
+                // Use the network sync manager for traditional sync
+                if (self.blockchain.sync_manager) |sync_mgr| {
+                    try sync_mgr.startSync();
+                    print("✅ Traditional sync started with peer height {}\n", .{peer.height});
+                } else {
+                    print("⚠️ No sync manager available\n");
+                }
+            } else {
+                print("❌ No peers available for traditional sync\n");
+                return error.NoPeersAvailable;
+            }
+        } else {
+            print("❌ Network not initialized\n");
+            return error.NetworkNotInitialized;
+        }
     }
 
     /// Start block download phase for headers-first sync
     fn startBlockDownload(self: *Self) !void {
-        _ = self; // TODO: Implement headers-first protocol integration
-        // Implementation will be extracted to protocol/headers_first.zig
         print("📦 Starting block download phase...\n", .{});
-        // TODO: Extract block download logic from node.zig
+        
+        // Find best peer for headers-first sync
+        if (self.blockchain.network) |network| {
+            if (network.peer_manager.getBestPeerForSync()) |peer| {
+                self.sync_peer = peer;
+                self.target_height = peer.height;
+                
+                // Use headers-first protocol
+                if (self.blockchain.sync_manager) |sync_mgr| {
+                    try sync_mgr.startHeadersFirstSync(peer, peer.height);
+                    print("✅ Headers-first sync started with peer height {}\n", .{peer.height});
+                } else {
+                    print("⚠️ No sync manager available for headers-first sync\n");
+                }
+            } else {
+                print("❌ No peers available for headers-first sync\n");
+                return error.NoPeersAvailable;
+            }
+        } else {
+            print("❌ Network not initialized\n");
+            return error.NetworkNotInitialized;
+        }
     }
 };

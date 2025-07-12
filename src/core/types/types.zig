@@ -264,9 +264,9 @@ pub const Transaction = struct {
         };
 
         // Serialize and hash the transaction data
-        // TODO: This fixed buffer size is a limitation - transactions with large extra_data
-        // (approaching 1KB) will panic. Should use dynamic allocation for large transactions.
-        var buffer: [1024]u8 = undefined;
+        // Use larger buffer to handle transactions with extra_data up to limit
+        // Buffer size matches TransactionLimits.MAX_TX_SIZE (100KB)
+        var buffer: [TransactionLimits.MAX_TX_SIZE]u8 = undefined;
         var stream = std.io.fixedBufferStream(&buffer);
         const writer = stream.writer();
 

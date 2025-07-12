@@ -166,8 +166,11 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair) !types.Block
         const block_height = try ctx.blockchain.getHeight();
         try ctx.database.saveBlock(block_height, new_block);
         
-        // TODO: Check for matured coinbase rewards when implemented
-        // try ctx.blockchain.matureCoinbaseRewards(block_height);
+        // Check for matured coinbase rewards (100 block maturity)
+        if (block_height >= types.COINBASE_MATURITY) {
+            const maturity_height = block_height - types.COINBASE_MATURITY;
+            try ctx.blockchain.chain_state.matureCoinbaseRewards(maturity_height);
+        }
 
         // Clean mempool of confirmed transactions
         try ctx.mempool_manager.cleanAfterBlock(new_block);

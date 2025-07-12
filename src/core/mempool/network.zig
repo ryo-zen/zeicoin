@@ -154,13 +154,26 @@ pub const NetworkHandler = struct {
             // we might be behind. Check peer heights and trigger sync if needed.
             const highest_peer_height = network.getHighestPeerHeight();
             
-            // For this check, we'd need access to chain state
-            // This is a placeholder for the logic
-            _ = transaction;
-            _ = highest_peer_height;
+            // Auto-sync trigger: if peers are significantly ahead, start sync
+            const current_height = self.mempool_manager.blockchain.getHeight() catch 0;
             
-            // TODO: Implement auto-sync trigger logic
-            print("🔄 Auto-sync trigger check (placeholder)\\n", .{});
+            // If peers are more than 2 blocks ahead, trigger sync
+            if (highest_peer_height > current_height + 2) {
+                print("🔄 Peers are {} blocks ahead, triggering auto-sync\n", .{highest_peer_height - current_height});
+                
+                // Use the sync manager to start sync if available
+                if (self.mempool_manager.blockchain.sync_manager) |sync_mgr| {
+                    sync_mgr.startSync() catch |err| {
+                        print("⚠️ Auto-sync failed to start: {}\n", .{err});
+                    };
+                } else {
+                    print("⚠️ No sync manager available for auto-sync\n");
+                }
+            } else {
+                print("ℹ️ Chain up to date, no auto-sync needed\n");
+            }
+            
+            _ = transaction; // Transaction already processed
         }
     }
     

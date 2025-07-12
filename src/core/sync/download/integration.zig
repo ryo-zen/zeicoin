@@ -125,10 +125,15 @@ pub const EnhancedSyncManager = struct {
         }
         
         // Fall back to traditional sync handling
-        // This would need integration with the existing sync block handling
         print("📦 Block {} forwarded to traditional sync\n", .{height});
         
-        // TODO: Forward to sync_manager.handleSyncBlock or similar
+        // Forward to sync manager for traditional block processing
+        if (self.sync_manager.sync_manager) |sm| {
+            try sm.handleSyncBlock(block);
+        } else {
+            // Direct blockchain integration if no sync manager
+            try self.sync_manager.blockchain.handleIncomingBlock(block, from_peer);
+        }
     }
     
     /// Process completed blocks from parallel downloads
@@ -140,10 +145,15 @@ pub const EnhancedSyncManager = struct {
         while (self.parallel_downloads.getNextCompletedBlock(next_height)) |block| {
             print("🔄 Processing downloaded block at height {}\n", .{next_height});
             
-            // Forward to blockchain for processing
-            // This would integrate with ChainProcessor.addBlockToChain
-            _ = block; // TODO: Actually process the block
-            // try self.sync_manager.blockchain.chain_processor.addBlockToChain(block, next_height);
+            // Validate the block before adding to chain
+            if (try self.sync_manager.blockchain.validateSyncBlock(block, next_height)) {
+                // Add validated block to chain
+                try self.sync_manager.blockchain.chain_processor.addBlockToChain(block, next_height);
+                print("✅ Block {} successfully added to chain\n", .{next_height});
+            } else {
+                print("❌ Block {} validation failed, skipping\n", .{next_height});
+                // Block cleanup handled by blockchain
+            }
             
             next_height += 1;
         }

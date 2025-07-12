@@ -3,6 +3,7 @@
 // Uses the extracted sync protocols from src/core/sync/
 
 const std = @import("std");
+const print = std.debug.print;
 const types = @import("../types/types.zig");
 const util = @import("../util/util.zig");
 const headerchain = @import("headerchain.zig");
@@ -312,9 +313,19 @@ pub const SyncManager = struct {
             
             // Request the block from peer
             if (self.sync_peer) |peer| {
-                _ = peer;
+                // Get block hash from header chain if available
+                if (self.blockchain.header_chain.getHeader(height)) |header| {
+                    const block_hash = header.hash();
+                    peer.sendGetBlockByHash(block_hash) catch |err| {
+                        print("⚠️ Failed to request block {} by hash: {}\n", .{height, err});
+                        // Fallback to height-based request
+                        peer.sendGetBlockByHeight(height) catch continue;
+                    };
+                } else {
+                    // Fallback to height-based request if no header available
+                    peer.sendGetBlockByHeight(height) catch continue;
+                }
                 requested += 1;
-                // TODO: Implement proper block request using block hash from header chain
             }
             
             if (requested >= 8) break; // Batch size limit
@@ -323,9 +334,21 @@ pub const SyncManager = struct {
     
     /// Get height for a block by its hash
     fn getHeightForBlock(self: *SyncManager, block_hash: types.BlockHash) !u32 {
-        _ = self;
-        _ = block_hash;
-        // TODO: Implement header chain lookup
+        // Try header chain lookup first
+        if (self.blockchain.header_chain.getHeightForHash(block_hash)) |height| {
+            return height;
+        }
+        
+        // Fallback: scan our download queue for known heights
+        for (self.blocks_to_download.items) |height| {
+            if (self.blockchain.header_chain.getHeader(height)) |header| {
+                const header_hash = header.hash();
+                if (std.mem.eql(u8, &block_hash, &header_hash)) {
+                    return height;
+                }
+            }
+        }
+        
         return error.HeightNotFound;
     }
     

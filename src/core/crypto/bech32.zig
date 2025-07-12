@@ -115,14 +115,14 @@ pub fn encodeBech32Check(allocator: std.mem.Allocator, hrp: []const u8, data: []
     return encodeBech32(allocator, hrp, data);
 }
 
-// Equivalent to Hash160ToAddress, creating a Bech32 address from a hash
+// Create a Bech32 address from a BLAKE3 hash (modern, fast address generation)
 pub fn hash160ToAddress(allocator: std.mem.Allocator, hash160: []const u8, hrp: []const u8) ![]u8 {
     // Add version byte (similar to ADDRESSVERSION in original)
     var data = std.ArrayList(u8).init(allocator);
     defer data.deinit();
 
     try data.append(0); // Version byte, e.g., 0 for P2WPKH
-    try data.appendSlice(hash160); // Append the 20-byte hash160
+    try data.appendSlice(hash160); // Append the 20-byte BLAKE3 hash
 
     return encodeBech32(allocator, hrp, data.items);
 }

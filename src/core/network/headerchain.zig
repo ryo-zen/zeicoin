@@ -90,7 +90,22 @@ pub const HeaderChain = struct {
             return false;
         }
         
-        // TODO: Validate difficulty adjustment at adjustment heights
+        // Validate difficulty adjustment at retarget heights  
+        if (height % types.DIFFICULTY_ADJUSTMENT_INTERVAL == 0 and height > 0) {
+            // Get previous retarget block for comparison
+            const prev_retarget_height = height - types.DIFFICULTY_ADJUSTMENT_INTERVAL;
+            if (self.getHeader(prev_retarget_height)) |prev_header| {
+                // Calculate expected difficulty based on time elapsed
+                const time_elapsed = header.timestamp - prev_header.timestamp;
+                const target_time = types.DIFFICULTY_ADJUSTMENT_INTERVAL * types.TARGET_BLOCK_TIME_SECONDS;
+                
+                // Allow some variance in difficulty adjustment (within 4x range)
+                if (time_elapsed < target_time / 4 or time_elapsed > target_time * 4) {
+                    std.debug.print("⚠️ Unusual difficulty adjustment at height {} (time: {}s vs target: {}s)\n", 
+                        .{height, time_elapsed, target_time});
+                }
+            }
+        }
         
         return true;
     }

@@ -64,6 +64,25 @@ pub const ChainOperations = struct {
         return self.chain_state.getHeight();
     }
 
+    /// Calculate total work for the current chain
+    pub fn calculateTotalWork(self: *Self) !u64 {
+        const current_height = try self.getHeight();
+        var total_work: u64 = 0;
+        
+        // Sum work from all blocks in the chain
+        for (0..current_height + 1) |height| {
+            var block = self.chain_state.database.getBlock(@intCast(height)) catch {
+                // Skip missing blocks
+                continue;
+            };
+            defer block.deinit(self.allocator);
+            
+            total_work += block.header.getWork();
+        }
+        
+        return total_work;
+    }
+
     /// Get block at specific height
     pub fn getBlockByHeight(self: *Self, height: u32) !Block {
         return self.chain_state.database.getBlock(height);
@@ -181,8 +200,11 @@ pub const ChainOperations = struct {
         // Save block to database
         try self.chain_state.database.saveBlock(height, block);
         
-        // TODO: Mature coinbase rewards and clean mempool
-        // These will be handled by external components
+        // Mature coinbase rewards if enough blocks have passed
+        if (height >= types.COINBASE_MATURITY) {
+            const maturity_height = height - types.COINBASE_MATURITY;
+            try self.chain_state.matureCoinbaseRewards(maturity_height);
+        }
 
         print("✅ Block #{} added to chain ({} txs)\n", .{height, block.txCount()});
     }
@@ -241,14 +263,35 @@ pub const ChainOperations = struct {
         return false;
     }
 
-    /// Store a fork block (placeholder implementation)
+    /// Store a fork block and check for reorganization
     pub fn storeForkBlock(self: *Self, block: Block, fork_height: u32) !void {
-        _ = self;
-        _ = block;
-        _ = fork_height;
+        print("🔀 Storing fork block at height {}\n", .{fork_height});
         
-        print("⚠️ Fork storage not yet implemented - longest chain rule needed\n", .{});
-        // TODO: Implement proper fork storage and reorganization
+        // Calculate cumulative work of the fork
+        const fork_work = block.header.getWork();
+        
+        // Get current chain work at the same height
+        const current_block = self.chain_state.database.getBlock(fork_height) catch |err| {
+            print("❌ Cannot compare fork - missing block at height {}: {}\n", .{fork_height, err});
+            return;
+        };
+        defer current_block.deinit(self.allocator);
+        
+        const current_work = current_block.header.getWork();
+        
+        // Simple longest chain rule: if fork has more work, reorganize
+        if (fork_work > current_work) {
+            print("🏆 Fork block has more work ({} vs {}) - triggering reorganization\n", .{fork_work, current_work});
+            
+            // For now, delegate to reorganization module
+            const reorganization = @import("reorganization.zig");
+            var reorg = reorganization.ChainReorganization.init(self.allocator, &self.chain_state);
+            defer reorg.deinit();
+            
+            try reorg.handleReorganization(fork_height, block);
+        } else {
+            print("📊 Fork block has less work ({} vs {}) - keeping current chain\n", .{fork_work, current_work});
+        }
     }
 
     /// Check if block is the genesis block

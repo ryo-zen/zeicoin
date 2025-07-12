@@ -125,15 +125,22 @@ pub const ChainProcessor = struct {
     }
     
     fn matureCoinbaseRewards(self: *ChainProcessor, current_height: u32) !void {
-        _ = self;
-        _ = current_height;
-        // TODO: Implement coinbase maturity when ChainState has matureCoinbaseReward method
+        // Check if we have mature coinbase rewards (100 block maturity)
+        if (current_height >= types.COINBASE_MATURITY) {
+            const maturity_height = current_height - types.COINBASE_MATURITY;
+            try self.chain_state.matureCoinbaseRewards(maturity_height);
+        }
     }
     
     fn cleanMempool(self: *ChainProcessor, block: types.Block) void {
-        _ = self;
-        _ = block;
-        // TODO: Integrate with MempoolManager when available
+        // Clean mempool of transactions that were included in this block
+        if (self.blockchain.mempool_manager) |mempool| {
+            mempool.cleanAfterBlock(block) catch |err| {
+                print("⚠️ Failed to clean mempool after block: {}\n", .{err});
+            };
+        } else {
+            print("ℹ️ No mempool manager available for cleanup\n");
+        }
     }
     
     fn estimateCumulativeWork(self: *ChainProcessor, height: u32) !types.ChainWork {

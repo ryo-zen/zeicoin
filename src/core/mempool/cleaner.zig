@@ -216,9 +216,8 @@ pub const MempoolCleaner = struct {
     /// Check if transaction is a coinbase transaction
     fn isCoinbaseTransaction(self: *Self, tx: Transaction) bool {
         _ = self;
-        // In a more complete implementation, we'd check transaction properties
-        // For now, use a simple heuristic (this is a placeholder)
-        return tx.amount == types.ZenMining.BLOCK_REWARD;
+        // Coinbase transactions have zero sender address and nonce
+        return tx.sender.isZero() and tx.nonce == 0;
     }
     
     /// Get cleanup statistics
