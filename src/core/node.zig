@@ -430,9 +430,9 @@ pub const ZeiCoin = struct {
         try self.mempool_manager.handleIncomingTransaction(transaction);
     }
 
-    /// Estimate cumulative work for a block height (temporary until we store it properly)
-    pub fn estimateCumulativeWork(self: *ZeiCoin, height: u32) !types.ChainWork {
-        return try self.chain_query.estimateCumulativeWork(height);
+    /// Get cumulative work for the current chain (delegates to chain operations)
+    pub fn getTotalWork(self: *ZeiCoin) !types.ChainWork {
+        return try self.chain_operations.calculateTotalWork();
     }
 
     /// Handle chain reorganization when a better chain is found

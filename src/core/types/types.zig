@@ -147,19 +147,19 @@ pub const Address = extern struct {
         return @enumFromInt(self.version);
     }
 
-    /// Convert to legacy format for display (temporary compatibility)
-    pub fn toLegacyBytes(self: Address) [32]u8 {
-        var result: [32]u8 = undefined;
+    /// Convert to standard bytes format for serialization
+    pub fn toBytes(self: Address) [21]u8 {
+        var result: [21]u8 = undefined;
         result[0] = self.version;
         @memcpy(result[1..], &self.hash);
         return result;
     }
 
-    /// Create from legacy bytes (for migration)
-    pub fn fromLegacyBytes(bytes: [32]u8) Address {
+    /// Create from standard bytes format
+    pub fn fromBytes(bytes: [21]u8) Address {
         return Address{
-            .version = 0, // Assume P2PKH for legacy
-            .hash = bytes[0..31].*,
+            .version = bytes[0],
+            .hash = bytes[1..21].*,
         };
     }
 

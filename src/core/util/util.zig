@@ -78,11 +78,26 @@ pub fn addTimeData(ip: u32, network_time: i64) !void {
         time_offset = median;
 
         if (@abs(median) > 5 * 60) {
-            // Only let other nodes change our clock so far before we
-            // would go to NTP servers (not implemented yet)
+            // Large time offset detected - use time synchronizer for verification
             if (debug_mode) {
-                print("WARNING: Time offset is large: {:+} minutes\n", .{@divTrunc(median, 60)});
+                print("WARNING: Time offset is large: {:+} minutes, using time sync module...\n", .{@divTrunc(median, 60)});
             }
+            
+            // Use the dedicated time synchronization module
+            const time_mod = @import("../time/time.zig");
+            var time_sync = time_mod.TimeSynchronizer.init(.{ .debug = debug_mode });
+            
+            // Let time synchronizer handle the verification logic
+            var temp_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            defer temp_allocator.deinit();
+            time_sync.updateFromPeerConsensus(temp_allocator.allocator(), &[_]i64{median + std.time.timestamp()}) catch |err| {
+                if (debug_mode) {
+                    print("Time sync failed: {}, using peer consensus\n", .{err});
+                }
+                return median;
+            };
+            
+            time_offset = time_sync.getTimeOffset();
         }
 
         if (debug_mode) {
@@ -339,6 +354,7 @@ pub fn hash160(_: Allocator, data: []const u8) ![20]u8 {
     hasher.final(result[0..]);
     return result;
 }
+
 
 /// Print exception information (Zig equivalent)
 pub fn printException(err: anyerror, thread_name: []const u8) void {
