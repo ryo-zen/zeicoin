@@ -197,7 +197,7 @@ pub fn encodeAddress(allocator: std.mem.Allocator, address: types.Address, netwo
     };
     
     // Combine version and hash into 32-byte payload
-    var payload: [32]u8 = undefined;
+    var payload: [21]u8 = undefined;
     payload[0] = address.version;
     @memcpy(payload[1..], &address.hash);
     
@@ -283,7 +283,7 @@ fn parseHexAddress(hex_str: []const u8) !types.Address {
         .version = payload[0],
         .hash = undefined,
     };
-    @memcpy(&address.hash, payload[1..]);
+    @memcpy(&address.hash, payload[1..21]);
     return address;
 }
 

@@ -136,8 +136,8 @@ pub const Database = struct {
     /// Save account to file
     pub fn saveAccount(self: *Database, address: Address, account: Account) !void {
         // Create hex representation of address
-        var hex_buffer: [64]u8 = undefined;
-        const addr_bytes = address.toLegacyBytes();
+        var hex_buffer: [42]u8 = undefined;
+        const addr_bytes = address.toBytes();
         _ = std.fmt.bufPrint(&hex_buffer, "{}", .{std.fmt.fmtSliceHexLower(&addr_bytes)}) catch unreachable;
         
         // Create filename: accounts/1a2b3c4d...hex.account
@@ -172,8 +172,8 @@ pub const Database = struct {
         const accounts_dir_slice = self.accounts_dir[0..self.accounts_dir_len];
         
         // Create hex representation of address
-        var hex_buffer: [64]u8 = undefined;
-        const addr_bytes = address.toLegacyBytes();
+        var hex_buffer: [42]u8 = undefined;
+        const addr_bytes = address.toBytes();
         _ = std.fmt.bufPrint(&hex_buffer, "{}", .{std.fmt.fmtSliceHexLower(&addr_bytes)}) catch unreachable;
         
         // Create filename

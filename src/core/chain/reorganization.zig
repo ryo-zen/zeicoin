@@ -33,12 +33,7 @@ pub const ChainReorganization = struct {
     const Self = @This();
 
     /// Initialize ChainReorganization with all required components
-    pub fn init(
-        allocator: std.mem.Allocator,
-        chain_state: *ChainState,
-        chain_validator: *ChainValidator,
-        chain_operations: *ChainOperations
-    ) Self {
+    pub fn init(allocator: std.mem.Allocator, chain_state: *ChainState, chain_validator: *ChainValidator, chain_operations: *ChainOperations) Self {
         return .{
             .fork_manager = forkmanager.ForkManager.init(allocator),
             .chain_state = chain_state,
@@ -59,13 +54,13 @@ pub const ChainReorganization = struct {
     // - backupOrphanedTransactions()
     // - replayCoinbaseTransaction()
     // - replayRegularTransaction()
-    
+
     // Reorganization Methods extracted from node.zig
-    
+
     /// Handle chain reorganization process
     pub fn handleChainReorganization(self: *Self, new_block: Block, new_chain_tip: Hash) !void {
         const current_height = try self.chain_state.getHeight();
-        
+
         print("🔄 Starting reorganization from height {}\n", .{current_height});
 
         // Find common ancestor (simplified - assume rebuild from genesis for safety)
@@ -88,15 +83,15 @@ pub const ChainReorganization = struct {
     /// O(log n) performance vs O(n) for linear search
     pub fn findCommonAncestor(self: *Self, new_tip_hash: Hash) !u32 {
         const current_height = try self.chain_state.getHeight();
-        
+
         // Binary search for the common ancestor
         var low: u32 = 0;
         var high: u32 = current_height;
         var common_height: u32 = 0;
-        
+
         while (low <= high) {
             const mid = low + (high - low) / 2;
-            
+
             // Get block at mid height from our current chain
             const our_block = self.chain_state.database.getBlock(mid) catch {
                 // If block doesn't exist, try lower
@@ -105,9 +100,9 @@ pub const ChainReorganization = struct {
                 continue;
             };
             defer our_block.deinit(self.allocator);
-            
+
             const our_hash = our_block.hash();
-            
+
             // Check if this hash exists in the new chain by comparing with new tip ancestry
             if (self.isAncestorOf(our_hash, new_tip_hash)) {
                 // This block is common, try to find a higher one
@@ -119,22 +114,146 @@ pub const ChainReorganization = struct {
                 high = mid - 1;
             }
         }
-        
+
         print("🔍 Found common ancestor at height {} using binary search\n", .{common_height});
         return common_height;
     }
-    
+
     /// Check if block_hash is an ancestor of tip_hash (helper for binary search)
-    fn isAncestorOf(self: *Self, block_hash: Hash, tip_hash: Hash) bool {
-        _ = self;
-        _ = tip_hash;
-        
-        // Simplified check: for now, assume blocks with earlier timestamps are ancestors
-        // In a full implementation, we'd traverse the block chain or use a block index
-        
-        // For demonstration, we'll do a simple hash comparison
-        // This is a placeholder that should be enhanced with proper chain traversal
-        return std.mem.eql(u8, &block_hash, &Hash.init());
+    /// Modern height-based traversal with O(height_diff) performance and memory safety
+    fn isAncestorOf(self: *Self, ancestor_hash: Hash, descendant_hash: Hash) bool {
+        // Input validation: hashes must not be identical
+        if (std.mem.eql(u8, &ancestor_hash, &descendant_hash)) return false;
+
+        // Input validation: hashes must not be zero (invalid)
+        const zero_hash = std.mem.zeroes([32]u8);
+        if (std.mem.eql(u8, &ancestor_hash, &zero_hash) or
+            std.mem.eql(u8, &descendant_hash, &zero_hash)) return false;
+
+        // Fast path: get heights with proper error handling
+        const ancestor_height = self.getBlockHeight(ancestor_hash) catch |err| {
+            print("⚠️ Failed to get ancestor height: {}\n", .{err});
+            return false;
+        };
+        const descendant_height = self.getBlockHeight(descendant_hash) catch |err| {
+            print("⚠️ Failed to get descendant height: {}\n", .{err});
+            return false;
+        };
+
+        // Logic validation: ancestor must have lower height than descendant
+        if (ancestor_height >= descendant_height) return false;
+
+        // Security: limit traversal depth to prevent DoS attacks
+        const height_diff = descendant_height - ancestor_height;
+        const MAX_TRAVERSAL_DEPTH = 10000; // Configurable safety limit
+        if (height_diff > MAX_TRAVERSAL_DEPTH) {
+            print("⚠️ Chain traversal depth {} exceeds safety limit {}\n", .{ height_diff, MAX_TRAVERSAL_DEPTH });
+            return false;
+        }
+
+        // Traverse backwards from descendant to ancestor height with memory safety
+        var current_hash = descendant_hash;
+        var current_height = descendant_height;
+        var steps: u32 = 0;
+
+        while (current_height > ancestor_height and steps < height_diff + 1) {
+            // Memory-safe block retrieval with proper cleanup
+            const block = self.chain_state.database.getBlockByHash(current_hash) catch |err| {
+                print("⚠️ Failed to retrieve block at height {}: {}\n", .{ current_height, err });
+                return false;
+            };
+            defer block.deinit(self.allocator); // Guaranteed cleanup
+
+            // Validate block header integrity before accessing prev_hash
+            if (block.header.version == 0) {
+                print("⚠️ Invalid block header detected at height {}\n", .{current_height});
+                return false;
+            }
+
+            // Extract previous hash safely
+            current_hash = block.header.prev_hash;
+            current_height -= 1;
+            steps += 1;
+
+            // Safety check: ensure we're making progress
+            if (steps > height_diff + 1) {
+                print("⚠️ Traversal exceeded expected steps\n");
+                return false;
+            }
+
+            // Check if we reached genesis (prev_hash is zero) - this is valid
+            if (std.mem.eql(u8, &current_hash, &zero_hash)) {
+                // We've reached genesis, ancestor cannot be found
+                return false;
+            }
+        }
+
+        // Final validation: check if we found the ancestor at the expected height
+        const found_ancestor = std.mem.eql(u8, &current_hash, &ancestor_hash);
+
+        if (found_ancestor) {
+            print("✅ Confirmed: block is ancestor (traversed {} steps)\n", .{steps});
+        }
+
+        return found_ancestor;
+    }
+
+    /// Get block height by hash with memory safety and performance optimization
+    /// TODO: In production, replace with O(1) block index/cache lookup
+    fn getBlockHeight(self: *Self, block_hash: Hash) !u32 {
+        // Input validation
+        const zero_hash = std.mem.zeroes([32]u8);
+        if (std.mem.eql(u8, &block_hash, &zero_hash)) {
+            return error.InvalidHash;
+        }
+
+        // Get current chain height with error handling
+        const current_height = self.chain_state.getHeight() catch |err| {
+            print("⚠️ Failed to get current chain height: {}\n", .{err});
+            return err;
+        };
+
+        // Security: prevent excessive search
+        const MAX_SEARCH_DEPTH = 50000; // Configurable limit
+        const search_limit = @min(current_height + 1, MAX_SEARCH_DEPTH);
+
+        // Optimization: search backwards from current height (recent blocks more likely)
+        var height = current_height;
+        var searches: u32 = 0;
+
+        while (searches < search_limit) {
+            // Memory-safe block retrieval
+            const block = self.chain_state.database.getBlock(height) catch |err| {
+                // If block doesn't exist at this height, continue searching
+                if (err == error.NotFound or err == error.LoadFailed) {
+                    if (height == 0) break; // Reached genesis, not found
+                    height -= 1;
+                    searches += 1;
+                    continue;
+                } else {
+                    // Other errors are fatal
+                    print("⚠️ Database error at height {}: {}\n", .{ height, err });
+                    return err;
+                }
+            };
+            defer block.deinit(self.allocator); // Guaranteed memory cleanup
+
+            // Calculate hash and compare safely
+            const this_hash = block.hash();
+            if (std.mem.eql(u8, &this_hash, &block_hash)) {
+                print("✅ Found block at height {} (searched {} blocks)\n", .{ height, searches + 1 });
+                return height;
+            }
+
+            // Continue searching backwards
+            if (height == 0) break; // Reached genesis
+            height -= 1;
+            searches += 1;
+        }
+
+        // Block not found within search limits
+        print("⚠️ Block not found after searching {} blocks\n", .{searches});
+        return error.BlockNotFound;
     }
 
     /// Backup transactions from orphaned blocks to mempool
@@ -174,13 +293,13 @@ pub const ChainReorganization = struct {
             // In test scenarios, skip transaction if sender not found
             return;
         };
-        
+
         // Check if sender has sufficient balance (safety check)
         const total_cost = tx.amount + tx.fee;
         if (sender_account.balance < total_cost) {
             return; // Skip transaction if insufficient balance
         }
-        
+
         // Process transaction through chain state
         try self.chain_state.processTransaction(tx);
     }

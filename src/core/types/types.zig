@@ -108,10 +108,10 @@ pub const AddressVersion = enum(u8) {
     _,
 };
 
-// Future-proof versioned address structure (maintains 32-byte size)
+// Modern versioned address structure (21-byte format)
 pub const Address = extern struct {
     version: u8, // Address type/version
-    hash: [31]u8, // Address hash (1 byte less to fit version)
+    hash: [20]u8, // 20-byte address hash (modern standard)
 
     /// Create a P2PKH address from a public key
     pub fn fromPublicKey(public_key: [32]u8) Address {
@@ -120,7 +120,7 @@ pub const Address = extern struct {
             .version = @intFromEnum(AddressVersion.P2PKH),
             .hash = undefined,
         };
-        @memcpy(&addr.hash, full_hash[0..31]);
+        @memcpy(&addr.hash, full_hash[0..20]);
         return addr;
     }
 
@@ -128,13 +128,13 @@ pub const Address = extern struct {
     pub fn zero() Address {
         return Address{
             .version = 0,
-            .hash = std.mem.zeroes([31]u8),
+            .hash = std.mem.zeroes([20]u8),
         };
     }
 
     /// Check if this is a zero address
     pub fn isZero(self: Address) bool {
-        return self.version == 0 and std.mem.eql(u8, &self.hash, &std.mem.zeroes([31]u8));
+        return self.version == 0 and std.mem.eql(u8, &self.hash, &std.mem.zeroes([20]u8));
     }
 
     /// Compare two addresses for equality
