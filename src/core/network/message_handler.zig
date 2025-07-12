@@ -1,28 +1,15 @@
-// message_handler.zig - Network Message Handler
-// Handles incoming network messages and coordinates with blockchain
-// Extracted from node.zig for clean separation of network concerns
-
 const std = @import("std");
 const print = std.debug.print;
 
 const types = @import("../types/types.zig");
-const util = @import("../util/util.zig");
 const net = @import("peer.zig");
 const forkmanager = @import("../fork/main.zig");
-const headerchain = @import("headerchain.zig");
 const sync_mod = @import("../sync/sync.zig");
 
-// Forward declaration for blockchain dependency
 const ZeiCoin = @import("../node.zig").ZeiCoin;
-
-// Type aliases for clarity
 const Transaction = types.Transaction;
 const Block = types.Block;
-const BlockHeader = types.BlockHeader;
-const Hash = types.Hash;
 
-/// Network Message Handler - Coordinates network messages with blockchain
-/// Handles incoming blocks, transactions, and network coordination
 pub const NetworkMessageHandler = struct {
     allocator: std.mem.Allocator,
     blockchain: *ZeiCoin,
@@ -46,9 +33,9 @@ pub const NetworkMessageHandler = struct {
     /// Handle incoming block from network peer with longest chain consensus
     /// NOTE: We take ownership of the block - the caller transfers ownership to us.
     pub fn handleIncomingBlock(self: *Self, block: Block, peer: ?*net.Peer) !void {
-        // Take ownership and ensure cleanup
+        // Take ownership - we'll transfer it to chain_processor if accepted
         var owned_block = block;
-        defer owned_block.deinit(self.allocator);
+        // Note: Manual cleanup needed - we may transfer ownership
         
         // Log peer info if available
         if (peer) |p| {
@@ -60,12 +47,26 @@ pub const NetworkMessageHandler = struct {
         const current_height = try self.blockchain.getHeight();
         const block_height = current_height + 1; // Block would be at next height if accepted
 
+        // First validate the block before fork evaluation
+        const is_valid = self.blockchain.validateBlock(owned_block, block_height) catch |err| {
+            print("❌ Block validation failed: {}\n", .{err});
+            owned_block.deinit(self.allocator); // Clean up on validation failure
+            return;
+        };
+        
+        if (!is_valid) {
+            print("❌ Invalid block rejected\n", .{});
+            owned_block.deinit(self.allocator); // Clean up invalid block
+            return;
+        }
+
         // Calculate cumulative work for this block
         const block_work = owned_block.header.getWork();
         const cumulative_work = if (current_height > 0) parent_calc: {
             // Get parent block work
             var parent_block = self.blockchain.database.getBlock(current_height - 1) catch {
                 print("❌ Cannot find parent block for height {}\n", .{current_height - 1});
+                owned_block.deinit(self.allocator); // Clean up on error
                 return;
             };
             defer parent_block.deinit(self.allocator);
@@ -78,16 +79,19 @@ pub const NetworkMessageHandler = struct {
         // Evaluate block using fork manager
         const decision = self.blockchain.fork_manager.evaluateBlock(owned_block, block_height, cumulative_work) catch |err| {
             print("❌ Fork evaluation failed: {}\n", .{err});
+            owned_block.deinit(self.allocator); // Clean up on error
             return;
         };
 
         switch (decision) {
             .ignore => {
                 print("🌊 Block already seen - gracefully ignored\n", .{});
+                owned_block.deinit(self.allocator); // Clean up ignored block
                 return;
             },
             .store_orphan => {
                 print("🔀 Block stored as orphan - waiting for parent\n", .{});
+                // Note: ForkManager takes ownership when storing orphan, so no cleanup needed
 
                 // Auto-sync logic: If we're storing orphan blocks, we're likely behind
                 // The block was stored as orphan, which means it doesn't fit our current chain
@@ -107,26 +111,77 @@ pub const NetworkMessageHandler = struct {
                 if (chain_info.requires_reorg) {
                     print("🏆 New best chain detected! Starting reorganization...\n", .{});
                     // TODO: implement reorganization logic
+                    owned_block.deinit(self.allocator); // Clean up until reorg is implemented
                 } else {
-                    print("📈 Block extends side chain {}\n", .{chain_info.chain_index});
-                    // Just update the side chain for now
+                    // Block extends the main chain - add it!
+                    print("📈 Block extends main chain - adding to blockchain\n", .{});
+                    
+                    // Create a deep copy of the block for chain processor
+                    // This is necessary because broadcastNewBlock also needs the block
+                    var block_copy = try owned_block.dupe(self.allocator);
+                    
+                    // Transfer ownership to chain processor
+                    self.blockchain.chain_processor.addBlockToChain(block_copy, block_height) catch |err| {
+                        print("❌ Failed to add block to chain: {}\n", .{err});
+                        block_copy.deinit(self.allocator); // Clean up on error
+                        owned_block.deinit(self.allocator); // Clean up original too
+                        return;
+                    };
+                    // Note: chain_processor now owns block_copy
+                    
+                    // Broadcast the new block to peers (using original)
+                    self.broadcastNewBlock(owned_block) catch |err| {
+                        print("⚠️  Failed to broadcast block: {}\n", .{err});
+                    };
+                    // Cleanup handled by broadcastNewBlock
                 }
             },
             .new_best_chain => |chain_index| {
                 print("🏆 New best chain {} detected!\n", .{chain_index});
-                // TODO: implement new best chain logic
+                // For now, if this is chain 0 (main chain), add the block
+                if (chain_index == 0) {
+                    print("📈 Block creates new best chain - adding to blockchain\n", .{});
+                    
+                    // Create a deep copy of the block for chain processor
+                    // This is necessary because broadcastNewBlock also needs the block
+                    var block_copy = try owned_block.dupe(self.allocator);
+                    
+                    // Transfer ownership to chain processor
+                    self.blockchain.chain_processor.addBlockToChain(block_copy, block_height) catch |err| {
+                        print("❌ Failed to add block to chain: {}\n", .{err});
+                        block_copy.deinit(self.allocator); // Clean up on error
+                        owned_block.deinit(self.allocator); // Clean up original too
+                        return;
+                    };
+                    // Note: chain_processor now owns block_copy
+                    
+                    // Broadcast the new block to peers (using original)
+                    self.broadcastNewBlock(owned_block) catch |err| {
+                        print("⚠️  Failed to broadcast block: {}\n", .{err});
+                    };
+                    // Cleanup handled by broadcastNewBlock
+                } else {
+                    // TODO: implement side chain handling
+                    owned_block.deinit(self.allocator); // Clean up until implemented
+                }
             },
         }
     }
     
     /// Handle incoming transaction from network peer  
     pub fn handleIncomingTransaction(self: *Self, transaction: Transaction, peer: ?*net.Peer) !void {
-        // Implementation will be extracted from node.zig
-        _ = self;
-        _ = transaction;
-        _ = peer;
-        print("💰 NetworkMessageHandler: Processing incoming transaction...\n", .{});
-        // TODO: Extract handleIncomingTransaction implementation
+        // Log peer info if available
+        if (peer) |p| {
+            print("💰 Transaction received from peer {}\n", .{p.id});
+        } else {
+            print("💰 Transaction received from network peer\n", .{});
+        }
+        
+        // Forward to blockchain's transaction handler
+        // The mempool manager will handle validation and broadcasting
+        try self.blockchain.handleIncomingTransaction(transaction);
+        
+        print("✅ Transaction processed successfully\n", .{});
     }
     
     /// Broadcast new block to network peers
@@ -216,58 +271,31 @@ pub const NetworkMessageHandler = struct {
         print("✅ Reorganization complete! New chain tip: {s}\n", .{std.fmt.fmtSliceHexLower(new_chain_state.tip_hash[0..8])});
     }
     
-    /// Process downloaded block during headers-first sync
     pub fn processDownloadedBlock(self: *Self, block: Block, expected_height: u32) !void {
-        // Implementation will be extracted from node.zig
-        _ = self;
-        _ = block;
-        _ = expected_height;
-        print("📥 NetworkMessageHandler: Processing downloaded block...\n", .{});
-        // TODO: Extract processDownloadedBlock implementation
+        if (!try self.blockchain.validateSyncBlock(block, expected_height)) {
+            return error.InvalidBlock;
+        }
+        try self.blockchain.addBlockToChain(block, expected_height);
     }
     
-    /// Validate block during sync (network-specific validation)
     pub fn validateSyncBlock(self: *Self, block: Block, expected_height: u32) !bool {
-        // Implementation will be extracted from node.zig
-        _ = self;
-        _ = block;
-        _ = expected_height;
-        print("✅ NetworkMessageHandler: Validating sync block...\n", .{});
-        // TODO: Extract validateSyncBlock implementation
-        return true;
+        return try self.blockchain.validateSyncBlock(block, expected_height);
     }
     
-    /// Network management functions
-    
-    /// Start network operations
     pub fn startNetwork(self: *Self) !void {
-        _ = self;
-        print("🌐 NetworkMessageHandler: Starting network operations...\n", .{});
-        // TODO: Extract startNetwork implementation
+        try self.blockchain.startNetwork();
     }
     
-    /// Stop network operations
     pub fn stopNetwork(self: *Self) void {
-        _ = self;
-        print("🛑 NetworkMessageHandler: Stopping network operations...\n", .{});
-        // TODO: Extract stopNetwork implementation
+        self.blockchain.stopNetwork();
     }
     
-    /// Connect to a specific peer
     pub fn connectToPeer(self: *Self, peer: *net.Peer) !void {
-        _ = self;
-        _ = peer;
-        print("🤝 NetworkMessageHandler: Connecting to peer...\n", .{});
-        // TODO: Extract connectToPeer implementation
+        try self.blockchain.connectToPeer(peer);
     }
     
-    /// Check if sync is needed with peer
     pub fn shouldSync(self: *Self, peer_height: u32) !bool {
-        _ = self;
-        _ = peer_height;
-        print("🔍 NetworkMessageHandler: Checking if sync needed...\n", .{});
-        // TODO: Extract shouldSync implementation
-        return false;
+        return try self.blockchain.shouldSync(peer_height);
     }
     
     /// Get current sync state for network coordination

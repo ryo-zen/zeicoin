@@ -1,17 +1,11 @@
-// manager.zig - Sync Manager Coordinator
-// Main coordinator for all synchronization operations
-// Manages sync state, protocols, and dependencies
-
 const std = @import("std");
 const print = std.debug.print;
 
 const types = @import("../types/types.zig");
-const util = @import("../util/util.zig");
 const net = @import("../network/peer.zig");
 const headerchain = @import("../network/headerchain.zig");
 const state_mod = @import("state.zig");
 
-// Forward declarations for circular dependency resolution
 const ZeiCoin = @import("../node.zig").ZeiCoin;
 
 // Type aliases for clarity
@@ -100,11 +94,12 @@ pub const SyncManager = struct {
         self.state_manager.startSync(current_height, target_height);
         self.sync_peer = peer;
         
-        print("🔄 Starting sync with peer to height {} (current: {})\n", .{target_height, current_height});
-        
-        // Start with traditional sync for now
-        // TODO: Implement headers-first sync selection logic
-        try self.startTraditionalSync();
+        const height_difference = target_height - current_height;
+        if (height_difference > 100) {
+            try self.startHeadersFirstSync();
+        } else {
+            try self.startTraditionalSync();
+        }
     }
 
     /// Start headers-first sync operation
@@ -136,11 +131,28 @@ pub const SyncManager = struct {
 
     /// Process incoming sync block
     pub fn handleSyncBlock(self: *Self, block: Block) !void {
-        _ = block; // TODO: Implement block processing
         if (!self.state_manager.isActive()) {
             print("Not in sync mode, ignoring block.\n", .{});
+            block.deinit(self.allocator); // Clean up ignored block
             return;
         }
+
+        // Get expected height for this sync block
+        const current_height = try self.blockchain.getHeight();
+        const expected_height = current_height + 1;
+        
+        // Validate the sync block
+        const is_valid = try self.blockchain.validateSyncBlock(block, expected_height);
+        if (!is_valid) {
+            print("❌ Invalid sync block at height {} rejected\n", .{expected_height});
+            block.deinit(self.allocator); // Clean up invalid block
+            return;
+        }
+        
+        // Forward the block to the blockchain for processing
+        // The blockchain will handle adding it to the chain
+        try self.blockchain.handleIncomingBlock(block, self.sync_peer);
+        // Note: blockchain takes ownership of the block
 
         // Update progress
         if (self.state_manager.progress) |*progress| {

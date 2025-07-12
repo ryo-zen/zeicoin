@@ -496,7 +496,7 @@ pub const ChainValidator = struct {
 
     /// Get block by height (delegates to ChainState database)
     fn getBlockByHeight(self: *Self, height: u32) !types.Block {
-        return self.chain_state.database.getBlockByHeight(height);
+        return self.chain_state.database.getBlock(height);
     }
 
     /// Calculate median time past for timestamp validation

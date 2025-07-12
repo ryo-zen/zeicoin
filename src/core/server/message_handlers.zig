@@ -201,7 +201,29 @@ pub const MessageHandlerImpl = struct {
         const block = msg.block;
         self.blockchain.handleIncomingBlock(block, peer) catch |err| {
             std.log.warn("Failed to process block from {any}: {}", .{ peer.address, err });
-            // TODO: Send reject message back to peer
+            
+            // Send reject message back to peer
+            const reject_info = self.mapErrorToReject(err);
+            const block_hash = block.hash();
+            var reject_msg = network.messages.RejectMessage.init(
+                self.blockchain.allocator,
+                .block,
+                reject_info.code,
+                reject_info.reason,
+                &block_hash
+            ) catch |reject_err| {
+                std.log.debug("Failed to create reject message: {}", .{reject_err});
+                return;
+            };
+            defer reject_msg.deinit(self.blockchain.allocator);
+            
+            const data = peer.sendMessage(.reject, reject_msg) catch |send_err| {
+                std.log.debug("Failed to send block reject to {any}: {}", .{ peer.address, send_err });
+                return;
+            };
+            defer self.blockchain.allocator.free(data);
+            
+            std.log.debug("Sent block reject to {any}: {s}", .{ peer.address, reject_info.reason });
         };
     }
     
@@ -210,7 +232,29 @@ pub const MessageHandlerImpl = struct {
         
         self.blockchain.handleIncomingTransaction(msg.transaction) catch |err| {
             std.log.debug("Failed to process transaction from {any}: {}", .{ peer.address, err });
-            // TODO: Send reject message back to peer
+            
+            // Send reject message back to peer
+            const reject_info = self.mapErrorToReject(err);
+            const tx_hash = msg.transaction.hash();
+            var reject_msg = network.messages.RejectMessage.init(
+                self.blockchain.allocator,
+                .transaction,
+                reject_info.code,
+                reject_info.reason,
+                &tx_hash
+            ) catch |reject_err| {
+                std.log.debug("Failed to create reject message: {}", .{reject_err});
+                return;
+            };
+            defer reject_msg.deinit(self.blockchain.allocator);
+            
+            const data = peer.sendMessage(.reject, reject_msg) catch |send_err| {
+                std.log.debug("Failed to send transaction reject to {any}: {}", .{ peer.address, send_err });
+                return;
+            };
+            defer self.blockchain.allocator.free(data);
+            
+            std.log.debug("Sent transaction reject to {any}: {s}", .{ peer.address, reject_info.reason });
         };
     }
     
@@ -335,6 +379,53 @@ pub const MessageHandlerImpl = struct {
                 else => {},
             }
         }
+    }
+    
+    const RejectInfo = struct {
+        code: network.protocol.RejectCode,
+        reason: []const u8,
+    };
+    
+    fn mapErrorToReject(self: *Self, err: anyerror) RejectInfo {
+        _ = self;
+        return switch (err) {
+            error.InvalidBlock, error.InvalidTransaction => .{
+                .code = .invalid,
+                .reason = "Invalid data structure",
+            },
+            error.DuplicateBlock, error.DuplicateTransaction => .{
+                .code = .duplicate,
+                .reason = "Already exists",
+            },
+            error.InvalidSignature => .{
+                .code = .invalid,
+                .reason = "Invalid signature",
+            },
+            error.InsufficientBalance => .{
+                .code = .invalid,
+                .reason = "Insufficient balance",
+            },
+            error.InvalidNonce => .{
+                .code = .invalid,
+                .reason = "Invalid nonce",
+            },
+            error.BlockTooBig, error.TransactionTooBig => .{
+                .code = .invalid,
+                .reason = "Size limit exceeded",
+            },
+            error.OutOfMemory => .{
+                .code = .invalid,
+                .reason = "Resource exhaustion",
+            },
+            error.MovedToMempoolManager => .{
+                .code = .obsolete,
+                .reason = "Use mempool manager",
+            },
+            else => .{
+                .code = .invalid,
+                .reason = "Processing failed",
+            },
+        };
     }
     
     fn onReject(self: *Self, peer: *network.Peer, msg: network.messages.RejectMessage) !void {

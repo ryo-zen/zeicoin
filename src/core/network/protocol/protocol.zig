@@ -64,13 +64,70 @@ pub const MessageType = enum(u8) {
     }
 };
 
-// Service flags for node capabilities
+// Service flags for node capabilities - clean, modern design
 pub const ServiceFlags = struct {
-    pub const NETWORK: u64 = 0x1;        // Full node
-    pub const WITNESS: u64 = 0x2;        // Supports witness data
-    pub const PRUNED: u64 = 0x4;         // Pruned node
-    pub const MEMPOOL: u64 = 0x8;        // Has mempool
-    pub const HEADERS_FIRST: u64 = 0x10; // Supports headers-first sync
+    // Core node capabilities
+    pub const NETWORK: u64 = 0x1;           // Full node with complete blockchain
+    pub const WITNESS: u64 = 0x2;           // Supports witness data
+    pub const PRUNED: u64 = 0x4;            // Pruned node (partial chain storage)
+    pub const MEMPOOL: u64 = 0x8;           // Has active mempool
+    
+    // Sync protocol capabilities
+    pub const HEADERS_FIRST: u64 = 0x10;    // Supports headers-first sync
+    pub const PARALLEL_DOWNLOAD: u64 = 0x20; // Can handle parallel block requests
+    pub const FAST_SYNC: u64 = 0x40;        // Supports optimized fast sync
+    pub const CHECKPOINT_SYNC: u64 = 0x80;  // Supports checkpoint-based sync
+    
+    // Network optimization capabilities
+    pub const COMPACT_BLOCKS: u64 = 0x100;  // Supports compact block relay
+    pub const BLOOM_FILTER: u64 = 0x200;    // Supports bloom filtered connections
+    pub const FEE_FILTER: u64 = 0x400;      // Supports fee filtering
+    
+    // Mining and validation
+    pub const MINING: u64 = 0x1000;         // Active miner
+    pub const VALIDATION: u64 = 0x2000;     // Full transaction validation
+    
+    // Service combinations for common node types
+    pub const FULL_NODE: u64 = NETWORK | MEMPOOL | HEADERS_FIRST | VALIDATION;
+    pub const FAST_NODE: u64 = FULL_NODE | PARALLEL_DOWNLOAD | FAST_SYNC;
+    pub const PRUNED_NODE: u64 = PRUNED | MEMPOOL | HEADERS_FIRST | VALIDATION;
+    pub const MINING_NODE: u64 = FULL_NODE | MINING;
+    
+    /// Check if a service set represents a full node
+    pub fn isFullNode(services: u64) bool {
+        return (services & NETWORK) != 0 and (services & VALIDATION) != 0;
+    }
+    
+    /// Check if a service set supports efficient sync
+    pub fn supportsFastSync(services: u64) bool {
+        return (services & HEADERS_FIRST) != 0 and (services & PARALLEL_DOWNLOAD) != 0;
+    }
+    
+    /// Check if a service set is suitable for sync peer
+    pub fn isSuitableForSync(services: u64) bool {
+        return isFullNode(services) and (services & HEADERS_FIRST) != 0;
+    }
+    
+    /// Get human-readable service description
+    pub fn describe(services: u64, allocator: std.mem.Allocator) ![]const u8 {
+        if (services == 0) return try allocator.dupe(u8, "NONE");
+        if (services == FAST_NODE) return try allocator.dupe(u8, "FAST_NODE");
+        if (services == FULL_NODE) return try allocator.dupe(u8, "FULL_NODE");
+        if (services == MINING_NODE) return try allocator.dupe(u8, "MINING_NODE");
+        if (services == PRUNED_NODE) return try allocator.dupe(u8, "PRUNED_NODE");
+        
+        var parts = std.ArrayList([]const u8).init(allocator);
+        defer parts.deinit();
+        
+        if ((services & NETWORK) != 0) try parts.append("NETWORK");
+        if ((services & PRUNED) != 0) try parts.append("PRUNED");
+        if ((services & MEMPOOL) != 0) try parts.append("MEMPOOL");
+        if ((services & HEADERS_FIRST) != 0) try parts.append("HEADERS_FIRST");
+        if ((services & PARALLEL_DOWNLOAD) != 0) try parts.append("PARALLEL");
+        if ((services & MINING) != 0) try parts.append("MINING");
+        
+        return try std.mem.join(allocator, "|", parts.items);
+    }
 };
 
 // Inventory types for announcements

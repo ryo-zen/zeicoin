@@ -1,5 +1,4 @@
 // block.zig - Block message for transmitting full blocks
-// TODO: Implement block serialization
 
 const std = @import("std");
 const types = @import("../../../types/types.zig");

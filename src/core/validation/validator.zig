@@ -1,14 +1,5 @@
-// validator.zig - Chain Validation Logic
-// Extracted from node.zig for modular validation architecture
-// Handles block validation, transaction validation, and chain rules
-
 const std = @import("std");
-const print = std.debug.print;
-
 const types = @import("../types/types.zig");
-const util = @import("../util/util.zig");
-const key = @import("../crypto/key.zig");
-const miner_mod = @import("../miner/main.zig");
 
 // Forward declaration for blockchain dependency
 const ZeiCoin = @import("../node.zig").ZeiCoin;
@@ -27,7 +18,6 @@ pub const ChainValidator = struct {
     
     const Self = @This();
     
-    /// Initialize chain validator
     pub fn init(allocator: std.mem.Allocator, blockchain: *ZeiCoin) Self {
         return .{
             .allocator = allocator,
@@ -35,67 +25,54 @@ pub const ChainValidator = struct {
         };
     }
     
-    /// Cleanup validator resources
     pub fn deinit(self: *Self) void {
         _ = self;
-        // No resources to cleanup currently
     }
     
-    /// Validate block for normal operation (full validation)
+    /// Helper to create chain validator instance for delegation
+    fn getChainValidator(self: *Self) !@import("../chain/validator.zig").ChainValidator {
+        var chain_state = @import("../chain/state.zig").ChainState.init(self.allocator, self.blockchain.database);
+        return @import("../chain/validator.zig").ChainValidator.init(self.allocator, &chain_state);
+    }
+    
     pub fn validateBlock(self: *Self, block: Block, expected_height: u32) !bool {
-        _ = self;
-        _ = block;
-        _ = expected_height;
-        print("✅ ChainValidator: Validating block for normal operation...\n", .{});
-        // TODO: Extract validateBlock implementation from node.zig
-        return true;
+        var chain_validator = try self.getChainValidator();
+        defer chain_validator.deinit();
+        return try chain_validator.validateBlock(block, expected_height);
     }
     
-    /// Validate block during sync (optimized validation)
     pub fn validateSyncBlock(self: *Self, block: Block, expected_height: u32) !bool {
-        _ = self;
-        _ = block;
-        _ = expected_height;
-        print("🔄 ChainValidator: Validating sync block...\n", .{});
-        // TODO: Extract validateSyncBlock implementation from node.zig
-        return true;
+        var chain_validator = try self.getChainValidator();
+        defer chain_validator.deinit();
+        return try chain_validator.validateSyncBlock(block, expected_height);
     }
     
-    /// Validate block during reorganization
     pub fn validateReorgBlock(self: *Self, block: Block, expected_height: u32) !bool {
-        _ = self;
-        _ = block;
-        _ = expected_height;
-        print("🔄 ChainValidator: Validating reorg block...\n", .{});
-        // TODO: Extract validateReorgBlock implementation from node.zig
-        return true;
+        return try self.validateSyncBlock(block, expected_height);
     }
     
-    /// Validate transaction
     pub fn validateTransaction(self: *Self, transaction: Transaction) !bool {
-        _ = self;
-        _ = transaction;
-        print("💰 ChainValidator: Validating transaction...\n", .{});
-        // TODO: Extract transaction validation logic
-        return true;
+        var chain_validator = try self.getChainValidator();
+        defer chain_validator.deinit();
+        return try chain_validator.validateTransaction(transaction);
     }
     
-    /// Validate block structure (header, merkle root, etc.)
     pub fn validateBlockStructure(self: *Self, block: Block) !bool {
         _ = self;
-        _ = block;
-        print("🏗️  ChainValidator: Validating block structure...\n", .{});
-        // TODO: Extract block structure validation
-        return true;
+        if (!block.isValid()) return false;
+        
+        const calculated_merkle = block.calculateMerkleRoot();
+        return std.mem.eql(u8, &block.header.merkle_root, &calculated_merkle);
     }
     
-    /// Validate proof of work
     pub fn validateProofOfWork(self: *Self, header: BlockHeader, expected_difficulty: u64) !bool {
         _ = self;
-        _ = header;
-        _ = expected_difficulty;
-        print("⛏️  ChainValidator: Validating proof of work...\n", .{});
-        // TODO: Extract PoW validation logic
-        return true;
+        const miner_validation = @import("../miner/validation.zig");
+        
+        if (@import("builtin").mode == .Debug) {
+            return miner_validation.validateBlockHashSHA256(header, expected_difficulty);
+        } else {
+            return miner_validation.validateBlockHashRandomX(header, expected_difficulty);
+        }
     }
 };

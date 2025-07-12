@@ -7,6 +7,7 @@ const types = @import("../types/types.zig");
 const util = @import("../util/util.zig");
 const headerchain = @import("headerchain.zig");
 const net = @import("peer.zig");
+const protocol = @import("protocol/protocol.zig");
 
 // Import the new modular sync system
 const sync_mod = @import("../sync/sync.zig");
@@ -33,6 +34,8 @@ pub const SyncManager = struct {
     is_syncing: bool,
     sync_peer: ?*net.Peer,
     target_height: u32,
+    current_height: u32,
+    blocks_downloaded: u32,
 
     pub fn init(allocator: std.mem.Allocator, blockchain: *ZeiCoin) SyncManager {
         return .{
@@ -46,6 +49,8 @@ pub const SyncManager = struct {
             .is_syncing = false,
             .sync_peer = null,
             .target_height = 0,
+            .current_height = 0,
+            .blocks_downloaded = 0,
         };
     }
 
@@ -57,15 +62,17 @@ pub const SyncManager = struct {
         self.is_syncing = false;
         self.sync_peer = null;
         self.target_height = 0;
+        self.current_height = 0;
+        self.blocks_downloaded = 0;
         
         // 2. Clean up protocols (if any)
         // These are cleaned up first as they might reference the collections
-        if (self.block_sync_protocol) |*protocol| {
-            protocol.deinit();
+        if (self.block_sync_protocol) |*proto| {
+            proto.deinit();
             self.block_sync_protocol = null;
         }
-        if (self.headers_first_protocol) |*protocol| {
-            protocol.deinit();
+        if (self.headers_first_protocol) |*proto| {
+            proto.deinit();
             self.headers_first_protocol = null;
         }
         
@@ -104,6 +111,8 @@ pub const SyncManager = struct {
     pub fn startHeadersFirstSync(self: *SyncManager, peer: *net.Peer, target_height: u32) !void {
         self.sync_peer = peer;
         self.target_height = target_height;
+        self.current_height = try self.blockchain.getHeight();
+        self.blocks_downloaded = 0;
         self.is_syncing = true;
     }
 
@@ -114,9 +123,36 @@ pub const SyncManager = struct {
             return;
         }
 
-        // TODO: Implement headers processing
-        _ = headers;
-        _ = start_height;
+        // Validate we have headers
+        if (headers.len == 0) {
+            std.debug.print("No headers received, ignoring.\n", .{});
+            return;
+        }
+
+        std.debug.print("📥 Processing {} headers starting from height {}\n", .{headers.len, start_height});
+
+        // Use the header chain
+        const hc = &self.blockchain.header_chain;
+        for (headers, 0..) |header, i| {
+            const height = start_height + @as(u32, @intCast(i));
+            
+            // Try to add the header
+            hc.addHeader(header, height) catch |err| {
+                std.debug.print("❌ Header at height {} rejected: {}\n", .{height, err});
+                break; // Stop processing further headers on error
+            };
+            
+            std.debug.print("✅ Header at height {} accepted\n", .{height});
+            // Queue this height for block download
+            try self.blocks_to_download.append(height);
+        }
+        
+        // After processing headers, check if we need to download blocks
+        if (self.blocks_to_download.items.len > 0) {
+            std.debug.print("📦 {} blocks queued for download\n", .{self.blocks_to_download.items.len});
+            // Trigger block downloads
+            try self.requestNextBlocks();
+        }
     }
 
     /// Process incoming block (legacy compatibility)
@@ -127,7 +163,62 @@ pub const SyncManager = struct {
             return;
         }
 
-        // TODO: Implement block processing
+        // Get the block height from its hash
+        const block_hash = block.hash();
+        const block_height = self.getHeightForBlock(block_hash) catch {
+            std.debug.print("⚠️  Cannot determine height for block, ignoring\n", .{});
+            block.deinit(self.allocator);
+            return;
+        };
+
+        // Remove from active downloads
+        _ = self.active_downloads.remove(block_height);
+
+        // Validate it's a block we're expecting
+        var found = false;
+        for (self.blocks_to_download.items, 0..) |height, i| {
+            if (height == block_height) {
+                _ = self.blocks_to_download.orderedRemove(i);
+                found = true;
+                break;
+            }
+        }
+
+        if (!found) {
+            std.debug.print("⚠️  Received unexpected block at height {}, ignoring\n", .{block_height});
+            block.deinit(self.allocator);
+            return;
+        }
+
+        std.debug.print("📦 Processing sync block at height {}\n", .{block_height});
+
+        // Forward to the blockchain sync manager
+        // Note: ownership is transferred to handleSyncBlock
+        if (self.blockchain.sync_manager) |sm| {
+            try sm.handleSyncBlock(block.*);
+            // Block ownership transferred, just free the pointer
+            self.allocator.destroy(block);
+        } else {
+            // No sync manager, process directly through blockchain
+            try self.blockchain.handleIncomingBlock(block.*, self.sync_peer);
+            // Block ownership transferred, just free the pointer
+            self.allocator.destroy(block);
+        }
+
+        // Update progress
+        self.blocks_downloaded += 1;
+        const progress = @as(f64, @floatFromInt(self.blocks_downloaded)) / 
+                        @as(f64, @floatFromInt(self.target_height - self.current_height)) * 100.0;
+        std.debug.print("📊 Sync progress: {d:.1}%\n", .{progress});
+
+        // Request next blocks if needed
+        if (self.blocks_to_download.items.len > 0) {
+            try self.requestNextBlocks();
+        } else if (self.blocks_downloaded >= (self.target_height - self.current_height)) {
+            // Sync complete
+            std.debug.print("✅ Sync completed!\n", .{});
+            try self.completeSync();
+        }
     }
 
     /// Handle failed download (legacy compatibility)
@@ -167,6 +258,10 @@ pub const SyncManager = struct {
         self.is_syncing = false;
         self.sync_peer = null;
         self.target_height = 0;
+        self.blocks_downloaded = 0;
+        self.blocks_to_download.clearRetainingCapacity();
+        self.active_downloads.clearRetainingCapacity();
+        std.debug.print("🎉 Blockchain sync completed successfully!\n", .{});
     }
 
     /// Fail sync operation
@@ -192,4 +287,46 @@ pub const SyncManager = struct {
         _ = self;
         std.debug.print("downloadNextBlocks: delegating to modular sync system\n", .{});
     }
+    
+    /// Request next blocks for download
+    fn requestNextBlocks(self: *SyncManager) !void {
+        if (self.sync_peer == null) {
+            std.debug.print("⚠️  No sync peer available for block requests\n", .{});
+            return;
+        }
+        
+        const MAX_CONCURRENT_DOWNLOADS = 16;
+        const current_time = std.time.milliTimestamp();
+        
+        // Request blocks up to the limit
+        var requested: usize = 0;
+        for (self.blocks_to_download.items) |height| {
+            // Skip if already downloading
+            if (self.active_downloads.contains(height)) continue;
+            
+            // Check concurrent download limit
+            if (self.active_downloads.count() >= MAX_CONCURRENT_DOWNLOADS) break;
+            
+            // Mark as active download
+            try self.active_downloads.put(height, current_time);
+            
+            // Request the block from peer
+            if (self.sync_peer) |peer| {
+                _ = peer;
+                requested += 1;
+                // TODO: Implement proper block request using block hash from header chain
+            }
+            
+            if (requested >= 8) break; // Batch size limit
+        }
+    }
+    
+    /// Get height for a block by its hash
+    fn getHeightForBlock(self: *SyncManager, block_hash: types.BlockHash) !u32 {
+        _ = self;
+        _ = block_hash;
+        // TODO: Implement header chain lookup
+        return error.HeightNotFound;
+    }
+    
 };

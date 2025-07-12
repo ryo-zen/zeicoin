@@ -46,6 +46,12 @@ pub const SYNC = struct {
     pub const MAX_SYNC_RETRIES: u32 = 3; // Maximum sync retry attempts
     pub const MAX_CONSECUTIVE_FAILURES: u32 = 5; // Maximum consecutive sync failures before peer disconnect
     pub const PROGRESS_REPORT_INTERVAL: u32 = 10; // Report progress every N blocks
+    
+    // Parallel download constants
+    pub const DOWNLOAD_TIMEOUT_SECONDS: i64 = 30; // Timeout for individual block download
+    pub const MAX_DOWNLOAD_RETRIES: u8 = 3; // Maximum retries for failed block download
+    pub const MAX_CONCURRENT_DOWNLOADS: u8 = 20; // Total concurrent downloads across all peers
+    pub const PEER_MAX_CONCURRENT: u8 = 3; // Default max concurrent downloads per peer
 };
 
 // Block versioning - for protocol upgrades
@@ -769,6 +775,35 @@ pub const Block = struct {
         }
         // Then free the transactions array itself
         allocator.free(self.transactions);
+    }
+    
+    /// Create a deep copy of this block
+    /// The caller owns the returned block and must call deinit on it
+    pub fn dupe(self: *const Block, allocator: std.mem.Allocator) !Block {
+        // Copy the header (simple value copy)
+        var new_block = Block{
+            .header = self.header,
+            .transactions = undefined,
+        };
+        
+        // Allocate array for transactions
+        new_block.transactions = try allocator.alloc(Transaction, self.transactions.len);
+        var copied_count: usize = 0;
+        errdefer {
+            // Clean up on error
+            for (new_block.transactions[0..copied_count]) |*tx| {
+                tx.deinit(allocator);
+            }
+            allocator.free(new_block.transactions);
+        }
+        
+        // Deep copy each transaction
+        for (self.transactions, 0..) |tx, i| {
+            new_block.transactions[i] = try tx.dupe(allocator);
+            copied_count += 1;
+        }
+        
+        return new_block;
     }
 };
 

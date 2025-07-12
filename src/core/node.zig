@@ -8,7 +8,6 @@ const types = @import("types/types.zig");
 const util = @import("util/util.zig");
 const serialize = @import("storage/serialize.zig");
 const db = @import("storage/db.zig");
-const key = @import("crypto/key.zig");
 const net = @import("network/peer.zig");
 const randomx = @import("crypto/randomx.zig");
 const genesis = @import("chain/genesis.zig");
@@ -346,23 +345,13 @@ pub const ZeiCoin = struct {
     pub fn validateSyncBlock(self: *ZeiCoin, block: Block, expected_height: u32) !bool {
         return try self.chain_validator.validateSyncBlock(block, expected_height);
     }
-    fn validateTransactionSignature(self: *ZeiCoin, tx: Transaction) !bool {
-        _ = self;
-        const tx_hash = tx.hashForSigning();
-        print("     🔍 Transaction hash for signing: {s}\n", .{std.fmt.fmtSliceHexLower(&tx_hash)});
-        print("     🔍 Sender public key: {s}\n", .{std.fmt.fmtSliceHexLower(&tx.sender_public_key)});
-        print("     🔍 Transaction signature: {s}\n", .{std.fmt.fmtSliceHexLower(&tx.signature)});
-        if (!key.verify(tx.sender_public_key, &tx_hash, tx.signature)) {
-            print("❌ Invalid signature: transaction not signed by sender\n", .{});
-            print("❌ Signature verification failed - detailed info above\n", .{});
-            return false;
-        }
-        print("     ✅ Signature verification passed\n", .{});
-        return true;
-    }
 
     pub fn validateReorgBlock(self: *ZeiCoin, block: Block, expected_height: u32) !bool {
         return try self.chain_validator.validateReorgBlock(block, expected_height);
+    }
+
+    pub fn validateTransaction(self: *ZeiCoin, tx: Transaction) !bool {
+        return try self.chain_validator.validateTransaction(tx);
     }
 
     fn isValidForkBlock(self: *ZeiCoin, block: types.Block) !bool {
@@ -437,9 +426,8 @@ pub const ZeiCoin = struct {
     }
 
     pub fn handleIncomingTransaction(self: *ZeiCoin, transaction: types.Transaction) !void {
-        _ = self;
-        _ = transaction;
-        return error.MovedToMempoolManager;
+        // Forward to mempool manager which handles validation and broadcasting
+        try self.mempool_manager.handleIncomingTransaction(transaction);
     }
 
     /// Estimate cumulative work for a block height (temporary until we store it properly)

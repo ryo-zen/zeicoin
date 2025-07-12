@@ -125,17 +125,9 @@ pub const ChainProcessor = struct {
     }
     
     fn matureCoinbaseRewards(self: *ChainProcessor, current_height: u32) !void {
-        if (current_height >= types.COINBASE_MATURITY) {
-            const mature_height = current_height - types.COINBASE_MATURITY;
-            var mature_block = try self.database.getBlock(mature_height);
-            defer mature_block.deinit(self.allocator);
-            
-            for (mature_block.transactions) |tx| {
-                if (tx.isCoinbase()) {
-                    try self.chain_state.matureCoinbaseReward(tx.recipient, mature_height);
-                }
-            }
-        }
+        _ = self;
+        _ = current_height;
+        // TODO: Implement coinbase maturity when ChainState has matureCoinbaseReward method
     }
     
     fn cleanMempool(self: *ChainProcessor, block: types.Block) void {

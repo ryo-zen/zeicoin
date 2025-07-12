@@ -1,5 +1,4 @@
 // peers.zig - Share peer addresses for network discovery
-// TODO: Implement proper peer address format
 
 const std = @import("std");
 

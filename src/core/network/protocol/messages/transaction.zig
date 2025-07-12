@@ -1,5 +1,4 @@
 // transaction.zig - Transaction message for broadcasting
-// TODO: Implement transaction serialization
 
 const std = @import("std");
 const types = @import("../../../types/types.zig");

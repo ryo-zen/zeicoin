@@ -31,7 +31,7 @@ pub const HandshakeMessage = struct {
         
         return Self{
             .version = protocol.PROTOCOL_VERSION,
-            .services = protocol.ServiceFlags.NETWORK | protocol.ServiceFlags.HEADERS_FIRST,
+            .services = protocol.ServiceFlags.FAST_NODE, // Modern full node with all optimizations
             .timestamp = std.time.timestamp(),
             .listen_port = 0, // Set by caller if listening
             .nonce = std.crypto.random.int(u64),
@@ -39,6 +39,13 @@ pub const HandshakeMessage = struct {
             .start_height = 0, // Set by caller
             .network_id = types.CURRENT_NETWORK.getNetworkId(),
         };
+    }
+    
+    /// Create handshake with custom service flags
+    pub fn initWithServices(allocator: std.mem.Allocator, user_agent: []const u8, services: u64) !Self {
+        var handshake = try init(allocator, user_agent);
+        handshake.services = services;
+        return handshake;
     }
     
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
@@ -103,22 +110,76 @@ pub const HandshakeMessage = struct {
         return (self.services & service) != 0;
     }
     
-    /// Validate handshake for compatibility
+    /// Validate handshake for compatibility and usefulness
     pub fn validate(self: Self) !void {
-        // Check protocol version
+        // Check protocol version compatibility
         if (self.version > protocol.PROTOCOL_VERSION) {
             return error.IncompatibleProtocolVersion;
         }
+        if (self.version == 0) {
+            return error.InvalidProtocolVersion;
+        }
         
-        // Check network ID
+        // Check network ID to prevent cross-network connections
         if (self.network_id != types.CURRENT_NETWORK.getNetworkId()) {
             return error.WrongNetwork;
         }
         
-        // Basic service validation
-        if (self.services & protocol.ServiceFlags.NETWORK == 0) {
-            return error.NotAFullNode;
+        // Validate timestamp (reject if too far in future or past)
+        const now = std.time.timestamp();
+        const time_diff = @abs(self.timestamp - now);
+        if (time_diff > 2 * 60 * 60) { // 2 hours tolerance
+            return error.InvalidTimestamp;
         }
+        
+        // Check for minimum useful services
+        if (self.services == 0) {
+            return error.NoServicesOffered;
+        }
+        
+        // Validate user agent length
+        if (self.user_agent.len > MAX_USER_AGENT_LEN) {
+            return error.UserAgentTooLong;
+        }
+    }
+    
+    /// Check if this peer would be useful for syncing
+    pub fn isGoodSyncPeer(self: Self) bool {
+        return protocol.ServiceFlags.isSuitableForSync(self.services);
+    }
+    
+    /// Check if this peer supports parallel downloads
+    pub fn supportsParallelDownload(self: Self) bool {
+        return protocol.ServiceFlags.supportsFastSync(self.services);
+    }
+    
+    /// Get quality score for peer selection (0-100)
+    pub fn getQualityScore(self: Self, our_height: u32) u8 {
+        var score: u32 = 0;
+        
+        // Base score for being a full node
+        if (protocol.ServiceFlags.isFullNode(self.services)) {
+            score += 40;
+        } else {
+            return 0; // Not useful for sync
+        }
+        
+        // Bonus for modern sync capabilities
+        if (self.hasService(protocol.ServiceFlags.HEADERS_FIRST)) score += 20;
+        if (self.hasService(protocol.ServiceFlags.PARALLEL_DOWNLOAD)) score += 15;
+        if (self.hasService(protocol.ServiceFlags.FAST_SYNC)) score += 10;
+        
+        // Bonus for having a mempool
+        if (self.hasService(protocol.ServiceFlags.MEMPOOL)) score += 10;
+        
+        // Height bonus/penalty
+        if (self.start_height >= our_height) {
+            score += 5; // Peer is ahead or equal
+        } else if (our_height - self.start_height > 1000) {
+            score = score / 2; // Peer is far behind
+        }
+        
+        return @min(100, @as(u8, @intCast(score)));
     }
 };
 
@@ -149,4 +210,42 @@ test "HandshakeMessage encode/decode" {
     
     // Validate the decoded message
     try decoded.validate();
+    
+    // Test service flag functionality
+    try std.testing.expect(decoded.isGoodSyncPeer());
+    try std.testing.expect(decoded.supportsParallelDownload());
+    
+    const quality = decoded.getQualityScore(10000);
+    try std.testing.expect(quality > 80); // Should be high quality with FAST_NODE services
+}
+
+test "ServiceFlags functionality" {
+    const allocator = std.testing.allocator;
+    
+    // Test different service combinations
+    var full_node = try HandshakeMessage.initWithServices(allocator, "ZeiCoin/1.0.0", protocol.ServiceFlags.FULL_NODE);
+    defer full_node.deinit(allocator);
+    
+    var mining_node = try HandshakeMessage.initWithServices(allocator, "ZeiCoin/1.0.0", protocol.ServiceFlags.MINING_NODE);
+    defer mining_node.deinit(allocator);
+    
+    var pruned_node = try HandshakeMessage.initWithServices(allocator, "ZeiCoin/1.0.0", protocol.ServiceFlags.PRUNED_NODE);
+    defer pruned_node.deinit(allocator);
+    
+    // Test sync peer suitability
+    try std.testing.expect(full_node.isGoodSyncPeer());
+    try std.testing.expect(mining_node.isGoodSyncPeer());
+    try std.testing.expect(pruned_node.isGoodSyncPeer());
+    
+    // Test quality scoring
+    full_node.start_height = 12345;
+    mining_node.start_height = 12345;
+    pruned_node.start_height = 10000; // Behind
+    
+    const full_quality = full_node.getQualityScore(12000);
+    const mining_quality = mining_node.getQualityScore(12000);
+    const pruned_quality = pruned_node.getQualityScore(12000);
+    
+    try std.testing.expect(mining_quality >= full_quality); // Mining nodes often have good sync capabilities
+    try std.testing.expect(full_quality > pruned_quality); // Full node better than pruned when behind
 }
