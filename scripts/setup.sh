@@ -7,8 +7,9 @@ echo "🚀 ZeiCoin Setup Script"
 echo "======================"
 
 # Check if we're in the right directory
-if [ ! -f "main.zig" ]; then
+if [ ! -f "src/apps/main.zig" ] || [ ! -f "build.zig" ]; then
     echo "❌ Please run this script from the ZeiCoin root directory"
+    echo "   (Should contain src/apps/main.zig and build.zig)"
     exit 1
 fi
 
@@ -39,11 +40,13 @@ fi
 if [ -n "$missing_deps" ]; then
     echo "❌ Missing dependencies:$missing_deps"
     echo ""
-    echo "On Ubuntu/Debian, install with:"
-    echo "  sudo apt update"
-    echo "  sudo apt install build-essential cmake git"
+    echo "🚀 Quick fix - run the dependency installer:"
+    echo "  ./scripts/install_dependencies.sh"
     echo ""
-    echo "For Zig, download from: https://ziglang.org/download/"
+    echo "Or install manually:"
+    echo "  Ubuntu/Debian: sudo apt update && sudo apt install build-essential cmake git"
+    echo "  CentOS/RHEL: sudo yum groupinstall 'Development Tools' && sudo yum install cmake git"
+    echo "  For Zig: Download from https://ziglang.org/download/"
     exit 1
 fi
 
@@ -89,17 +92,25 @@ else
     echo "✅ RandomX already built!"
 fi
 
-# Build ZeiCoin
-echo "🔨 Building ZeiCoin..."
-zig build
+# Build ZeiCoin (Release mode for RandomX mining)
+echo "🔨 Building ZeiCoin (Release mode)..."
+zig build -Doptimize=ReleaseFast
 
 echo ""
 echo "🎉 Setup complete!"
 echo ""
 echo "Quick start:"
-echo "  make server     # Start mining server"
-echo "  make help       # Show all commands"
+echo "  scripts/start_zei_server.sh    # Start public server"
+echo "  zig build test                 # Run all tests"
 echo ""
 echo "Create your first wallet:"
 echo "  ./zig-out/bin/zeicoin wallet create mywallet"
 echo "  ./zig-out/bin/zeicoin balance mywallet"
+echo ""
+echo "Start server with mining:"
+echo "  ./zig-out/bin/zen_server --mine mywallet"
+echo ""
+echo "For public server deployment with mining:"
+echo "  ZEICOIN_MINER_WALLET=ryo scripts/start_zei_server.sh"
+echo "  # Replace 'ryo' with your wallet name"
+echo "  # Server will auto-detect public IP and start RandomX mining"
