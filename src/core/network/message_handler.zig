@@ -282,16 +282,16 @@ pub const NetworkMessageHandler = struct {
         return try self.blockchain.validateSyncBlock(block, expected_height);
     }
     
-    pub fn startNetwork(self: *Self) !void {
-        try self.blockchain.startNetwork();
+    pub fn startNetwork(self: *Self, port: u16) !void {
+        try self.blockchain.startNetwork(port);
     }
     
     pub fn stopNetwork(self: *Self) void {
         self.blockchain.stopNetwork();
     }
     
-    pub fn connectToPeer(self: *Self, peer: *net.Peer) !void {
-        try self.blockchain.connectToPeer(peer);
+    pub fn connectToPeer(self: *Self, address: []const u8) !void {
+        try self.blockchain.connectToPeer(address);
     }
     
     pub fn shouldSync(self: *Self, peer_height: u32) !bool {

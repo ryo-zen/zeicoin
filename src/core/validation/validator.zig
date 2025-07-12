@@ -29,22 +29,12 @@ pub const ChainValidator = struct {
         _ = self;
     }
     
-    /// Helper to create chain validator instance for delegation
-    fn getChainValidator(self: *Self) !@import("../chain/validator.zig").ChainValidator {
-        var chain_state = @import("../chain/state.zig").ChainState.init(self.allocator, self.blockchain.database);
-        return @import("../chain/validator.zig").ChainValidator.init(self.allocator, &chain_state);
-    }
-    
     pub fn validateBlock(self: *Self, block: Block, expected_height: u32) !bool {
-        var chain_validator = try self.getChainValidator();
-        defer chain_validator.deinit();
-        return try chain_validator.validateBlock(block, expected_height);
+        return try self.blockchain.chain_validator.validateBlock(block, expected_height);
     }
     
     pub fn validateSyncBlock(self: *Self, block: Block, expected_height: u32) !bool {
-        var chain_validator = try self.getChainValidator();
-        defer chain_validator.deinit();
-        return try chain_validator.validateSyncBlock(block, expected_height);
+        return try self.blockchain.chain_validator.validateSyncBlock(block, expected_height);
     }
     
     pub fn validateReorgBlock(self: *Self, block: Block, expected_height: u32) !bool {
@@ -52,9 +42,7 @@ pub const ChainValidator = struct {
     }
     
     pub fn validateTransaction(self: *Self, transaction: Transaction) !bool {
-        var chain_validator = try self.getChainValidator();
-        defer chain_validator.deinit();
-        return try chain_validator.validateTransaction(transaction);
+        return try self.blockchain.chain_validator.validateTransaction(transaction);
     }
     
     pub fn validateBlockStructure(self: *Self, block: Block) !bool {
