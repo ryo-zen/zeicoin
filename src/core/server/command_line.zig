@@ -16,6 +16,10 @@ pub const Config = struct {
         if (self.bootstrap_nodes.len > 0) {
             self.allocator.free(self.bootstrap_nodes);
         }
+        // Free miner_wallet if owned
+        if (self.miner_wallet) |wallet_name| {
+            self.allocator.free(wallet_name);
+        }
     }
 };
 
@@ -44,11 +48,17 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Config {
             try parseBootstrapNodes(&bootstrap_list, args[i + 1]);
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--mine")) {
-            config.enable_mining = true;
-            // Check if wallet name follows
+            // Check if wallet name follows (REQUIRED)
             if (i + 1 < args.len and !std.mem.startsWith(u8, args[i + 1], "--")) {
-                config.miner_wallet = args[i + 1];
+                config.enable_mining = true;
+                // Create owned copy of wallet name to avoid dangling pointer
+                config.miner_wallet = try allocator.dupe(u8, args[i + 1]);
                 i += 1;
+            } else {
+                std.debug.print("❌ Error: --mine requires a wallet name\n", .{});
+                std.debug.print("💡 Usage: zen_server --mine <wallet_name>\n", .{});
+                std.debug.print("💡 Example: zen_server --mine Alice\n", .{});
+                return error.MissingMinerWallet;
             }
         } else if (std.mem.eql(u8, args[i], "--no-client-api")) {
             config.client_api_disabled = true;
@@ -99,7 +109,7 @@ fn printHelp() void {
         \\Options:
         \\  --port <port>           Listen on specified port (default: 10801)
         \\  --bootstrap <nodes>     Bootstrap nodes (ip:port,ip:port,...)
-        \\  --mine [wallet]         Enable mining (optionally to specific wallet)
+        \\  --mine <wallet>         Enable mining to specified wallet (REQUIRED)
         \\  --no-client-api         Disable client API on port 10802
         \\  --help, -h              Show this help message
         \\

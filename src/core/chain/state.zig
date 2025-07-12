@@ -135,8 +135,8 @@ pub const ChainState = struct {
             // Genesis block pre-mine allocations are immediately mature
             miner_account.balance += coinbase_tx.amount;
         } else {
-            // Regular mining rewards (will need maturity tracking in future)
-            miner_account.balance += coinbase_tx.amount;
+            // Regular mining rewards go to immature balance (100 block maturity)
+            miner_account.immature_balance += coinbase_tx.amount;
         }
 
         // Save miner account
@@ -262,9 +262,23 @@ pub const ChainState = struct {
         // Process coinbase transactions in the mature block
         for (mature_block.transactions) |tx| {
             if (self.isCoinbaseTransaction(tx)) {
-                // Coinbase rewards are already credited in processCoinbaseTransaction
-                // This is where we'd implement time-locked rewards if needed
-                print("💰 Coinbase reward matured for block {} (recipient: {})\n", .{maturity_height, std.fmt.fmtSliceHexLower(tx.recipient.hash[0..8])});
+                // Move rewards from immature to mature balance
+                var miner_account = self.getAccount(tx.recipient) catch {
+                    // Miner account should exist, but handle gracefully
+                    continue;
+                };
+                
+                // Only mature if there's actually immature balance to move
+                if (miner_account.immature_balance >= tx.amount) {
+                    miner_account.immature_balance -= tx.amount;
+                    miner_account.balance += tx.amount;
+                    try self.database.saveAccount(tx.recipient, miner_account);
+                    print("💰 Coinbase reward matured: {} ZEI for block {} (recipient: {})\n", .{
+                        tx.amount,
+                        maturity_height,
+                        std.fmt.fmtSliceHexLower(tx.recipient.hash[0..8])
+                    });
+                }
             }
         }
     }

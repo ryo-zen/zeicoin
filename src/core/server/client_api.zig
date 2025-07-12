@@ -2,6 +2,7 @@
 // Handles transaction submission, balance queries, and other client operations
 
 const std = @import("std");
+const print = std.debug.print;
 const net = std.net;
 const types = @import("../types/types.zig");
 const zen = @import("../node.zig");

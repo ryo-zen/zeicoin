@@ -92,7 +92,8 @@ pub fn initializeNode(allocator: std.mem.Allocator, config: command_line.Config)
     
     // Initialize mining if enabled
     if (config.enable_mining) {
-        try initializeMining(blockchain, config.miner_wallet);
+        // miner_wallet is guaranteed to be non-null when enable_mining is true
+        try initializeMining(blockchain, config.miner_wallet.?);
     }
     
     return NodeComponents{
@@ -122,36 +123,39 @@ fn createMessageHandler(allocator: std.mem.Allocator, blockchain: *zen.ZeiCoin) 
     };
 }
 
-fn initializeMining(blockchain: *zen.ZeiCoin, miner_wallet_name: ?[]const u8) !void {
+fn initializeMining(blockchain: *zen.ZeiCoin, miner_wallet_name: []const u8) !void {
     const allocator = blockchain.allocator;
     
-    // Determine mining address
+    // Load specified mining wallet
+    const wallet_name = miner_wallet_name;
     var mining_address: types.Address = undefined;
     var wallet_instance: ?wallet.Wallet = null;
     
-    if (miner_wallet_name) |wallet_name| {
-        // Load specified wallet
-        var wallet_obj = wallet.Wallet.init(allocator);
-        const wallet_path = try std.fmt.allocPrint(allocator, "{s}/wallets/{s}.wallet", .{types.CURRENT_NETWORK.getDataDir(), wallet_name});
-        defer allocator.free(wallet_path);
-        
-        wallet_obj.loadFromFile(wallet_path, "zen") catch |err| {
-            std.log.err("Failed to load mining wallet", .{});
-            return err;
-        };
-        wallet_instance = wallet_obj;
-        mining_address = wallet_instance.?.address.?;
-        std.log.info("Mining to wallet: {s}", .{wallet_name});
+    // Load specified wallet
+    var wallet_obj = wallet.Wallet.init(allocator);
+    
+    // Build proper wallet path (wallet_name is already safely owned by Config)
+    const data_dir = types.CURRENT_NETWORK.getDataDir();
+    const wallet_path = try std.fmt.allocPrint(allocator, "{s}/wallets/{s}.wallet", .{ data_dir, wallet_name });
+    defer allocator.free(wallet_path);
+    
+    std.log.info("Loading mining wallet from: {s}", .{wallet_path});
+    
+    wallet_obj.loadFromFile(wallet_path, "zen") catch |err| {
+        std.log.err("Failed to load mining wallet '{s}' from path: {s}", .{wallet_name, wallet_path});
+        std.log.err("Error: {}", .{err});
+        return err;
+    };
+    
+    wallet_instance = wallet_obj;
+    
+    if (wallet_instance.?.address) |addr| {
+        mining_address = addr;
+        std.log.info("✅ Mining enabled for wallet: {s}", .{wallet_name});
+        std.log.info("⛏️  Mining address: {s}", .{std.fmt.fmtSliceHexLower(std.mem.asBytes(&addr))});
     } else {
-        // Create default mining wallet
-        var wallet_obj = wallet.Wallet.init(allocator);
-        try wallet_obj.createNew();
-        const wallet_path = try std.fmt.allocPrint(allocator, "{s}/wallets/default_miner.wallet", .{types.CURRENT_NETWORK.getDataDir()});
-        defer allocator.free(wallet_path);
-        try wallet_obj.saveToFile(wallet_path, "zen_miner");
-        wallet_instance = wallet_obj;
-        mining_address = wallet_instance.?.address.?;
-        std.log.info("Created default mining wallet", .{});
+        std.log.err("❌ Wallet '{s}' has no address!", .{wallet_name});
+        return error.WalletHasNoAddress;
     }
     
     if (wallet_instance) |*w| {
@@ -176,7 +180,7 @@ fn initializeMining(blockchain: *zen.ZeiCoin, miner_wallet_name: ?[]const u8) !v
                     .blockchain = blockchain,
                 };
                 blockchain.mining_manager = try allocator.create(miner_mod.MiningManager);
-                blockchain.mining_manager.?.* = miner_mod.MiningManager.init(mining_context);
+                blockchain.mining_manager.?.* = miner_mod.MiningManager.init(mining_context, mining_address);
             }
             
             // Start mining

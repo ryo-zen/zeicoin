@@ -13,10 +13,12 @@ const validation = @import("validation.zig");
 /// Mining Manager - coordinates all mining operations
 pub const MiningManager = struct {
     context: MiningContext,
+    mining_address: types.Address,
     
-    pub fn init(context: MiningContext) MiningManager {
+    pub fn init(context: MiningContext, mining_address: types.Address) MiningManager {
         return MiningManager{
             .context = context,
+            .mining_address = mining_address,
         };
     }
     
@@ -27,7 +29,7 @@ pub const MiningManager = struct {
         }
         
         self.context.mining_state.active.store(true, .release);
-        self.context.mining_state.thread = try std.Thread.spawn(.{}, miningThreadFn, .{ self.context, miner_keypair });
+        self.context.mining_state.thread = try std.Thread.spawn(.{}, miningThreadFn, .{ self.context, miner_keypair, self.mining_address });
         print("⛏️  Mining thread started successfully\n", .{});
     }
     
@@ -49,7 +51,7 @@ pub const MiningManager = struct {
     
     /// Mine a single block (public API)
     pub fn mineBlock(self: *MiningManager, miner_keypair: key.KeyPair) !types.Block {
-        return core.zenMineBlock(self.context, miner_keypair);
+        return core.zenMineBlock(self.context, miner_keypair, self.mining_address);
     }
     
     /// Validate a block's proof-of-work (public API)
@@ -59,7 +61,7 @@ pub const MiningManager = struct {
 };
 
 /// Mining thread function - runs in background
-pub fn miningThreadFn(ctx: MiningContext, miner_keypair: key.KeyPair) void {
+pub fn miningThreadFn(ctx: MiningContext, miner_keypair: key.KeyPair, mining_address: types.Address) void {
     print("⛏️  Mining thread started\n", .{});
     
     while (ctx.mining_state.active.load(.acquire)) {
@@ -92,7 +94,7 @@ pub fn miningThreadFn(ctx: MiningContext, miner_keypair: key.KeyPair) void {
         
         // Mine the block
         print("🔨 Mining thread: Calling zenMineBlock (mempool has {} transactions)\n", .{ctx.mempool_manager.getTransactionCount()});
-        const block = core.zenMineBlock(ctx, miner_keypair) catch |err| {
+        const block = core.zenMineBlock(ctx, miner_keypair, mining_address) catch |err| {
             print("❌ Mining error: {}\n", .{err});
             std.time.sleep(1 * std.time.ns_per_s); // Wait 1 second before retry
             continue;

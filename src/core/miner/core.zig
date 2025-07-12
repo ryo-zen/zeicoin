@@ -21,7 +21,8 @@ const Hash = types.Hash;
 const Address = types.Address;
 
 /// Mine a new block with transactions from mempool
-pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair) !types.Block {
+pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_address: Address) !types.Block {
+    _ = miner_keypair; // Coinbase transactions don't need signatures
     print("⛏️  zenMineBlock: Starting to mine new block\n", .{});
     
     // Get transactions from mempool manager
@@ -41,7 +42,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair) !types.Block
         .flags = .{}, // Default flags
         .sender = types.Address.zero(), // From thin air (coinbase)
         .sender_public_key = std.mem.zeroes([32]u8), // No sender for coinbase
-        .recipient = miner_keypair.getAddress(),
+        .recipient = mining_address,
         .amount = miner_reward, // 💰 Block reward + all transaction fees
         .fee = 0, // Coinbase has no fee
         .nonce = 0, // Coinbase always nonce 0
@@ -143,8 +144,6 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair) !types.Block
     print("👌 Starting mining\n", .{});
     const start_time = util.getTime();
 
-    const miner_address = miner_keypair.getAddress();
-
     // ZEN PROOF-OF-WORK: Find valid nonce
     // Ensure mining state height is synchronized before mining
     ctx.mining_state.current_height.store(current_height, .release);
@@ -155,7 +154,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair) !types.Block
 
     if (found_nonce) {
         // Process coinbase transaction (create new coins!)
-        try ctx.blockchain.chain_state.processCoinbaseTransaction(coinbase_tx, miner_address, current_height);
+        try ctx.blockchain.chain_state.processCoinbaseTransaction(coinbase_tx, mining_address, current_height);
 
         // Process regular transactions
         for (new_block.transactions[1..]) |tx| {

@@ -946,8 +946,8 @@ fn getBalanceFromServer(allocator: std.mem.Allocator, address: types.Address) !B
         
         // Split by comma to get mature and immature
         var parts = std.mem.splitScalar(u8, balance_str, ',');
-        const mature_str = parts.next() orelse "0";
-        const immature_str = parts.next() orelse "0";
+        const mature_str = std.mem.trim(u8, parts.next() orelse "0", " \n\r\t");
+        const immature_str = std.mem.trim(u8, parts.next() orelse "0", " \n\r\t");
         
         return BalanceInfo{
             .mature = std.fmt.parseInt(u64, mature_str, 10) catch 0,

@@ -27,6 +27,8 @@ pub fn main() !void {
     // Parse command line
     var config = command_line.parseArgs(allocator) catch |err| switch (err) {
         error.HelpRequested => return,
+        error.MissingMinerWallet => return, // Error already printed in parseArgs
+        error.UnknownArgument => return,   // Error already printed in parseArgs
         else => return err,
     };
     defer config.deinit();
