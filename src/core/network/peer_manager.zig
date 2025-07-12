@@ -108,7 +108,7 @@ pub const Peer = struct {
     /// Send request for specific block by hash
     pub fn sendGetBlockByHash(self: *Self, hash: [32]u8) !void {
         const hashes = [_][32]u8{hash};
-        const msg = try messages.GetBlocksMessage.init(self.allocator, &hashes);
+        var msg = try messages.GetBlocksMessage.init(self.allocator, &hashes);
         defer msg.deinit(self.allocator);
         
         _ = try self.sendMessage(.get_blocks, msg);
@@ -124,7 +124,7 @@ pub const Peer = struct {
     
     /// Send request for multiple blocks by hash
     pub fn sendGetBlocks(self: *Self, hashes: []const [32]u8) !void {
-        const msg = try messages.GetBlocksMessage.init(self.allocator, hashes);
+        var msg = try messages.GetBlocksMessage.init(self.allocator, hashes);
         defer msg.deinit(self.allocator);
         
         _ = try self.sendMessage(.get_blocks, msg);

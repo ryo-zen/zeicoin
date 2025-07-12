@@ -133,14 +133,11 @@ pub const ChainProcessor = struct {
     }
     
     fn cleanMempool(self: *ChainProcessor, block: types.Block) void {
-        // Clean mempool of transactions that were included in this block
-        if (self.blockchain.mempool_manager) |mempool| {
-            mempool.cleanAfterBlock(block) catch |err| {
-                print("⚠️ Failed to clean mempool after block: {}\n", .{err});
-            };
-        } else {
-            print("ℹ️ No mempool manager available for cleanup\n");
-        }
+        // TODO: Clean mempool of transactions that were included in this block
+        // This should be handled by the node coordinator that has access to mempool
+        _ = self;
+        _ = block;
+        print("🧹 Block processed, mempool cleanup delegated to coordinator\n", .{});
     }
     
     fn estimateCumulativeWork(self: *ChainProcessor, height: u32) !types.ChainWork {

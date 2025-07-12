@@ -72,7 +72,7 @@ pub const MempoolManager = struct {
         
         
         // Initialize components that need pointers to other components
-        self.network_handler = NetworkHandler.init(allocator, &self.storage, &self.validator, &self.limits);
+        self.network_handler = NetworkHandler.init(allocator, &self.storage, &self.validator, &self.limits, chain_state);
         self.cleaner = MempoolCleaner.init(allocator, &self.storage, &self.validator);
         
         

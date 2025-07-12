@@ -164,24 +164,10 @@ pub const ClientApiServer = struct {
     fn handleBalance(self: *Self, connection: net.Server.Connection, message: []const u8) !void {
         const address_str = std.mem.trim(u8, message[8..], " \n\r");
         
-        var address_bytes: [21]u8 = undefined;
-        if (address_str.len == 42) {
-            // Hex address (21 bytes = 42 hex characters)
-            _ = try std.fmt.hexToBytes(&address_bytes, address_str);
-        } else {
-            // Try bech32
-            const decoded_address = bech32.decodeAddress(self.allocator, address_str) catch {
-                _ = try connection.stream.write("ERROR: Invalid address format\n");
-                return;
-            };
-            address_bytes[0] = decoded_address.version;
-            @memcpy(address_bytes[1..], &decoded_address.hash);
-        }
-        
-        // Convert bytes to Address
-        const address = types.Address{
-            .version = address_bytes[0],
-            .hash = address_bytes[1..21].*,
+        // Parse bech32 address (modern standard)
+        const address = bech32.decodeAddress(self.allocator, address_str) catch {
+            _ = try connection.stream.write("ERROR: Invalid bech32 address format\n");
+            return;
         };
         const balance = self.blockchain.chain_query.getBalance(address) catch |err| {
             const error_msg = try std.fmt.allocPrint(
@@ -275,13 +261,10 @@ pub const ClientApiServer = struct {
     fn handleNonce(self: *Self, connection: net.Server.Connection, message: []const u8) !void {
         const address_str = std.mem.trim(u8, message[6..], " \n\r");
         
-        var address_bytes: [21]u8 = undefined;
-        _ = try std.fmt.hexToBytes(&address_bytes, address_str);
-        
-        // Convert bytes to Address
-        const address = types.Address{
-            .version = address_bytes[0],
-            .hash = address_bytes[1..21].*,
+        // Parse bech32 address (modern standard)
+        const address = bech32.decodeAddress(self.allocator, address_str) catch {
+            _ = try connection.stream.write("ERROR: Invalid bech32 address format\n");
+            return;
         };
         
         const account = self.blockchain.chain_query.getAccount(address) catch types.Account{ .address = address, .balance = 0, .nonce = 0 };
@@ -713,9 +696,9 @@ pub const ClientApiServer = struct {
         
         const address_str = std.mem.trim(u8, message[12..], " \n\r"); // "FUND_WALLET:" is 12 chars
         
-        // Parse address (supports both bech32 and hex)
-        const recipient = types.Address.fromString(self.allocator, address_str) catch {
-            _ = try connection.stream.write("ERROR: Invalid address format\n");
+        // Parse bech32 address (modern standard)
+        const recipient = bech32.decodeAddress(self.allocator, address_str) catch {
+            _ = try connection.stream.write("ERROR: Invalid bech32 address format\n");
             return;
         };
         

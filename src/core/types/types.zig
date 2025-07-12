@@ -38,21 +38,6 @@ pub const HEADERS_SYNC = struct {
     pub const MAX_CONCURRENT_DOWNLOADS: u32 = 5; // Parallel block downloads
 };
 
-// OLD sync protocol constants - will be removed when main.zig is updated
-pub const SYNC = struct {
-    pub const BATCH_SIZE: u32 = 10; // Blocks per sync request (small for responsiveness)
-    pub const SYNC_TIMEOUT_SECONDS: i64 = 30; // Timeout for sync requests
-    pub const RETRY_DELAY_SECONDS: i64 = 5; // Delay before retrying failed sync
-    pub const MAX_SYNC_RETRIES: u32 = 3; // Maximum sync retry attempts
-    pub const MAX_CONSECUTIVE_FAILURES: u32 = 5; // Maximum consecutive sync failures before peer disconnect
-    pub const PROGRESS_REPORT_INTERVAL: u32 = 10; // Report progress every N blocks
-    
-    // Parallel download constants
-    pub const DOWNLOAD_TIMEOUT_SECONDS: i64 = 30; // Timeout for individual block download
-    pub const MAX_DOWNLOAD_RETRIES: u8 = 3; // Maximum retries for failed block download
-    pub const MAX_CONCURRENT_DOWNLOADS: u8 = 20; // Total concurrent downloads across all peers
-    pub const PEER_MAX_CONCURRENT: u8 = 3; // Default max concurrent downloads per peer
-};
 
 // Block versioning - for protocol upgrades
 pub const BlockVersion = enum(u32) {
@@ -63,6 +48,9 @@ pub const BlockVersion = enum(u32) {
 
 // Current block version used by the protocol
 pub const CURRENT_BLOCK_VERSION: u32 = @intFromEnum(BlockVersion.V0);
+
+// Mining constants
+pub const COINBASE_MATURITY: u32 = 100; // Coinbase rewards require 100 confirmations
 
 // Network constants - Bootstrap nodes for peer discovery
 pub const BOOTSTRAP_NODES = [_][]const u8{

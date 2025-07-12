@@ -264,7 +264,7 @@ pub const ChainState = struct {
             if (self.isCoinbaseTransaction(tx)) {
                 // Coinbase rewards are already credited in processCoinbaseTransaction
                 // This is where we'd implement time-locked rewards if needed
-                print("💰 Coinbase reward matured for block {} (recipient: {})\n", .{maturity_height, std.fmt.fmtSliceHexLower(tx.recipient.data[0..8])});
+                print("💰 Coinbase reward matured for block {} (recipient: {})\n", .{maturity_height, std.fmt.fmtSliceHexLower(tx.recipient.hash[0..8])});
             }
         }
     }

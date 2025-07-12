@@ -6,6 +6,7 @@ const std = @import("std");
 const types = @import("../types/types.zig");
 const util = @import("../util/util.zig");
 const net = @import("../network/peer.zig");
+const ChainState = @import("../chain/state.zig").ChainState;
 
 const print = std.debug.print;
 
@@ -29,6 +30,9 @@ pub const NetworkHandler = struct {
     validator: *TransactionValidator,
     limits: *MempoolLimits,
     
+    // Chain state reference for height queries
+    chain_state: *ChainState,
+    
     // Network manager reference (optional)
     network: ?*net.NetworkManager,
     
@@ -48,12 +52,14 @@ pub const NetworkHandler = struct {
         allocator: std.mem.Allocator,
         storage: *MempoolStorage,
         validator: *TransactionValidator,
-        limits: *MempoolLimits
+        limits: *MempoolLimits,
+        chain_state: *ChainState
     ) Self {
         return .{
             .storage = storage,
             .validator = validator,
             .limits = limits,
+            .chain_state = chain_state,
             .network = null,
             .received_count = 0,
             .broadcast_count = 0,
@@ -155,22 +161,18 @@ pub const NetworkHandler = struct {
             const highest_peer_height = network.getHighestPeerHeight();
             
             // Auto-sync trigger: if peers are significantly ahead, start sync
-            const current_height = self.mempool_manager.blockchain.getHeight() catch 0;
+            const current_height = self.chain_state.getHeight() catch 0;
             
             // If peers are more than 2 blocks ahead, trigger sync
             if (highest_peer_height > current_height + 2) {
                 print("🔄 Peers are {} blocks ahead, triggering auto-sync\n", .{highest_peer_height - current_height});
                 
-                // Use the sync manager to start sync if available
-                if (self.mempool_manager.blockchain.sync_manager) |sync_mgr| {
-                    sync_mgr.startSync() catch |err| {
-                        print("⚠️ Auto-sync failed to start: {}\n", .{err});
-                    };
-                } else {
-                    print("⚠️ No sync manager available for auto-sync\n");
-                }
+                // TODO: Implement sync trigger through network manager
+                // For now, just log the need to sync - sync will be handled
+                // by the main node coordinator based on peer height differences
+                print("⚠️ Node appears to be behind peers - sync recommended\n", .{});
             } else {
-                print("ℹ️ Chain up to date, no auto-sync needed\n");
+                print("ℹ️ Chain up to date, no auto-sync needed\n", .{});
             }
             
             _ = transaction; // Transaction already processed

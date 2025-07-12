@@ -547,7 +547,7 @@ fn handleSendCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         defer if (addr.len > 20) allocator.free(short_addr);
         print("🆔 From: {s}\n", .{short_addr});
     } else {
-        const sender_bytes = sender_address.toLegacyBytes();
+        const sender_bytes = sender_address.toBytes();
         print("🆔 From: {s}\n", .{std.fmt.fmtSliceHexLower(sender_bytes[0..16])});
     }
     
@@ -559,7 +559,7 @@ fn handleSendCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         defer if (addr.len > 20) allocator.free(short_addr);
         print("🎯 To: {s}\n", .{short_addr});
     } else {
-        const recipient_bytes = recipient_address.toLegacyBytes();
+        const recipient_bytes = recipient_address.toBytes();
         print("🎯 To: {s}\n", .{std.fmt.fmtSliceHexLower(recipient_bytes[0..16])});
     }
 

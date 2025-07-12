@@ -241,7 +241,7 @@ pub fn decodeAddress(allocator: std.mem.Allocator, bech32_str: []const u8) !type
     defer allocator.free(data8bit);
     
     // Extract version and hash
-    if (data8bit.len != 32) return error.InvalidLength;
+    if (data8bit.len != 21) return error.InvalidLength;
     
     var address = types.Address{
         .version = data8bit[0],
@@ -252,39 +252,9 @@ pub fn decodeAddress(allocator: std.mem.Allocator, bech32_str: []const u8) !type
     return address;
 }
 
-/// Parse an address from string (either bech32 or legacy hex)
+/// Parse a modern Bech32 address from string
 pub fn parseAddress(allocator: std.mem.Allocator, str: []const u8) !types.Address {
-    // Try bech32 first by checking for the separator '1'
-    if (std.mem.indexOf(u8, str, "1")) |_| {
-        return decodeAddress(allocator, str) catch {
-            // Fall back to hex parsing
-            return parseHexAddress(str);
-        };
-    }
-    return parseHexAddress(str);
-}
-
-/// Parse legacy hex address format.
-/// A hex address is expected to be 64 characters, representing a 32-byte payload
-/// consisting of a 1-byte version and a 31-byte hash.
-fn parseHexAddress(hex_str: []const u8) !types.Address {
-    // Handle "0x" prefix if present
-    const clean_hex = if (std.mem.startsWith(u8, hex_str, "0x"))
-        hex_str[2..]
-    else
-        hex_str;
-
-    if (clean_hex.len != 64) return error.InvalidLength;
-
-    var payload: [32]u8 = undefined;
-    _ = std.fmt.hexToBytes(&payload, clean_hex) catch return error.InvalidHex;
-
-    var address = types.Address{
-        .version = payload[0],
-        .hash = undefined,
-    };
-    @memcpy(&address.hash, payload[1..21]);
-    return address;
+    return decodeAddress(allocator, str);
 }
 
 // ===== Tests =====
@@ -295,7 +265,7 @@ test "bech32 encoding and decoding" {
     // Test address
     const address = types.Address{
         .version = 0,
-        .hash = [_]u8{0x14} ** 31,
+        .hash = [_]u8{0x14} ** 20,
     };
     
     // Encode
@@ -313,16 +283,6 @@ test "bech32 encoding and decoding" {
     try std.testing.expectEqualSlices(u8, &address.hash, &decoded.hash);
 }
 
-test "hex address parsing" {
-    const allocator = std.testing.allocator;
-    
-    // Test hex address (version 0 + 31 bytes of 0x14)
-    const hex = "00" ++ "14" ** 31;
-    
-    const address = try parseAddress(allocator, hex);
-    try std.testing.expectEqual(@as(u8, 0), address.version);
-    try std.testing.expectEqual(@as(u8, 0x14), address.hash[0]);
-}
 
 test "bech32 checksum validation" {
     const allocator = std.testing.allocator;
@@ -365,21 +325,6 @@ test "bech32 edge cases" {
     try std.testing.expectError(error.InvalidFormat, decodeAddress(allocator, "tzei1qq"));
 }
 
-test "hex address edge cases" {
-    const allocator = std.testing.allocator;
-    
-    // Test with 0x prefix
-    const with_prefix = "0x00" ++ "14" ** 31;
-    const addr1 = try parseAddress(allocator, with_prefix);
-    try std.testing.expectEqual(@as(u8, 0), addr1.version);
-    
-    // Test invalid hex length
-    try std.testing.expectError(error.InvalidLength, parseAddress(allocator, "00112233"));
-    try std.testing.expectError(error.InvalidLength, parseAddress(allocator, "00" ++ "11" ** 32));
-    
-    // Test invalid hex characters
-    try std.testing.expectError(error.InvalidHex, parseAddress(allocator, "00" ++ "ZZ" ** 31));
-}
 
 test "address round-trip encoding" {
     const allocator = std.testing.allocator;

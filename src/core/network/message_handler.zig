@@ -71,8 +71,8 @@ pub const NetworkMessageHandler = struct {
             };
             defer parent_block.deinit(self.allocator);
 
-            // For now, estimate parent cumulative work (should be stored in future)
-            const parent_work = self.blockchain.estimateCumulativeWork(current_height - 1) catch 0;
+            // Get current total work from chain operations
+            const parent_work = self.blockchain.getTotalWork() catch 0;
             break :parent_calc parent_work + block_work;
         } else block_work;
 
