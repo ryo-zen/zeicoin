@@ -615,7 +615,7 @@ fn handleStatusCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     defer connection.close();
 
     // Send status request
-    try connection.writeAll("BLOCKCHAIN_STATUS");
+    try connection.writeAll("BLOCKCHAIN_STATUS\n");
 
     // Read response with timeout
     var buffer: [1024]u8 = undefined;
@@ -701,7 +701,7 @@ fn handleSyncCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     defer connection.close();
 
     // Send sync trigger request
-    try connection.writeAll("TRIGGER_SYNC");
+    try connection.writeAll("TRIGGER_SYNC\n");
 
     // Read response with timeout
     var buffer: [1024]u8 = undefined;
@@ -1069,7 +1069,7 @@ fn sendTransaction(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
         0;
 
     // Get current blockchain height from server for expiry calculation
-    try connection.writeAll("GET_HEIGHT");
+    try connection.writeAll("GET_HEIGHT\n");
     
     // Read height response with timeout
     var height_buffer: [1024]u8 = undefined;

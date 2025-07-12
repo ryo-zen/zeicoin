@@ -21,22 +21,25 @@ fi
 ZIG_VERSION=$(zig version)
 echo "🔧 Found Zig version: $ZIG_VERSION"
 
-# Get server IP configuration
+# Determine server binding IP
 if [ -n "$ZEICOIN_BIND_IP" ]; then
-    SERVER_IP="$ZEICOIN_BIND_IP"
-    echo "🌐 Binding to configured IP: $SERVER_IP"
+    BIND_IP="$ZEICOIN_BIND_IP"
+    echo "🌐 Using configured bind IP: $BIND_IP"
 else
-    # Try to get public IP, fallback to local IP
+    # Auto-detect: try public IP, fallback to local IP
     PUBLIC_IP=$(curl -s http://ipinfo.io/ip 2>/dev/null || echo "")
-    LOCAL_IP=$(hostname -I | awk '{print $1}' 2>/dev/null || echo "Unknown")
+    LOCAL_IP=$(hostname -I | awk '{print $1}' 2>/dev/null || echo "127.0.0.1")
     
     if [ -n "$PUBLIC_IP" ] && [ "$PUBLIC_IP" != "$LOCAL_IP" ]; then
-        SERVER_IP="$PUBLIC_IP"
-        echo "🌐 Public IP detected: $PUBLIC_IP"
-        echo "🏠 Local IP: $LOCAL_IP"
+        BIND_IP="$PUBLIC_IP"
+        echo "🌐 Auto-detected public IP: $PUBLIC_IP (local: $LOCAL_IP)"
+        # Export for server process
+        export ZEICOIN_BIND_IP="$BIND_IP"
     else
-        SERVER_IP="$LOCAL_IP"
+        BIND_IP="$LOCAL_IP"
         echo "🌐 Using local IP: $LOCAL_IP"
+        # Export for server process
+        export ZEICOIN_BIND_IP="$BIND_IP"
     fi
 fi
 
@@ -67,16 +70,16 @@ echo "📁 Created ZeiCoin data directories (testnet and mainnet)"
 
 echo ""
 echo "🎯 Starting ZeiCoin Server..."
-echo "   - P2P Network: $SERVER_IP:10801"
-echo "   - Client API: $SERVER_IP:10802"
-echo "   - UDP Discovery: $SERVER_IP:10800"
+echo "   - P2P Network: $BIND_IP:10801"
+echo "   - Client API: $BIND_IP:10802"
+echo "   - UDP Discovery: $BIND_IP:10800"
 echo "   - Blockchain data: ./zeicoin_data_testnet/ or ./zeicoin_data_mainnet/"
 echo "   - Active network determined by types.zig CURRENT_NETWORK setting"
 echo "   - Press Ctrl+C to stop"
 echo ""
 
 # Show network configuration advice for public servers
-if [ "$SERVER_IP" != "$LOCAL_IP" ] || [ -n "$ZEICOIN_BIND_IP" ]; then
+if [ "$BIND_IP" != "127.0.0.1" ] && [ "$BIND_IP" != "localhost" ]; then
     echo "🔒 Public Server Configuration:"
     echo "   - Ensure firewall allows ports 10800-10802"
     echo "   - Consider running behind reverse proxy for API (10802)"
@@ -106,12 +109,9 @@ if [ ! -f "./zig-out/bin/zen_server" ]; then
 fi
 
 echo "🌐 Starting ZeiCoin blockchain server..."
-echo "   - Server IP: $SERVER_IP"
+echo "   - Bind IP: $BIND_IP"
 echo "   - Build mode: Production (RandomX mining)"
 echo ""
-
-# Set environment variables for server
-export ZEICOIN_SERVER="$SERVER_IP"
 
 # Mining wallet setup
 MINER_WALLET=""
@@ -170,7 +170,7 @@ if [ -n "$MINER_WALLET" ]; then
                 if ./zig-out/bin/zeicoin wallet create "$MINER_WALLET"; then
                     echo "✅ Wallet '$MINER_WALLET' created successfully!"
                     echo "💡 After the server starts, you can fund this wallet with:"
-                    echo "   ZEICOIN_SERVER=$SERVER_IP ./zig-out/bin/zeicoin fund $MINER_WALLET"
+                    echo "   ZEICOIN_SERVER=$BIND_IP ./zig-out/bin/zeicoin fund $MINER_WALLET"
                     echo ""
                 else
                     echo "❌ Failed to create wallet '$MINER_WALLET'"
@@ -207,4 +207,5 @@ if [ -n "$ZEICOIN_BOOTSTRAP" ]; then
 fi
 
 echo "Starting server with args: $SERVER_ARGS"
+echo "🌐 Server will bind to: $BIND_IP"
 exec ./zig-out/bin/zen_server $SERVER_ARGS

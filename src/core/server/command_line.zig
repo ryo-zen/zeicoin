@@ -10,6 +10,7 @@ pub const Config = struct {
     enable_mining: bool = false,
     miner_wallet: ?[]const u8 = null,
     client_api_disabled: bool = false,
+    bind_address: []const u8 = "127.0.0.1",
     allocator: std.mem.Allocator,
     
     pub fn deinit(self: *Config) void {
@@ -19,6 +20,10 @@ pub const Config = struct {
         // Free miner_wallet if owned
         if (self.miner_wallet) |wallet_name| {
             self.allocator.free(wallet_name);
+        }
+        // Free bind_address if it's not the default literal
+        if (!std.mem.eql(u8, self.bind_address, "127.0.0.1")) {
+            self.allocator.free(self.bind_address);
         }
     }
 };
@@ -68,6 +73,11 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Config {
             return error.UnknownArgument;
         }
     }
+    
+    // Handle environment variable for bind address
+    if (std.process.getEnvVarOwned(allocator, "ZEICOIN_BIND_IP")) |bind_ip| {
+        config.bind_address = bind_ip; // Transfer ownership to config
+    } else |_| {}
     
     // Handle environment variable for bootstrap nodes
     if (bootstrap_list.items.len == 0) {

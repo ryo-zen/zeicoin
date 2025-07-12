@@ -40,12 +40,12 @@ pub fn main() !void {
     // Start client API if not disabled
     var api_server: ?client_api.ClientApiServer = null;
     if (!config.client_api_disabled) {
-        api_server = client_api.ClientApiServer.init(allocator, components.blockchain);
+        api_server = client_api.ClientApiServer.init(allocator, components.blockchain, config.bind_address);
         
         const api_thread = try std.Thread.spawn(.{}, client_api.ClientApiServer.start, .{&api_server.?});
         api_thread.detach();
         
-        std.log.info("✅ Client API started on port {}", .{client_api.CLIENT_API_PORT});
+        std.log.info("✅ Client API started on {s}:{}", .{config.bind_address, client_api.CLIENT_API_PORT});
     }
     defer if (api_server) |*server| server.deinit();
     

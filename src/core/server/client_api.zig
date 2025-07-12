@@ -20,15 +20,17 @@ pub const ClientApiServer = struct {
     blockchain: *zen.ZeiCoin,
     server: ?net.Server,
     running: bool,
+    bind_address: []const u8,
     
     const Self = @This();
     
-    pub fn init(allocator: std.mem.Allocator, blockchain: *zen.ZeiCoin) Self {
+    pub fn init(allocator: std.mem.Allocator, blockchain: *zen.ZeiCoin, bind_address: []const u8) Self {
         return .{
             .allocator = allocator,
             .blockchain = blockchain,
             .server = null,
             .running = false,
+            .bind_address = bind_address,
         };
     }
     
@@ -40,10 +42,10 @@ pub const ClientApiServer = struct {
     }
     
     pub fn start(self: *Self) !void {
-        const address = try net.Address.parseIp("127.0.0.1", CLIENT_API_PORT);
+        const address = try net.Address.parseIp(self.bind_address, CLIENT_API_PORT);
         self.server = try address.listen(.{ .reuse_address = true });
         
-        std.log.info("Client API listening on port {}", .{CLIENT_API_PORT});
+        std.log.info("Client API listening on {s}:{}", .{self.bind_address, CLIENT_API_PORT});
         
         self.running = true;
         while (self.running) {

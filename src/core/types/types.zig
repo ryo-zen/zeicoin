@@ -56,6 +56,7 @@ pub const COINBASE_MATURITY: u32 = 100; // Coinbase rewards require 100 confirma
 pub const BOOTSTRAP_NODES = [_][]const u8{
     "134.199.168.129:10801", // Public bootstrap node 1
     "161.189.98.149:10801", // Public bootstrap node 2
+    "134.199.170.129:10801", // Public bootstrap node 3
     // Note: Local/private IPs should not be hardcoded as bootstrap nodes
     // They will be discovered via local network scanning if available
 };
