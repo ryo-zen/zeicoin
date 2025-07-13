@@ -47,3 +47,7 @@ GEMINI.md
 launch.json
 tasks.json
 .vscode/settings.json
+fuzz/bech32_fuzz.zig
+.gitignore
+fuzz/bech32_simple_fuzz.zig
+fuzz/network_message_fuzz.zig

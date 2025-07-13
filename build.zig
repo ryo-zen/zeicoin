@@ -423,6 +423,40 @@ pub fn build(b: *std.Build) !void {
     }
 
     // **************************************************************
+    // *              FUZZ TESTS                                    *
+    // **************************************************************
+    
+    // Bech32 fuzz tests
+    {
+        const bech32_fuzz_tests = b.addTest(.{
+            .name = "bech32_fuzz_tests",
+            .root_source_file = b.path("fuzz/bech32_simple_fuzz.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        bech32_fuzz_tests.root_module.addImport("zeicoin", lib.root_module);
+        
+        const run_bech32_fuzz = b.addRunArtifact(bech32_fuzz_tests);
+        const bech32_fuzz_step = b.step("fuzz-bech32", "Run Bech32 fuzz tests");
+        bech32_fuzz_step.dependOn(&run_bech32_fuzz.step);
+    }
+    
+    // Network message fuzz tests  
+    {
+        const network_fuzz_tests = b.addTest(.{
+            .name = "network_message_fuzz_tests",
+            .root_source_file = b.path("fuzz/network_message_fuzz.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        network_fuzz_tests.root_module.addImport("zeicoin", lib.root_module);
+        
+        const run_network_fuzz = b.addRunArtifact(network_fuzz_tests);
+        const network_fuzz_step = b.step("fuzz-network", "Run network protocol fuzz tests");
+        network_fuzz_step.dependOn(&run_network_fuzz.step);
+    }
+
+    // **************************************************************
     // *              CLEAN                                         *
     // **************************************************************
     const clean_step = b.step("clean", "Clean build artifacts and cache");
