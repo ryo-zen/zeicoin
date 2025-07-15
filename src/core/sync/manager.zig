@@ -316,4 +316,202 @@ pub const SyncManager = struct {
             return error.NetworkNotInitialized;
         }
     }
+
+    /// Check if we need to sync with a peer
+    pub fn shouldSyncWithPeer(self: *Self, peer_height: u32) !bool {
+        const our_height = try self.blockchain.getHeight();
+
+        // If we have no blockchain and peer has blocks, always sync (including genesis)
+        if (our_height == 0 and peer_height > 0) {
+            print("🌐 Network has blockchain (height {}), will sync from genesis\n", .{peer_height});
+            return true;
+        }
+
+        if (self.getSyncState() != .synced) {
+            return false; // Already syncing or in error state
+        }
+
+        return peer_height > our_height;
+    }
+
+    /// Switch to a different peer for sync (peer fallback mechanism)
+    pub fn switchToNewPeer(self: *Self) !void {
+        if (self.blockchain.network == null) {
+            return error.NoNetworkManager;
+        }
+
+        // Add current peer to failed list
+        if (self.sync_peer) |failed_peer| {
+            try self.failed_peers.append(failed_peer);
+            print("🚫 Added peer to blacklist (total: {})\n", .{self.failed_peers.items.len});
+        }
+
+        // Find a new peer that's not in the failed list
+        const network = self.blockchain.network.?;
+        var new_peer: ?*net.Peer = null;
+
+        for (network.peers.items) |*peer| {
+            if (peer.state != .connected) continue;
+
+            // Check if this peer is in the failed list
+            var is_failed = false;
+            for (self.failed_peers.items) |failed_peer| {
+                if (peer == failed_peer) {
+                    is_failed = true;
+                    break;
+                }
+            }
+
+            if (!is_failed) {
+                new_peer = peer;
+                break;
+            }
+        }
+
+        if (new_peer) |peer| {
+            print("🔄 Switching to new sync peer\n", .{});
+            self.sync_peer = peer;
+
+            // Reset retry count - caller will retry the request
+            self.resetSyncRetry();
+        } else {
+            print("❌ No more peers available for sync\n", .{});
+            self.failSyncWithReason("No more peers available");
+        }
+    }
+
+    /// Fail sync process with error message
+    pub fn failSyncWithReason(self: *Self, reason: []const u8) void {
+        print("❌ Sync failed: {s}\n", .{reason});
+        self.state_manager.failSync();
+        self.sync_peer = null;
+
+        // Clear failed peers list for future attempts
+        self.failed_peers.clearAndFree();
+    }
+
+    /// Reset sync retry count and update timestamp
+    fn resetSyncRetry(self: *Self) void {
+        if (self.state_manager.progress) |*progress| {
+            progress.retry_count = 0;
+            progress.last_request_time = @import("../util/util.zig").getTime();
+        }
+    }
+
+    /// Start block downloads for headers-first sync
+    pub fn startBlockDownloads(self: *Self) !void {
+        const current_block_height = try self.blockchain.getHeight();
+        
+        if (self.header_chain) |chain| {
+            const header_height = chain.validated_height;
+
+            if (current_block_height >= header_height) {
+                @import("../util/util.zig").logInfo("Already have all blocks", .{});
+                self.completeHeadersSync();
+                return;
+            }
+
+            // Queue blocks for download
+            self.blocks_to_download.clearRetainingCapacity();
+            for (current_block_height + 1..header_height + 1) |height| {
+                try self.blocks_to_download.append(@intCast(height));
+            }
+
+            @import("../util/util.zig").logInfo("Queued {} blocks for download", .{self.blocks_to_download.items.len});
+
+            // Start parallel downloads
+            try self.requestNextBlocks();
+        }
+    }
+
+    /// Request next blocks for download
+    pub fn requestNextBlocks(self: *Self) !void {
+        if (self.blockchain.network == null) return;
+
+        const network = self.blockchain.network.?;
+        const now = @import("../util/util.zig").getTime();
+
+        // Clean up timed out downloads
+        var iter = self.active_block_downloads.iterator();
+        while (iter.next()) |entry| {
+            if (now - entry.value_ptr.* > types.HEADERS_SYNC.BLOCK_DOWNLOAD_TIMEOUT) {
+                // Re-queue timed out block
+                try self.blocks_to_download.append(entry.key_ptr.*);
+                _ = self.active_block_downloads.remove(entry.key_ptr.*);
+                print("❌ Block {} download timed out, re-queuing\n", .{entry.key_ptr.*});
+            }
+        }
+
+        // Start new downloads up to concurrent limit
+        while (self.active_block_downloads.count() < types.HEADERS_SYNC.MAX_CONCURRENT_DOWNLOADS and
+            self.blocks_to_download.items.len > 0)
+        {
+            const height = self.blocks_to_download.orderedRemove(0);
+
+            // Find available peer
+            var sent = false;
+            for (network.peers.items) |*peer| {
+                if (peer.state == .connected) {
+                    peer.sendGetBlock(height) catch continue;
+                    try self.active_block_downloads.put(height, now);
+                    @import("../util/util.zig").logProcess("Requested block {}", .{height});
+                    sent = true;
+                    break;
+                }
+            }
+
+            if (!sent) {
+                // No peers available, re-queue
+                try self.blocks_to_download.insert(0, height);
+                break;
+            }
+        }
+    }
+
+    /// Process downloaded block during headers-first sync
+    pub fn processDownloadedBlock(self: *Self, block: Block, height: u32) !void {
+        // Verify block matches expected header
+        if (self.header_chain) |chain| {
+            const expected_header = chain.getHeader(height);
+            if (expected_header == null or !std.mem.eql(u8, &block.header.hash(), &expected_header.?.hash())) {
+                print("❌ Block header mismatch at height {}\n", .{height});
+                return error.BlockHeaderMismatch;
+            }
+        }
+
+        // Process the block
+        try self.blockchain.handleSyncBlock(height, block);
+
+        // Remove from active downloads
+        _ = self.active_block_downloads.remove(height);
+
+        // Request more blocks
+        try self.requestNextBlocks();
+
+        // Check if sync is complete
+        if (self.blocks_to_download.items.len == 0 and self.active_block_downloads.count() == 0) {
+            self.completeHeadersSync();
+        }
+    }
+
+    /// Complete headers-first sync
+    fn completeHeadersSync(self: *Self) void {
+        @import("../util/util.zig").logSuccess("Headers-first sync completed!", .{});
+
+        if (self.state_manager.headers_progress) |progress| {
+            const elapsed = @import("../util/util.zig").getTime() - progress.start_time;
+            const headers_per_sec = progress.getHeadersPerSecond();
+            @import("../util/util.zig").logInfo("Downloaded {} headers in {}s ({:.2} headers/sec)", .{ progress.headers_downloaded, elapsed, headers_per_sec });
+        }
+
+        // Clean up
+        self.state_manager.headers_progress = null;
+        if (self.header_chain) |chain| {
+            chain.deinit();
+            self.allocator.destroy(chain);
+            self.header_chain = null;
+        }
+
+        self.state_manager.completeSync();
+    }
 };

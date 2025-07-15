@@ -338,21 +338,6 @@ pub const ZeiCoin = struct {
         return try self.chain_query.getMedianTimePast(height);
     }
 
-    pub fn validateBlock(self: *ZeiCoin, block: Block, expected_height: u32) !bool {
-        return try self.chain_validator.validateBlock(block, expected_height);
-    }
-
-    pub fn validateSyncBlock(self: *ZeiCoin, block: Block, expected_height: u32) !bool {
-        return try self.chain_validator.validateSyncBlock(block, expected_height);
-    }
-
-    pub fn validateReorgBlock(self: *ZeiCoin, block: Block, expected_height: u32) !bool {
-        return try self.chain_validator.validateReorgBlock(block, expected_height);
-    }
-
-    pub fn validateTransaction(self: *ZeiCoin, tx: Transaction) !bool {
-        return try self.chain_validator.validateTransaction(tx);
-    }
 
     fn isValidForkBlock(self: *ZeiCoin, block: types.Block) !bool {
         const current_height = try self.getHeight();
@@ -442,91 +427,51 @@ pub const ZeiCoin = struct {
 
     /// Handle chain reorganization when a better chain is found
     fn handleChainReorganization(self: *ZeiCoin, new_block: types.Block, new_chain_state: types.ChainState) !void {
-        const current_height = try self.getHeight();
-
-        // Safety check: prevent very deep reorganizations
-        if (self.fork_manager.isReorgTooDeep(current_height, new_chain_state.tip_height)) {
-            print("❌ Reorganization too deep ({} -> {}) - rejected for safety\n", .{ current_height, new_chain_state.tip_height });
-            return;
-        }
-
-        print("🔄 Starting reorganization: {} -> {} (depth: {})\n", .{ current_height, new_chain_state.tip_height, if (current_height > new_chain_state.tip_height) current_height - new_chain_state.tip_height else new_chain_state.tip_height - current_height });
-
-        // Find common ancestor (simplified - assume we need to rebuild from genesis for now)
-        const common_ancestor_height = try self.findCommonAncestor(new_chain_state.tip_hash);
-
-        if (common_ancestor_height == 0) {
-            print("⚠️ Deep reorganization required - rebuilding from genesis\n", .{});
-        }
-
-        // Rollback to common ancestor (no transaction backup needed - new block contains valid transactions)
-        try self.rollbackToHeight(common_ancestor_height);
-
-        // Accept the new block (this will become the new tip)
-        try self.acceptBlock(new_block);
-
-        // Update fork manager
-        self.fork_manager.updateChain(0, new_chain_state); // Update main chain
-
-        print("✅ Reorganization complete! New chain tip: {s}\n", .{std.fmt.fmtSliceHexLower(new_chain_state.tip_hash[0..8])});
+        try self.fork_manager.handleChainReorganization(self, new_block, new_chain_state);
     }
 
-    /// Find common ancestor between current chain and new chain
-    fn findCommonAncestor(self: *ZeiCoin, new_tip_hash: types.BlockHash) !u32 {
-        // Simplified: return 0 for now (rebuild from genesis)
-        // In a full implementation, we'd traverse back through both chains
+    /// Rollback blockchain to a specific height
+    fn rollbackToHeight(self: *ZeiCoin, target_height: u32) !void {
         _ = self;
-        _ = new_tip_hash;
-        return 0;
+        // TODO: Implement rollback logic
+        // This would be delegated to chain processor or similar
+        print("🔄 Rollback to height {} delegated to chain processor\n", .{target_height});
     }
 
-    /// Backup transactions from orphaned blocks
-    fn backupOrphanedTransactions(self: *ZeiCoin, from_height: u32, to_height: u32) !void {
-        print("💾 Backing up transactions from orphaned blocks ({} to {})\n", .{ from_height, to_height });
-
-        for (from_height..to_height) |height| {
-            const block = self.database.getBlock(@intCast(height)) catch continue;
-            defer block.deinit(self.allocator);
-
-            // Re-validate and add non-coinbase transactions back to mempool
-            for (block.transactions) |tx| {
-                if (!tx.isCoinbase()) {
-                    // Validate transaction is still valid
-                    if (self.validateTransaction(tx) catch false) {
-                        // TODO: Restore to MempoolManager instead
-                        print("🔄 Orphaned transaction backup (moved to MempoolManager)\n", .{});
-                    } else {
-                        print("❌ Orphaned transaction no longer valid - discarded\n", .{});
-                    }
-                }
-            }
-        }
+    /// Handle sync block at specific height
+    fn handleSyncBlock(self: *ZeiCoin, height: u32, block: Block) !void {
+        _ = height;
+        try self.handleIncomingBlock(block, null);
     }
 
-    /// Accept a block after validation (used in reorganization)
-    fn acceptBlock(self: *ZeiCoin, block: types.Block) !void {
-        return try self.chain_processor.acceptBlock(block);
+    /// Validate a block (delegated to chain validator)
+    pub fn validateBlock(self: *ZeiCoin, block: Block, expected_height: u32) !bool {
+        return try self.chain_validator.validateBlock(block, expected_height);
+    }
+
+    /// Validate a sync block (delegated to chain validator)
+    pub fn validateSyncBlock(self: *ZeiCoin, block: Block, expected_height: u32) !bool {
+        return try self.chain_validator.validateSyncBlock(block, expected_height);
+    }
+
+    /// Validate a transaction (delegated to chain validator)
+    pub fn validateTransaction(self: *ZeiCoin, tx: Transaction) !bool {
+        return try self.chain_validator.validateTransaction(tx);
     }
 
     /// Check if we need to sync with a peer
     pub fn shouldSync(self: *ZeiCoin, peer_height: u32) !bool {
-        const our_height = try self.getHeight();
-
-        // If we have no blockchain and peer has blocks, always sync (including genesis)
-        if (our_height == 0 and peer_height > 0) {
-            print("🌐 Network has blockchain (height {}), will sync from genesis\n", .{peer_height});
-            return true;
+        if (self.sync_manager) |sm| {
+            return try sm.shouldSyncWithPeer(peer_height);
         }
-
-        if (self.sync_state != .synced) {
-            return false; // Already syncing or in error state
-        }
-
-        return peer_height > our_height;
+        return false;
     }
 
     /// Get sync state
     pub fn getSyncState(self: *const ZeiCoin) sync_mod.SyncState {
+        if (self.sync_manager) |sm| {
+            return sm.getSyncState();
+        }
         return self.sync_state;
     }
 
@@ -537,13 +482,6 @@ pub const ZeiCoin = struct {
 
     // Helper methods for cleaner code
 
-    /// Reset sync retry count and update timestamp
-    fn resetSyncRetry(self: *ZeiCoin) void {
-        if (self.sync_progress) |*progress| {
-            progress.retry_count = 0;
-            progress.last_request_time = util.getTime();
-        }
-    }
 
     pub fn cleanupProcessedTransactions(self: *ZeiCoin) void {
         _ = self;
@@ -551,59 +489,22 @@ pub const ZeiCoin = struct {
 
     /// Switch to a different peer for sync (peer fallback mechanism)
     fn switchSyncPeer(self: *ZeiCoin) !void {
-        if (self.network == null) {
-            return error.NoNetworkManager;
-        }
-
-        // Add current peer to failed list
-        if (self.sync_peer) |failed_peer| {
-            try self.failed_peers.append(failed_peer);
-            print("🚫 Added peer to blacklist (total: {})\n", .{self.failed_peers.items.len});
-        }
-
-        // Find a new peer that's not in the failed list
-        const network = self.network.?;
-        var new_peer: ?*net.Peer = null;
-
-        for (network.peers.items) |*peer| {
-            if (peer.state != .connected) continue;
-
-            // Check if this peer is in the failed list
-            var is_failed = false;
-            for (self.failed_peers.items) |failed_peer| {
-                if (peer == failed_peer) {
-                    is_failed = true;
-                    break;
-                }
-            }
-
-            if (!is_failed) {
-                new_peer = peer;
-                break;
-            }
-        }
-
-        if (new_peer) |peer| {
-            print("🔄 Switching to new sync peer\n", .{});
-            self.sync_peer = peer;
-
-            // Reset retry count - caller will retry the request
-            self.resetSyncRetry();
-        } else {
-            print("❌ No more peers available for sync\n", .{});
-            self.failSync("No more peers available");
+        if (self.sync_manager) |sm| {
+            try sm.switchToNewPeer();
         }
     }
 
     /// Fail sync process with error message
     fn failSync(self: *ZeiCoin, reason: []const u8) void {
-        print("❌ Sync failed: {s}\n", .{reason});
-        self.sync_state = .sync_failed;
-        self.sync_progress = null;
-        self.sync_peer = null;
-
-        // Clear failed peers list for future attempts
-        self.failed_peers.clearAndFree();
+        if (self.sync_manager) |sm| {
+            sm.failSyncWithReason(reason);
+        } else {
+            print("❌ Sync failed: {s}\n", .{reason});
+            self.sync_state = .sync_failed;
+            self.sync_progress = null;
+            self.sync_peer = null;
+            self.failed_peers.clearAndFree();
+        }
     }
 
     /// Check if sync has timed out and needs recovery
@@ -624,137 +525,28 @@ pub const ZeiCoin = struct {
         return;
     }
     pub fn getHeadersRange(self: *ZeiCoin, start_height: u32, count: u32) ![]BlockHeader {
-        const headers = try self.allocator.alloc(BlockHeader, count);
-        errdefer self.allocator.free(headers);
-
-        var retrieved: usize = 0;
-        for (0..count) |i| {
-            const height = start_height + @as(u32, @intCast(i));
-            if (height > try self.getHeight()) break;
-
-            const block = try self.database.getBlock(height);
-            headers[retrieved] = block.header;
-            retrieved += 1;
-        }
-
-        if (retrieved < count) {
-            const actual_headers = try self.allocator.alloc(BlockHeader, retrieved);
-            @memcpy(actual_headers, headers[0..retrieved]);
-            self.allocator.free(headers);
-            return actual_headers;
-        }
-
-        return headers;
+        return try self.chain_query.getHeadersRange(start_height, count);
     }
 
+    /// Start block downloads (delegated to sync manager)
     fn startBlockDownloads(self: *ZeiCoin) !void {
-        const current_block_height = try self.getHeight();
-        const header_height = self.header_chain.?.validated_height;
-
-        if (current_block_height >= header_height) {
-            util.logInfo("Already have all blocks", .{});
-            self.completeHeadersSync();
-            return;
+        if (self.sync_manager) |sm| {
+            try sm.startBlockDownloads();
         }
-
-        // Queue blocks for download
-        self.blocks_to_download.clearRetainingCapacity();
-        for (current_block_height + 1..header_height + 1) |height| {
-            try self.blocks_to_download.append(@intCast(height));
-        }
-
-        util.logInfo("Queued {} blocks for download", .{self.blocks_to_download.items.len});
-
-        // Start parallel downloads
-        try self.requestNextBlocks();
     }
 
+    /// Request next blocks (delegated to sync manager)
     fn requestNextBlocks(self: *ZeiCoin) !void {
-        if (self.network == null) return;
-
-        const network = self.network.?;
-        const now = util.getTime();
-
-        // Clean up timed out downloads
-        var iter = self.active_block_downloads.iterator();
-        while (iter.next()) |entry| {
-            if (now - entry.value_ptr.* > types.HEADERS_SYNC.BLOCK_DOWNLOAD_TIMEOUT) {
-                // Re-queue timed out block
-                try self.blocks_to_download.append(entry.key_ptr.*);
-                _ = self.active_block_downloads.remove(entry.key_ptr.*);
-                print("❌ Block {} download timed out, re-queuing\n", .{entry.key_ptr.*});
-            }
-        }
-
-        // Start new downloads up to concurrent limit
-        while (self.active_block_downloads.count() < types.HEADERS_SYNC.MAX_CONCURRENT_DOWNLOADS and
-            self.blocks_to_download.items.len > 0)
-        {
-            const height = self.blocks_to_download.orderedRemove(0);
-
-            // Find available peer
-            var sent = false;
-            for (network.peers.items) |*peer| {
-                if (peer.state == .connected) {
-                    peer.sendGetBlock(height) catch continue;
-                    try self.active_block_downloads.put(height, now);
-                    util.logProcess("Requested block {}", .{height});
-                    sent = true;
-                    break;
-                }
-            }
-
-            if (!sent) {
-                // No peers available, re-queue
-                try self.blocks_to_download.insert(0, height);
-                break;
-            }
+        if (self.sync_manager) |sm| {
+            try sm.requestNextBlocks();
         }
     }
 
+    /// Process downloaded block (delegated to sync manager)
     pub fn processDownloadedBlock(self: *ZeiCoin, block: Block, height: u32) !void {
-        // Verify block matches expected header
-        if (self.header_chain) |chain| {
-            const expected_header = chain.getHeader(height);
-            if (expected_header == null or !std.mem.eql(u8, &block.header.hash(), &expected_header.?.hash())) {
-                print("❌ Block header mismatch at height {}\n", .{height});
-                return error.BlockHeaderMismatch;
-            }
+        if (self.sync_manager) |sm| {
+            try sm.processDownloadedBlock(block, height);
         }
-
-        // Process the block
-        try self.handleSyncBlock(height, block);
-
-        // Remove from active downloads
-        _ = self.active_block_downloads.remove(height);
-
-        // Request more blocks
-        try self.requestNextBlocks();
-
-        // Check if sync is complete
-        if (self.blocks_to_download.items.len == 0 and self.active_block_downloads.count() == 0) {
-            self.completeHeadersSync();
-        }
-    }
-
-    fn completeHeadersSync(self: *ZeiCoin) void {
-        util.logSuccess("Headers-first sync completed!", .{});
-
-        if (self.headers_progress) |progress| {
-            const elapsed = util.getTime() - progress.start_time;
-            const headers_per_sec = progress.getHeadersPerSecond();
-            util.logInfo("Downloaded {} headers in {}s ({:.2} headers/sec)", .{ progress.headers_downloaded, elapsed, headers_per_sec });
-        }
-
-        // Clean up
-        self.headers_progress = null;
-        if (self.header_chain) |chain| {
-            chain.deinit();
-            self.allocator.destroy(chain);
-            self.header_chain.deinit();
-        }
-
-        self.sync_state = .synced;
     }
 
     pub fn calculateNextDifficulty(self: *ZeiCoin) !types.DifficultyTarget {

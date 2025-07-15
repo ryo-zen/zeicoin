@@ -132,4 +132,96 @@ pub const ForkManager = struct {
         self.orphan_manager.cleanupOrphanBlocks();
         self.orphan_manager.cleanupRecentBlocks();
     }
+
+    /// Handle chain reorganization when a better chain is found
+    pub fn handleChainReorganization(self: *ForkManager, blockchain: anytype, new_block: types.Block, new_chain_state: types.ChainState) !void {
+        const current_height = try blockchain.getHeight();
+
+        // Safety check: prevent very deep reorganizations
+        if (self.isReorgTooDeep(current_height, new_chain_state.tip_height)) {
+            print("❌ Reorganization too deep ({} -> {}) - rejected for safety\n", .{ current_height, new_chain_state.tip_height });
+            return;
+        }
+
+        print("🔄 Starting reorganization: {} -> {} (depth: {})\n", .{ current_height, new_chain_state.tip_height, if (current_height > new_chain_state.tip_height) current_height - new_chain_state.tip_height else new_chain_state.tip_height - current_height });
+
+        // Find common ancestor (simplified - assume we need to rebuild from genesis for now)
+        const common_ancestor_height = try self.findCommonAncestor(blockchain, new_chain_state.tip_hash);
+
+        if (common_ancestor_height == 0) {
+            print("⚠️ Deep reorganization required - rebuilding from genesis\n", .{});
+        }
+
+        // Rollback to common ancestor
+        try self.rollbackToHeight(blockchain, common_ancestor_height);
+
+        // Accept the new block (this will become the new tip)
+        try self.acceptBlock(blockchain, new_block);
+
+        // Update fork manager
+        self.updateChain(0, new_chain_state); // Update main chain
+
+        print("✅ Reorganization complete! New chain tip: {s}\n", .{std.fmt.fmtSliceHexLower(new_chain_state.tip_hash[0..8])});
+    }
+
+    /// Find common ancestor between current chain and new chain
+    fn findCommonAncestor(self: *ForkManager, blockchain: anytype, new_tip_hash: types.BlockHash) !u32 {
+        // Simplified: return 0 for now (rebuild from genesis)
+        // In a full implementation, we'd traverse back through both chains
+        _ = self;
+        _ = blockchain;
+        _ = new_tip_hash;
+        return 0;
+    }
+
+    /// Rollback blockchain to a specific height
+    fn rollbackToHeight(self: *ForkManager, blockchain: anytype, target_height: u32) !void {
+        const current_height = try blockchain.getHeight();
+        
+        if (target_height >= current_height) {
+            return; // Nothing to rollback
+        }
+
+        // Backup transactions from orphaned blocks
+        try self.backupOrphanedTransactions(blockchain, target_height + 1, current_height);
+
+        // TODO: Implement actual rollback logic
+        // This would involve:
+        // 1. Reversing transactions from orphaned blocks
+        // 2. Updating chain state
+        // 3. Removing orphaned blocks from database
+        print("🔄 Rollback to height {} not yet fully implemented\n", .{target_height});
+    }
+
+    /// Backup transactions from orphaned blocks
+    fn backupOrphanedTransactions(self: *ForkManager, blockchain: anytype, from_height: u32, to_height: u32) !void {
+        print("💾 Backing up transactions from orphaned blocks ({} to {})\n", .{ from_height, to_height });
+
+        var transactions = std.ArrayList(types.Transaction).init(self.allocator);
+        defer transactions.deinit();
+
+        // Collect all transactions from orphaned blocks
+        for (from_height..to_height) |height| {
+            const block = blockchain.database.getBlock(@intCast(height)) catch continue;
+            defer block.deinit(self.allocator);
+
+            // Add non-coinbase transactions to backup list
+            for (block.transactions) |tx| {
+                if (!tx.isCoinbase()) {
+                    try transactions.append(tx);
+                }
+            }
+        }
+
+        // Restore transactions to mempool
+        if (transactions.items.len > 0) {
+            blockchain.mempool_manager.restoreOrphanedTransactions(transactions.items);
+        }
+    }
+
+    /// Accept a block after validation (used in reorganization)
+    fn acceptBlock(self: *ForkManager, blockchain: anytype, block: types.Block) !void {
+        _ = self;
+        return try blockchain.chain_processor.acceptBlock(block);
+    }
 };

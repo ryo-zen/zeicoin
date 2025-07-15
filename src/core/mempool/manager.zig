@@ -241,6 +241,52 @@ pub const MempoolManager = struct {
         _ = try self.cleaner.backupOrphanedTransactions(orphaned_blocks, true);
     }
 
+    /// Restore orphaned transactions back to mempool after reorganization
+    pub fn restoreOrphanedTransactions(self: *Self, transactions: []const Transaction) void {
+        for (transactions) |tx| {
+            if (!tx.isCoinbase()) {
+                // Validate transaction is still valid
+                if (self.validator.validateTransaction(tx) catch false) {
+                    // Deep copy transaction to transfer ownership to mempool
+                    const tx_copy = tx.dupe(self.allocator) catch |err| switch (err) {
+                        error.OutOfMemory => {
+                            print("⚠️  Out of memory restoring orphaned transaction - skipping\n", .{});
+                            continue;
+                        },
+                    };
+                    
+                    // Add to mempool with proper error handling
+                    if (self.addTransaction(tx_copy)) {
+                        print("🔄 Orphaned transaction restored to mempool\n", .{});
+                    } else |err| switch (err) {
+                        error.DuplicateTransaction => {
+                            // Transaction already in mempool, clean up our copy
+                            tx_copy.deinit(self.allocator);
+                            print("🔄 Orphaned transaction already in mempool - skipping\n", .{});
+                        },
+                        error.InsufficientBalance, error.FeeTooLow, error.InvalidNonce, error.TransactionExpired, error.InvalidTransaction => {
+                            // Transaction no longer valid, clean up our copy
+                            tx_copy.deinit(self.allocator);
+                            print("❌ Orphaned transaction validation failed - discarded\n", .{});
+                        },
+                        error.MempoolFull => {
+                            // Mempool is full, clean up our copy
+                            tx_copy.deinit(self.allocator);
+                            print("⚠️  Mempool full - cannot restore orphaned transaction\n", .{});
+                        },
+                        else => {
+                            // Unexpected error, clean up our copy and continue
+                            tx_copy.deinit(self.allocator);
+                            print("⚠️  Error restoring orphaned transaction - skipping\n", .{});
+                        },
+                    }
+                } else {
+                    print("❌ Orphaned transaction no longer valid - discarded\n", .{});
+                }
+            }
+        }
+    }
+
     /// Clear all transactions from mempool
     pub fn clearMempool(self: *Self) void {
         self.storage.clearPool();

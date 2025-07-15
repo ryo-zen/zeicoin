@@ -89,4 +89,30 @@ pub const ChainQuery = struct {
     pub fn hasTransaction(self: *ChainQuery, hash: [32]u8) bool {
         return self.database.hasTransaction(hash);
     }
+    
+    /// Get block headers for a range of heights
+    pub fn getHeadersRange(self: *ChainQuery, start_height: u32, count: u32) ![]types.BlockHeader {
+        const headers = try self.allocator.alloc(types.BlockHeader, count);
+        errdefer self.allocator.free(headers);
+
+        var retrieved: usize = 0;
+        for (0..count) |i| {
+            const height = start_height + @as(u32, @intCast(i));
+            if (height > try self.getHeight()) break;
+
+            const block = try self.database.getBlock(height);
+            defer block.deinit(self.allocator);
+            headers[retrieved] = block.header;
+            retrieved += 1;
+        }
+
+        if (retrieved < count) {
+            const actual_headers = try self.allocator.alloc(types.BlockHeader, retrieved);
+            @memcpy(actual_headers, headers[0..retrieved]);
+            self.allocator.free(headers);
+            return actual_headers;
+        }
+
+        return headers;
+    }
 };
