@@ -198,8 +198,8 @@ pub const ChainReorganization = struct {
         return found_ancestor;
     }
 
-    /// Get block height by hash with memory safety and performance optimization
-    /// TODO: In production, replace with O(1) block index/cache lookup
+    /// Get block height by hash with O(1) performance using block index
+    /// Replaces previous O(n) linear search with hash map lookup
     fn getBlockHeight(self: *Self, block_hash: Hash) !u32 {
         // Input validation
         const zero_hash = std.mem.zeroes([32]u8);
@@ -207,52 +207,15 @@ pub const ChainReorganization = struct {
             return error.InvalidHash;
         }
 
-        // Get current chain height with error handling
-        const current_height = self.chain_state.getHeight() catch |err| {
-            print("⚠️ Failed to get current chain height: {}\n", .{err});
-            return err;
-        };
-
-        // Security: prevent excessive search
-        const MAX_SEARCH_DEPTH = 50000; // Configurable limit
-        const search_limit = @min(current_height + 1, MAX_SEARCH_DEPTH);
-
-        // Optimization: search backwards from current height (recent blocks more likely)
-        var height = current_height;
-        var searches: u32 = 0;
-
-        while (searches < search_limit) {
-            // Memory-safe block retrieval
-            const block = self.chain_state.database.getBlock(height) catch |err| {
-                // If block doesn't exist at this height, continue searching
-                if (err == error.NotFound or err == error.LoadFailed) {
-                    if (height == 0) break; // Reached genesis, not found
-                    height -= 1;
-                    searches += 1;
-                    continue;
-                } else {
-                    // Other errors are fatal
-                    print("⚠️ Database error at height {}: {}\n", .{ height, err });
-                    return err;
-                }
-            };
-            defer block.deinit(self.allocator); // Guaranteed memory cleanup
-
-            // Calculate hash and compare safely
-            const this_hash = block.hash();
-            if (std.mem.eql(u8, &this_hash, &block_hash)) {
-                print("✅ Found block at height {} (searched {} blocks)\n", .{ height, searches + 1 });
-                return height;
-            }
-
-            // Continue searching backwards
-            if (height == 0) break; // Reached genesis
-            height -= 1;
-            searches += 1;
+        // O(1) lookup using block index cache
+        if (self.chain_state.getBlockHeight(block_hash)) |height| {
+            return height;
         }
 
-        // Block not found within search limits
-        print("⚠️ Block not found after searching {} blocks\n", .{searches});
+        // If not found in index, this could indicate:
+        // 1. Block doesn't exist on this chain
+        // 2. Block index needs rebuilding (shouldn't happen in normal operation)
+        print("⚠️ Block height not found in index for hash (may not exist on chain)\n", .{});
         return error.BlockNotFound;
     }
 

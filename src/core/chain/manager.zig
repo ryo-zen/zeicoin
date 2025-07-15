@@ -66,6 +66,11 @@ pub const ChainManager = struct {
         self.validator = ChainValidator.init(self.allocator, &self.state);
         self.operations = ChainOperations.init(self.allocator, &self.state, &self.validator);
         self.reorganization = ChainReorganization.init(self.allocator, &self.state, &self.validator, &self.operations);
+        
+        // Initialize block index from existing blockchain data
+        self.state.initializeBlockIndex() catch |err| {
+            print("⚠️ Failed to initialize block index: {} - O(1) lookups disabled\n", .{err});
+        };
     }
 
     /// Cleanup resources

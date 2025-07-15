@@ -52,6 +52,10 @@ pub const ChainProcessor = struct {
         // Save block to database
         try self.database.saveBlock(height, block);
         
+        // Update block index for O(1) lookups in reorganizations
+        const block_hash = block.hash();
+        try self.chain_state.indexBlock(height, block_hash);
+        
         // Mature any coinbase rewards that have reached 100 confirmations
         try self.matureCoinbaseRewards(height);
 
@@ -73,6 +77,10 @@ pub const ChainProcessor = struct {
         // Save block to database
         const block_height = try self.database.getHeight();
         try self.database.saveBlock(block_height, block);
+        
+        // Update block index for O(1) lookups in reorganizations
+        const block_hash = block.hash();
+        try self.chain_state.indexBlock(block_height, block_hash);
         
         // Mature any coinbase rewards that have reached 100 confirmations
         try self.matureCoinbaseRewards(block_height);
@@ -102,6 +110,10 @@ pub const ChainProcessor = struct {
 
         // Save to database
         try self.database.saveBlock(target_height, block);
+        
+        // Update block index for O(1) lookups in reorganizations
+        const block_hash = block.hash();
+        try self.chain_state.indexBlock(target_height, block_hash);
 
         print("✅ Block accepted at height {}\n", .{target_height});
 

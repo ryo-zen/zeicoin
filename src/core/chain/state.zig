@@ -6,6 +6,7 @@ const std = @import("std");
 const types = @import("../types/types.zig");
 const util = @import("../util/util.zig");
 const db = @import("../storage/db.zig");
+const block_index = @import("block_index.zig");
 
 const print = std.debug.print;
 
@@ -24,6 +25,10 @@ pub const ChainState = struct {
     // Core state storage
     database: *db.Database,
     processed_transactions: std.ArrayList([32]u8),
+    
+    // O(1) block lookups - replaces O(n) searches
+    block_index: block_index.BlockIndex,
+    
     allocator: std.mem.Allocator,
 
     const Self = @This();
@@ -33,6 +38,7 @@ pub const ChainState = struct {
         return .{
             .database = database,
             .processed_transactions = std.ArrayList([32]u8).init(allocator),
+            .block_index = block_index.BlockIndex.init(allocator),
             .allocator = allocator,
         };
     }
@@ -41,6 +47,38 @@ pub const ChainState = struct {
     /// Note: Database is owned by ZeiCoin, we only clean up our own resources
     pub fn deinit(self: *Self) void {
         self.processed_transactions.deinit();
+        self.block_index.deinit();
+    }
+
+    /// Initialize block index from existing blockchain data
+    /// Should be called after ChainState creation to populate O(1) lookups
+    pub fn initializeBlockIndex(self: *Self) !void {
+        try self.block_index.rebuild(self.database);
+        print("✅ ChainState: Block index initialized\n", .{});
+    }
+
+    /// Add block to index when new block is processed
+    /// Maintains O(1) lookup performance for reorganizations
+    pub fn indexBlock(self: *Self, height: u32, block_hash: Hash) !void {
+        try self.block_index.addBlock(height, block_hash);
+    }
+
+    /// Remove blocks from index during reorganization
+    /// Used when rolling back to a previous chain state
+    pub fn removeBlocksFromIndex(self: *Self, from_height: u32) void {
+        self.block_index.removeFromHeight(from_height);
+    }
+
+    /// Get block height by hash - O(1) operation
+    /// Replaces the O(n) search in reorganization.zig
+    pub fn getBlockHeight(self: *const Self, block_hash: Hash) ?u32 {
+        return self.block_index.getHeight(block_hash);
+    }
+
+    /// Get block hash by height - O(1) operation
+    /// Useful for chain validation and reorganization
+    pub fn getBlockHash(self: *const Self, height: u32) ?Hash {
+        return self.block_index.getHash(height);
     }
 
     // Account Management Methods (to be extracted from node.zig)
@@ -172,6 +210,12 @@ pub const ChainState = struct {
             };
             defer block.deinit(self.allocator);
 
+            // Rebuild block index during replay
+            const block_hash = block.hash();
+            self.indexBlock(@intCast(height), block_hash) catch |err| {
+                print("⚠️ Failed to rebuild block index at height {}: {}\n", .{height, err});
+            };
+
             // Process each transaction in the block
             for (block.transactions) |tx| {
                 if (self.isCoinbaseTransaction(tx)) {
@@ -191,6 +235,9 @@ pub const ChainState = struct {
             return; // Nothing to rollback
         }
 
+        // Remove blocks from index that will be rolled back
+        self.removeBlocksFromIndex(target_height + 1);
+        
         // Clear all account state - we'll rebuild by replaying from genesis
         try self.clearAllAccounts();
 
