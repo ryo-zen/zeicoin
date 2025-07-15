@@ -434,7 +434,7 @@ pub const ChainValidator = struct {
     pub fn validateReorgBlock(self: *Self, block: Block, expected_height: u32) !bool {
         // Special validation for genesis block
         if (expected_height == 0) {
-            if (!genesis.GenesisBlocks.TESTNET.getBlock().equals(block)) {
+            if (!genesis.GenesisBlocks.TESTNET.getBlock().equals(&block)) {
                 print("❌ Reorg genesis block validation failed\n", .{});
                 return false;
             }

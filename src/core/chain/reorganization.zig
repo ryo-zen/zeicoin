@@ -93,7 +93,7 @@ pub const ChainReorganization = struct {
             const mid = low + (high - low) / 2;
 
             // Get block at mid height from our current chain
-            const our_block = self.chain_state.database.getBlock(mid) catch {
+            var our_block = self.chain_state.database.getBlock(mid) catch {
                 // If block doesn't exist, try lower
                 if (mid == 0) break;
                 high = mid - 1;
@@ -158,7 +158,7 @@ pub const ChainReorganization = struct {
 
         while (current_height > ancestor_height and steps < height_diff + 1) {
             // Memory-safe block retrieval with proper cleanup
-            const block = self.chain_state.database.getBlockByHash(current_hash) catch |err| {
+            var block = self.chain_state.database.getBlockByHash(current_hash) catch |err| {
                 print("⚠️ Failed to retrieve block at height {}: {}\n", .{ current_height, err });
                 return false;
             };
@@ -171,13 +171,13 @@ pub const ChainReorganization = struct {
             }
 
             // Extract previous hash safely
-            current_hash = block.header.prev_hash;
+            current_hash = block.header.previous_hash;
             current_height -= 1;
             steps += 1;
 
             // Safety check: ensure we're making progress
             if (steps > height_diff + 1) {
-                print("⚠️ Traversal exceeded expected steps\n");
+                print("⚠️ Traversal exceeded expected steps\n", .{});
                 return false;
             }
 

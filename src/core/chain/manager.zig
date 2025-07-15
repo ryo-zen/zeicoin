@@ -12,7 +12,7 @@ const db = @import("../storage/db.zig");
 const ChainState = @import("state.zig").ChainState;
 const ChainValidator = @import("validator.zig").ChainValidator;
 const ChainOperations = @import("operations.zig").ChainOperations;
-const ChainReorganization = @import("reorganization.zig").ChainReorganization;
+const ReorgManager = @import("reorganization/manager.zig").ReorgManager;
 const Genesis = @import("genesis.zig");
 
 // Type aliases for clarity
@@ -40,7 +40,7 @@ pub const ChainManager = struct {
     state: ChainState,
     validator: ChainValidator,
     operations: ChainOperations,
-    reorganization: ChainReorganization,
+    reorganization: *ReorgManager,
     
     // Resource management
     allocator: std.mem.Allocator,
@@ -62,10 +62,10 @@ pub const ChainManager = struct {
     }
 
     /// Complete initialization after struct is created (to handle circular references)
-    pub fn completeInit(self: *Self) void {
+    pub fn completeInit(self: *Self) !void {
         self.validator = ChainValidator.init(self.allocator, &self.state);
         self.operations = ChainOperations.init(self.allocator, &self.state, &self.validator);
-        self.reorganization = ChainReorganization.init(self.allocator, &self.state, &self.validator, &self.operations);
+        self.reorganization = try ReorgManager.init(self.allocator, &self.state, &self.validator, &self.operations);
         
         // Initialize block index from existing blockchain data
         self.state.initializeBlockIndex() catch |err| {
@@ -137,16 +137,15 @@ pub const ChainManager = struct {
     }
 
     /// Handle chain reorganization
-    pub fn handleReorganization(self: *Self, new_tip: Hash) !void {
-        try self.reorganization.handleChainReorganization(new_tip);
+    pub fn handleReorganization(self: *Self, new_block: Block, new_tip: Hash) !void {
+        _ = try self.reorganization.executeReorganization(new_block, new_tip);
     }
 
     /// Get current mempool size
     fn getMempoolSize(self: *Self) !usize {
-        // Get mempool size from blockchain if available
-        if (self.blockchain.mempool_manager) |mempool| {
-            return mempool.getTransactionCount();
-        }
+        // ChainManager doesn't have direct access to mempool
+        // This would need to be provided through dependency injection
+        _ = self;
         return 0;
     }
 
@@ -157,11 +156,11 @@ pub const ChainManager = struct {
         const genesis_block = try genesis.createGenesisBlock(self.allocator, network);
         defer genesis_block.deinit(self.allocator);
         
-        // Save genesis block at height 0
-        try self.database.saveBlock(0, genesis_block);
+        // Save genesis block at height 0  
+        try self.state.database.saveBlock(0, genesis_block);
         
         // Process genesis transactions to initialize accounts
-        try self.chain_state.processBlockTransactions(genesis_block.transactions, 0);
+        try self.state.processBlockTransactions(genesis_block.transactions, 0);
         
         print("✅ Genesis block initialized for network {}\n", .{network});
     }

@@ -110,8 +110,73 @@ pub const NetworkMessageHandler = struct {
             .extends_chain => |chain_info| {
                 if (chain_info.requires_reorg) {
                     print("🏆 New best chain detected! Starting reorganization...\n", .{});
-                    // TODO: implement reorganization logic
-                    owned_block.deinit(self.allocator); // Clean up until reorg is implemented
+                    
+                    // Import modern reorganization architecture
+                    const ReorgManager = @import("../chain/reorganization/manager.zig").ReorgManager;
+                    const ChainValidator = @import("../chain/validator.zig").ChainValidator;
+                    const ChainOperations = @import("../chain/operations.zig").ChainOperations;
+                    
+                    // Initialize reorganization components
+                    var chain_validator = ChainValidator.init(self.allocator, &self.blockchain.chain_state);
+                    defer chain_validator.deinit();
+                    
+                    var chain_operations = ChainOperations.init(
+                        self.allocator,
+                        &self.blockchain.chain_state,
+                        &chain_validator
+                    );
+                    defer chain_operations.deinit();
+                    
+                    // Initialize modern reorganization manager
+                    var reorg_manager = ReorgManager.init(
+                        self.allocator,
+                        &self.blockchain.chain_state,
+                        &chain_validator,
+                        &chain_operations,
+                    ) catch |err| {
+                        print("❌ Failed to initialize reorganization manager: {}\n", .{err});
+                        owned_block.deinit(self.allocator);
+                        return;
+                    };
+                    defer reorg_manager.deinit();
+                    
+                    // Execute complete reorganization
+                    const new_chain_tip = owned_block.hash();
+                    const reorg_result = reorg_manager.executeReorganization(owned_block, new_chain_tip) catch |err| {
+                        print("❌ Chain reorganization failed: {}\n", .{err});
+                        owned_block.deinit(self.allocator);
+                        return;
+                    };
+                    
+                    // Check reorganization result
+                    if (reorg_result.success) {
+                        print("✅ Modern reorganization completed successfully!\n", .{});
+                        print("📊 Stats: {} blocks reverted, {} applied, {} txs replayed ({} ms)\n", .{
+                            reorg_result.blocks_reverted,
+                            reorg_result.blocks_applied,
+                            reorg_result.transactions_replayed,
+                            reorg_result.duration_ms
+                        });
+                        
+                        // Broadcast the new block to peers (create copy for broadcast)
+                        const block_copy = owned_block.dupe(self.allocator) catch |err| {
+                            print("⚠️  Failed to duplicate block for broadcast: {}\n", .{err});
+                            owned_block.deinit(self.allocator);
+                            return;
+                        };
+                        
+                        self.broadcastNewBlock(block_copy) catch |err| {
+                            print("⚠️  Failed to broadcast reorganization block: {}\n", .{err});
+                        };
+                        // Cleanup handled by broadcastNewBlock
+                        
+                        // Original block cleanup
+                        owned_block.deinit(self.allocator);
+                        
+                    } else {
+                        print("❌ Reorganization failed: {s}\n", .{reorg_result.error_message orelse "Unknown error"});
+                        owned_block.deinit(self.allocator);
+                    }
                 } else {
                     // Block extends the main chain - add it!
                     print("📈 Block extends main chain - adding to blockchain\n", .{});

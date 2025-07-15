@@ -14,7 +14,7 @@ pub const chain = struct {
     pub const state = @import("core/chain/state.zig");
     pub const validator = @import("core/chain/validator.zig");
     pub const operations = @import("core/chain/operations.zig");
-    pub const reorganization = @import("core/chain/reorganization.zig");
+    pub const reorganization = @import("core/chain/reorganization/manager.zig");
 };
 
 // Mempool management components

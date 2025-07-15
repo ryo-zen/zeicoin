@@ -754,6 +754,28 @@ pub const Block = struct {
         return true;
     }
 
+    /// Compare two blocks for equality
+    pub fn equals(self: *const Block, other: *const Block) bool {
+        // Compare headers
+        if (!std.mem.eql(u8, &self.header.hash(), &other.header.hash())) {
+            return false;
+        }
+        
+        // Compare transaction count
+        if (self.transactions.len != other.transactions.len) {
+            return false;
+        }
+        
+        // Compare each transaction
+        for (self.transactions, other.transactions) |tx1, tx2| {
+            if (!std.mem.eql(u8, &tx1.hash(), &tx2.hash())) {
+                return false;
+            }
+        }
+        
+        return true;
+    }
+
     /// Free all dynamically allocated memory in this block
     /// This includes the transactions array and any nested allocations
     /// IMPORTANT: Only call this on blocks loaded from disk/database

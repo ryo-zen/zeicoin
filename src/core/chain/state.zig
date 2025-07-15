@@ -184,7 +184,7 @@ pub const ChainState = struct {
     /// Clear all account state for rebuild
     pub fn clearAllAccounts(self: *Self) !void {
         // Open accounts directory
-        var accounts_dir = std.fs.cwd().openDir(self.database.accounts_dir, .{ .iterate = true }) catch {
+        var accounts_dir = std.fs.cwd().openDir(self.database.accounts_dir[0..self.database.accounts_dir_len], .{ .iterate = true }) catch {
             // Directory might not exist, that's okay
             return;
         };

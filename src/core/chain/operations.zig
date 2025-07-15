@@ -6,9 +6,9 @@ const std = @import("std");
 const types = @import("../types/types.zig");
 const util = @import("../util/util.zig");
 const genesis = @import("genesis.zig");
-const miner_mod = @import("../miner/main.zig");
 const ChainState = @import("state.zig").ChainState;
 const ChainValidator = @import("validator.zig").ChainValidator;
+const ReorgManager = @import("reorganization/manager.zig").ReorgManager;
 
 const print = std.debug.print;
 
@@ -283,12 +283,16 @@ pub const ChainOperations = struct {
         if (fork_work > current_work) {
             print("🏆 Fork block has more work ({} vs {}) - triggering reorganization\n", .{fork_work, current_work});
             
-            // For now, delegate to reorganization module
-            const reorganization = @import("reorganization.zig");
-            var reorg = reorganization.ChainReorganization.init(self.allocator, &self.chain_state);
-            defer reorg.deinit();
+            // Delegate to modern reorganization system
+            var reorg_manager = try ReorgManager.init(
+                self.allocator,
+                &self.chain_state,
+                self.chain_validator,
+                self,
+            );
+            defer reorg_manager.deinit();
             
-            try reorg.handleReorganization(fork_height, block);
+            _ = try reorg_manager.executeReorganization(block, block.hash());
         } else {
             print("📊 Fork block has less work ({} vs {}) - keeping current chain\n", .{fork_work, current_work});
         }
@@ -297,6 +301,6 @@ pub const ChainOperations = struct {
     /// Check if block is the genesis block
     fn isGenesisBlock(self: *Self, block: Block) bool {
         _ = self;
-        return genesis.GenesisBlocks.TESTNET.getBlock().equals(block);
+        return genesis.GenesisBlocks.TESTNET.getBlock().equals(&block);
     }
 };
