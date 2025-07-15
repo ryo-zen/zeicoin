@@ -91,7 +91,7 @@ pub const SyncManager = struct {
         }
 
         // Find a peer to sync with
-        if (self.blockchain.network) |network| {
+        if (self.blockchain.network_coordinator.getNetworkManager()) |network| {
             if (network.peer_manager.getBestPeerForSync()) |peer| {
                 self.sync_peer = peer;
                 self.target_height = peer.height;

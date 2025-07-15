@@ -288,7 +288,7 @@ pub const MessageHandlerImpl = struct {
         var peer_list = std.ArrayList(network.messages.PeerAddress).init(self.blockchain.allocator);
         defer peer_list.deinit();
         
-        if (self.blockchain.network) |net_manager| {
+        if (self.blockchain.network_coordinator.getNetworkManager()) |net_manager| {
             net_manager.peer_manager.mutex.lock();
             defer net_manager.peer_manager.mutex.unlock();
             
@@ -338,7 +338,7 @@ pub const MessageHandlerImpl = struct {
     fn onPeers(self: *Self, peer: *network.Peer, msg: network.messages.PeersMessage) !void {
         std.log.debug("Received {} peer addresses from {any}", .{ msg.addresses.len, peer.address });
         
-        if (self.blockchain.network) |net_manager| {
+        if (self.blockchain.network_coordinator.getNetworkManager()) |net_manager| {
             for (msg.addresses) |peer_addr| {
                 // Convert PeerAddress back to net.Address
                 const net_addr = if (std.mem.eql(u8, peer_addr.ip[0..10], &[_]u8{0} ** 10) and 

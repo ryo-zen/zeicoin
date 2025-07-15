@@ -66,7 +66,6 @@ pub fn initializeNode(allocator: std.mem.Allocator, config: command_line.Config)
     }
     
     // Connect components
-    blockchain.network = network_manager;
     blockchain.mempool_manager.setNetworkManager(network_manager);
     
     // Initialize sync manager following ZeiCoin ownership principles
@@ -175,7 +174,7 @@ fn initializeMining(blockchain: *zen.ZeiCoin, miner_wallet_name: []const u8) !vo
                     .database = blockchain.database,
                     .mempool_manager = blockchain.mempool_manager,
                     .mining_state = &blockchain.mining_state,
-                    .network = blockchain.network,
+                    .network = blockchain.network_coordinator.getNetworkManager(),
                     .fork_manager = &blockchain.fork_manager,
                     .blockchain = blockchain,
                 };

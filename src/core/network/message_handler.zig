@@ -186,7 +186,7 @@ pub const NetworkMessageHandler = struct {
     
     /// Broadcast new block to network peers
     pub fn broadcastNewBlock(self: *Self, block: Block) !void {
-        if (self.blockchain.network) |network| {
+        if (self.blockchain.network_coordinator.getNetworkManager()) |network| {
             print("📡 Broadcasting new block to {} peers\n", .{network.peer_manager.getConnectedCount()});
             try network.broadcastBlock(block);
         } else {

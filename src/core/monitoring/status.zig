@@ -6,17 +6,18 @@ const print = std.debug.print;
 const types = @import("../types/types.zig");
 const db = @import("../storage/db.zig");
 const net = @import("../network/peer.zig");
+const NetworkCoordinator = @import("../network/coordinator.zig").NetworkCoordinator;
 
 pub const StatusReporter = struct {
     allocator: std.mem.Allocator,
     database: *db.Database,
-    network: *?*net.NetworkManager,
+    network_coordinator: *NetworkCoordinator,
     
-    pub fn init(allocator: std.mem.Allocator, database: *db.Database, network: *?*net.NetworkManager) StatusReporter {
+    pub fn init(allocator: std.mem.Allocator, database: *db.Database, network_coordinator: *NetworkCoordinator) StatusReporter {
         return .{
             .allocator = allocator,
             .database = database,
-            .network = network,
+            .network_coordinator = network_coordinator,
         };
     }
     
@@ -34,7 +35,7 @@ pub const StatusReporter = struct {
         print("   Accounts: {} active\n", .{account_count});
 
         // Show network status
-        if (self.network.*) |network| {
+        if (self.network_coordinator.getNetworkManager()) |network| {
             const connected_peers = network.getConnectedPeers();
             const total_peers = network.peers.items.len;
             print("   Network: {} of {} peers connected\n", .{ connected_peers, total_peers });
@@ -85,8 +86,8 @@ pub const StatusReporter = struct {
             .height = try self.database.getHeight(),
             .account_count = try self.database.getAccountCount(),
             .mempool_count = mempool_count,
-            .network_peers = if (self.network.*) |n| n.peers.items.len else 0,
-            .connected_peers = if (self.network.*) |n| n.getConnectedPeers() else 0,
+            .network_peers = if (self.network_coordinator.getNetworkManager()) |n| n.peer_manager.peers.items.len else 0,
+            .connected_peers = if (self.network_coordinator.getNetworkManager()) |n| n.peer_manager.getConnectedPeers() else 0,
         };
     }
 };

@@ -181,6 +181,17 @@ pub const NetworkManager = struct {
         }
     }
     
+    /// Start network (convenience method that calls listen)
+    pub fn start(self: *Self, port: u16) !void {
+        try self.listen(port);
+    }
+    
+    /// Add a peer by string address (parses and delegates to connectToPeer)
+    pub fn addPeer(self: *Self, address_str: []const u8) !void {
+        const address = try std.net.Address.parseIp4(address_str, 10801); // Default P2P port
+        try self.connectToPeer(address);
+    }
+    
     /// Stop network manager
     pub fn stop(self: *Self) void {
         // Prevent multiple stop calls
