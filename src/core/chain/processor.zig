@@ -17,6 +17,7 @@ pub const ChainProcessor = struct {
     chain_state: *ChainState,
     fork_manager: *ForkManager,
     chain_validator: *ChainValidator,
+    mempool_manager: ?*@import("../mempool/manager.zig").MempoolManager,
     // Reference to parent for network broadcasting
     network_callback: ?*const fn(block: types.Block) void = null,
     
@@ -26,6 +27,7 @@ pub const ChainProcessor = struct {
         chain_state: *ChainState,
         fork_manager: *ForkManager,
         chain_validator: *ChainValidator,
+        mempool_manager: ?*@import("../mempool/manager.zig").MempoolManager,
     ) ChainProcessor {
         return .{
             .allocator = allocator,
@@ -33,6 +35,7 @@ pub const ChainProcessor = struct {
             .chain_state = chain_state,
             .fork_manager = fork_manager,
             .chain_validator = chain_validator,
+            .mempool_manager = mempool_manager,
         };
     }
     
@@ -42,6 +45,10 @@ pub const ChainProcessor = struct {
     
     pub fn setNetworkCallback(self: *ChainProcessor, callback: *const fn(block: types.Block) void) void {
         self.network_callback = callback;
+    }
+    
+    pub fn setMempoolManager(self: *ChainProcessor, mempool_manager: *@import("../mempool/manager.zig").MempoolManager) void {
+        self.mempool_manager = mempool_manager;
     }
     
     /// Apply a valid block to the blockchain
@@ -145,11 +152,15 @@ pub const ChainProcessor = struct {
     }
     
     fn cleanMempool(self: *ChainProcessor, block: types.Block) void {
-        // TODO: Clean mempool of transactions that were included in this block
-        // This should be handled by the node coordinator that has access to mempool
-        _ = self;
-        _ = block;
-        print("🧹 Block processed, mempool cleanup delegated to coordinator\n", .{});
+        if (self.mempool_manager) |mempool| {
+            mempool.cleanAfterBlock(block) catch |err| {
+                print("⚠️  Mempool cleanup failed: {}\n", .{err});
+                // Continue processing - mempool cleanup failure shouldn't stop block processing
+            };
+            print("🧹 Mempool cleaned after block processing\n", .{});
+        } else {
+            print("🧹 No mempool manager - cleanup skipped\n", .{});
+        }
     }
     
     fn estimateCumulativeWork(self: *ChainProcessor, height: u32) !types.ChainWork {

@@ -144,7 +144,7 @@ pub const ZeiCoin = struct {
             return error.DatabaseCorrupted;
         }
 
-        instance_ptr.chain_processor = ChainProcessor.init(allocator, instance_ptr.database, &instance_ptr.chain_state, &instance_ptr.fork_manager, &instance_ptr.chain_validator);
+        instance_ptr.chain_processor = ChainProcessor.init(allocator, instance_ptr.database, &instance_ptr.chain_state, &instance_ptr.fork_manager, &instance_ptr.chain_validator, null);
         components_initialized = 4;
 
         if (!database.validate()) {
@@ -180,6 +180,7 @@ pub const ZeiCoin = struct {
         components_initialized = 8;
 
         instance_ptr.mempool_manager.setMiningState(&instance_ptr.mining_state);
+        instance_ptr.chain_processor.setMempoolManager(instance_ptr.mempool_manager);
 
         if (!database.validate()) {
             print("❌ Database corrupted after mempool_manager init\n", .{});
