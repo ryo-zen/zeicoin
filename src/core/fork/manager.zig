@@ -224,4 +224,28 @@ pub const ForkManager = struct {
         _ = self;
         return try blockchain.chain_processor.acceptBlock(block);
     }
+
+    /// Check if a block is a valid fork block
+    pub fn isValidForkBlock(self: *ForkManager, block: types.Block, blockchain: anytype) !bool {
+        _ = self;
+        const current_height = try blockchain.getHeight();
+        for (0..current_height) |height| {
+            var existing_block = blockchain.database.getBlock(@intCast(height)) catch continue;
+            defer existing_block.deinit(blockchain.allocator);
+            const existing_hash = existing_block.hash();
+            if (std.mem.eql(u8, &block.header.previous_hash, &existing_hash)) {
+                print("🔗 Fork block builds on height {} (current tip: {})\n", .{ height, current_height - 1 });
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Store a fork block for potential chain reorganization
+    pub fn storeForkBlock(self: *ForkManager, block: types.Block, fork_height: u32) !void {
+        _ = self;
+        _ = block;
+        _ = fork_height;
+        print("⚠️ Fork storage not yet implemented - longest chain rule needed\n", .{});
+    }
 };
