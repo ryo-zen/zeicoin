@@ -239,7 +239,7 @@ pub const ChainValidator = struct {
                 .database = &self.chain_state.database,
                 .mempool_manager = undefined, // Not needed for validation
                 .mining_state = undefined, // Not needed for validation
-                .network = self.network,
+                .network = null,
                 .fork_manager = self.fork_manager,
                 .blockchain = undefined, // Not needed for validation
             };
@@ -339,7 +339,7 @@ pub const ChainValidator = struct {
                 .database = &self.chain_state.database,
                 .mempool_manager = undefined, // Not needed for validation
                 .mining_state = undefined, // Not needed for validation
-                .network = self.network,
+                .network = null,
                 .fork_manager = self.fork_manager,
                 .blockchain = undefined, // Not needed for validation
             };
