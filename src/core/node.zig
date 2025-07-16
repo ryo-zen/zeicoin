@@ -30,7 +30,6 @@ const ChainQuery = @import("chain/query.zig").ChainQuery;
 const ChainProcessor = @import("chain/processor.zig").ChainProcessor;
 const DifficultyCalculator = @import("chain/difficulty.zig").DifficultyCalculator;
 const StatusReporter = @import("monitoring/status.zig").StatusReporter;
-const BlockchainManager = @import("blockchain/manager.zig").BlockchainManager;
 
 pub const ZeiCoin = struct {
     database: *db.Database,
@@ -46,7 +45,6 @@ pub const ZeiCoin = struct {
     chain_processor: ChainProcessor,
     difficulty_calculator: DifficultyCalculator,
     status_reporter: StatusReporter,
-    blockchain_manager: BlockchainManager,
     mempool_manager: *MempoolManager,
     mining_state: types.MiningState,
     mining_manager: ?*miner_mod.MiningManager,
@@ -93,7 +91,6 @@ pub const ZeiCoin = struct {
             .chain_processor = undefined,
             .difficulty_calculator = undefined,
             .status_reporter = undefined,
-            .blockchain_manager = undefined,
             .mempool_manager = undefined,
             .mining_state = types.MiningState.init(),
             .mining_manager = null,
@@ -104,7 +101,6 @@ pub const ZeiCoin = struct {
             if (components_initialized >= 8) {
                 instance_ptr.mempool_manager.deinit();
             }
-            if (components_initialized >= 7) instance_ptr.blockchain_manager.deinit();
             if (components_initialized >= 6) instance_ptr.status_reporter.deinit();
             if (components_initialized >= 5) instance_ptr.difficulty_calculator.deinit();
             if (components_initialized >= 4) instance_ptr.chain_processor.deinit();
@@ -168,7 +164,6 @@ pub const ZeiCoin = struct {
             return error.DatabaseCorrupted;
         }
 
-        instance_ptr.blockchain_manager = BlockchainManager.init(allocator, instance_ptr.database, &instance_ptr.chain_state, &instance_ptr.chain_query, &instance_ptr.chain_processor, &instance_ptr.difficulty_calculator);
         components_initialized = 7;
 
         if (!database.validate()) {
@@ -181,6 +176,9 @@ pub const ZeiCoin = struct {
 
         instance_ptr.mempool_manager.setMiningState(&instance_ptr.mining_state);
         instance_ptr.chain_processor.setMempoolManager(instance_ptr.mempool_manager);
+        
+        // Wire up network coordinator for sync triggers
+        instance_ptr.mempool_manager.network_handler.setNetworkCoordinator(&instance_ptr.network_coordinator);
 
         if (!database.validate()) {
             print("❌ Database corrupted after mempool_manager init\n", .{});
@@ -225,7 +223,6 @@ pub const ZeiCoin = struct {
         self.mining_state.deinit();
 
         self.mempool_manager.deinit();
-        self.blockchain_manager.deinit();
         self.status_reporter.deinit();
         self.difficulty_calculator.deinit();
         self.chain_processor.deinit();
@@ -279,14 +276,14 @@ pub const ZeiCoin = struct {
     }
 
     pub fn getAccount(self: *ZeiCoin, address: Address) !Account {
-        if (!self.blockchain_manager.validateDatabase()) {
+        if (!self.database.validate()) {
             print("❌ Database corruption detected in ZeiCoin.getAccount()!\n", .{});
             print("  ZeiCoin ptr: {*}\n", .{self});
             print("  Database ptr: {*}\n", .{self.database});
             return error.DatabaseCorrupted;
         }
 
-        return try self.blockchain_manager.getAccount(address);
+        return try self.chain_query.getAccount(address);
     }
 
     pub fn addTransaction(self: *ZeiCoin, transaction: Transaction) !void {
@@ -294,14 +291,14 @@ pub const ZeiCoin = struct {
     }
 
     pub fn getHeight(self: *ZeiCoin) !u32 {
-        return try self.blockchain_manager.getHeight();
+        return try self.chain_query.getHeight();
     }
 
     pub fn getBlockByHeight(self: *ZeiCoin, height: u32) !Block {
-        return try self.blockchain_manager.getBlockByHeight(height);
+        return try self.chain_query.getBlock(height);
     }
     fn getMedianTimePast(self: *ZeiCoin, height: u32) !u64 {
-        return try self.blockchain_manager.getMedianTimePast(height);
+        return try self.chain_query.getMedianTimePast(height);
     }
 
     fn isValidForkBlock(self: *ZeiCoin, block: types.Block) !bool {
@@ -313,11 +310,11 @@ pub const ZeiCoin = struct {
     }
 
     pub fn addBlockToChain(self: *ZeiCoin, block: Block, height: u32) !void {
-        return try self.blockchain_manager.addBlockToChain(block, height);
+        return try self.chain_processor.addBlockToChain(block, height);
     }
 
     fn applyBlock(self: *ZeiCoin, block: Block) !void {
-        return try self.blockchain_manager.applyBlock(block);
+        return try self.chain_processor.applyBlock(block);
     }
 
     pub fn startNetwork(self: *ZeiCoin, port: u16) !void {
@@ -387,7 +384,7 @@ pub const ZeiCoin = struct {
     }
 
     pub fn getBlock(self: *ZeiCoin, height: u32) !types.Block {
-        return try self.blockchain_manager.getBlock(height);
+        return try self.chain_query.getBlock(height);
     }
 
     fn switchSyncPeer(self: *ZeiCoin) !void {
@@ -421,7 +418,7 @@ pub const ZeiCoin = struct {
     }
 
     pub fn getHeadersRange(self: *ZeiCoin, start_height: u32, count: u32) ![]BlockHeader {
-        return try self.blockchain_manager.getHeadersRange(start_height, count);
+        return try self.chain_query.getHeadersRange(start_height, count);
     }
 
     fn startBlockDownloads(self: *ZeiCoin) !void {
@@ -443,6 +440,6 @@ pub const ZeiCoin = struct {
     }
 
     pub fn calculateNextDifficulty(self: *ZeiCoin) !types.DifficultyTarget {
-        return try self.blockchain_manager.calculateNextDifficulty();
+        return try self.difficulty_calculator.calculateNextDifficulty();
     }
 };

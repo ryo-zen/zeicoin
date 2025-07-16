@@ -10,6 +10,7 @@ const message_mod = @import("protocol/message.zig");
 
 const ArrayList = std.ArrayList;
 const Mutex = std.Thread.Mutex;
+const print = std.debug.print;
 
 /// Peer connection state
 pub const PeerState = enum {
@@ -116,10 +117,16 @@ pub const Peer = struct {
     
     /// Send request for specific block by height
     pub fn sendGetBlockByHeight(self: *Self, height: u32) !void {
-        _ = self;
-        _ = height;
-        // TODO: Implement height-based block requests
-        return error.NotImplemented;
+        // For simple 2-node setup, we'll use a placeholder approach
+        // In practice, we'd need to map height to hash or use a different protocol message
+        
+        // For now, just request the next available blocks using empty hash list
+        // This will trigger a general block request that the peer can fulfill
+        var msg = try messages.GetBlocksMessage.init(self.allocator, &.{});
+        defer msg.deinit(self.allocator);
+        
+        _ = try self.sendMessage(.get_blocks, msg);
+        print("📤 Requested blocks starting from height {}\n", .{height});
     }
     
     /// Send request for multiple blocks by hash

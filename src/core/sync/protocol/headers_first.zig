@@ -306,7 +306,7 @@ pub const HeadersFirstProtocol = struct {
     }
     
     /// Get number of blocks queued for download
-    pub fn getBlocksToDownload(self: *const Self) usize {
+    pub fn getBlocksDownload(self: *const Self) usize {
         return self.blocks_to_download.items.len;
     }
     
@@ -360,7 +360,7 @@ test "HeadersFirstProtocol initialization" {
     
     try std.testing.expectEqual(SyncState.synced, protocol.sync_state);
     try std.testing.expectEqual(@as(?*net.Peer, null), protocol.sync_peer);
-    try std.testing.expectEqual(@as(usize, 0), protocol.getBlocksToDownload());
+    try std.testing.expectEqual(@as(usize, 0), protocol.getBlocksDownload());
 }
 
 // Mock functions for testing

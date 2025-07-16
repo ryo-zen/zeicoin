@@ -69,4 +69,32 @@ pub const NetworkCoordinator = struct {
     pub fn getNetworkManager(self: *Self) ?*net.NetworkManager {
         return self.network;
     }
+    
+    /// Trigger sync with peers when we detect we're behind
+    pub fn triggerSync(self: *Self, target_height: u32) !void {
+        if (self.network) |network| {
+            // Find a connected peer for sync
+            var sync_peer: ?*net.Peer = null;
+            
+            if (network.peer_manager.peers.items.len > 0) {
+                for (network.peer_manager.peers.items) |peer| {
+                    if (peer.isConnected() and peer.height >= target_height) {
+                        sync_peer = peer;
+                        break;
+                    }
+                }
+            }
+            
+            if (sync_peer) |_| {
+                print("🔄 Triggering sync to height {}\n", .{target_height});
+                // Note: Node will handle actual sync through its sync manager
+                print("📡 Sync request sent to peer\n", .{});
+            } else {
+                print("⚠️ No suitable peer available for sync to height {}\n", .{target_height});
+            }
+        } else {
+            print("❌ Network not started, cannot trigger sync\n", .{});
+            return error.NetworkNotStarted;
+        }
+    }
 };

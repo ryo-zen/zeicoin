@@ -6,6 +6,7 @@ const std = @import("std");
 const types = @import("../types/types.zig");
 const util = @import("../util/util.zig");
 const net = @import("../network/peer.zig");
+const NetworkCoordinator = @import("../network/coordinator.zig").NetworkCoordinator;
 const ChainState = @import("../chain/state.zig").ChainState;
 
 const print = std.debug.print;
@@ -36,6 +37,9 @@ pub const NetworkHandler = struct {
     // Network manager reference (optional)
     network: ?*net.NetworkManager,
     
+    // Network coordinator reference (for sync triggers)
+    network_coordinator: ?*NetworkCoordinator,
+    
     // Statistics
     received_count: u64,
     broadcast_count: u64,
@@ -61,6 +65,7 @@ pub const NetworkHandler = struct {
             .limits = limits,
             .chain_state = chain_state,
             .network = null,
+            .network_coordinator = null,
             .received_count = 0,
             .broadcast_count = 0,
             .duplicate_count = 0,
@@ -72,6 +77,11 @@ pub const NetworkHandler = struct {
     /// Set network manager reference
     pub fn setNetworkManager(self: *Self, network: *net.NetworkManager) void {
         self.network = network;
+    }
+    
+    /// Set network coordinator reference
+    pub fn setNetworkCoordinator(self: *Self, coordinator: *NetworkCoordinator) void {
+        self.network_coordinator = coordinator;
     }
     
     /// Handle incoming transaction from network peer
@@ -167,10 +177,14 @@ pub const NetworkHandler = struct {
             if (highest_peer_height > current_height + 2) {
                 print("🔄 Peers are {} blocks ahead, triggering auto-sync\n", .{highest_peer_height - current_height});
                 
-                // TODO: Implement sync trigger through network manager
-                // For now, just log the need to sync - sync will be handled
-                // by the main node coordinator based on peer height differences
-                print("⚠️ Node appears to be behind peers - sync recommended\n", .{});
+                // Trigger sync through network coordinator
+                if (self.network_coordinator) |coordinator| {
+                    coordinator.triggerSync(highest_peer_height) catch |err| {
+                        print("⚠️ Failed to trigger sync: {}\n", .{err});
+                    };
+                } else {
+                    print("⚠️ No network coordinator available for sync trigger\n", .{});
+                }
             } else {
                 print("ℹ️ Chain up to date, no auto-sync needed\n", .{});
             }
