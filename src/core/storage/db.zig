@@ -20,6 +20,7 @@ pub const DatabaseError = error{
     NotFound,
     InvalidPath,
     SerializationFailed,
+    DeletionFailed,
 };
 
 /// ZeiCoin zen minimal database
@@ -350,6 +351,40 @@ pub const Database = struct {
         var tx = self.getTransactionByHash(hash) catch return false;
         tx.deinit(self.allocator);
         return true;
+    }
+    
+    /// Remove a block at a specific height
+    pub fn removeBlock(self: *Database, height: u32) !void {
+        // Create filename: blocks/000012.block
+        const filename = try std.fmt.allocPrint(self.allocator, "{s}/{:0>6}.block", .{ self.blocks_dir[0..self.blocks_dir_len], height });
+        defer self.allocator.free(filename);
+        
+        // Delete the file
+        std.fs.cwd().deleteFile(filename) catch |err| {
+            if (err == error.FileNotFound) {
+                // Block already removed, not an error
+                return;
+            }
+            return DatabaseError.DeletionFailed;
+        };
+        
+        std.debug.print("🗑️ Removed block at height {}\n", .{height});
+    }
+    
+    /// Save the current blockchain height
+    pub fn saveHeight(self: *Database, height: u32) !void {
+        // Create height file path
+        const filename = try std.fmt.allocPrint(self.allocator, "{s}/HEIGHT", .{self.blocks_dir[0..self.blocks_dir_len]});
+        defer self.allocator.free(filename);
+        
+        // Write height to file
+        const file = std.fs.cwd().createFile(filename, .{}) catch return DatabaseError.SaveFailed;
+        defer file.close();
+        
+        const height_str = try std.fmt.allocPrint(self.allocator, "{}", .{height});
+        defer self.allocator.free(height_str);
+        
+        file.writeAll(height_str) catch return DatabaseError.SaveFailed;
     }
 };
 
