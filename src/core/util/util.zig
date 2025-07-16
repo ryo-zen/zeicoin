@@ -48,6 +48,24 @@ pub fn getAdjustedTime() i64 {
     return getTime() + time_offset;
 }
 
+/// Calculate block work from difficulty bits
+/// Work = 2^256 / (target + 1)
+/// For simplicity, we use difficulty bits as a proxy for work
+pub fn calculateBlockWork(difficulty_bits: u32) u128 {
+    // Extract exponent and mantissa from compact bits
+    const exponent = @as(u32, difficulty_bits >> 24) & 0xff;
+    const mantissa = difficulty_bits & 0xffffff;
+    
+    // Basic work approximation: higher difficulty = more work
+    // This is simplified - Bitcoin uses more complex calculation
+    if (exponent <= 3) {
+        return mantissa >> @intCast(8 * (3 - exponent));
+    } else {
+        const shift = @as(u7, @intCast(@min(8 * (exponent - 3), 127)));
+        return @as(u128, mantissa) << shift;
+    }
+}
+
 /// Add time data from network peer for consensus adjustment
 pub fn addTimeData(ip: u32, network_time: i64) !void {
     const offset_sample = network_time - getTime();

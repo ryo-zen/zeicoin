@@ -490,8 +490,16 @@ pub const ChainValidator = struct {
 
     /// Validate block proof-of-work (delegates to miner module)
     fn validateBlockPoW(self: *Self, block: Block) !bool {
-        _ = self;
-        return miner_mod.validateBlockPoW(block);
+        const mining_context = miner_mod.MiningContext{
+            .allocator = self.allocator,
+            .database = self.chain_state.database,
+            .mempool_manager = undefined, // Not needed for validation
+            .mining_state = undefined, // Not needed for validation
+            .network = null, // Not needed for validation
+            .fork_manager = undefined, // Not needed for validation
+            .blockchain = undefined, // Not needed for validation
+        };
+        return miner_mod.validateBlockPoW(mining_context, block);
     }
 
     /// Get block by height (delegates to ChainState database)

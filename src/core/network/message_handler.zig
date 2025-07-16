@@ -226,8 +226,45 @@ pub const NetworkMessageHandler = struct {
                     };
                     // Cleanup handled by broadcastNewBlock
                 } else {
-                    // TODO: implement side chain handling
-                    owned_block.deinit(self.allocator); // Clean up until implemented
+                    // Handle side chain block
+                    print("📦 Processing side chain block (chain {})\n", .{chain_index});
+                    
+                    // Get block work (use existing getWork method)
+                    const side_block_work = owned_block.header.getWork();
+                    
+                    // Add to side chain manager
+                    const side_chain_action = self.blockchain.fork_manager.handleSideChainBlock(
+                        owned_block,
+                        owned_block.header.previous_hash,
+                        block_height - 1, // Parent height
+                        side_block_work
+                    ) catch |err| {
+                        print("❌ Failed to handle side chain block: {}\n", .{err});
+                        owned_block.deinit(self.allocator);
+                        return;
+                    };
+                    
+                    // Handle the result
+                    switch (side_chain_action) {
+                        .stored => {
+                            print("✅ Side chain block stored successfully\n", .{});
+                            // Check if this side chain should trigger reorganization
+                            if (self.blockchain.fork_manager.getActiveChain()) |active_chain| {
+                                if (self.blockchain.fork_manager.evaluateSideChains(active_chain.cumulative_work)) |_| {
+                                    print("🏆 Side chain has more work! Triggering reorganization\n", .{});
+                                    // TODO: Implement side chain reorganization
+                                    print("⚠️ Side chain reorganization not yet implemented\n", .{});
+                                }
+                            }
+                        },
+                        .rejected => {
+                            print("❌ Side chain block rejected (capacity/limits)\n", .{});
+                            owned_block.deinit(self.allocator);
+                        },
+                        else => {
+                            owned_block.deinit(self.allocator);
+                        },
+                    }
                 }
             },
         }

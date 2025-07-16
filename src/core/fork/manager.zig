@@ -10,6 +10,7 @@ const fork_types = @import("types.zig");
 const chains = @import("chains.zig");
 const orphans = @import("orphans.zig");
 const decisions = @import("decisions.zig");
+const sidechains = @import("sidechains.zig");
 
 const Block = types.Block;
 const BlockHash = types.BlockHash;
@@ -55,6 +56,7 @@ pub const ForkManager = struct {
     chain_tracker: chains.ChainTracker,
     orphan_manager: orphans.OrphanManager,
     decision_engine: decisions.DecisionEngine,
+    side_chain_manager: sidechains.SideChainManager,
     
     // Rollback state tracking
     block_effects: std.ArrayList(BlockEffect),
@@ -65,12 +67,14 @@ pub const ForkManager = struct {
             .chain_tracker = chains.ChainTracker.init(),
             .orphan_manager = orphans.OrphanManager.init(allocator),
             .decision_engine = decisions.DecisionEngine{},
+            .side_chain_manager = sidechains.SideChainManager.init(allocator),
             .block_effects = std.ArrayList(BlockEffect).init(allocator),
         };
     }
     
     pub fn deinit(self: *ForkManager) void {
         self.orphan_manager.deinit();
+        self.side_chain_manager.deinit();
         // Clean up block effects
         for (self.block_effects.items) |*effect| {
             effect.deinit();
@@ -427,6 +431,41 @@ pub const ForkManager = struct {
             effect.deinit();
         }
         self.block_effects.clearRetainingCapacity();
+    }
+    
+    /// Handle a side chain block
+    pub fn handleSideChainBlock(self: *ForkManager, block: Block, parent_hash: BlockHash, parent_height: u32, block_work: ChainWork) !sidechains.ChainAction {
+        // Add to side chain manager
+        const action = try self.side_chain_manager.addSideChainBlock(block, parent_hash, parent_height, block_work);
+        
+        // Perform maintenance periodically
+        if (self.side_chain_manager.total_blocks_stored % 10 == 0) {
+            self.side_chain_manager.pruneOldChains();
+        }
+        
+        return action;
+    }
+    
+    /// Check if any side chain should trigger reorganization
+    pub fn evaluateSideChains(self: *ForkManager, main_chain_work: ChainWork) ?*sidechains.SideChainInfo {
+        return self.side_chain_manager.evaluateSideChains(main_chain_work);
+    }
+    
+    /// Get side chain blocks for reorganization
+    pub fn getSideChainBlocks(self: *ForkManager, chain_tip: BlockHash) !std.ArrayList(Block) {
+        return try self.side_chain_manager.extractChainBlocks(chain_tip);
+    }
+    
+    /// Get side chain statistics
+    pub fn getSideChainStats(self: *const ForkManager) struct {
+        chain_count: usize,
+        total_blocks: usize,
+        memory_usage: usize,
+        total_stored: u64,
+        total_chains: u64,
+        total_reorgs: u64,
+    } {
+        return self.side_chain_manager.getStats();
     }
 };
 

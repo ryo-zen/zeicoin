@@ -12,3 +12,4 @@ pub const ForkStats = @import("types.zig").ForkStats;
 pub const chains = @import("chains.zig");
 pub const orphans = @import("orphans.zig");
 pub const decisions = @import("decisions.zig");
+pub const sidechains = @import("sidechains.zig");
