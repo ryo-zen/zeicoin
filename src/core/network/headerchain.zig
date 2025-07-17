@@ -173,6 +173,11 @@ pub const HeaderChain = struct {
         return null;
     }
     
+    /// Get height for a given hash
+    pub fn getHeightForHash(self: *Self, hash: types.BlockHash) ?u32 {
+        return self.hash_to_height.get(hash);
+    }
+    
     /// Check if we have all headers up to target
     pub fn isComplete(self: *Self, target_height: u32) bool {
         return self.getHeight() >= target_height;

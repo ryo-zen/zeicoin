@@ -11,6 +11,13 @@ const key = @import("../crypto/key.zig");
 const command_line = @import("command_line.zig");
 const types = @import("../types/types.zig");
 
+/// Thread function to accept incoming connections
+fn acceptConnectionsThread(network_manager: *network.NetworkManager) void {
+    network_manager.acceptConnections() catch |err| {
+        std.log.err("Accept connections thread error: {}", .{err});
+    };
+}
+
 pub const NodeComponents = struct {
     blockchain: *zen.ZeiCoin,
     network_manager: *network.NetworkManager,
@@ -71,14 +78,22 @@ pub fn initializeNode(allocator: std.mem.Allocator, config: command_line.Config)
     // Initialize sync manager following ZeiCoin ownership principles
     const sync_manager = try allocator.create(sync.SyncManager);
     sync_manager.* = sync.SyncManager.init(allocator, blockchain);
+    sync_manager.network_manager = network_manager;
     blockchain.sync_manager = sync_manager;
     
     // Start network listening
     try network_manager.listen(config.port);
     std.log.info("Network listening on port {}", .{config.port});
     
+    // Start accepting connections in a separate thread
+    const accept_thread = try std.Thread.spawn(.{}, acceptConnectionsThread, .{network_manager});
+    accept_thread.detach();
+    std.log.info("Connection accept thread started", .{});
+    
     // Connect to bootstrap nodes
+    std.log.info("Connecting to {} bootstrap nodes", .{config.bootstrap_nodes.len});
     for (config.bootstrap_nodes) |node| {
+        std.log.info("Attempting to connect to bootstrap node {s}:{}", .{ node.ip, node.port });
         const address = std.net.Address.parseIp(node.ip, node.port) catch |err| {
             std.log.warn("Failed to parse bootstrap node {s}:{} - {}", .{ node.ip, node.port, err });
             continue;

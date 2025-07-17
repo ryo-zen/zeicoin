@@ -9,6 +9,7 @@ const util = @import("../util/util.zig");
 const headerchain = @import("headerchain.zig");
 const net = @import("peer.zig");
 const protocol = @import("protocol/protocol.zig");
+const messages = @import("protocol/messages/messages.zig");
 
 // Import the new modular sync system
 const sync_mod = @import("../sync/sync.zig");
@@ -21,6 +22,7 @@ const ZeiCoin = @import("../node.zig").ZeiCoin;
 pub const SyncManager = struct {
     allocator: std.mem.Allocator,
     blockchain: *ZeiCoin,
+    network_manager: ?*net.NetworkManager,
     
     // Sync management collections
     failed_peers: std.ArrayList(*net.Peer),
@@ -42,6 +44,7 @@ pub const SyncManager = struct {
         return .{
             .allocator = allocator,
             .blockchain = blockchain,
+            .network_manager = null,
             .failed_peers = std.ArrayList(*net.Peer).init(allocator),
             .blocks_to_download = std.ArrayList(u32).init(allocator),
             .active_downloads = std.AutoHashMap(u32, i64).init(allocator),
@@ -91,7 +94,7 @@ pub const SyncManager = struct {
         }
 
         // Find a peer to sync with
-        if (self.blockchain.network_coordinator.getNetworkManager()) |network| {
+        if (self.network_manager) |network| {
             if (network.peer_manager.getBestPeerForSync()) |peer| {
                 self.sync_peer = peer;
                 self.target_height = peer.height;
@@ -100,6 +103,12 @@ pub const SyncManager = struct {
                 self.is_syncing = true;
                 
                 std.debug.print("Starting sync with peer {} to height {}\n", .{ peer.address, self.target_height });
+                
+                // Start the actual sync process
+                self.requestHeaders(peer) catch |err| {
+                    std.debug.print("Failed to request headers: {}\n", .{err});
+                    self.is_syncing = false;
+                };
             } else {
                 std.debug.print("No connected peers to sync with.\n", .{});
             }
@@ -108,6 +117,82 @@ pub const SyncManager = struct {
         }
     }
 
+    /// Request headers from peer using block locator
+    fn requestHeaders(self: *SyncManager, peer: *net.Peer) !void {
+        const our_height = try self.blockchain.getHeight();
+        std.debug.print("Requesting headers from peer (our height: {})\n", .{our_height});
+        
+        // For simplicity, request headers starting from our current height
+        // Build a simple block locator with just our current tip
+        var locator = std.ArrayList(types.Hash).init(self.allocator);
+        defer locator.deinit();
+        
+        // Add our current tip hash (or genesis if height 0)
+        if (our_height > 0) {
+            var current_block = try self.blockchain.chain_query.getBlockByHeight(our_height);
+            defer current_block.deinit(self.allocator);
+            try locator.append(current_block.hash());
+        }
+        
+        // Always add genesis block
+        var genesis_block = try self.blockchain.chain_query.getBlockByHeight(0);
+        defer genesis_block.deinit(self.allocator);
+        try locator.append(genesis_block.hash());
+        
+        // Create get headers message
+        const stop_hash = [_]u8{0} ** 32; // Request all headers until chain tip
+        const locator_slice = try locator.toOwnedSlice();
+        defer self.allocator.free(locator_slice);
+        
+        var get_headers = try messages.GetHeadersMessage.init(self.allocator, locator_slice, stop_hash);
+        defer get_headers.deinit(self.allocator);
+        
+        // Send the message
+        const data = try peer.sendMessage(.get_headers, get_headers);
+        defer self.allocator.free(data);
+        
+        std.debug.print("Sent GetHeaders request to peer\n", .{});
+    }
+    
+    /// Handle headers response and request blocks
+    pub fn handleHeaders(self: *SyncManager, peer: *net.Peer, headers: []const types.BlockHeader) !void {
+        if (!self.is_syncing or self.sync_peer != peer) {
+            std.debug.print("Ignoring headers from non-sync peer\n", .{});
+            return;
+        }
+        
+        std.debug.print("Received {} headers from peer\n", .{headers.len});
+        
+        if (headers.len == 0) {
+            std.debug.print("No new headers, sync complete\n", .{});
+            self.is_syncing = false;
+            return;
+        }
+        
+        // Request blocks for each header
+        var hashes = std.ArrayList(types.Hash).init(self.allocator);
+        defer hashes.deinit();
+        
+        for (headers) |header| {
+            const hash = header.hash();
+            try hashes.append(hash);
+            std.debug.print("Will request block with hash: {}\n", .{std.fmt.fmtSliceHexLower(&hash)});
+        }
+        
+        // Send GetBlocks message
+        const hashes_slice = try hashes.toOwnedSlice();
+        defer self.allocator.free(hashes_slice);
+        
+        var get_blocks = try messages.GetBlocksMessage.init(self.allocator, hashes_slice);
+        defer get_blocks.deinit(self.allocator);
+        
+        const data = try peer.sendMessage(.get_blocks, get_blocks);
+        defer self.allocator.free(data);
+        
+        std.debug.print("Sent GetBlocks request for {} blocks\n", .{headers.len});
+    }
+    
+    
     /// Start headers-first sync specifically
     pub fn startHeadersFirstSync(self: *SyncManager, peer: *net.Peer, target_height: u32) !void {
         self.sync_peer = peer;
@@ -193,18 +278,10 @@ pub const SyncManager = struct {
 
         std.debug.print("📦 Processing sync block at height {}\n", .{block_height});
 
-        // Forward to the blockchain sync manager
-        // Note: ownership is transferred to handleSyncBlock
-        if (self.blockchain.sync_manager) |sm| {
-            try sm.handleSyncBlock(block.*);
-            // Block ownership transferred, just free the pointer
-            self.allocator.destroy(block);
-        } else {
-            // No sync manager, process directly through blockchain
-            try self.blockchain.handleIncomingBlock(block.*, self.sync_peer);
-            // Block ownership transferred, just free the pointer
-            self.allocator.destroy(block);
-        }
+        // Process block through blockchain directly
+        try self.blockchain.handleIncomingBlock(block.*, self.sync_peer);
+        // Block ownership transferred, just free the pointer
+        self.allocator.destroy(block);
 
         // Update progress
         self.blocks_downloaded += 1;

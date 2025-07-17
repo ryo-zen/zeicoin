@@ -96,6 +96,42 @@ fi
 echo "🔨 Building ZeiCoin (Release mode)..."
 zig build -Doptimize=ReleaseFast
 
+# Create mining wallet
+echo "👛 Creating mining wallet..."
+if [ ! -d "wallets" ]; then
+    mkdir -p wallets
+fi
+
+# Create Alice wallet if it doesn't exist
+if [ ! -f "wallets/Alice.wallet" ]; then
+    echo "Creating 'Alice' wallet for mining..."
+    ./zig-out/bin/zeicoin wallet create Alice
+    echo "✅ Alice wallet created!"
+else
+    echo "✅ Alice wallet already exists"
+fi
+
+# Configure firewall for ZeiCoin ports
+echo "🔥 Configuring firewall..."
+if command -v ufw &> /dev/null; then
+    # UFW (Ubuntu/Debian)
+    sudo ufw allow 10800/udp comment "ZeiCoin UDP Discovery"
+    sudo ufw allow 10801/tcp comment "ZeiCoin P2P"
+    sudo ufw allow 10802/tcp comment "ZeiCoin Client API"
+    sudo ufw allow 10803/tcp comment "ZeiCoin Metrics"
+    echo "✅ UFW firewall configured"
+elif command -v firewall-cmd &> /dev/null; then
+    # firewalld (CentOS/RHEL)
+    sudo firewall-cmd --permanent --add-port=10800/udp
+    sudo firewall-cmd --permanent --add-port=10801/tcp
+    sudo firewall-cmd --permanent --add-port=10802/tcp
+    sudo firewall-cmd --permanent --add-port=10803/tcp
+    sudo firewall-cmd --reload
+    echo "✅ Firewalld configured"
+else
+    echo "⚠️  No firewall detected - manually open ports: 10800/udp, 10801/tcp, 10802/tcp, 10803/tcp"
+fi
+
 echo ""
 echo "🎉 Setup complete!"
 echo ""
@@ -103,14 +139,73 @@ echo "Quick start:"
 echo "  scripts/start_zei_server.sh    # Start public server"
 echo "  zig build test                 # Run all tests"
 echo ""
-echo "Create your first wallet:"
-echo "  ./zig-out/bin/zeicoin wallet create mywallet"
-echo "  ./zig-out/bin/zeicoin balance mywallet"
+echo "Mining wallet created: Alice"
+echo "  ./zig-out/bin/zeicoin balance Alice"
+echo "  ./zig-out/bin/zeicoin address Alice"
 echo ""
 echo "Start server with mining:"
-echo "  ./zig-out/bin/zen_server --mine mywallet"
+echo "  ./zig-out/bin/zen_server --mine Alice"
 echo ""
 echo "For public server deployment with mining:"
 echo "  ZEICOIN_MINER_WALLET=ryo scripts/start_zei_server.sh"
 echo "  # Replace 'ryo' with your wallet name"
 echo "  # Server will auto-detect public IP and start RandomX mining"
+echo ""
+# Create systemd service for production deployment
+if command -v systemctl &> /dev/null; then
+    echo "🔧 Creating systemd service..."
+    
+    CURRENT_DIR=$(pwd)
+    
+    sudo tee /etc/systemd/system/zeicoin-mining.service > /dev/null <<EOF
+[Unit]
+Description=ZeiCoin Mining Server
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=$CURRENT_DIR
+Environment="ZEICOIN_SERVER=127.0.0.1"
+Environment="ZEICOIN_BIND_IP=0.0.0.0"
+ExecStart=$CURRENT_DIR/zig-out/bin/zen_server --mine Alice
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Security settings
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable zeicoin-mining.service
+    
+    echo "✅ Systemd service created and enabled!"
+    
+    # Test the service
+    echo "🧪 Testing service configuration..."
+    if sudo systemctl start zeicoin-mining.service; then
+        sleep 3
+        if sudo systemctl is-active --quiet zeicoin-mining.service; then
+            echo "✅ Service started successfully!"
+            sudo systemctl stop zeicoin-mining.service
+        else
+            echo "❌ Service failed to start - check logs: sudo journalctl -u zeicoin-mining.service"
+        fi
+    else
+        echo "❌ Service failed to start - check configuration"
+    fi
+    
+    echo ""
+    echo "Service management:"
+    echo "  sudo systemctl start zeicoin-mining.service     # Start service"
+    echo "  sudo systemctl status zeicoin-mining.service    # Check status"
+    echo "  sudo journalctl -u zeicoin-mining.service -f    # View logs"
+fi

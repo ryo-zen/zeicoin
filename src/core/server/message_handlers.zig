@@ -55,8 +55,16 @@ pub const MessageHandlerImpl = struct {
             peer.address, peer.height, our_height
         });
         
-        if (peer.height > our_height and self.blockchain.sync_manager != null) {
-            try self.blockchain.sync_manager.?.startSync();
+        if (peer.height > our_height) {
+            std.log.info("Peer has higher height, checking sync manager...", .{});
+            if (self.blockchain.sync_manager != null) {
+                std.log.info("Starting sync with peer at height {}", .{peer.height});
+                try self.blockchain.sync_manager.?.startSync();
+            } else {
+                std.log.warn("Sync manager is null, cannot start sync!", .{});
+            }
+        } else {
+            std.log.info("Peer height {} is not higher than our height {}, no sync needed", .{ peer.height, our_height });
         }
     }
     
@@ -101,8 +109,8 @@ pub const MessageHandlerImpl = struct {
         std.log.debug("Received {} headers from {any}", .{ msg.headers.len, peer.address });
         
         if (self.blockchain.sync_manager) |sync_manager| {
-            sync_manager.processIncomingHeaders(@constCast(msg.headers), 0) catch |err| {
-                std.log.warn("Failed to process headers: {}", .{err});
+            sync_manager.handleHeaders(peer, msg.headers) catch |err| {
+                std.log.warn("Failed to handle headers: {}", .{err});
             };
         }
     }
@@ -199,6 +207,23 @@ pub const MessageHandlerImpl = struct {
         std.log.info("Received block from {any}", .{peer.address});
         
         const block = msg.block;
+        
+        // Check if we're in sync mode - if so, route to sync manager
+        if (self.blockchain.sync_manager) |sync_manager| {
+            if (sync_manager.is_syncing and sync_manager.sync_peer == peer) {
+                // Create a copy of the block for the sync manager
+                const block_copy = try self.blockchain.allocator.create(types.Block);
+                block_copy.* = block;
+                
+                sync_manager.processIncomingBlock(block_copy) catch |err| {
+                    std.log.warn("Failed to process sync block from {any}: {}", .{ peer.address, err });
+                    self.blockchain.allocator.destroy(block_copy);
+                };
+                return;
+            }
+        }
+        
+        // Normal block processing
         self.blockchain.handleIncomingBlock(block, peer) catch |err| {
             std.log.warn("Failed to process block from {any}: {}", .{ peer.address, err });
             

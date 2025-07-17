@@ -105,8 +105,10 @@ pub const PeerConnection = struct {
         handshake.listen_port = protocol.DEFAULT_PORT;
         handshake.start_height = try self.message_handler.getHeight();
         
+        std.log.info("Sending handshake to peer {} with height {}", .{ self.peer.id, handshake.start_height });
         const data = try self.peer.sendMessage(.handshake, handshake);
         try self.stream.writeAll(data);
+        std.log.info("Handshake sent to peer {}", .{self.peer.id});
     }
     
     /// Send ping message
@@ -151,6 +153,8 @@ pub const PeerConnection = struct {
     }
     
     fn handleHandshake(self: *Self, handshake: messages.HandshakeMessage) !void {
+        std.log.info("Received handshake from peer {} with height {}", .{ self.peer.id, handshake.start_height });
+        
         // Validate handshake
         try handshake.validate();
         
@@ -164,6 +168,7 @@ pub const PeerConnection = struct {
         self.peer.user_agent = try self.allocator.dupe(u8, handshake.user_agent);
         
         // Send handshake ack
+        std.log.info("Sending handshake ack to peer {}", .{self.peer.id});
         const data = try self.peer.sendMessage(.handshake_ack, {});
         try self.stream.writeAll(data);
         
@@ -173,6 +178,7 @@ pub const PeerConnection = struct {
         });
         
         // Call handler
+        std.log.info("Calling onPeerConnected handler for peer {}", .{self.peer.id});
         try self.message_handler.onPeerConnected(self.peer);
     }
     

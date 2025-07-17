@@ -15,6 +15,10 @@ pub const Config = struct {
     
     pub fn deinit(self: *Config) void {
         if (self.bootstrap_nodes.len > 0) {
+            // Free each IP string
+            for (self.bootstrap_nodes) |node| {
+                self.allocator.free(node.ip);
+            }
             self.allocator.free(self.bootstrap_nodes);
         }
         // Free miner_wallet if owned
@@ -106,7 +110,9 @@ fn parseBootstrapNodes(list: *std.ArrayList(BootstrapNode), input: []const u8) !
         else 
             network.DEFAULT_PORT;
         
-        try list.append(.{ .ip = ip, .port = port });
+        // Duplicate the IP string to ensure it's owned by the list
+        const ip_copy = try list.allocator.dupe(u8, ip);
+        try list.append(.{ .ip = ip_copy, .port = port });
     }
 }
 

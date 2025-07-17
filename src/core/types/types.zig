@@ -38,6 +38,12 @@ pub const HEADERS_SYNC = struct {
     pub const MAX_CONCURRENT_DOWNLOADS: u32 = 5; // Parallel block downloads
 };
 
+// Parallel block download constants
+pub const SYNC = struct {
+    pub const DOWNLOAD_TIMEOUT_SECONDS: i64 = 30; // Timeout for parallel downloads
+    pub const MAX_DOWNLOAD_RETRIES: u8 = 3; // Maximum retry attempts
+};
+
 
 // Block versioning - for protocol upgrades
 pub const BlockVersion = enum(u32) {

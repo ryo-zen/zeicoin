@@ -64,29 +64,43 @@ pub const NetworkManager = struct {
             .reuse_port = true,
         });
         
+        // Set running to true so connection threads can proceed
+        self.running = true;
+        std.log.info("Network manager started, running={}", .{self.running});
+        
         std.log.info("Listening on {}", .{address});
     }
     
     /// Connect to a peer
     pub fn connectToPeer(self: *Self, address: net.Address) !void {
+        std.log.info("Attempting to connect to peer at {}", .{address});
         const peer = try self.peer_manager.addPeer(address);
+        std.log.info("Added peer {} to peer manager", .{peer.id});
         
         // Spawn connection thread
         const thread = try std.Thread.spawn(.{}, runPeerConnection, .{
             self, peer
         });
         thread.detach();
+        std.log.info("Spawned connection thread for peer {}", .{peer.id});
     }
     
     /// Run peer connection in thread
     fn runPeerConnection(self: *Self, peer: *Peer) void {
+        std.log.info("Connection thread started for peer {} at {}", .{ peer.id, peer.address });
+        
+        // Give the network time to fully initialize
+        std.time.sleep(100 * std.time.ns_per_ms);
+        
         // Check if we're shutting down at the very start
+        std.log.info("Checking if network is running: {}", .{self.running});
         if (!self.running) {
-            std.log.debug("Peer connection aborted - network shutting down", .{});
+            std.log.warn("Peer connection aborted - network shutting down (self.running=false)", .{});
             return;
         }
         
         // Attempt connection
+        std.log.info("Starting TCP connection attempt to peer {} at {}", .{ peer.id, peer.address });
         const stream = net.tcpConnectToAddress(peer.address) catch |err| {
             // Check running state before ANY access to self
             if (!self.running) {
@@ -95,10 +109,11 @@ pub const NetworkManager = struct {
             }
             
             // Only log and remove if still running
-            std.log.err("Failed to connect to {}: {}", .{ peer.address, err });
+            std.log.err("TCP connection failed to {}: {}", .{ peer.address, err });
             self.peer_manager.removePeer(peer.id);
             return;
         };
+        std.log.info("TCP connection established successfully to peer {} at {}", .{ peer.id, peer.address });
         
         // Check again before initializing connection
         if (!self.running) {
@@ -131,11 +146,11 @@ pub const NetworkManager = struct {
     
     /// Accept incoming connections
     pub fn acceptConnections(self: *Self) !void {
-        const server = self.server orelse return error.NotListening;
+        if (self.server == null) return error.NotListening;
         
         self.running = true;
         while (self.running) {
-            const connection = server.accept() catch |err| switch (err) {
+            const connection = self.server.?.accept() catch |err| switch (err) {
                 error.WouldBlock => {
                     std.time.sleep(100 * std.time.ns_per_ms);
                     continue;

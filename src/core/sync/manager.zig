@@ -29,6 +29,7 @@ pub const SyncManager = struct {
     
     // Current sync peer
     sync_peer: ?*net.Peer,
+    target_height: u32,
     failed_peers: std.ArrayList(*net.Peer),
     
     // Download management
@@ -47,6 +48,7 @@ pub const SyncManager = struct {
             .blockchain = blockchain,
             .state_manager = SyncStateManager.init(),
             .sync_peer = null,
+            .target_height = 0,
             .failed_peers = std.ArrayList(*net.Peer).init(allocator),
             .blocks_to_download = std.ArrayList(u32).init(allocator),
             .active_block_downloads = std.AutoHashMap(u32, i64).init(allocator),
@@ -61,6 +63,7 @@ pub const SyncManager = struct {
         self.blockchain = blockchain;
         self.state_manager = SyncStateManager.init();
         self.sync_peer = null;
+        self.target_height = 0;
         self.failed_peers = std.ArrayList(*net.Peer).init(allocator);
         self.blocks_to_download = std.ArrayList(u32).init(allocator);
         self.active_block_downloads = std.AutoHashMap(u32, i64).init(allocator);
@@ -288,6 +291,21 @@ pub const SyncManager = struct {
             print("❌ Network not initialized\n");
             return error.NetworkNotInitialized;
         }
+    }
+
+    /// Start headers-first sync operation
+    fn startHeadersFirstSync(self: *Self) !void {
+        if (self.sync_peer == null) {
+            print("❌ No sync peer available for headers-first sync\n");
+            return error.NoPeersAvailable;
+        }
+        
+        print("🔄 Starting headers-first sync...\n");
+        
+        // For now, fall back to traditional sync since headers-first is complex
+        // TODO: Implement proper headers-first sync protocol
+        print("⚠️ Headers-first sync not fully implemented, falling back to traditional sync\n");
+        return self.startTraditionalSync();
     }
 
     /// Start block download phase for headers-first sync
