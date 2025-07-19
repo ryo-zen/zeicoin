@@ -176,8 +176,20 @@ pub fn deserialize(reader: anytype, comptime T: type, allocator: std.mem.Allocat
                     } else {
                         // Generic slice
                         const data = try allocator.alloc(ptr_info.child, len);
+                        var initialized_count: usize = 0;
+                        errdefer {
+                            // Clean up any items that were successfully deserialized
+                            for (data[0..initialized_count]) |*item| {
+                                if (@hasDecl(ptr_info.child, "deinit")) {
+                                    item.deinit(allocator);
+                                }
+                            }
+                            allocator.free(data);
+                        }
+                        
                         for (data) |*item| {
                             item.* = try deserialize(reader, ptr_info.child, allocator);
+                            initialized_count += 1;
                         }
                         return data;
                     }

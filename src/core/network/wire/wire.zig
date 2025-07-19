@@ -181,18 +181,22 @@ pub const WireConnection = struct {
     /// Try to read next message
     pub fn readMessage(self: *Self) !?message_mod.MessageEnvelope {
         const msg = try self.reader.readMessage();
-        if (msg != null) {
+        if (msg) |envelope| {
             self.stats.messages_received += 1;
+            std.debug.print("🔧 [WIRE RECV] Message received from wire, type: {}, total received: {}\n", .{envelope.header.message_type, self.stats.messages_received});
         }
         return msg;
     }
     
     /// Send a message
     pub fn sendMessage(self: *Self, msg_type: protocol.MessageType, msg: anytype) ![]const u8 {
+        std.debug.print("🔧 [WIRE SEND] Writing message type: {} to wire\n", .{msg_type});
         try self.writer.writeMessage(msg_type, msg);
         self.stats.messages_sent += 1;
         self.stats.bytes_sent += self.writer.getData().len;
-        return self.writer.getData();
+        const data = self.writer.getData();
+        std.debug.print("🔧 [WIRE SEND] Message written, size: {} bytes, total sent: {}\n", .{data.len, self.stats.messages_sent});
+        return data;
     }
 };
 

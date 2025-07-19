@@ -4,6 +4,7 @@
 const std = @import("std");
 const net = std.net;
 const types = @import("../types/types.zig");
+const command_line = @import("../server/command_line.zig");
 
 // Re-export the modular components
 pub const protocol = @import("protocol/protocol.zig");
@@ -28,6 +29,8 @@ pub const NetworkManager = struct {
     message_handler: MessageHandler,
     running: bool,
     stopped: bool,
+    bootstrap_nodes: []const command_line.BootstrapNode,
+    last_reconnect_attempt: i64,
     
     const Self = @This();
     
@@ -43,15 +46,29 @@ pub const NetworkManager = struct {
             .message_handler = handler,
             .running = false,
             .stopped = false,
+            .bootstrap_nodes = &[_]command_line.BootstrapNode{},
+            .last_reconnect_attempt = 0,
         };
     }
     
     pub fn deinit(self: *Self) void {
-        self.stop();
+        // Fast shutdown: just clean up resources without complex thread synchronization
+        // Set flags atomically
+        @atomicStore(bool, &self.stopped, true, .release);
+        @atomicStore(bool, &self.running, false, .release);
+        
+        // Clean up server immediately
         if (self.server) |*server| {
             server.deinit();
+            self.server = null;
         }
+        
+        // Clean up peer manager
         self.peer_manager.deinit();
+        
+        // Note: bootstrap_nodes is a slice, not owned by us, so no cleanup needed
+        
+        // Process will exit soon anyway, so threads will be cleaned up by OS
     }
     
     /// Start listening for connections
@@ -209,12 +226,12 @@ pub const NetworkManager = struct {
     
     /// Stop network manager
     pub fn stop(self: *Self) void {
-        // Prevent multiple stop calls
-        if (self.stopped) return;
-        self.stopped = true;
+        // Prevent multiple stop calls - use atomic operation for thread safety
+        if (@atomicLoad(bool, &self.stopped, .acquire)) return;
+        @atomicStore(bool, &self.stopped, true, .release);
         
         // Signal shutdown first - this must happen before ANY cleanup
-        self.running = false;
+        @atomicStore(bool, &self.running, false, .release);
         
         // Give threads a moment to see the running flag change
         std.time.sleep(100 * std.time.ns_per_ms);
@@ -308,8 +325,43 @@ pub const NetworkManager = struct {
         return .{ .total = stats.total, .connected = stats.connected, .syncing = stats.syncing };
     }
     
-    /// Clean up timed out connections
+    /// Set bootstrap nodes for auto-reconnect
+    pub fn setBootstrapNodes(self: *Self, nodes: []const command_line.BootstrapNode) void {
+        self.bootstrap_nodes = nodes;
+    }
+    
+    /// Clean up timed out connections and handle auto-reconnect
     pub fn maintenance(self: *Self) void {
+        // Skip maintenance if we're shutting down
+        if (@atomicLoad(bool, &self.stopped, .acquire)) return;
+        
+        // Clean up timed out peers first
         self.peer_manager.cleanupTimedOut();
+        
+        // Auto-reconnect logic
+        const now = std.time.timestamp();
+        const peer_stats = self.getPeerStats();
+        const connected_peers = peer_stats.connected;
+        
+        // If no connected peers and we have bootstrap nodes, try to reconnect
+        if (connected_peers == 0 and self.bootstrap_nodes.len > 0) {
+            // Only attempt reconnect every 30 seconds to avoid spam
+            if (now - self.last_reconnect_attempt >= 30) {
+                std.log.info("🔄 Auto-reconnect: No peers connected, attempting to reconnect to bootstrap nodes", .{});
+                self.last_reconnect_attempt = now;
+                
+                // Try to connect to each bootstrap node
+                for (self.bootstrap_nodes) |node| {
+                    const address = std.net.Address.parseIp(node.ip, node.port) catch |err| {
+                        std.log.warn("Failed to parse bootstrap node {s}:{} - {}", .{ node.ip, node.port, err });
+                        continue;
+                    };
+                    
+                    self.connectToPeer(address) catch |err| {
+                        std.log.warn("Auto-reconnect failed to {any} - {}", .{ address, err });
+                    };
+                }
+            }
+        }
     }
 };

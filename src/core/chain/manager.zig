@@ -153,7 +153,7 @@ pub const ChainManager = struct {
     pub fn initializeWithGenesis(self: *Self, network: types.Network) !void {
         // Use the Genesis component to create and save genesis block
         const genesis = @import("genesis.zig");
-        const genesis_block = try genesis.createGenesisBlock(self.allocator, network);
+        const genesis_block = try genesis.createGenesis(self.allocator);
         defer genesis_block.deinit(self.allocator);
         
         // Save genesis block at height 0  

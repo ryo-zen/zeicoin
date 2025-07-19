@@ -48,6 +48,9 @@ pub const PeerConnection = struct {
         
         std.log.info("Peer {} connected", .{self.peer});
         
+        // Set up TCP send callback for this peer
+        self.peer.setTcpSendCallback(tcpSendCallback, self);
+        
         // Send handshake
         try self.sendHandshake();
         self.peer.state = .handshaking;
@@ -83,13 +86,16 @@ pub const PeerConnection = struct {
             }
             
             // Process received data
+            std.debug.print("🌐 [TCP RECV] Peer {} received {} bytes from network\n", .{self.peer.id, bytes_read});
             try self.peer.receiveData(buffer[0..bytes_read]);
             
             // Process messages
             while (try self.peer.readMessage()) |envelope| {
                 var env = envelope;
                 defer env.deinit();
+                std.debug.print("🎯 [MESSAGE HANDLE] Peer {} processing message type: {}\n", .{self.peer.id, env.header.message_type});
                 try self.handleMessage(env);
+                std.debug.print("✅ [MESSAGE HANDLE] Peer {} completed processing message\n", .{self.peer.id});
             }
         }
         
@@ -106,8 +112,7 @@ pub const PeerConnection = struct {
         handshake.start_height = try self.message_handler.getHeight();
         
         std.log.info("Sending handshake to peer {} with height {}", .{ self.peer.id, handshake.start_height });
-        const data = try self.peer.sendMessage(.handshake, handshake);
-        try self.stream.writeAll(data);
+        _ = try self.peer.sendMessage(.handshake, handshake);
         std.log.info("Handshake sent to peer {}", .{self.peer.id});
     }
     
@@ -117,8 +122,7 @@ pub const PeerConnection = struct {
         self.peer.ping_nonce = ping.nonce;
         self.peer.last_ping = std.time.timestamp();
         
-        const data = try self.peer.sendMessage(.ping, ping);
-        try self.stream.writeAll(data);
+        _ = try self.peer.sendMessage(.ping, ping);
     }
     
     /// Handle incoming message
@@ -169,8 +173,7 @@ pub const PeerConnection = struct {
         
         // Send handshake ack
         std.log.info("Sending handshake ack to peer {}", .{self.peer.id});
-        const data = try self.peer.sendMessage(.handshake_ack, {});
-        try self.stream.writeAll(data);
+        _ = try self.peer.sendMessage(.handshake_ack, {});
         
         self.peer.state = .connected;
         std.log.info("Handshake complete with {}: height={}, agent={s}", .{
@@ -191,8 +194,7 @@ pub const PeerConnection = struct {
     
     fn handlePing(self: *Self, ping: messages.PingMessage) !void {
         const pong = messages.PongMessage.init(ping.nonce);
-        const data = try self.peer.sendMessage(.pong, pong);
-        try self.stream.writeAll(data);
+        _ = try self.peer.sendMessage(.pong, pong);
     }
     
     fn handlePong(self: *Self, pong: messages.PongMessage) !void {
@@ -297,3 +299,11 @@ pub const MessageHandler = struct {
     /// Handle reject message
     onReject: *const fn (peer: *Peer, msg: messages.RejectMessage) anyerror!void,
 };
+
+/// TCP send callback function
+fn tcpSendCallback(ctx: ?*anyopaque, data: []const u8) anyerror!void {
+    const self = @as(*PeerConnection, @ptrCast(@alignCast(ctx.?)));
+    std.debug.print("🌐 [TCP CALLBACK] Peer {} writing {} bytes to TCP stream\n", .{self.peer.id, data.len});
+    try self.stream.writeAll(data);
+    std.debug.print("✅ [TCP CALLBACK] Peer {} TCP write completed\n", .{self.peer.id});
+}

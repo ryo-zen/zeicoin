@@ -45,6 +45,10 @@ pub const Peer = struct {
     syncing: bool,
     headers_requested: bool,
     
+    // TCP send callback
+    tcp_send_fn: ?*const fn(ctx: ?*anyopaque, data: []const u8) anyerror!void,
+    tcp_send_ctx: ?*anyopaque,
+    
     const Self = @This();
     
     pub fn init(allocator: std.mem.Allocator, id: u64, address: net.Address) Self {
@@ -63,6 +67,8 @@ pub const Peer = struct {
             .ping_nonce = null,
             .syncing = false,
             .headers_requested = false,
+            .tcp_send_fn = null,
+            .tcp_send_ctx = null,
         };
     }
     
@@ -75,7 +81,27 @@ pub const Peer = struct {
     
     /// Send a message to this peer
     pub fn sendMessage(self: *Self, msg_type: protocol.MessageType, msg: anytype) ![]const u8 {
-        return try self.connection.sendMessage(msg_type, msg);
+        print("📤 [PEER SEND] Peer {} sending message type: {}\n", .{self.id, msg_type});
+        const result = try self.connection.sendMessage(msg_type, msg);
+        print("✅ [PEER SEND] Peer {} message created, size: {} bytes\n", .{self.id, result.len});
+        
+        // If we have a TCP send callback, use it to actually send the data
+        if (self.tcp_send_fn) |send_fn| {
+            print("🌐 [PEER TCP] Peer {} sending {} bytes over TCP callback\n", .{self.id, result.len});
+            try send_fn(self.tcp_send_ctx, result);
+            print("✅ [PEER TCP] Peer {} TCP send completed successfully\n", .{self.id});
+        } else {
+            print("⚠️ [PEER TCP] Peer {} has no TCP callback, message not sent!\n", .{self.id});
+        }
+        
+        return result;
+    }
+    
+    /// Set TCP send callback
+    pub fn setTcpSendCallback(self: *Self, send_fn: *const fn(ctx: ?*anyopaque, data: []const u8) anyerror!void, ctx: ?*anyopaque) void {
+        self.tcp_send_fn = send_fn;
+        self.tcp_send_ctx = ctx;
+        print("🔗 [PEER TCP] Peer {} TCP callback configured\n", .{self.id});
     }
     
     /// Process received data
@@ -86,7 +112,11 @@ pub const Peer = struct {
     
     /// Try to read next message
     pub fn readMessage(self: *Self) !?message_mod.MessageEnvelope {
-        return try self.connection.readMessage();
+        const result = try self.connection.readMessage();
+        if (result) |envelope| {
+            print("📥 [PEER RECV] Peer {} received message type: {}\n", .{self.id, envelope.header.message_type});
+        }
+        return result;
     }
     
     /// Check if peer needs ping
@@ -98,7 +128,11 @@ pub const Peer = struct {
     /// Check if peer timed out
     pub fn isTimedOut(self: Self) bool {
         const now = std.time.timestamp();
-        return (now - self.last_recv) > protocol.CONNECTION_TIMEOUT_SECONDS;
+        const timeout_result = (now - self.last_recv) > protocol.CONNECTION_TIMEOUT_SECONDS;
+        if (timeout_result) {
+            print("⏰ [PEER TIMEOUT] Peer {} timed out (last_recv: {}, now: {}, diff: {}s)\n", .{self.id, self.last_recv, now, now - self.last_recv});
+        }
+        return timeout_result;
     }
     
     /// Check if peer is connected and ready for requests
@@ -117,16 +151,26 @@ pub const Peer = struct {
     
     /// Send request for specific block by height
     pub fn sendGetBlockByHeight(self: *Self, height: u32) !void {
-        // For simple 2-node setup, we'll use a placeholder approach
-        // In practice, we'd need to map height to hash or use a different protocol message
+        print("📤 [PEER REQUEST] Sending getBlock request for height {} to peer {}\n", .{height, self.id});
+        print("🔍 [PEER REQUEST] Peer state: {}, connected: {}\n", .{self.state, self.isConnected()});
         
-        // For now, just request the next available blocks using empty hash list
-        // This will trigger a general block request that the peer can fulfill
-        var msg = try messages.GetBlocksMessage.init(self.allocator, &.{});
+        // For height-based requests, we'll use a special encoding in the GetBlocksMessage
+        // We'll encode the height as a 32-byte hash where the first 4 bytes contain the height
+        // and the rest are zeros. The receiving peer can detect this pattern.
+        var height_hash: [32]u8 = [_]u8{0} ** 32;
+        std.mem.writeInt(u32, height_hash[0..4], height, .little);
+        
+        // Set a magic marker in bytes 4-8 to indicate this is a height request
+        const HEIGHT_REQUEST_MAGIC: u32 = 0xDEADBEEF;
+        std.mem.writeInt(u32, height_hash[4..8], HEIGHT_REQUEST_MAGIC, .little);
+        
+        var hashes = [_][32]u8{height_hash};
+        var msg = try messages.GetBlocksMessage.init(self.allocator, &hashes);
         defer msg.deinit(self.allocator);
         
+        print("🔍 [PEER REQUEST] Sending height {} as encoded hash request\n", .{height});
         _ = try self.sendMessage(.get_blocks, msg);
-        print("📤 Requested blocks starting from height {}\n", .{height});
+        print("✅ [PEER REQUEST] Block request sent successfully for height {}\n", .{height});
     }
     
     /// Send request for multiple blocks by hash
@@ -135,6 +179,41 @@ pub const Peer = struct {
         defer msg.deinit(self.allocator);
         
         _ = try self.sendMessage(.get_blocks, msg);
+    }
+    
+    /// Send request for headers using block locator pattern
+    pub fn sendGetHeaders(self: *Self, start_height: u32, count: u32) !void {
+        _ = count; // For future use
+        
+        var locator = std.ArrayList([32]u8).init(self.allocator);
+        defer locator.deinit();
+        
+        // Build a simple block locator
+        // If we have a blockchain reference, use actual hashes; otherwise use genesis
+        if (start_height > 0) {
+            // For sync protocol, we want to start from our current height
+            // Add a genesis hash as the locator - this tells the peer we need everything from genesis
+            const genesis_hash = [_]u8{0} ** 32; // Genesis is always zero hash
+            try locator.append(genesis_hash);
+        } else {
+            // Request from genesis
+            const genesis_hash = [_]u8{0} ** 32;
+            try locator.append(genesis_hash);
+        }
+        
+        // Stop hash - zero means "send up to chain tip"
+        const stop_hash = [_]u8{0} ** 32;
+        
+        var msg = try messages.GetHeadersMessage.init(self.allocator, locator.items, stop_hash);
+        defer msg.deinit(self.allocator);
+        
+        _ = try self.sendMessage(.get_headers, msg);
+        print("📤 Requested headers starting from height {} with {} locator hashes\n", .{ start_height, locator.items.len });
+    }
+    
+    /// Send request for specific block (wrapper method)
+    pub fn sendGetBlock(self: *Self, height: u32) !void {
+        return self.sendGetBlockByHeight(height);
     }
     
     /// Format peer for logging

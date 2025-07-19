@@ -54,7 +54,7 @@ pub const ChainProcessor = struct {
     /// Apply a valid block to the blockchain
     pub fn addBlockToChain(self: *ChainProcessor, block: types.Block, height: u32) !void {
         // Process all transactions in the block
-        try self.processBlockTransactions(block.transactions);
+        try self.processBlockTransactions(block.transactions, height);
 
         // Save block to database
         try self.database.saveBlock(height, block);
@@ -78,11 +78,13 @@ pub const ChainProcessor = struct {
     
     /// Apply a valid block to the blockchain (internal)
     pub fn applyBlock(self: *ChainProcessor, block: types.Block) !void {
-        // Process all transactions in the block
-        try self.processBlockTransactions(block.transactions);
-
-        // Save block to database
+        // Get the current height - this is the height for the new block
         const block_height = try self.database.getHeight();
+        
+        // Process all transactions in the block
+        try self.processBlockTransactions(block.transactions, block_height);
+
+        // Save block to database at the current height
         try self.database.saveBlock(block_height, block);
         
         // Update block index for O(1) lookups in reorganizations
@@ -94,6 +96,8 @@ pub const ChainProcessor = struct {
 
         // Remove processed transactions from mempool
         self.cleanMempool(block);
+        
+        print("📊 [BLOCK APPLY] Block applied at height {}, database now has {} blocks\n", .{block_height, try self.database.getHeight()});
     }
     
     /// Accept a block after validation (used in reorganization)
@@ -113,7 +117,7 @@ pub const ChainProcessor = struct {
         }
 
         // Process transactions
-        try self.processBlockTransactions(block.transactions);
+        try self.processBlockTransactions(block.transactions, target_height);
 
         // Save to database
         try self.database.saveBlock(target_height, block);
@@ -133,10 +137,10 @@ pub const ChainProcessor = struct {
         }
     }
     
-    fn processBlockTransactions(self: *ChainProcessor, transactions: []const types.Transaction) !void {
+    fn processBlockTransactions(self: *ChainProcessor, transactions: []const types.Transaction, height: u32) !void {
         for (transactions) |tx| {
             if (tx.isCoinbase()) {
-                try self.chain_state.processCoinbaseTransaction(tx, tx.recipient, 0);
+                try self.chain_state.processCoinbaseTransaction(tx, tx.recipient, height);
             } else {
                 try self.chain_state.processTransaction(tx);
             }

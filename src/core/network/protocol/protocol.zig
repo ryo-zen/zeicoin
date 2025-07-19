@@ -4,7 +4,7 @@
 const std = @import("std");
 
 // Protocol version - start fresh at 1
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 101; // 1.01 represented as 101
 
 // Network magic bytes - "ZEIC" 
 pub const MAGIC: u32 = 0x5A454943;
@@ -21,8 +21,8 @@ pub const MAX_INV_PER_MESSAGE: usize = 50000;
 // Connection limits
 pub const MAX_PEERS: usize = 125;
 pub const MAX_PENDING_MESSAGES: usize = 1000;
-pub const CONNECTION_TIMEOUT_SECONDS: u64 = 30;
-pub const PING_INTERVAL_SECONDS: u64 = 60;
+pub const CONNECTION_TIMEOUT_SECONDS: u64 = 120; // 2 minutes - reasonable for small syncs
+pub const PING_INTERVAL_SECONDS: u64 = 30;
 
 // Memory limits per connection
 pub const MAX_MEMORY_PER_CONNECTION: usize = 100 * 1024 * 1024; // 100MB

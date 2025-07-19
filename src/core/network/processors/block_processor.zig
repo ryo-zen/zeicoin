@@ -46,6 +46,7 @@ pub const BlockProcessor = struct {
     
     /// Process incoming block from network
     pub fn processIncomingBlock(self: *Self, block: Block, peer: ?*net.Peer) !BlockProcessingResult {
+        print("🔧 [BLOCK PROCESSOR] processIncomingBlock() ENTRY\n", .{});
         var owned_block = block;
         errdefer owned_block.deinit(self.allocator);
         
@@ -54,9 +55,12 @@ pub const BlockProcessor = struct {
         
         // Validate block
         const block_height = try self.blockchain.getHeight() + 1;
+        print("🔧 [BLOCK PROCESSOR] About to validate block at height {}\n", .{block_height});
         if (!try self.validateBlock(&owned_block, block_height)) {
+            print("🔧 [BLOCK PROCESSOR] Block validation FAILED, returning rejected\n", .{});
             return .rejected;
         }
+        print("🔧 [BLOCK PROCESSOR] Block validation PASSED\n", .{});
         
         // Calculate cumulative work
         const cumulative_work = try self.calculateCumulativeWork(&owned_block, block_height - 1);
@@ -69,12 +73,28 @@ pub const BlockProcessor = struct {
             .peer = peer,
         };
         
-        // Evaluate block using fork manager
-        const decision = try self.blockchain.fork_manager.evaluateBlock(
-            context.block, 
-            context.block_height, 
-            context.cumulative_work
-        );
+        // Check if we're currently syncing to use sync-aware block processing
+        const is_syncing = if (self.blockchain.sync_manager) |sync_manager| 
+            sync_manager.isActive() 
+        else 
+            false;
+        
+        print("🔧 [BLOCK PROCESSOR] Sync status: {}, using {s} evaluation\n", .{is_syncing, if (is_syncing) "SYNC-AWARE" else "NORMAL"});
+        
+        // Evaluate block using fork manager (sync-aware if syncing)
+        const decision = if (is_syncing) 
+            try self.blockchain.fork_manager.evaluateBlockWithSyncFlag(
+                context.block, 
+                context.block_height, 
+                context.cumulative_work,
+                true
+            )
+        else 
+            try self.blockchain.fork_manager.evaluateBlock(
+                context.block, 
+                context.block_height, 
+                context.cumulative_work
+            );
         
         // Process based on fork decision
         return try self.processBasedOnDecision(decision, context);
@@ -118,15 +138,32 @@ pub const BlockProcessor = struct {
     
     /// Validate incoming block
     fn validateBlock(self: *Self, owned_block: *Block, block_height: u32) !bool {
-        const is_valid = self.blockchain.validateBlock(owned_block.*, block_height) catch |err| {
-            print("❌ Block validation failed: {}\n", .{err});
-            owned_block.deinit(self.allocator);
-            return false;
+        print("🔧 [BLOCK PROCESSOR] validateBlock called for height {}\n", .{block_height});
+        // Check if we're currently syncing - if so, use sync-aware validation
+        const current_height = self.blockchain.getHeight() catch 0;
+        const is_syncing = if (self.blockchain.sync_manager) |sync_manager| 
+            sync_manager.state_manager.isActive() or (current_height < block_height and block_height <= current_height + 10)
+        else 
+            (current_height < block_height and block_height <= current_height + 10);
+            
+        print("🔧 [BLOCK PROCESSOR] Validation mode: {s} (current_height: {}, block_height: {}, syncing: {})\n", .{if (is_syncing) "SYNC" else "NORMAL", current_height, block_height, is_syncing});
+            
+        const is_valid = if (is_syncing) blk: {
+            print("🔧 [BLOCK PROCESSOR] Using SYNC validation for block {}\n", .{block_height});
+            break :blk self.blockchain.validateSyncBlock(owned_block, block_height) catch |err| {
+                print("❌ Sync block validation failed: {}\n", .{err});
+                return false;
+            };
+        } else blk: {
+            print("🔧 [BLOCK PROCESSOR] Using NORMAL validation for block {}\n", .{block_height});
+            break :blk self.blockchain.validateBlock(owned_block.*, block_height) catch |err| {
+                print("❌ Block validation failed: {}\n", .{err});
+                return false;
+            };
         };
         
         if (!is_valid) {
             print("❌ Invalid block rejected\n", .{});
-            owned_block.deinit(self.allocator);
             return false;
         }
         
@@ -144,7 +181,6 @@ pub const BlockProcessor = struct {
         // Get parent block work
         var parent_block = self.blockchain.database.getBlock(current_height - 1) catch {
             print("❌ Cannot find parent block for height {}\n", .{current_height - 1});
-            owned_block.deinit(self.allocator);
             return error.ParentBlockNotFound;
         };
         defer parent_block.deinit(self.allocator);
@@ -192,7 +228,6 @@ pub const BlockProcessor = struct {
             &chain_operations,
         ) catch |err| {
             print("❌ Failed to initialize reorganization manager: {}\n", .{err});
-            owned_block.deinit(self.allocator);
             return;
         };
         defer reorg_manager.deinit();
@@ -201,7 +236,6 @@ pub const BlockProcessor = struct {
         const new_chain_tip = owned_block.hash();
         const reorg_result = reorg_manager.executeReorganization(owned_block.*, new_chain_tip) catch |err| {
             print("❌ Chain reorganization failed: {}\n", .{err});
-            owned_block.deinit(self.allocator);
             return;
         };
         
@@ -233,9 +267,9 @@ pub const BlockProcessor = struct {
         self.blockchain.chain_processor.addBlockToChain(block_copy, block_height) catch |err| {
             print("❌ Failed to add block to chain: {}\n", .{err});
             block_copy.deinit(self.allocator);
-            owned_block.deinit(self.allocator);
             return;
         };
+        // Ownership transferred to chain_processor
         // Note: chain_processor now owns block_copy
         
         // Block will be cleaned up by caller for broadcasting
@@ -255,7 +289,6 @@ pub const BlockProcessor = struct {
             side_block_work
         ) catch |err| {
             print("❌ Failed to handle side chain block: {}\n", .{err});
-            owned_block.deinit(self.allocator);
             return;
         };
         
@@ -274,10 +307,9 @@ pub const BlockProcessor = struct {
             },
             .rejected => {
                 print("❌ Side chain block rejected (capacity/limits)\n", .{});
-                owned_block.deinit(self.allocator);
             },
             else => {
-                owned_block.deinit(self.allocator);
+                // Block cleanup handled by errdefer
             },
         }
     }
@@ -295,8 +327,17 @@ pub const BlockProcessor = struct {
     /// Trigger auto-sync when orphan blocks are detected
     fn triggerAutoSync(self: *Self) !void {
         if (self.blockchain.sync_manager) |sync_manager| {
-            try sync_manager.startSync();
-            print("🔄 Auto-sync triggered due to orphan block\n", .{});
+            // Find the best peer to sync with
+            if (self.blockchain.network_coordinator.getNetworkManager()) |network| {
+                if (network.peer_manager.getBestPeerForSync()) |best_peer| {
+                    try sync_manager.startSync(best_peer, best_peer.height);
+                    print("🔄 Auto-sync triggered due to orphan block with peer height {}\n", .{best_peer.height});
+                } else {
+                    print("⚠️ No peers available for auto-sync\n", .{});
+                }
+            } else {
+                print("⚠️ No network manager available for auto-sync\n", .{});
+            }
         } else {
             print("⚠️ No sync manager available for auto-sync\n", .{});
         }

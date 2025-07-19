@@ -123,6 +123,29 @@ pub const Wallet = struct {
         self.public_key = zeicoin_keypair.public_key;
         self.address = address;
     }
+    
+    /// 🔑 Import a genesis test account (TestNet only)
+    pub fn importGenesisAccount(self: *Wallet, name: []const u8) !void {
+        if (types.CURRENT_NETWORK != .testnet) {
+            return error.GenesisAccountsTestNetOnly;
+        }
+        
+        const genesis_wallet = @import("genesis_wallet.zig");
+        const keypair = (try genesis_wallet.getTestAccountKeyPair(name)) orelse {
+            return error.UnknownGenesisAccount;
+        };
+        
+        // Verify the keypair generates the expected address
+        if (!try genesis_wallet.verifyGenesisKeyPair(name, keypair)) {
+            return error.InvalidGenesisKeyPair;
+        }
+        
+        const address = types.Address.fromPublicKey(keypair.public_key);
+        
+        self.private_key = keypair.private_key;
+        self.public_key = keypair.public_key;
+        self.address = address;
+    }
 
     /// 💾 Save wallet to encrypted file
     pub fn saveToFile(self: *Wallet, file_path: []const u8, password: []const u8) !void {

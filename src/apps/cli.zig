@@ -192,7 +192,6 @@ const Command = enum {
     send,
     status,
     address,
-    fund,
     sync,
     help,
 };
@@ -230,7 +229,6 @@ pub fn main() !void {
         .send => try handleSendCommand(allocator, args[2..]),
         .status => try handleStatusCommand(allocator, args[2..]),
         .address => try handleAddressCommand(allocator, args[2..]),
-        .fund => try handleFundCommand(allocator, args[2..]),
         .sync => try handleSyncCommand(allocator, args[2..]),
         .help => printHelp(),
     }
@@ -279,7 +277,26 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     var zen_wallet = wallet.Wallet.init(allocator);
     defer zen_wallet.deinit();
 
-    try zen_wallet.createNew();
+    // Check if this is a genesis account name (TestNet only)
+    const genesis_names = [_][]const u8{ "alice", "bob", "charlie", "david", "eve" };
+    var is_genesis = false;
+    for (genesis_names) |name| {
+        if (std.mem.eql(u8, wallet_name, name)) {
+            is_genesis = true;
+            break;
+        }
+    }
+    
+    if (is_genesis and types.CURRENT_NETWORK == .testnet) {
+        // Import genesis account instead of creating new
+        zen_wallet.importGenesisAccount(wallet_name) catch |err| {
+            print("❌ Failed to import genesis account '{s}': {}\n", .{ wallet_name, err });
+            std.process.exit(1);
+        };
+        print("🔑 Importing pre-funded genesis account '{s}'...\n", .{wallet_name});
+    } else {
+        try zen_wallet.createNew();
+    }
 
     // Get wallet path and save
     const wallet_path = try database.getWalletPath(wallet_name);
@@ -295,13 +312,13 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const bech32_addr = address.toBech32(allocator, types.CURRENT_NETWORK) catch {
         // Show error if bech32 encoding fails
         print("🆔 Address: <encoding error>\n", .{});
-        print("💡 Use 'zeicoin fund' to get test ZEI for this wallet\n", .{});
+        print("💡 Genesis accounts (alice, bob, charlie, david, eve) have pre-funded balances\n", .{});
         return;
     };
     defer allocator.free(bech32_addr);
     
     print("🆔 Address: {s}\n", .{bech32_addr});
-    print("💡 Use 'zeicoin fund' to get test ZEI for this wallet\n", .{});
+    print("💡 Genesis accounts (alice, bob, charlie, david, eve) have pre-funded balances\n", .{});
 }
 
 fn loadWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
@@ -723,94 +740,6 @@ fn handleSyncCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     print("📨 Sync response: {s}\n", .{response});
 }
 
-fn handleFundCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
-    const wallet_name = if (args.len > 0) args[0] else "default";
-
-    // Load wallet
-    const zen_wallet = loadWalletForOperation(allocator, wallet_name) catch |err| {
-        switch (err) {
-            error.WalletNotFound => {
-                // Error message already printed in loadWalletForOperation
-                return;
-            },
-            else => return err,
-        }
-    };
-    defer {
-        zen_wallet.deinit();
-        allocator.destroy(zen_wallet);
-    }
-
-    const address = zen_wallet.getAddress() orelse return error.WalletNotLoaded;
-
-    print("💰 Requesting test funds for wallet '{s}'...\n", .{wallet_name});
-
-    // Connect to server
-    const server_ip = try getServerIP(allocator);
-    defer allocator.free(server_ip);
-
-    const server_address = net.Address.parseIp4(server_ip, 10802) catch {
-        print("❌ Invalid server address\n", .{});
-        return;
-    };
-
-    const connection = connectWithTimeout(server_address) catch |err| {
-        switch (err) {
-            error.ConnectionTimeout => {
-                print("❌ Connection timeout to ZeiCoin server at {s}:10802\n", .{server_ip});
-                print("💡 Server did not respond within 5 seconds\n", .{});
-                return;
-            },
-            error.ConnectionFailed => {
-                print("❌ Connection failed to ZeiCoin server at {s}:10802\n", .{server_ip});
-                print("💡 Make sure the server is running and accessible\n", .{});
-                return;
-            },
-            error.ThreadSpawnFailed => {
-                print("❌ System error: Could not create connection thread\n", .{});
-                return;
-            },
-        }
-    };
-    defer connection.close();
-
-    // Send funding request with bech32 address
-    const bech32_addr = try address.toBech32(allocator, types.CURRENT_NETWORK);
-    defer allocator.free(bech32_addr);
-    
-    const fund_request = try std.fmt.allocPrint(allocator, "FUND_WALLET:{s}", .{bech32_addr});
-    defer allocator.free(fund_request);
-
-    try connection.writeAll(fund_request);
-
-    // Read response with timeout
-    var buffer: [1024]u8 = undefined;
-    const bytes_read = readWithTimeout(connection, &buffer) catch |err| {
-        switch (err) {
-            error.ReadTimeout => {
-                print("❌ Server response timeout (5s) - server may be busy\n", .{});
-                return;
-            },
-            error.ReadFailed => {
-                print("❌ Failed to read server response\n", .{});
-                return;
-            },
-            error.ThreadSpawnFailed => {
-                print("❌ System error: Could not create read thread\n", .{});
-                return;
-            },
-        }
-    };
-    const response = buffer[0..bytes_read];
-
-    if (std.mem.startsWith(u8, response, "WALLET_FUNDED")) {
-        print("✅ Wallet funded successfully!\n", .{});
-        print("💰 Received test ZEI for development\n", .{});
-        print("💡 Use 'zeicoin balance' to check your balance\n", .{});
-    } else {
-        print("❌ Funding failed: {s}\n", .{response});
-    }
-}
 
 // Helper functions
 
@@ -1164,13 +1093,13 @@ fn sendTransaction(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
         if (std.mem.startsWith(u8, response, "ERROR: Insufficient balance")) {
             print("❌ Insufficient balance! You don't have enough ZEI for this transaction.\n", .{});
             print("💡 Check your balance with: zeicoin balance\n", .{});
-            print("💡 Get test funds with: zeicoin fund\n", .{});
+            print("💡 Use genesis accounts (alice, bob, charlie, david, eve) which have pre-funded balances\n", .{});
         } else if (std.mem.startsWith(u8, response, "ERROR: Invalid nonce")) {
             print("❌ Invalid transaction nonce. This usually means another transaction is pending.\n", .{});
             print("💡 Wait a moment and try again after the current transaction is processed.\n", .{});
         } else if (std.mem.startsWith(u8, response, "ERROR: Sender account not found")) {
             print("❌ Wallet account not found on the network.\n", .{});
-            print("💡 Get initial funds with: zeicoin fund\n", .{});
+            print("💡 Use genesis accounts (alice, bob, charlie, david, eve) which have pre-funded balances\n", .{});
         } else {
             print("❌ Transaction failed: {s}\n", .{response});
         }
@@ -1209,15 +1138,13 @@ fn printHelp() void {
     print("TRANSACTION COMMANDS:\n", .{});
     print("  zeicoin balance [wallet]         Check wallet balance\n", .{});
     print("  zeicoin send <amount> <recipient> Send ZEI to address or wallet\n", .{});
-    print("  zeicoin fund [wallet]            Request test funds\n\n", .{});
     print("NETWORK COMMANDS:\n", .{});
     print("  zeicoin status                   Show network status\n", .{});
     print("  zeicoin sync                     Trigger manual blockchain sync\n", .{});
     print("  zeicoin address [wallet]         Show wallet address\n\n", .{});
     print("EXAMPLES:\n", .{});
     print("  zeicoin wallet create alice      # Create wallet named 'alice'\n", .{});
-    print("  zeicoin fund alice               # Get test funds for alice\n", .{});
-    print("  zeicoin balance alice            # Check alice's balance\n", .{});
+    print("  zeicoin balance alice            # Check alice's balance (pre-funded)\n", .{});
     print("  zeicoin send 50 tzei1qr2q...      # Send 50 ZEI to address\n", .{});
     print("  zeicoin send 50 bob               # Send 50 ZEI to wallet 'bob'\n", .{});
     print("  zeicoin status                   # Check network status\n\n", .{});

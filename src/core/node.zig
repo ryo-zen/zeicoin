@@ -12,8 +12,7 @@ const randomx = @import("crypto/randomx.zig");
 const genesis = @import("chain/genesis.zig");
 const forkmanager = @import("fork/main.zig");
 const headerchain = @import("network/headerchain.zig");
-const sync = @import("network/sync.zig");
-const sync_mod = @import("sync/sync.zig");
+const sync_mod = @import("sync/manager.zig");
 const message_handler = @import("network/message_handler.zig");
 const validator_mod = @import("validation/validator.zig");
 const miner_mod = @import("miner/main.zig");
@@ -38,7 +37,7 @@ pub const ZeiCoin = struct {
     allocator: std.mem.Allocator,
     fork_manager: forkmanager.ForkManager,
     header_chain: headerchain.HeaderChain,
-    sync_manager: ?*sync.SyncManager,
+    sync_manager: ?*sync_mod.SyncManager,
     message_handler: message_handler.NetworkMessageHandler,
     chain_validator: validator_mod.ChainValidator,
     chain_query: ChainQuery,
@@ -205,8 +204,17 @@ pub const ZeiCoin = struct {
     }
 
     pub fn initializeBlockchain(self: *ZeiCoin) !void {
-        const current_height = try self.getHeight();
-        print("🔗 Blockchain initialized at height {}, ready for network sync\n", .{current_height});
+        const current_height = self.getHeight() catch 0;
+        
+        // Create genesis block if blockchain is empty
+        if (current_height == 0) {
+            print("🌟 Creating genesis block for new blockchain...\n", .{});
+            try self.createCanonicalGenesis();
+            const new_height = try self.getHeight();
+            print("✅ Genesis block created, blockchain at height {}\n", .{new_height});
+        } else {
+            print("🔗 Blockchain initialized at height {}, ready for network sync\n", .{current_height});
+        }
     }
 
     pub fn deinit(self: *ZeiCoin) void {
@@ -247,7 +255,7 @@ pub const ZeiCoin = struct {
         print("✅ ZeiCoin cleanup completed\n", .{});
     }
 
-    fn createCanonicalGenesis(self: *ZeiCoin) !void {
+    pub fn createCanonicalGenesis(self: *ZeiCoin) !void {
         var genesis_block = try genesis.createGenesis(self.allocator);
         defer genesis_block.deinit(self.allocator);
         for (genesis_block.transactions) |tx| {
@@ -313,6 +321,12 @@ pub const ZeiCoin = struct {
         return try self.chain_processor.addBlockToChain(block, height);
     }
 
+    /// Add sync block directly to chain processor, bypassing block processor validation
+    pub fn addSyncBlockToChain(self: *ZeiCoin, block: Block, height: u32) !void {
+        print("🔄 [SYNC] Adding block {} directly to chain processor (bypassing block processor)\n", .{height});
+        return try self.chain_processor.addBlockToChain(block, height);
+    }
+
     fn applyBlock(self: *ZeiCoin, block: Block) !void {
         return try self.chain_processor.applyBlock(block);
     }
@@ -358,11 +372,19 @@ pub const ZeiCoin = struct {
     }
 
     pub fn validateBlock(self: *ZeiCoin, block: Block, expected_height: u32) !bool {
-        return try self.chain_validator.validateBlock(block, expected_height);
+        print("🔧 [NODE] validateBlock() ENTRY - height: {}\n", .{expected_height});
+        print("🔧 [NODE] Delegating to chain_validator.validateBlock()\n", .{});
+        const result = try self.chain_validator.validateBlock(block, expected_height);
+        print("🔧 [NODE] validateBlock() result: {}\n", .{result});
+        return result;
     }
 
-    pub fn validateSyncBlock(self: *ZeiCoin, block: Block, expected_height: u32) !bool {
-        return try self.chain_validator.validateSyncBlock(block, expected_height);
+    pub fn validateSyncBlock(self: *ZeiCoin, block: *const Block, expected_height: u32) !bool {
+        print("🔧 [NODE] validateSyncBlock() ENTRY - height: {}\n", .{expected_height});
+        print("🔧 [NODE] Delegating to chain_validator.validateSyncBlock()\n", .{});
+        const result = try self.chain_validator.validateSyncBlock(block, expected_height);
+        print("🔧 [NODE] validateSyncBlock() result: {}\n", .{result});
+        return result;
     }
 
     pub fn validateTransaction(self: *ZeiCoin, tx: Transaction) !bool {
@@ -410,7 +432,9 @@ pub const ZeiCoin = struct {
     }
 
     pub fn handleIncomingBlock(self: *ZeiCoin, block: Block, peer: ?*net.Peer) !void {
+        print("🔧 [NODE] handleIncomingBlock() ENTRY - delegating to message handler\n", .{});
         try self.message_handler.handleIncomingBlock(block, peer);
+        print("🔧 [NODE] handleIncomingBlock() completed successfully\n", .{});
     }
 
     pub fn broadcastNewBlock(self: *ZeiCoin, block: Block) !void {

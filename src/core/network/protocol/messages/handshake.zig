@@ -113,12 +113,18 @@ pub const HandshakeMessage = struct {
     /// Validate handshake for compatibility and usefulness
     pub fn validate(self: Self) !void {
         // Check protocol version compatibility
+        std.log.info("🔍 Protocol Version Check: Peer version={}, Our version={}", .{ self.version, protocol.PROTOCOL_VERSION });
+        
         if (self.version > protocol.PROTOCOL_VERSION) {
+            std.log.warn("❌ Protocol version mismatch: Peer version {} > our version {}", .{ self.version, protocol.PROTOCOL_VERSION });
             return error.IncompatibleProtocolVersion;
         }
         if (self.version == 0) {
+            std.log.warn("❌ Invalid protocol version: Peer version is 0", .{});
             return error.InvalidProtocolVersion;
         }
+        
+        std.log.info("✅ Protocol version compatible: Peer={}, Ours={}", .{ self.version, protocol.PROTOCOL_VERSION });
         
         // Check network ID to prevent cross-network connections
         if (self.network_id != types.CURRENT_NETWORK.getNetworkId()) {

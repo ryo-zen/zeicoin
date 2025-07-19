@@ -26,12 +26,28 @@ pub const DecisionEngine = struct {
         block_height: u32,
         cumulative_work: ChainWork,
     ) ForkDecision {
+        return evaluateBlockWithSyncFlag(chain_tracker, orphan_manager, block, block_height, cumulative_work, false);
+    }
+    
+    /// Evaluate a new block with sync flag to control recent block checking
+    pub fn evaluateBlockWithSyncFlag(
+        chain_tracker: *const chains.ChainTracker,
+        orphan_manager: *orphans.OrphanManager,
+        block: Block,
+        block_height: u32,
+        cumulative_work: ChainWork,
+        is_sync_block: bool,
+    ) ForkDecision {
         const block_hash = block.hash();
         
-        // Check if we've already seen this block
-        if (orphan_manager.wasRecentlySeen(block_hash)) {
+        // Skip "recently seen" check during sync to allow reprocessing blocks
+        if (!is_sync_block and orphan_manager.wasRecentlySeen(block_hash)) {
             print("🔄 Block already seen recently: {s}\n", .{std.fmt.fmtSliceHexLower(block_hash[0..8])});
             return ForkDecision.ignore;
+        }
+        
+        if (is_sync_block) {
+            print("🔄 [SYNC] Processing sync block (skipping recent check): {s}\n", .{std.fmt.fmtSliceHexLower(block_hash[0..8])});
         }
         
         // Get current best chain

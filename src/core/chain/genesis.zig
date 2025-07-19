@@ -12,7 +12,7 @@ pub const GenesisBlocks = struct {
     /// Created: 2024-01-01 00:00:00 UTC
     /// Purpose: Development, testing, and experimentation
     pub const TESTNET = struct {
-        pub const HASH: [32]u8 = [_]u8{ 0xaf, 0x5c, 0x07, 0x3a, 0x98, 0xaf, 0x00, 0xbf, 0x7e, 0x9a, 0xbb, 0xbb, 0x99, 0xff, 0xe5, 0x6f, 0x15, 0x52, 0xdc, 0xe1, 0x3d, 0xda, 0x3c, 0x09, 0xf5, 0x5e, 0x2a, 0xb3, 0xa5, 0x80, 0xcb, 0x08 };
+        pub const HASH: [32]u8 = [_]u8{ 0x70, 0x7e, 0x62, 0xc6, 0xd8, 0xad, 0x69, 0xdb, 0x9a, 0x05, 0x27, 0xcb, 0xa0, 0xa5, 0xb3, 0xcb, 0xa0, 0x55, 0xec, 0xd0, 0x76, 0xd8, 0x72, 0x25, 0x6b, 0xda, 0x10, 0x30, 0x01, 0xce, 0x24, 0xac };
 
         pub const MESSAGE = "ZeiCoin TestNet Genesis - A minimal digital currency written in ⚡Zig";
         pub const TIMESTAMP: u64 = 1704067200; // 2024-01-01 00:00:00 UTC
@@ -84,13 +84,18 @@ pub const GenesisBlocks = struct {
 };
 
 /// Create deterministic public key from network seed
-fn createGenesisPublicKey(seed: []const u8) [32]u8 {
+pub fn createGenesisPublicKey(seed: []const u8) [32]u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(seed);
     hasher.update("_ZEICOIN_GENESIS_KEY");
-    var result: [32]u8 = undefined;
-    hasher.final(&result);
-    return result;
+    var seed_bytes: [32]u8 = undefined;
+    hasher.final(&seed_bytes);
+    
+    // Create proper Ed25519 keypair from seed
+    const Ed25519 = std.crypto.sign.Ed25519;
+    const keypair = Ed25519.KeyPair.generateDeterministic(seed_bytes) catch unreachable;
+    
+    return keypair.public_key.bytes;
 }
 
 /// Get the canonical genesis block for the current network
@@ -125,6 +130,30 @@ pub fn validateGenesis(block: types.Block) bool {
     return true;
 }
 
+/// TestNet pre-funded accounts for testing
+pub const TESTNET_DISTRIBUTION = [_]struct {
+    name: []const u8,
+    seed: []const u8,
+    amount: u64,
+}{
+    .{ .name = "alice", .seed = "TESTNET_ALICE_SEED", .amount = 1000 * types.ZEI_COIN },
+    .{ .name = "bob", .seed = "TESTNET_BOB_SEED", .amount = 1000 * types.ZEI_COIN },
+    .{ .name = "charlie", .seed = "TESTNET_CHARLIE_SEED", .amount = 1000 * types.ZEI_COIN },
+    .{ .name = "david", .seed = "TESTNET_DAVID_SEED", .amount = 1000 * types.ZEI_COIN },
+    .{ .name = "eve", .seed = "TESTNET_EVE_SEED", .amount = 1000 * types.ZEI_COIN },
+};
+
+/// Get deterministic address for a test account
+pub fn getTestAccountAddress(name: []const u8) ?types.Address {
+    for (TESTNET_DISTRIBUTION) |account| {
+        if (std.mem.eql(u8, account.name, name)) {
+            const public_key = createGenesisPublicKey(account.seed);
+            return types.Address.fromPublicKey(public_key);
+        }
+    }
+    return null;
+}
+
 /// Create genesis block with proper memory management
 pub fn createGenesis(allocator: std.mem.Allocator) !types.Block {
     const canonical = getCanonicalGenesis();
@@ -149,8 +178,14 @@ pub fn createGenesis(allocator: std.mem.Allocator) !types.Block {
     const genesis_public_key = createGenesisPublicKey(network_seed);
     const genesis_address = types.Address.fromPublicKey(genesis_public_key);
     
+    // Calculate number of transactions
+    const tx_count = switch (types.CURRENT_NETWORK) {
+        .testnet => 1 + TESTNET_DISTRIBUTION.len, // Coinbase + distributions
+        .mainnet => 1, // Just coinbase for now
+    };
+    
     // Allocate memory for transactions array
-    const transactions = try allocator.alloc(types.Transaction, 1);
+    const transactions = try allocator.alloc(types.Transaction, tx_count);
     
     // Create coinbase transaction
     transactions[0] = types.Transaction{
@@ -169,6 +204,31 @@ pub fn createGenesis(allocator: std.mem.Allocator) !types.Block {
         .witness_data = &[_]u8{},
         .extra_data = &[_]u8{},
     };
+    
+    // Add TestNet distribution transactions
+    if (types.CURRENT_NETWORK == .testnet) {
+        for (TESTNET_DISTRIBUTION, 0..) |account, i| {
+            const account_pubkey = createGenesisPublicKey(account.seed);
+            const account_address = types.Address.fromPublicKey(account_pubkey);
+            
+            transactions[i + 1] = types.Transaction{
+                .version = 0,
+                .flags = .{},
+                .sender = types.Address.zero(),
+                .sender_public_key = std.mem.zeroes([32]u8),
+                .recipient = account_address,
+                .amount = account.amount,
+                .fee = 0,
+                .nonce = @intCast(i),
+                .timestamp = timestamp,
+                .expiry_height = std.math.maxInt(u64),
+                .signature = std.mem.zeroes(types.Signature),
+                .script_version = 0,
+                .witness_data = &[_]u8{},
+                .extra_data = &[_]u8{},
+            };
+        }
+    }
 
     return types.Block{
         .header = canonical.header,

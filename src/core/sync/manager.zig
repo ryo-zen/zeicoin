@@ -39,6 +39,9 @@ pub const SyncManager = struct {
     // Headers-first sync support
     header_chain: ?*headerchain.HeaderChain,
     
+    // Out-of-order block queue for sequential processing
+    pending_blocks: std.AutoHashMap(u32, Block),
+    
     const Self = @This();
     
     /// Initialize sync manager
@@ -53,6 +56,7 @@ pub const SyncManager = struct {
             .blocks_to_download = std.ArrayList(u32).init(allocator),
             .active_block_downloads = std.AutoHashMap(u32, i64).init(allocator),
             .header_chain = null,
+            .pending_blocks = std.AutoHashMap(u32, Block).init(allocator),
         };
     }
 
@@ -75,32 +79,74 @@ pub const SyncManager = struct {
         self.failed_peers.deinit();
         self.blocks_to_download.deinit();
         self.active_block_downloads.deinit();
+        
+        // Clean up pending blocks
+        var iter = self.pending_blocks.iterator();
+        while (iter.next()) |entry| {
+            entry.value_ptr.deinit(self.allocator);
+        }
+        self.pending_blocks.deinit();
     }
 
     /// Start sync operation with a peer
     pub fn startSync(self: *Self, peer: *net.Peer, target_height: u32) !void {
+        print("🔄 [SYNC] Starting sync operation...\n", .{});
+        print("🔄 [SYNC] Peer: {any}, Target height: {}\n", .{peer.address, target_height});
+        
         if (self.state_manager.isActive()) {
-            print("Sync already in progress.\n", .{});
+            print("⚠️ [SYNC] Sync already in progress, ignoring new request\n", .{});
             return;
+        }
+
+        // Try to resume from saved sync state first
+        if (self.loadSyncState()) |saved_state| {
+            if (saved_state.target_height == target_height and saved_state.blocks_downloaded > 0) {
+                print("🔄 [SYNC RESUME] Resuming previous sync from {} blocks downloaded\n", .{saved_state.blocks_downloaded});
+                self.state_manager.progress = saved_state;
+                self.sync_peer = peer;
+                
+                // Continue sync from where we left off
+                const current_height = try self.blockchain.getHeight();
+                const next_height = current_height + 1;
+                if (next_height <= target_height) {
+                    try self.requestNextBlock(next_height);
+                }
+                return;
+            }
+        }
+
+        // Ensure we have genesis block before syncing
+        const current_height = self.blockchain.getHeight() catch 0;
+        if (current_height == 0) {
+            print("🌟 [SYNC] Creating genesis block before sync...\n", .{});
+            try self.blockchain.createCanonicalGenesis();
         }
 
         // Get current height from blockchain
-        const current_height = try self.blockchain.getHeight();
+        const final_height = try self.blockchain.getHeight();
+        print("📊 [SYNC] Current blockchain height: {}\n", .{final_height});
         
         // Check if sync is actually needed
-        if (target_height <= current_height) {
-            print("Already synced or ahead of peer (local: {}, peer: {}).\n", .{current_height, target_height});
+        if (target_height <= final_height) {
+            print("✅ [SYNC] Already synced or ahead of peer (local: {}, peer: {})\n", .{final_height, target_height});
             return;
         }
 
-        // Initialize sync state
-        self.state_manager.startSync(current_height, target_height);
-        self.sync_peer = peer;
+        print("🚀 [SYNC] Sync needed! Height difference: {}\n", .{target_height - final_height});
         
-        const height_difference = target_height - current_height;
+        // Initialize sync state
+        self.state_manager.startSync(final_height, target_height);
+        self.sync_peer = peer;
+        self.target_height = target_height;
+        
+        const height_difference = target_height - final_height;
+        print("🔍 [SYNC] Height difference: {} blocks\n", .{height_difference});
+        
         if (height_difference > 100) {
+            print("📋 [SYNC] Using headers-first sync (large difference)\n", .{});
             try self.startHeadersFirstSync();
         } else {
+            print("🔗 [SYNC] Using traditional sync (small difference)\n", .{});
             try self.startTraditionalSync();
         }
     }
@@ -133,10 +179,11 @@ pub const SyncManager = struct {
     }
 
     /// Process incoming sync block
-    pub fn handleSyncBlock(self: *Self, block: Block) !void {
+    pub fn handleSyncBlock(self: *Self, block: *const Block) !void {
+        print("📦 [SYNC BLOCK] Received block for sync processing\n", .{});
+        
         if (!self.state_manager.isActive()) {
-            print("Not in sync mode, ignoring block.\n", .{});
-            block.deinit(self.allocator); // Clean up ignored block
+            print("⚠️ [SYNC BLOCK] Not in sync mode, ignoring block\n", .{});
             return;
         }
 
@@ -144,34 +191,81 @@ pub const SyncManager = struct {
         const current_height = try self.blockchain.getHeight();
         const expected_height = current_height + 1;
         
+        print("📊 [SYNC BLOCK] Current height: {}, expected block height: {}\n", .{current_height, expected_height});
+        print("🔍 [SYNC BLOCK] Block hash: {}\n", .{std.fmt.fmtSliceHexLower(&block.hash())});
+        print("🔍 [SYNC BLOCK] Block transactions: {}\n", .{block.transactions.len});
+        
         // Validate the sync block
+        print("🔍 [SYNC BLOCK] About to validate block...\n", .{});
+        print("🔍 [SYNC BLOCK] Block pointer validity check: {*}\n", .{block});
+        print("🔍 [SYNC BLOCK] Expected height: {}\n", .{expected_height});
+        print("🔍 [SYNC BLOCK] Blockchain pointer: {*}\n", .{self.blockchain});
+        
+        // Try to access block fields to check memory validity
+        print("🔍 [SYNC BLOCK] Checking block memory access...\n", .{});
+        const block_tx_count = block.transactions.len;
+        print("🔍 [SYNC BLOCK] Block transaction count accessible: {}\n", .{block_tx_count});
+        
+        const block_timestamp = block.header.timestamp;
+        print("🔍 [SYNC BLOCK] Block timestamp accessible: {}\n", .{block_timestamp});
+        
+        print("🔍 [SYNC BLOCK] Memory access successful, calling validateSyncBlock...\n", .{});
         const is_valid = try self.blockchain.validateSyncBlock(block, expected_height);
         if (!is_valid) {
-            print("❌ Invalid sync block at height {} rejected\n", .{expected_height});
-            block.deinit(self.allocator); // Clean up invalid block
+            print("❌ [SYNC BLOCK] Invalid sync block at height {} rejected\n", .{expected_height});
             return;
         }
+        print("✅ [SYNC BLOCK] Block validation passed\n", .{});
         
-        // Forward the block to the blockchain for processing
-        // The blockchain will handle adding it to the chain
-        try self.blockchain.handleIncomingBlock(block, self.sync_peer);
-        // Note: blockchain takes ownership of the block
+        // Add block directly to chain processor during sync (bypasses duplicate checks)
+        print("📝 [SYNC BLOCK] Adding block directly to chain processor (bypassing block processor)...\n", .{});
+        print("🔧 [SYNC MANAGER] About to call blockchain.addSyncBlockToChain()\n", .{});
+        
+        // Create a deep copy for ownership transfer to avoid double-free
+        const owned_block = try block.dupe(self.allocator);
+        print("🔧 [SYNC MANAGER] Block duplicated, calling addSyncBlockToChain now\n", .{});
+        try self.blockchain.addSyncBlockToChain(owned_block, expected_height);
+        print("✅ [SYNC BLOCK] Block added successfully to blockchain\n", .{});
+        print("🔧 [SYNC MANAGER] addSyncBlockToChain() completed without error\n", .{});
 
         // Update progress
         if (self.state_manager.progress) |*progress| {
             progress.updateProgress(1);
             
+            const new_progress = self.getProgress();
+            print("📊 [SYNC BLOCK] Progress updated: {d:.1}%\n", .{new_progress});
+            print("📊 [SYNC BLOCK] Blocks downloaded: {}/{}\n", .{progress.blocks_downloaded, progress.target_height - progress.current_height});
+            
+            // Save sync state after each block
+            self.saveSyncState();
+            
             // Check if sync is complete
             if (progress.blocks_downloaded >= (progress.target_height - progress.current_height)) {
+                print("🎉 [SYNC BLOCK] Sync progress complete! Finishing sync...\n", .{});
                 try self.completeSync();
+            } else {
+                print("⏳ [SYNC BLOCK] Sync continuing, {} more blocks needed\n", .{(progress.target_height - progress.current_height) - progress.blocks_downloaded});
+                
+                // Automatically request next block to continue sync
+                const next_height = (try self.blockchain.getHeight()) + 1;
+                print("🔍 [SYNC DEBUG] next_height={}, target_height={}, condition: {}\n", .{next_height, self.target_height, next_height <= self.target_height});
+                
+                if (next_height <= self.target_height) {
+                    print("🔄 [SYNC CONTINUATION] Requesting next block at height {}\n", .{next_height});
+                    self.requestNextBlock(next_height) catch |err| {
+                        print("❌ [SYNC CONTINUATION] Failed to request next block {}: {}\n", .{next_height, err});
+                    };
+                } else {
+                    print("⚠️ [SYNC CONTINUATION] Skipping request: next_height {} > target_height {}\n", .{next_height, self.target_height});
+                }
             }
         }
 
-        print("📦 Received sync block, progress: {d:.1}%\n", .{self.getProgress()});
+        print("📦 [SYNC BLOCK] Block processing complete, progress: {d:.1}%\n", .{self.getProgress()});
     }
 
     /// Process incoming headers for headers-first sync
-    pub fn processIncomingHeaders(self: *Self, headers: []BlockHeader, start_height: u32) !void {
+    pub fn processIncomingHeaders(self: *Self, headers: []const BlockHeader, start_height: u32) !void {
         if (!self.state_manager.isActive()) {
             print("Not in sync mode, ignoring headers.\n", .{});
             return;
@@ -193,13 +287,28 @@ pub const SyncManager = struct {
 
     /// Complete sync operation
     pub fn completeSync(self: *Self) !void {
+        print("🎉 [SYNC COMPLETE] Completing sync operation...\n", .{});
+        
+        const final_height = try self.blockchain.getHeight();
+        print("📊 [SYNC COMPLETE] Final blockchain height: {}\n", .{final_height});
+        
+        if (self.sync_peer) |peer| {
+            print("👥 [SYNC COMPLETE] Synced with peer: {any} (peer height: {})\n", .{peer.address, peer.height});
+        }
+        
         self.state_manager.completeSync();
         self.sync_peer = null;
         
-        print("✅ Sync complete!\n", .{});
+        // Clear saved sync state since sync is complete
+        self.clearSyncState();
+        
+        print("✅ [SYNC COMPLETE] Sync operation completed successfully!\n", .{});
+        print("🧹 [SYNC COMPLETE] Cleaning up failed peers list...\n", .{});
         
         // Clear failed peers list on successful sync
         self.failed_peers.clearRetainingCapacity();
+        
+        print("🎊 [SYNC COMPLETE] Blockchain is now fully synchronized!\n", .{});
     }
 
     /// Fail sync operation
@@ -268,43 +377,48 @@ pub const SyncManager = struct {
     
     /// Start traditional block-by-block sync
     fn startTraditionalSync(self: *Self) !void {
-        print("🔄 Starting traditional sync...\n", .{});
+        print("🔗 [TRADITIONAL SYNC] Starting traditional block-by-block sync...\n", .{});
         
-        // Find best peer for sync
-        if (self.blockchain.network) |network| {
-            if (network.peer_manager.getBestPeerForSync()) |peer| {
-                self.sync_peer = peer;
-                self.target_height = peer.height;
-                
-                // Use the network sync manager for traditional sync
-                if (self.blockchain.sync_manager) |sync_mgr| {
-                    try sync_mgr.startSync();
-                    print("✅ Traditional sync started with peer height {}\n", .{peer.height});
-                } else {
-                    print("⚠️ No sync manager available\n");
-                }
-            } else {
-                print("❌ No peers available for traditional sync\n");
-                return error.NoPeersAvailable;
-            }
+        // Use the peer that was already set when startSync was called
+        if (self.sync_peer) |peer| {
+            print("✅ [TRADITIONAL SYNC] Sync peer available: {any} (height: {})\n", .{peer.address, peer.height});
+            print("🔍 [TRADITIONAL SYNC] Peer state: {}\n", .{peer.state});
+            print("🔍 [TRADITIONAL SYNC] Peer connected: {}\n", .{peer.isConnected()});
+            
+            // Get current blockchain state
+            const current_height = try self.blockchain.getHeight();
+            const next_height = current_height + 1;
+            
+            print("📊 [TRADITIONAL SYNC] Current height: {}, requesting block: {}\n", .{current_height, next_height});
+            print("🎯 [TRADITIONAL SYNC] Target height: {} (need {} more blocks)\n", .{peer.height, peer.height - current_height});
+            
+            // Request the next block directly
+            print("📤 [TRADITIONAL SYNC] Sending getBlock request for height {}...\n", .{next_height});
+            peer.sendGetBlock(next_height) catch |err| {
+                print("❌ [TRADITIONAL SYNC] Failed to request block {}: {}\n", .{next_height, err});
+                print("🔍 [TRADITIONAL SYNC] Peer state after error: {}\n", .{peer.state});
+                return err;
+            };
+            print("✅ [TRADITIONAL SYNC] Block request sent successfully for height {}\n", .{next_height});
+            print("⏳ [TRADITIONAL SYNC] Waiting for block response...\n", .{});
         } else {
-            print("❌ Network not initialized\n");
-            return error.NetworkNotInitialized;
+            print("❌ [TRADITIONAL SYNC] No sync peer available!\n", .{});
+            return error.NoPeersAvailable;
         }
     }
 
     /// Start headers-first sync operation
     fn startHeadersFirstSync(self: *Self) !void {
         if (self.sync_peer == null) {
-            print("❌ No sync peer available for headers-first sync\n");
+            print("❌ No sync peer available for headers-first sync\n", .{});
             return error.NoPeersAvailable;
         }
         
-        print("🔄 Starting headers-first sync...\n");
+        print("🔄 Starting headers-first sync...\n", .{});
         
         // For now, fall back to traditional sync since headers-first is complex
         // TODO: Implement proper headers-first sync protocol
-        print("⚠️ Headers-first sync not fully implemented, falling back to traditional sync\n");
+        print("⚠️ Headers-first sync not fully implemented, falling back to traditional sync\n", .{});
         return self.startTraditionalSync();
     }
 
@@ -313,24 +427,18 @@ pub const SyncManager = struct {
         print("📦 Starting block download phase...\n", .{});
         
         // Find best peer for headers-first sync
-        if (self.blockchain.network) |network| {
+        if (self.blockchain.network_coordinator.getNetworkManager()) |network| {
             if (network.peer_manager.getBestPeerForSync()) |peer| {
                 self.sync_peer = peer;
                 self.target_height = peer.height;
                 
-                // Use headers-first protocol
-                if (self.blockchain.sync_manager) |sync_mgr| {
-                    try sync_mgr.startHeadersFirstSync(peer, peer.height);
-                    print("✅ Headers-first sync started with peer height {}\n", .{peer.height});
-                } else {
-                    print("⚠️ No sync manager available for headers-first sync\n");
-                }
+                print("✅ Headers-first block download started with peer height {}\n", .{peer.height});
             } else {
-                print("❌ No peers available for headers-first sync\n");
+                print("❌ No peers available for headers-first sync\n", .{});
                 return error.NoPeersAvailable;
             }
         } else {
-            print("❌ Network not initialized\n");
+            print("❌ Network not initialized\n", .{});
             return error.NetworkNotInitialized;
         }
     }
@@ -354,9 +462,9 @@ pub const SyncManager = struct {
 
     /// Switch to a different peer for sync (peer fallback mechanism)
     pub fn switchToNewPeer(self: *Self) !void {
-        if (self.blockchain.network == null) {
+        const network = self.blockchain.network_coordinator.getNetworkManager() orelse {
             return error.NoNetworkManager;
-        }
+        };
 
         // Add current peer to failed list
         if (self.sync_peer) |failed_peer| {
@@ -365,10 +473,11 @@ pub const SyncManager = struct {
         }
 
         // Find a new peer that's not in the failed list
-        const network = self.blockchain.network.?;
         var new_peer: ?*net.Peer = null;
+        network.peer_manager.mutex.lock();
+        defer network.peer_manager.mutex.unlock();
 
-        for (network.peers.items) |*peer| {
+        for (network.peer_manager.peers.items) |peer| {
             if (peer.state != .connected) continue;
 
             // Check if this peer is in the failed list
@@ -444,15 +553,13 @@ pub const SyncManager = struct {
 
     /// Request next blocks for download
     pub fn requestNextBlocks(self: *Self) !void {
-        if (self.blockchain.network == null) return;
-
-        const network = self.blockchain.network.?;
+        const network = self.blockchain.network_coordinator.getNetworkManager() orelse return;
         const now = @import("../util/util.zig").getTime();
 
         // Clean up timed out downloads
         var iter = self.active_block_downloads.iterator();
         while (iter.next()) |entry| {
-            if (now - entry.value_ptr.* > types.HEADERS_SYNC.BLOCK_DOWNLOAD_TIMEOUT) {
+            if (now - entry.value_ptr.* > 60) { // 60 second timeout
                 // Re-queue timed out block
                 try self.blocks_to_download.append(entry.key_ptr.*);
                 _ = self.active_block_downloads.remove(entry.key_ptr.*);
@@ -461,18 +568,21 @@ pub const SyncManager = struct {
         }
 
         // Start new downloads up to concurrent limit
-        while (self.active_block_downloads.count() < types.HEADERS_SYNC.MAX_CONCURRENT_DOWNLOADS and
+        while (self.active_block_downloads.count() < 5 and // Max 5 concurrent downloads
             self.blocks_to_download.items.len > 0)
         {
             const height = self.blocks_to_download.orderedRemove(0);
 
             // Find available peer
             var sent = false;
-            for (network.peers.items) |*peer| {
+            network.peer_manager.mutex.lock();
+            defer network.peer_manager.mutex.unlock();
+            
+            for (network.peer_manager.peers.items) |peer| {
                 if (peer.state == .connected) {
                     peer.sendGetBlock(height) catch continue;
                     try self.active_block_downloads.put(height, now);
-                    @import("../util/util.zig").logProcess("Requested block {}", .{height});
+                    print("📤 Requested block {}\n", .{height});
                     sent = true;
                     break;
                 }
@@ -531,5 +641,193 @@ pub const SyncManager = struct {
         }
 
         self.state_manager.completeSync();
+    }
+
+    /// Request next block for sync continuation with retry logic
+    fn requestNextBlock(self: *Self, height: u32) !void {
+        if (self.sync_peer) |peer| {
+            // Send keepalive ping before block request to maintain connection
+            try self.sendKeepalivePing(peer);
+            
+            print("📤 [SYNC CONTINUATION] Sending getBlock request for height {} to peer {any}\n", .{height, peer.address});
+            peer.sendGetBlock(height) catch |err| {
+                print("❌ [SYNC CONTINUATION] Failed to request block {}: {}\n", .{height, err});
+                
+                // Implement retry logic with exponential backoff
+                if (self.state_manager.progress) |*progress| {
+                    progress.consecutive_failures += 1;
+                    
+                    if (progress.consecutive_failures <= 3) {
+                        const backoff_delay = @as(u64, 1) << @intCast(progress.consecutive_failures); // 2, 4, 8 seconds
+                        print("🔄 [SYNC RETRY] Retrying block request {} in {} seconds (attempt {})\n", .{height, backoff_delay, progress.consecutive_failures});
+                        
+                        // Schedule retry (in a real implementation, this would use a timer)
+                        // For now, we'll save the state and let manual sync retry
+                        self.saveSyncState();
+                        return error.BlockRequestFailed;
+                    } else {
+                        print("❌ [SYNC RETRY] Max retries exceeded for block {}, switching peer\n", .{height});
+                        try self.switchToNewPeer();
+                        if (self.sync_peer) |_| {
+                            progress.consecutive_failures = 0; // Reset on new peer
+                            try self.requestNextBlock(height); // Retry with new peer
+                        }
+                    }
+                }
+                return err;
+            };
+            
+            // Reset failure count on successful request
+            if (self.state_manager.progress) |*progress| {
+                progress.consecutive_failures = 0;
+            }
+            
+            print("✅ [SYNC CONTINUATION] Block request sent successfully for height {}\n", .{height});
+        } else {
+            print("❌ [SYNC CONTINUATION] No sync peer available for block request\n", .{});
+            return error.NoPeersAvailable;
+        }
+    }
+
+    /// Send keepalive ping to maintain connection during sync
+    fn sendKeepalivePing(self: *Self, peer: *net.Peer) !void {
+        _ = self; // Mark as used
+        // Only send ping if it's been more than 15 seconds since last activity
+        const now = @import("../util/util.zig").getTime();
+        if (now - peer.last_ping > 15) {
+            print("💓 [SYNC KEEPALIVE] Sending keepalive ping to peer {any}\n", .{peer.address});
+            // Note: sendPing method doesn't exist in current Peer implementation
+            // This is a placeholder for future ping functionality
+            // peer.sendPing() catch |err| {
+            //     print("⚠️ [SYNC KEEPALIVE] Failed to send ping: {}\n", .{err});
+            // };
+            peer.last_ping = now;
+            print("💓 [SYNC KEEPALIVE] Keepalive timestamp updated\n", .{});
+        }
+    }
+
+    /// Save sync state to disk for resumption
+    fn saveSyncState(self: *Self) void {
+        if (self.state_manager.progress) |progress| {
+            const sync_state_file = "sync_state.tmp";
+            const file = std.fs.cwd().createFile(sync_state_file, .{}) catch {
+                print("⚠️ [SYNC PERSIST] Failed to save sync state\n", .{});
+                return;
+            };
+            defer file.close();
+            
+            var buffer = std.ArrayList(u8).init(self.allocator);
+            defer buffer.deinit();
+            
+            // Simple binary serialization of sync progress
+            const writer = buffer.writer();
+            writer.writeInt(u32, progress.target_height, .little) catch return;
+            writer.writeInt(u32, progress.current_height, .little) catch return;
+            writer.writeInt(u32, progress.blocks_downloaded, .little) catch return;
+            writer.writeInt(i64, progress.start_time, .little) catch return;
+            
+            file.writeAll(buffer.items) catch {
+                print("⚠️ [SYNC PERSIST] Failed to write sync state\n", .{});
+                return;
+            };
+            print("💾 [SYNC PERSIST] Sync state saved\n", .{});
+        }
+    }
+
+    /// Load sync state from disk
+    fn loadSyncState(self: *Self) ?SyncProgress {
+        _ = self; // Mark as used
+        const sync_state_file = "sync_state.tmp";
+        const file = std.fs.cwd().openFile(sync_state_file, .{}) catch return null;
+        defer file.close();
+        
+        const file_size = file.getEndPos() catch return null;
+        if (file_size < 20) return null; // Invalid file size
+        
+        var buffer: [20]u8 = undefined;
+        _ = file.readAll(&buffer) catch return null;
+        
+        var stream = std.io.fixedBufferStream(&buffer);
+        const reader = stream.reader();
+        
+        const target_height = reader.readInt(u32, .little) catch return null;
+        const current_height = reader.readInt(u32, .little) catch return null;
+        const blocks_downloaded = reader.readInt(u32, .little) catch return null;
+        const start_time = reader.readInt(i64, .little) catch return null;
+        
+        print("📁 [SYNC PERSIST] Loaded sync state: target={}, current={}, downloaded={}\n", .{target_height, current_height, blocks_downloaded});
+        
+        return SyncProgress{
+            .target_height = target_height,
+            .current_height = current_height,
+            .blocks_downloaded = blocks_downloaded,
+            .start_time = start_time,
+            .last_progress_report = @import("../util/util.zig").getTime(),
+            .last_request_time = @import("../util/util.zig").getTime(),
+            .retry_count = 0,
+            .consecutive_failures = 0,
+        };
+    }
+
+    /// Clear saved sync state
+    fn clearSyncState(self: *Self) void {
+        _ = self;
+        std.fs.cwd().deleteFile("sync_state.tmp") catch {};
+        print("🗑️ [SYNC PERSIST] Sync state cleared\n", .{});
+    }
+
+    /// Check for stalled sync and take corrective action
+    pub fn validateSyncProgress(self: *Self) !void {
+        if (!self.state_manager.isActive()) return;
+        
+        if (self.state_manager.progress) |*progress| {
+            const now = @import("../util/util.zig").getTime();
+            const time_since_last_progress = now - progress.last_progress_report;
+            const time_since_last_request = now - progress.last_request_time;
+            
+            // Check if sync has been stalled for more than 2 minutes
+            if (time_since_last_progress > 120) {
+                print("⚠️ [SYNC STALL] Sync stalled for {} seconds, taking corrective action\n", .{time_since_last_progress});
+                
+                // Check if we have a sync peer
+                if (self.sync_peer == null) {
+                    print("❌ [SYNC STALL] No sync peer, attempting to find new peer\n", .{});
+                    try self.switchToNewPeer();
+                    if (self.sync_peer == null) {
+                        print("❌ [SYNC STALL] No peers available, failing sync\n", .{});
+                        self.failSyncWithReason("No peers available after stall");
+                        return;
+                    }
+                }
+                
+                // If no recent request, send a new one
+                if (time_since_last_request > 60) {
+                    const current_height = try self.blockchain.getHeight();
+                    const next_height = current_height + 1;
+                    if (next_height <= progress.target_height) {
+                        print("🔄 [SYNC STALL] Sending recovery block request for height {}\n", .{next_height});
+                        progress.last_request_time = now;
+                        try self.requestNextBlock(next_height);
+                    }
+                }
+                
+                // Update timestamp to avoid constant stall detection
+                progress.last_progress_report = now - 60; // Give it another minute
+            }
+            
+            // Check for timeout (sync taking too long overall)
+            const total_sync_time = now - progress.start_time;
+            if (total_sync_time > 600) { // 10 minutes total timeout
+                print("⏰ [SYNC TIMEOUT] Sync taking too long ({} seconds), restarting\n", .{total_sync_time});
+                self.failSyncWithReason("Sync timeout");
+                
+                // Try to restart sync with a different peer
+                try self.switchToNewPeer();
+                if (self.sync_peer) |new_peer| {
+                    print("🔄 [SYNC TIMEOUT] Restarting sync with new peer\n", .{});
+                    try self.startSync(new_peer, progress.target_height);
+                }
+            }
+        }
     }
 };

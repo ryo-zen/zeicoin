@@ -7,11 +7,17 @@ const initialization = @import("initialization.zig");
 const client_api = @import("client_api.zig");
 
 // Signal handling for graceful shutdown
-var running = true;
+var running = std.atomic.Value(bool).init(true);
 
 fn signalHandler(sig: c_int) callconv(.C) void {
     _ = sig;
-    running = false;
+    running.store(false, .release);
+    std.debug.print("\nReceived Ctrl+C, shutting down gracefully...\n", .{});
+    
+    // Give a moment for cleanup, then force exit if needed
+    std.time.sleep(2 * std.time.ns_per_s);
+    std.debug.print("Force exit after 2 seconds...\n", .{});
+    std.process.exit(0);
 }
 
 pub fn main() !void {
@@ -61,21 +67,20 @@ pub fn main() !void {
     
     // Main loop - wait for shutdown signal
     var last_status_time = std.time.timestamp();
-    while (running) {
-        // Check if still running before maintenance
-        if (!running) break;
-        
-        // Periodic maintenance
-        components.network_manager.maintenance();
+    while (running.load(.acquire)) {
+        // Periodic maintenance (only if still running)
+        if (running.load(.acquire)) {
+            components.network_manager.maintenance();
+        }
         
         // Print status every 30 seconds
         const now = std.time.timestamp();
-        if (now - last_status_time >= 30) {
+        if (now - last_status_time >= 30 and running.load(.acquire)) {
             printStatus(&components);
             last_status_time = now;
         }
         
-        std.time.sleep(1 * std.time.ns_per_s);
+        std.time.sleep(100 * std.time.ns_per_ms); // Check more frequently
     }
     
     std.log.info("Shutting down...", .{});

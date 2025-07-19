@@ -51,37 +51,56 @@ pub const MessageHandlerImpl = struct {
     
     fn onPeerConnected(self: *Self, peer: *network.Peer) !void {
         const our_height = try self.blockchain.getHeight();
-        std.log.info("Peer {any} connected at height {} (our height: {})", .{
+        std.log.info("👥 [PEER CONNECT] Peer {any} connected at height {} (our height: {})", .{
             peer.address, peer.height, our_height
         });
+        std.log.info("🔍 [PEER CONNECT] Peer state: {}, services: 0x{x}", .{peer.state, peer.services});
         
         if (peer.height > our_height) {
-            std.log.info("Peer has higher height, checking sync manager...", .{});
+            std.log.info("🚀 [PEER CONNECT] Peer has higher height! Starting sync process...", .{});
             if (self.blockchain.sync_manager != null) {
-                std.log.info("Starting sync with peer at height {}", .{peer.height});
-                try self.blockchain.sync_manager.?.startSync();
+                std.log.info("🔄 [PEER CONNECT] Sync manager available, starting sync with peer at height {}", .{peer.height});
+                try self.blockchain.sync_manager.?.startSync(peer, peer.height);
+                std.log.info("✅ [PEER CONNECT] Sync started successfully", .{});
             } else {
-                std.log.warn("Sync manager is null, cannot start sync!", .{});
+                std.log.warn("❌ [PEER CONNECT] Sync manager is null, cannot start sync!", .{});
             }
         } else {
-            std.log.info("Peer height {} is not higher than our height {}, no sync needed", .{ peer.height, our_height });
+            std.log.info("✅ [PEER CONNECT] Peer height {} is not higher than our height {}, no sync needed", .{ peer.height, our_height });
         }
     }
     
     fn onGetHeaders(self: *Self, peer: *network.Peer, msg: network.messages.GetHeadersMessage) !void {
-        std.log.debug("GetHeaders request received", .{});
+        std.log.debug("GetHeaders request received with {} locator hashes", .{msg.block_locator.len});
         
         // Find the best common block from the locator
-        var start_height: u32 = 0;
+        var start_height: u32 = 1; // Start from block 1 (after genesis)
+        var found_common = false;
+        
         for (msg.block_locator) |locator_hash| {
+            // Check if this is genesis hash (all zeros)
+            const is_genesis = std.mem.allEqual(u8, &locator_hash, 0);
+            if (is_genesis) {
+                start_height = 1; // Start from block 1 (after genesis)
+                found_common = true;
+                std.log.debug("Found genesis locator, starting from height 1", .{});
+                break;
+            }
+            
             // Try to find this hash in our chain
-            // For now, we'll implement a simple approach
             if (self.blockchain.chain_query.hasBlock(locator_hash)) {
                 // Found a common block, we'll start from the next one
                 // This is a simplified implementation - we should find the actual height
                 start_height += 1; // Start from next block after common one
+                found_common = true;
+                std.log.debug("Found common block in locator, starting from height {}", .{start_height});
                 break;
             }
+        }
+        
+        if (!found_common) {
+            std.log.debug("No common block found in locator, starting from genesis", .{});
+            start_height = 1;
         }
         
         const current_height = try self.blockchain.getHeight();
@@ -91,16 +110,20 @@ pub const MessageHandlerImpl = struct {
         defer headers.deinit();
         
         const end_height = @min(start_height + max_headers, current_height);
+        std.log.debug("Sending headers from height {} to {} (current height: {})", .{ start_height, end_height, current_height });
+        
         for (start_height..end_height + 1) |h| {
-            var block = self.blockchain.chain_query.getBlock(@intCast(h)) catch continue;
+            var block = self.blockchain.chain_query.getBlock(@intCast(h)) catch |err| {
+                std.log.debug("Failed to get block at height {}: {}", .{ h, err });
+                continue;
+            };
             defer block.deinit(self.blockchain.allocator);
             try headers.append(block.header);
         }
         
         if (headers.items.len > 0) {
             const headers_msg = try network.messages.HeadersMessage.init(self.blockchain.allocator, headers.items);
-            const data = try peer.sendMessage(.headers, headers_msg);
-            defer self.blockchain.allocator.free(data);
+            _ = try peer.sendMessage(.headers, headers_msg);
             std.log.info("Sent {} headers to {any}", .{ headers.items.len, peer.address });
         }
     }
@@ -109,13 +132,37 @@ pub const MessageHandlerImpl = struct {
         std.log.debug("Received {} headers from {any}", .{ msg.headers.len, peer.address });
         
         if (self.blockchain.sync_manager) |sync_manager| {
-            sync_manager.handleHeaders(peer, msg.headers) catch |err| {
-                std.log.warn("Failed to handle headers: {}", .{err});
+            // First check if we need to start sync based on received headers
+            const current_height = try self.blockchain.getHeight();
+            
+            if (msg.headers.len > 0) {
+                // Update peer height based on the latest header received
+                const latest_header_height = current_height + msg.headers.len;
+                if (latest_header_height > peer.height) {
+                    std.log.info("🔄 [HEADERS] Updating peer height from {} to {}", .{ peer.height, latest_header_height });
+                    peer.height = @intCast(latest_header_height);
+                }
+                
+                // Check if we need to start a new sync operation
+                if (latest_header_height > current_height and !sync_manager.isActive()) {
+                    std.log.info("🚀 [HEADERS] Peer has {} blocks ahead, starting sync...", .{ latest_header_height - current_height });
+                    try sync_manager.startSync(peer, @intCast(latest_header_height));
+                    std.log.info("✅ [HEADERS] Sync started successfully", .{});
+                }
+            }
+            
+            // Process headers with modern sync manager
+            sync_manager.processIncomingHeaders(msg.headers, current_height + 1) catch |err| {
+                std.log.warn("Failed to process headers: {}", .{err});
             };
+        } else {
+            std.log.info("Received {} headers but no sync manager available", .{msg.headers.len});
         }
     }
     
     fn onAnnounce(self: *Self, peer: *network.Peer, msg: network.messages.AnnounceMessage) !void {
+        var need_sync_check = false;
+        
         for (msg.items) |item| {
             switch (item.item_type) {
                 .block => {
@@ -124,13 +171,15 @@ pub const MessageHandlerImpl = struct {
                     });
                     
                     if (!self.blockchain.chain_query.hasBlock(item.hash)) {
+                        // We don't have this block - might need to sync
+                        need_sync_check = true;
+                        
                         var items = [_]network.messages.InventoryItem{item};
                         const request = try network.messages.RequestMessage.init(self.blockchain.allocator, &items);
-                        const data = peer.sendMessage(.request, request) catch |err| {
+                        _ = peer.sendMessage(.request, request) catch |err| {
                             std.log.debug("Failed to request block: {}", .{err});
                             continue;
                         };
-                        defer self.blockchain.allocator.free(data);
                         std.log.debug("Requested block {s} from {any}", .{
                             std.fmt.fmtSliceHexLower(&item.hash), peer.address
                         });
@@ -141,11 +190,10 @@ pub const MessageHandlerImpl = struct {
                         !self.blockchain.chain_query.hasTransaction(item.hash)) {
                         var items = [_]network.messages.InventoryItem{item};
                         const request = try network.messages.RequestMessage.init(self.blockchain.allocator, &items);
-                        const data = peer.sendMessage(.request, request) catch |err| {
+                        _ = peer.sendMessage(.request, request) catch |err| {
                             std.log.debug("Failed to request tx: {}", .{err});
                             continue;
                         };
-                        defer self.blockchain.allocator.free(data);
                         std.log.debug("Requested tx {s} from {any}", .{
                             std.fmt.fmtSliceHexLower(&item.hash), peer.address
                         });
@@ -153,6 +201,43 @@ pub const MessageHandlerImpl = struct {
                 },
                 else => {},
             }
+        }
+        
+        // Check if we need to start a sync operation due to announced blocks
+        if (need_sync_check) {
+            const our_height = try self.blockchain.getHeight();
+            std.log.info("🔍 [ANNOUNCE] Block announced we don't have, checking sync need (our height: {}, peer height: {})", .{ our_height, peer.height });
+            
+            // Request headers to get the peer's current height - the peer height from handshake may be stale
+            std.log.info("📤 [ANNOUNCE] Requesting headers to get peer's current height...", .{});
+            
+            // Create a basic headers request to trigger height update
+            var locator = std.ArrayList([32]u8).init(self.blockchain.allocator);
+            defer locator.deinit();
+            
+            // Add our current best block hash as locator
+            if (our_height > 0) {
+                var current_block = self.blockchain.chain_query.getBlock(our_height - 1) catch {
+                    std.log.warn("Failed to get current block for headers request", .{});
+                    return;
+                };
+                defer current_block.deinit(self.blockchain.allocator);
+                try locator.append(current_block.hash());
+            } else {
+                // Use zero hash for genesis
+                try locator.append([_]u8{0} ** 32);
+            }
+            
+            const stop_hash = [_]u8{0} ** 32; // No stop hash - get all headers to tip
+            var get_headers = try network.messages.GetHeadersMessage.init(self.blockchain.allocator, locator.items, stop_hash);
+            defer get_headers.deinit(self.blockchain.allocator);
+            
+            _ = peer.sendMessage(.get_headers, get_headers) catch |err| {
+                std.log.warn("Failed to send headers request: {}", .{err});
+                return;
+            };
+            
+            std.log.info("✅ [ANNOUNCE] Headers request sent - will check for sync after response", .{});
         }
     }
     
@@ -165,22 +250,19 @@ pub const MessageHandlerImpl = struct {
                     var block = self.blockchain.chain_query.getBlockByHash(item.hash) catch {
                         var items = [_]network.messages.InventoryItem{item};
                         const not_found = try network.messages.NotFoundMessage.init(self.blockchain.allocator, &items);
-                        const data = try peer.sendMessage(.not_found, not_found);
-                        defer self.blockchain.allocator.free(data);
+                        _ = try peer.sendMessage(.not_found, not_found);
                         continue;
                     };
                     defer block.deinit(self.blockchain.allocator);
                     
                     const block_msg = network.messages.BlockMessage{ .block = block };
-                    const data = try peer.sendMessage(.block, block_msg);
-                    defer self.blockchain.allocator.free(data);
+                    _ = try peer.sendMessage(.block, block_msg);
                     std.log.info("Sent block to {any}", .{peer.address});
                 },
                 .transaction => {
                     if (self.blockchain.mempool_manager.getTransaction(item.hash)) |tx| {
                         const tx_msg = network.messages.TransactionMessage{ .transaction = tx };
-                        const data = try peer.sendMessage(.transaction, tx_msg);
-                        defer self.blockchain.allocator.free(data);
+                        _ = try peer.sendMessage(.transaction, tx_msg);
                         std.log.debug("Sent tx from mempool to {any}", .{peer.address});
                     } else {
                         var tx = self.blockchain.chain_query.getTransactionByHash(item.hash) catch {
@@ -193,8 +275,7 @@ pub const MessageHandlerImpl = struct {
                         defer tx.deinit(self.blockchain.allocator);
                         
                         const tx_msg = network.messages.TransactionMessage{ .transaction = tx };
-                        const data = try peer.sendMessage(.transaction, tx_msg);
-                        defer self.blockchain.allocator.free(data);
+                        _ = try peer.sendMessage(.transaction, tx_msg);
                         std.log.debug("Sent tx from blockchain to {any}", .{peer.address});
                     }
                 },
@@ -204,51 +285,60 @@ pub const MessageHandlerImpl = struct {
     }
     
     fn onBlock(self: *Self, peer: *network.Peer, msg: network.messages.BlockMessage) !void {
-        std.log.info("Received block from {any}", .{peer.address});
-        
         const block = msg.block;
+        const block_hash = std.fmt.fmtSliceHexLower(&block.hash());
+        std.log.info("📦 [BLOCK RECV] Received block from {any}", .{peer.address});
+        std.log.info("🔍 [BLOCK RECV] Block hash: {s}", .{block_hash});
+        std.log.info("🔍 [BLOCK RECV] Block transactions: {}, size: {} bytes", .{block.transactions.len, @sizeOf(@TypeOf(block))});
         
         // Check if we're in sync mode - if so, route to sync manager
         if (self.blockchain.sync_manager) |sync_manager| {
-            if (sync_manager.is_syncing and sync_manager.sync_peer == peer) {
-                // Create a copy of the block for the sync manager
-                const block_copy = try self.blockchain.allocator.create(types.Block);
-                block_copy.* = block;
-                
-                sync_manager.processIncomingBlock(block_copy) catch |err| {
-                    std.log.warn("Failed to process sync block from {any}: {}", .{ peer.address, err });
-                    self.blockchain.allocator.destroy(block_copy);
-                };
-                return;
+            std.log.info("🔍 [BLOCK RECV] Checking sync manager... Active: {}", .{sync_manager.isActive()});
+            if (sync_manager.isActive()) {
+                if (sync_manager.sync_peer == peer) {
+                    std.log.info("🔄 [BLOCK RECV] This is our sync peer! Routing to sync manager...", .{});
+                    // Route block to sync manager for headers-first sync
+                    sync_manager.handleSyncBlock(&block) catch |err| {
+                        std.log.warn("❌ [BLOCK RECV] Failed to process sync block from {any}: {}", .{ peer.address, err });
+                    };
+                    std.log.info("✅ [BLOCK RECV] Block routed to sync manager successfully", .{});
+                    return;
+                } else {
+                    std.log.info("🔍 [BLOCK RECV] Block from different peer (not sync peer), processing normally", .{});
+                }
+            } else {
+                std.log.info("🔍 [BLOCK RECV] Sync not active, processing block normally", .{});
             }
+        } else {
+            std.log.info("🔍 [BLOCK RECV] No sync manager available, processing block normally", .{});
         }
         
         // Normal block processing
+        std.log.info("📝 [BLOCK RECV] Processing block through normal blockchain handler...", .{});
         self.blockchain.handleIncomingBlock(block, peer) catch |err| {
-            std.log.warn("Failed to process block from {any}: {}", .{ peer.address, err });
+            std.log.warn("❌ [BLOCK RECV] Failed to process block from {any}: {}", .{ peer.address, err });
             
             // Send reject message back to peer
             const reject_info = self.mapErrorToReject(err);
-            const block_hash = block.hash();
+            const reject_block_hash = block.hash();
             var reject_msg = network.messages.RejectMessage.init(
                 self.blockchain.allocator,
                 .block,
                 reject_info.code,
                 reject_info.reason,
-                &block_hash
+                &reject_block_hash
             ) catch |reject_err| {
                 std.log.debug("Failed to create reject message: {}", .{reject_err});
                 return;
             };
             defer reject_msg.deinit(self.blockchain.allocator);
             
-            const data = peer.sendMessage(.reject, reject_msg) catch |send_err| {
+            _ = peer.sendMessage(.reject, reject_msg) catch |send_err| {
                 std.log.debug("Failed to send block reject to {any}: {}", .{ peer.address, send_err });
                 return;
             };
-            defer self.blockchain.allocator.free(data);
             
-            std.log.debug("Sent block reject to {any}: {s}", .{ peer.address, reject_info.reason });
+            std.log.info("📤 [BLOCK RECV] Sent block reject to {any}: {s}", .{ peer.address, reject_info.reason });
         };
     }
     
@@ -273,37 +363,112 @@ pub const MessageHandlerImpl = struct {
             };
             defer reject_msg.deinit(self.blockchain.allocator);
             
-            const data = peer.sendMessage(.reject, reject_msg) catch |send_err| {
+            _ = peer.sendMessage(.reject, reject_msg) catch |send_err| {
                 std.log.debug("Failed to send transaction reject to {any}: {}", .{ peer.address, send_err });
                 return;
             };
-            defer self.blockchain.allocator.free(data);
             
             std.log.debug("Sent transaction reject to {any}: {s}", .{ peer.address, reject_info.reason });
         };
     }
     
     fn onGetBlocks(self: *Self, peer: *network.Peer, msg: network.messages.GetBlocksMessage) !void {
-        std.log.debug("GetBlocks request from {} ({} hashes)", .{
+        std.log.info("📥 [GET BLOCKS] Request from {any} for {} block hashes", .{
             peer.address, msg.hashes.len
         });
         
-        // Send each requested block
-        for (msg.hashes) |hash| {
-            if (self.blockchain.chain_query.getBlockByHash(hash)) |block_const| {
-                var block = block_const;
+        var blocks_sent: u32 = 0;
+        
+        // Handle empty hash list (request for latest blocks)
+        if (msg.hashes.len == 0) {
+            std.log.info("📋 [GET BLOCKS] Empty hash list - sending latest blocks", .{});
+            
+            // Get current height and send the latest block
+            const current_height = try self.blockchain.getHeight();
+            std.log.info("📊 [GET BLOCKS] Current blockchain height: {}", .{current_height});
+            
+            if (current_height > 0) {
+                // Height represents next block to create, so latest block is at height - 1
+                const latest_block_height = current_height - 1;
+                std.log.info("🔍 [GET BLOCKS] Attempting to get latest block at height {}", .{latest_block_height});
+                
+                var block = self.blockchain.chain_query.getBlock(latest_block_height) catch |err| {
+                    std.log.warn("❌ [GET BLOCKS] Failed to get block at height {}: {}", .{latest_block_height, err});
+                    
+                    // Try height - 2 as additional fallback
+                    if (latest_block_height > 0) {
+                        const fallback_height = latest_block_height - 1;
+                        std.log.info("🔄 [GET BLOCKS] Trying height {} instead", .{fallback_height});
+                        var fallback_block = self.blockchain.chain_query.getBlock(fallback_height) catch |fallback_err| {
+                            std.log.warn("❌ [GET BLOCKS] Fallback failed at height {}: {}", .{fallback_height, fallback_err});
+                            return;
+                        };
+                        defer fallback_block.deinit(self.blockchain.allocator);
+                        
+                        std.log.info("📦 [GET BLOCKS] Sending fallback block at height {} to {any}", .{fallback_height, peer.address});
+                        const block_msg = network.messages.BlockMessage{ .block = fallback_block };
+                        _ = try peer.sendMessage(.block, block_msg);
+                        blocks_sent += 1;
+                        std.log.info("✅ [GET BLOCKS] Fallback block sent successfully", .{});
+                        return;
+                    } else {
+                        return;
+                    }
+                };
                 defer block.deinit(self.blockchain.allocator);
                 
+                std.log.info("📦 [GET BLOCKS] Sending block at height {} to {any}", .{latest_block_height, peer.address});
                 const block_msg = network.messages.BlockMessage{ .block = block };
-                const data = try peer.sendMessage(.block, block_msg);
-                defer self.blockchain.allocator.free(data);
-            } else |_| {
-                // Block not found - could send notfound message
-                continue;
+                _ = try peer.sendMessage(.block, block_msg);
+                blocks_sent += 1;
+                std.log.info("✅ [GET BLOCKS] Block sent successfully", .{});
+            }
+        } else {
+            // Handle each requested block (by hash or by height)
+            for (msg.hashes) |hash| {
+                // Check if this is a height-based request (encoded as special hash)
+                const HEIGHT_REQUEST_MAGIC: u32 = 0xDEADBEEF;
+                const maybe_magic = std.mem.readInt(u32, hash[4..8], .little);
+                
+                if (maybe_magic == HEIGHT_REQUEST_MAGIC) {
+                    // This is a height-based request
+                    const requested_height = std.mem.readInt(u32, hash[0..4], .little);
+                    std.log.info("🔍 [GET BLOCKS] Height-based request for block at height {}", .{requested_height});
+                    
+                    var block = self.blockchain.chain_query.getBlock(requested_height) catch |err| {
+                        std.log.warn("❌ [GET BLOCKS] Block not found at height {}: {}", .{requested_height, err});
+                        continue;
+                    };
+                    defer block.deinit(self.blockchain.allocator);
+                    
+                    std.log.info("📦 [GET BLOCKS] Found block at height {}, sending to {any}", .{requested_height, peer.address});
+                    const block_msg = network.messages.BlockMessage{ .block = block };
+                    _ = try peer.sendMessage(.block, block_msg);
+                    blocks_sent += 1;
+                    std.log.info("✅ [GET BLOCKS] Block sent successfully for height {}", .{requested_height});
+                } else {
+                    // Regular hash-based request
+                    std.log.info("🔍 [GET BLOCKS] Looking for block with hash: {s}", .{std.fmt.fmtSliceHexLower(&hash)});
+                    
+                    if (self.blockchain.chain_query.getBlockByHash(hash)) |block_const| {
+                        var block = block_const;
+                        defer block.deinit(self.blockchain.allocator);
+                        
+                        std.log.info("📦 [GET BLOCKS] Found block, sending to {any}", .{peer.address});
+                        const block_msg = network.messages.BlockMessage{ .block = block };
+                        _ = try peer.sendMessage(.block, block_msg);
+                        blocks_sent += 1;
+                        std.log.info("✅ [GET BLOCKS] Block sent successfully", .{});
+                    } else |err| {
+                        std.log.warn("❌ [GET BLOCKS] Block not found: {} - {s}", .{err, std.fmt.fmtSliceHexLower(&hash)});
+                        // Block not found - could send notfound message
+                        continue;
+                    }
+                }
             }
         }
         
-        std.log.info("Sent {} blocks to {any}", .{ msg.hashes.len, peer.address });
+        std.log.info("📤 [GET BLOCKS] Sent {} blocks to {any}", .{ blocks_sent, peer.address });
     }
     
     fn onGetPeers(self: *Self, peer: *network.Peer, msg: network.messages.GetPeersMessage) !void {
@@ -354,8 +519,7 @@ pub const MessageHandlerImpl = struct {
         
         if (peer_list.items.len > 0) {
             const peers_msg = try network.messages.PeersMessage.init(self.blockchain.allocator, peer_list.items);
-            const data = try peer.sendMessage(.peers, peers_msg);
-            defer self.blockchain.allocator.free(data);
+            _ = try peer.sendMessage(.peers, peers_msg);
             std.log.debug("Sent {} peer addresses to {any}", .{ peer_list.items.len, peer.address });
         }
     }

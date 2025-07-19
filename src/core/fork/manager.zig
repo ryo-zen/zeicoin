@@ -104,12 +104,18 @@ pub const ForkManager = struct {
     
     /// Evaluate a new block and decide how to handle it
     pub fn evaluateBlock(self: *ForkManager, block: Block, block_height: u32, cumulative_work: ChainWork) !ForkDecision {
-        const decision = decisions.DecisionEngine.evaluateBlock(
+        return self.evaluateBlockWithSyncFlag(block, block_height, cumulative_work, false);
+    }
+    
+    /// Evaluate a new block with sync flag (skips recent block checking during sync)
+    pub fn evaluateBlockWithSyncFlag(self: *ForkManager, block: Block, block_height: u32, cumulative_work: ChainWork, is_sync_block: bool) !ForkDecision {
+        const decision = decisions.DecisionEngine.evaluateBlockWithSyncFlag(
             &self.chain_tracker,
             &self.orphan_manager,
             block,
             block_height,
             cumulative_work,
+            is_sync_block,
         );
         
         // Handle the decision

@@ -974,6 +974,138 @@ test "transaction size limit" {
     print("  ✅ Transaction size limit tests passed!\n", .{});
 }
 
+test "genesis distribution validation" {
+    print("\n🎯 Testing genesis distribution validation...\n", .{});
+    
+    const test_dir = "test_genesis_distribution";
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+    
+    var zeicoin = try createTestZeiCoin(test_dir);
+    defer {
+        zeicoin.deinit();
+        testing.allocator.destroy(zeicoin);
+    }
+    
+    // Import genesis module
+    const genesis = @import("core/chain/genesis.zig");
+    const genesis_wallet = @import("core/wallet/genesis_wallet.zig");
+    
+    print("  📊 Testing {} pre-funded accounts...\n", .{genesis.TESTNET_DISTRIBUTION.len});
+    
+    // Test 1: Verify all genesis accounts have correct balances
+    for (genesis.TESTNET_DISTRIBUTION) |account| {
+        const address = genesis.getTestAccountAddress(account.name).?;
+        const chain_account = try zeicoin.chain_query.getAccount(address);
+        
+        try testing.expectEqual(account.amount, chain_account.balance);
+        try testing.expectEqual(@as(u64, 0), chain_account.immature_balance);
+        try testing.expectEqual(@as(u64, 0), chain_account.nonce);
+        
+        print("  ✅ {s}: {} ZEI at {s}\n", .{
+            account.name,
+            account.amount / types.ZEI_COIN,
+            @as([]const u8, &std.fmt.bufPrint(&[_]u8{0} ** 64, "tzei1{s}", .{
+                std.fmt.fmtSliceHexLower(address.hash[0..10])
+            }) catch unreachable)[0..15]
+        });
+    }
+    
+    // Test 2: Verify genesis key pair generation is deterministic
+    for (genesis.TESTNET_DISTRIBUTION) |account| {
+        const kp1 = try genesis_wallet.createGenesisKeyPair(account.seed);
+        const kp2 = try genesis_wallet.createGenesisKeyPair(account.seed);
+        
+        // Public keys should be identical
+        try testing.expectEqualSlices(u8, &kp1.public_key, &kp2.public_key);
+        // Private keys should be identical
+        try testing.expectEqualSlices(u8, &kp1.private_key, &kp2.private_key);
+        
+        // Address derived from public key should match genesis address
+        const derived_addr = types.Address.fromPublicKey(kp1.public_key);
+        const expected_addr = genesis.getTestAccountAddress(account.name).?;
+        try testing.expectEqualSlices(u8, &derived_addr.hash, &expected_addr.hash);
+    }
+    print("  ✅ Genesis key pairs are deterministic and match addresses\n", .{});
+    
+    // Test 3: Verify total genesis supply
+    var total_supply: u64 = 0;
+    for (genesis.TESTNET_DISTRIBUTION) |account| {
+        total_supply += account.amount;
+    }
+    // Add coinbase from genesis block
+    total_supply += types.ZenMining.BLOCK_REWARD;
+    
+    const expected_supply = 5 * 1000 * types.ZEI_COIN + types.ZenMining.BLOCK_REWARD; // 5 accounts × 1000 ZEI + coinbase
+    try testing.expectEqual(expected_supply, total_supply);
+    print("  ✅ Total genesis supply: {} ZEI (5000 distributed + {} coinbase)\n", .{
+        total_supply / types.ZEI_COIN,
+        types.ZenMining.BLOCK_REWARD / types.ZEI_COIN
+    });
+    
+    // Test 4: Verify genesis block contains distribution transactions
+    var genesis_block = try zeicoin.getBlockByHeight(0);
+    defer genesis_block.deinit(testing.allocator);
+    
+    // Should have 1 coinbase + 5 distribution transactions = 6 total
+    try testing.expectEqual(@as(u32, 6), genesis_block.txCount());
+    
+    // First transaction should be coinbase
+    const coinbase = genesis_block.transactions[0];
+    try testing.expectEqual(types.Address.zero(), coinbase.sender);
+    try testing.expectEqual(types.ZenMining.BLOCK_REWARD, coinbase.amount);
+    try testing.expectEqual(@as(u64, 0), coinbase.fee);
+    
+    // Remaining transactions should be distribution
+    for (genesis_block.transactions[1..], 0..) |tx, i| {
+        const account = genesis.TESTNET_DISTRIBUTION[i];
+        const expected_addr = genesis.getTestAccountAddress(account.name).?;
+        
+        try testing.expectEqual(types.Address.zero(), tx.sender); // From genesis
+        try testing.expectEqual(expected_addr, tx.recipient);
+        try testing.expectEqual(account.amount, tx.amount);
+        try testing.expectEqual(@as(u64, 0), tx.fee); // No fees for genesis distribution
+    }
+    print("  ✅ Genesis block contains correct distribution transactions\n", .{});
+    
+    // Test 5: Verify genesis hash matches expected
+    const expected_hash = genesis.getCanonicalGenesisHash();
+    const actual_hash = genesis_block.hash();
+    try testing.expectEqualSlices(u8, &expected_hash, &actual_hash);
+    print("  ✅ Genesis block hash matches canonical hash\n", .{});
+    
+    // Test 6: Test transaction capability from genesis accounts
+    const alice_kp = try genesis_wallet.getTestAccountKeyPair("alice");
+    const alice_addr = alice_kp.?.getAddress();
+    const bob_addr = genesis.getTestAccountAddress("bob").?;
+    
+    // Create a transaction from alice to bob
+    const tx = types.Transaction{
+        .version = 0,
+        .flags = std.mem.zeroes(types.TransactionFlags),
+        .sender = alice_addr,
+        .sender_public_key = alice_kp.?.public_key,
+        .recipient = bob_addr,
+        .amount = 100 * types.ZEI_COIN,
+        .fee = types.ZenFees.MIN_FEE,
+        .nonce = 0,
+        .timestamp = @intCast(util.getTime()),
+        .expiry_height = 10000,
+        .signature = undefined,
+        .script_version = 0,
+        .witness_data = &[_]u8{},
+        .extra_data = &[_]u8{},
+    };
+    var signed_tx = tx;
+    signed_tx.signature = try alice_kp.?.signTransaction(tx.hashForSigning());
+    
+    // Should be able to add to mempool
+    try zeicoin.addTransaction(signed_tx);
+    try testing.expectEqual(@as(usize, 1), zeicoin.mempool.items.len);
+    print("  ✅ Genesis accounts can create valid transactions\n", .{});
+    
+    print("  🎉 All genesis distribution validation tests passed!\n", .{});
+}
+
 test "memory leak detection - block operations" {
     print("\n🔍 Testing memory leak prevention in block operations...\n", .{});
     

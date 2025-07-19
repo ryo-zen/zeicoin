@@ -97,6 +97,7 @@ pub const ChainState = struct {
     pub fn getAccount(self: *Self, address: Address) !types.Account {
         // Try to load from database
         if (self.database.getAccount(address)) |account| {
+            print("🔍 [ACCOUNT LOAD] Found existing account {x}: balance={}, nonce={}\n", .{address.hash, account.balance, account.nonce});
             return account;
         } else |err| switch (err) {
             db.DatabaseError.NotFound => {
@@ -106,6 +107,7 @@ pub const ChainState = struct {
                     .balance = 0,
                     .nonce = 0,
                 };
+                print("🔍 [ACCOUNT LOAD] Created new account {x}: balance={}, nonce={}\n", .{address.hash, new_account.balance, new_account.nonce});
                 // Save to database immediately
                 try self.database.saveAccount(address, new_account);
                 return new_account;
@@ -127,20 +129,42 @@ pub const ChainState = struct {
 
     /// Process a regular transaction and update account states
     pub fn processTransaction(self: *Self, tx: Transaction) !void {
+        print("🔍 [TX VALIDATION] =============================================\n", .{});
+        print("🔍 [TX VALIDATION] Processing transaction:\n", .{});
+        print("🔍 [TX VALIDATION]   Sender: {x}\n", .{tx.sender.hash});
+        print("🔍 [TX VALIDATION]   Recipient: {x}\n", .{tx.recipient.hash});
+        print("🔍 [TX VALIDATION]   Amount: {} ZEI\n", .{tx.amount});
+        print("🔍 [TX VALIDATION]   Fee: {} ZEI\n", .{tx.fee});
+        print("🔍 [TX VALIDATION]   Nonce: {}\n", .{tx.nonce});
+        
         // Get accounts
+        print("🔍 [TX VALIDATION] Loading sender account...\n", .{});
         var sender_account = try self.getAccount(tx.sender);
+        print("🔍 [TX VALIDATION] Loading recipient account...\n", .{});
         var recipient_account = try self.getAccount(tx.recipient);
+
+        print("🔍 [TX VALIDATION] Processing transaction from sender: {x}\n", .{tx.sender.hash});
+        print("🔍 [TX VALIDATION] Sender balance: {} ZEI, nonce: {}\n", .{sender_account.balance, sender_account.nonce});
+        print("🔍 [TX VALIDATION] Recipient balance: {} ZEI, nonce: {}\n", .{recipient_account.balance, recipient_account.nonce});
+        print("🔍 [TX VALIDATION] Transaction amount: {} ZEI, fee: {} ZEI\n", .{tx.amount, tx.fee});
 
         // 💰 Apply transaction with fee deduction
         // Check for integer overflow in addition
         const total_cost = std.math.add(u64, tx.amount, tx.fee) catch {
+            print("❌ [TX VALIDATION] Integer overflow in cost calculation\n", .{});
             return error.IntegerOverflow;
         };
 
+        print("🔍 [TX VALIDATION] Total cost: {} ZEI\n", .{total_cost});
+
         // Safety check for sufficient balance
         if (sender_account.balance < total_cost) {
+            print("❌ [TX VALIDATION] INSUFFICIENT BALANCE! Sender has {} ZEI, needs {} ZEI\n", .{sender_account.balance, total_cost});
+            print("❌ [TX VALIDATION] Shortfall: {} ZEI\n", .{total_cost - sender_account.balance});
             return error.InsufficientBalance;
         }
+
+        print("✅ [TX VALIDATION] Balance check passed\n", .{});
 
         sender_account.balance -= total_cost;
 
@@ -161,6 +185,10 @@ pub const ChainState = struct {
 
     /// Process a coinbase transaction (mining reward)
     pub fn processCoinbaseTransaction(self: *Self, coinbase_tx: Transaction, miner_address: Address, current_height: u32) !void {
+        print("🔍 [COINBASE TX] =============================================\n", .{});
+        print("🔍 [COINBASE TX] Processing coinbase transaction to miner: {x}\n", .{miner_address.hash});
+        print("🔍 [COINBASE TX] Coinbase amount: {} ZEI, height: {}\n", .{coinbase_tx.amount, current_height});
+        
         // Get or create miner account
         var miner_account = self.getAccount(miner_address) catch types.Account{
             .address = miner_address,
@@ -168,17 +196,24 @@ pub const ChainState = struct {
             .nonce = 0,
         };
 
+        print("🔍 [COINBASE TX] Miner account BEFORE: balance={}, immature={}, nonce={}\n", .{miner_account.balance, miner_account.immature_balance, miner_account.nonce});
+
         // Check if this is a genesis block (height 0) transaction
         if (current_height == 0) {
+            print("🔍 [COINBASE TX] Genesis block - adding {} ZEI to mature balance\n", .{coinbase_tx.amount});
             // Genesis block pre-mine allocations are immediately mature
             miner_account.balance += coinbase_tx.amount;
         } else {
+            print("🔍 [COINBASE TX] Regular block - adding {} ZEI to immature balance\n", .{coinbase_tx.amount});
             // Regular mining rewards go to immature balance (100 block maturity)
             miner_account.immature_balance += coinbase_tx.amount;
         }
 
+        print("🔍 [COINBASE TX] Miner account AFTER: balance={}, immature={}, nonce={}\n", .{miner_account.balance, miner_account.immature_balance, miner_account.nonce});
+
         // Save miner account
         try self.database.saveAccount(miner_address, miner_account);
+        print("🔍 [COINBASE TX] Miner account saved to database\n", .{});
     }
 
     /// Clear all account state for rebuild
@@ -332,16 +367,20 @@ pub const ChainState = struct {
 
     /// Process all transactions in a block
     pub fn processBlockTransactions(self: *Self, transactions: []Transaction, current_height: u32) !void {
+        print("🔍 [BLOCK TX] Processing {} transactions at height {}\n", .{transactions.len, current_height});
+        
         // First pass: process all coinbase transactions
-        for (transactions) |tx| {
+        for (transactions, 0..) |tx, i| {
             if (self.isCoinbaseTransaction(tx)) {
+                print("🔍 [BLOCK TX] Processing coinbase transaction {} at height {}\n", .{i, current_height});
                 try self.processCoinbaseTransaction(tx, tx.recipient, current_height);
             }
         }
 
         // Second pass: process all regular transactions
-        for (transactions) |tx| {
+        for (transactions, 0..) |tx, i| {
             if (!self.isCoinbaseTransaction(tx)) {
+                print("🔍 [BLOCK TX] Processing regular transaction {} at height {}\n", .{i, current_height});
                 try self.processTransaction(tx);
             }
         }

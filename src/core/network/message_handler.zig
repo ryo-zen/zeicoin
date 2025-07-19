@@ -7,7 +7,6 @@ const ZeiCoin = @import("../node.zig").ZeiCoin;
 
 // Import modular components
 const BlockProcessor = @import("processors/block_processor.zig").BlockProcessor;
-const NetworkCoordinator = @import("coordinators/network_coordinator.zig").NetworkCoordinator;
 
 const Transaction = types.Transaction;
 const Block = types.Block;
@@ -18,7 +17,6 @@ pub const NetworkMessageHandler = struct {
     
     // Modular components
     block_processor: BlockProcessor,
-    network_coordinator: NetworkCoordinator,
     
     const Self = @This();
     
@@ -28,7 +26,6 @@ pub const NetworkMessageHandler = struct {
             .allocator = allocator,
             .blockchain = blockchain,
             .block_processor = BlockProcessor.init(allocator, blockchain),
-            .network_coordinator = NetworkCoordinator.init(allocator, blockchain),
         };
     }
     
@@ -40,7 +37,9 @@ pub const NetworkMessageHandler = struct {
     
     /// Handle incoming block from network peer (delegates to block processor)
     pub fn handleIncomingBlock(self: *Self, block: Block, peer: ?*net.Peer) !void {
+        print("🔧 [MESSAGE HANDLER] handleIncomingBlock() ENTRY - calling block processor\n", .{});
         const result = try self.block_processor.processIncomingBlock(block, peer);
+        print("🔧 [MESSAGE HANDLER] Block processor returned result: {}\n", .{result});
         
         // Handle post-processing actions based on result
         switch (result) {
@@ -67,49 +66,72 @@ pub const NetworkMessageHandler = struct {
         }
     }
     
-    /// Handle incoming transaction from network peer (delegates to network coordinator)
+    /// Handle incoming transaction from network peer (delegates to blockchain)
     pub fn handleIncomingTransaction(self: *Self, transaction: Transaction, peer: ?*net.Peer) !void {
-        try self.network_coordinator.handleIncomingTransaction(transaction, peer);
+        // Log peer info if available
+        if (peer) |p| {
+            print("💰 Transaction received from peer {}\n", .{p.id});
+        } else {
+            print("💰 Transaction received from network peer\n", .{});
+        }
+        
+        // Forward to blockchain's transaction handler
+        try self.blockchain.handleIncomingTransaction(transaction);
+        print("✅ Transaction processed successfully\n", .{});
     }
     
-    /// Broadcast new block to network peers (delegates to network coordinator)
+    /// Broadcast new block to network peers (delegates to blockchain's network coordinator)
     pub fn broadcastNewBlock(self: *Self, block: Block) !void {
-        try self.network_coordinator.broadcastBlock(block);
+        print("🔧 [BROADCAST] Attempting to broadcast block...\n", .{});
+        print("🔧 [BROADCAST] Network coordinator ptr: {*}\n", .{&self.blockchain.network_coordinator});
+        if (self.blockchain.network_coordinator.getNetworkManager()) |network| {
+            print("📡 Broadcasting new block to {} peers\n", .{network.peer_manager.getConnectedCount()});
+            try network.broadcastBlock(block);
+        } else {
+            print("⚠️  No network manager - block not broadcasted\n", .{});
+        }
     }
     
-    /// Check connected peers for new blocks (delegates to network coordinator)
+    /// Check connected peers for new blocks (delegates to blockchain)
     pub fn checkForNewBlocks(self: *Self) !void {
-        try self.network_coordinator.checkForNewBlocks();
+        // This functionality should be handled by the blockchain's sync system
+        _ = self;
     }
     
     // Network operations (delegate to network coordinator)
     pub fn processDownloadedBlock(self: *Self, block: Block, expected_height: u32) !void {
-        try self.network_coordinator.processDownloadedBlock(block, expected_height);
+        // During sync, validation is already done by sync manager
+        // Use dedicated sync path that bypasses block processor entirely
+        try self.blockchain.addSyncBlockToChain(block, expected_height);
     }
     
     pub fn validateSyncBlock(self: *Self, block: Block, expected_height: u32) !bool {
-        return try self.network_coordinator.validateSyncBlock(block, expected_height);
+        return try self.blockchain.validateSyncBlock(block, expected_height);
     }
     
     pub fn startNetwork(self: *Self, port: u16) !void {
-        try self.network_coordinator.startNetwork(port);
+        try self.blockchain.network_coordinator.startNetwork(port);
     }
     
     pub fn stopNetwork(self: *Self) void {
-        self.network_coordinator.stopNetwork();
+        self.blockchain.network_coordinator.stopNetwork();
     }
     
     pub fn connectToPeer(self: *Self, address: []const u8) !void {
-        try self.network_coordinator.connectToPeer(address);
+        try self.blockchain.network_coordinator.connectToPeer(address);
     }
     
     pub fn shouldSync(self: *Self, peer_height: u32) !bool {
-        return try self.network_coordinator.shouldSync(peer_height);
+        const our_height = try self.blockchain.getHeight();
+        return peer_height > our_height;
     }
     
-    /// Get current sync state (delegates to network coordinator)
+    /// Get current sync state (delegates to blockchain sync manager)
     pub fn getSyncState(self: *Self) @import("../sync/sync.zig").SyncState {
-        return self.network_coordinator.getSyncState();
+        if (self.blockchain.sync_manager) |sync_manager| {
+            return sync_manager.getSyncState();
+        }
+        return .synced;
     }
     
     /// Handle chain reorganization when better chain is found (legacy compatibility)

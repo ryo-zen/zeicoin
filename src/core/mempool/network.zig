@@ -114,7 +114,11 @@ pub const NetworkHandler = struct {
         // 3. Validate transaction using network-specific validation
         if (!try self.validator.validateNetworkTransaction(transaction)) {
             self.rejected_count += 1;
-            print("⚠️ Rejected network transaction: validation failed\\n", .{});
+            print("⚠️ Rejected network transaction: validation failed\n", .{});
+            
+            // Check auto-sync trigger in case account state is out of sync
+            try self.checkAutoSyncTrigger(transaction);
+            
             return NetworkTransactionResult{
                 .accepted = false,
                 .reason = .validation_failed,

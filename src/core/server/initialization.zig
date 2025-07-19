@@ -4,7 +4,7 @@
 const std = @import("std");
 const zen = @import("../node.zig");
 const network = @import("../network/peer.zig");
-const sync = @import("../network/sync.zig");
+const sync = @import("../sync/manager.zig");
 const miner_mod = @import("../miner/main.zig");
 const wallet = @import("../wallet/wallet.zig");
 const key = @import("../crypto/key.zig");
@@ -17,6 +17,7 @@ fn acceptConnectionsThread(network_manager: *network.NetworkManager) void {
         std.log.err("Accept connections thread error: {}", .{err});
     };
 }
+
 
 pub const NodeComponents = struct {
     blockchain: *zen.ZeiCoin,
@@ -75,10 +76,13 @@ pub fn initializeNode(allocator: std.mem.Allocator, config: command_line.Config)
     // Connect components
     blockchain.mempool_manager.setNetworkManager(network_manager);
     
+    // Set the network manager on blockchain's network coordinator
+    blockchain.network_coordinator.network = network_manager;
+    std.log.info("✅ Network manager set on blockchain coordinator", .{});
+    
     // Initialize sync manager following ZeiCoin ownership principles
     const sync_manager = try allocator.create(sync.SyncManager);
     sync_manager.* = sync.SyncManager.init(allocator, blockchain);
-    sync_manager.network_manager = network_manager;
     blockchain.sync_manager = sync_manager;
     
     // Start network listening
@@ -89,6 +93,10 @@ pub fn initializeNode(allocator: std.mem.Allocator, config: command_line.Config)
     const accept_thread = try std.Thread.spawn(.{}, acceptConnectionsThread, .{network_manager});
     accept_thread.detach();
     std.log.info("Connection accept thread started", .{});
+    
+    
+    // Set bootstrap nodes for auto-reconnect
+    network_manager.setBootstrapNodes(config.bootstrap_nodes);
     
     // Connect to bootstrap nodes
     std.log.info("Connecting to {} bootstrap nodes", .{config.bootstrap_nodes.len});

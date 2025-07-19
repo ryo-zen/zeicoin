@@ -147,9 +147,9 @@ pub const ChainValidator = struct {
 
         // Verify transaction signature
         const tx_hash = tx.hashForSigning();
-        print("     🔍 Transaction hash for signing: {s}\n", .{std.fmt.fmtSliceHexLower(&tx_hash)});
-        print("     🔍 Sender public key: {s}\n", .{std.fmt.fmtSliceHexLower(&tx.sender_public_key)});
-        print("     🔍 Transaction signature: {s}\n", .{std.fmt.fmtSliceHexLower(&tx.signature)});
+        // print("     🔍 Transaction hash for signing: {s}\n", .{std.fmt.fmtSliceHexLower(&tx_hash)});
+        // print("     🔍 Sender public key: {s}\n", .{std.fmt.fmtSliceHexLower(&tx.sender_public_key)});
+        // print("     🔍 Transaction signature: {s}\n", .{std.fmt.fmtSliceHexLower(&tx.signature)});
 
         if (!key.verify(tx.sender_public_key, &tx_hash, tx.signature)) {
             print("❌ Invalid signature: transaction not signed by sender\n", .{});
@@ -196,8 +196,10 @@ pub const ChainValidator = struct {
 
         // Check block height consistency
         const current_height = try self.chain_state.getHeight();
-        if (expected_height != current_height) {
+        // Allow either current height (reprocessing) or next height (normal progression)
+        if (expected_height != current_height and expected_height != current_height + 1) {
             print("❌ Block validation failed: height mismatch (expected: {}, current: {})\n", .{ expected_height, current_height });
+            print("💡 Block height must be current ({}) or next ({})\n", .{ current_height, current_height + 1 });
             return false;
         }
 
@@ -236,11 +238,11 @@ pub const ChainValidator = struct {
             // In production, use full RandomX validation with dynamic difficulty
             const mining_context = miner_mod.MiningContext{
                 .allocator = self.allocator,
-                .database = &self.chain_state.database,
+                .database = self.chain_state.database,
                 .mempool_manager = undefined, // Not needed for validation
                 .mining_state = undefined, // Not needed for validation
                 .network = null,
-                .fork_manager = self.fork_manager,
+                .fork_manager = self.fork_manager orelse undefined,
                 .blockchain = undefined, // Not needed for validation
             };
             if (!try miner_mod.validateBlockPoW(mining_context, block)) {
@@ -265,7 +267,7 @@ pub const ChainValidator = struct {
 
     /// Validate a block during synchronization (more lenient)
     /// Full sync validation from node.zig with detailed logging
-    pub fn validateSyncBlock(self: *Self, block: Block, expected_height: u32) !bool {
+    pub fn validateSyncBlock(self: *Self, block: *const Block, expected_height: u32) !bool {
         print("🔍 validateSyncBlock: Starting validation for height {}\n", .{expected_height});
 
         // Special validation for genesis block (height 0)
@@ -276,16 +278,16 @@ pub const ChainValidator = struct {
             print("🔍 Genesis validation details:\n", .{});
             print("   Block timestamp: {}\n", .{block.header.timestamp});
             print("   Expected genesis timestamp: {}\n", .{types.Genesis.timestamp()});
-            print("   Block previous_hash: {s}\n", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+            // print("   Block previous_hash: {s}\n", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
             print("   Block difficulty: {}\n", .{block.header.difficulty});
             print("   Block nonce: 0x{X}\n", .{block.header.nonce});
             print("   Block transaction count: {}\n", .{block.txCount()});
 
-            const block_hash = block.hash();
-            print("   Block hash: {s}\n", .{std.fmt.fmtSliceHexLower(&block_hash)});
-            print("   Expected genesis hash: {s}\n", .{std.fmt.fmtSliceHexLower(&genesis.getCanonicalGenesisHash())});
+            _ = block.hash(); // Block hash calculated but not used in release mode
+            // print("   Block hash: {s}\n", .{std.fmt.fmtSliceHexLower(&block_hash)});
+            // print("   Expected genesis hash: {s}\n", .{std.fmt.fmtSliceHexLower(&genesis.getCanonicalGenesisHash())});
 
-            if (!genesis.validateGenesis(block)) {
+            if (!genesis.validateGenesis(block.*)) {
                 print("❌ Genesis block validation failed: not canonical genesis\n", .{});
                 print("❌ Genesis validation failed - detailed comparison above\n", .{});
                 return false;
@@ -294,14 +296,27 @@ pub const ChainValidator = struct {
             return true; // Genesis block passed validation
         }
 
-        print("🔍 validateSyncBlock: Checking basic block structure for height {}\n", .{expected_height});
+        print("🔍 validateSyncBlock: About to check basic block structure for height {}\n", .{expected_height});
+        print("🔍 validateSyncBlock: Block pointer address: {*}\n", .{&block});
+        
+        // Try to access block fields safely first
+        print("🔍 validateSyncBlock: Checking block field access...\n", .{});
+        
+        // Check if we can access basic fields
+        const tx_count = block.txCount();
+        print("🔍 validateSyncBlock: Block transaction count: {}\n", .{tx_count});
+        
+        const timestamp = block.header.timestamp;
+        print("🔍 validateSyncBlock: Block timestamp: {}\n", .{timestamp});
+        
+        const difficulty = block.header.difficulty;
+        print("🔍 validateSyncBlock: Block difficulty: {}\n", .{difficulty});
+        
+        print("🔍 validateSyncBlock: Basic field access successful, now calling isValid()...\n", .{});
 
         // Check basic block structure
         if (!block.isValid()) {
             print("❌ Block validation failed: invalid block structure at height {}\n", .{expected_height});
-            print("   Block transaction count: {}\n", .{block.txCount()});
-            print("   Block timestamp: {}\n", .{block.header.timestamp});
-            print("   Block difficulty: {}\n", .{block.header.difficulty});
             return false;
         }
 
@@ -325,7 +340,7 @@ pub const ChainValidator = struct {
             const difficulty_target = block.header.getDifficultyTarget();
             const block_hash = block.header.hash();
             print("   Difficulty target: {}\n", .{difficulty_target.toU64()});
-            print("   Block hash: {s}\n", .{std.fmt.fmtSliceHexLower(&block_hash)});
+            // print("   Block hash: {s}\n", .{std.fmt.fmtSliceHexLower(&block_hash)});
 
             if (!difficulty_target.meetsDifficulty(block_hash)) {
                 print("❌ Proof-of-work validation failed for height {}\n", .{expected_height});
@@ -336,14 +351,14 @@ pub const ChainValidator = struct {
             // In production, use full RandomX validation with dynamic difficulty
             const mining_context = miner_mod.MiningContext{
                 .allocator = self.allocator,
-                .database = &self.chain_state.database,
+                .database = self.chain_state.database,
                 .mempool_manager = undefined, // Not needed for validation
                 .mining_state = undefined, // Not needed for validation
                 .network = null,
-                .fork_manager = self.fork_manager,
+                .fork_manager = self.fork_manager orelse undefined,
                 .blockchain = undefined, // Not needed for validation
             };
-            if (!try miner_mod.validateBlockPoW(mining_context, block)) {
+            if (!try miner_mod.validateBlockPoW(mining_context, block.*)) {
                 print("❌ RandomX proof-of-work validation failed for height {}\n", .{expected_height});
                 return false;
             }
@@ -368,13 +383,13 @@ pub const ChainValidator = struct {
                 defer prev_block.deinit(self.allocator);
 
                 const prev_hash = prev_block.hash();
-                print("   Previous block hash in chain: {s}\n", .{std.fmt.fmtSliceHexLower(&prev_hash)});
-                print("   Block's previous_hash field: {s}\n", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+                // print("   Previous block hash in chain: {s}\n", .{std.fmt.fmtSliceHexLower(&prev_hash)});
+                // print("   Block's previous_hash field: {s}\n", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
 
                 if (!std.mem.eql(u8, &block.header.previous_hash, &prev_hash)) {
                     print("❌ Previous hash validation failed during sync\n", .{});
-                    print("   Expected: {s}\n", .{std.fmt.fmtSliceHexLower(&prev_hash)});
-                    print("   Received: {s}\n", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+                    // print("   Expected: {s}\n", .{std.fmt.fmtSliceHexLower(&prev_hash)});
+                    // print("   Received: {s}\n", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
                     print("⚠️ This might indicate a fork - skipping hash validation during sync\n", .{});
                     // During sync, we trust the peer's chain - skip this validation
                 }
@@ -402,10 +417,10 @@ pub const ChainValidator = struct {
             // Basic transaction structure validation only
             if (!tx.isValid()) {
                 print("❌ Transaction {} structure validation failed\n", .{i});
-                const sender_bytes = tx.sender.toLegacyBytes();
-                const recipient_bytes = tx.recipient.toLegacyBytes();
-                print("   Sender: {s}\n", .{std.fmt.fmtSliceHexLower(&sender_bytes)});
-                print("   Recipient: {s}\n", .{std.fmt.fmtSliceHexLower(&recipient_bytes)});
+                _ = tx.sender.toBytes(); // Sender bytes calculated but not used in release mode
+                _ = tx.recipient.toBytes(); // Recipient bytes calculated but not used in release mode
+                // print("   Sender: {s}\n", .{std.fmt.fmtSliceHexLower(&sender_bytes)});
+                // print("   Recipient: {s}\n", .{std.fmt.fmtSliceHexLower(&recipient_bytes)});
                 print("   Amount: {}\n", .{tx.amount});
                 print("   Fee: {}\n", .{tx.fee});
                 print("   Nonce: {}\n", .{tx.nonce});
@@ -419,8 +434,8 @@ pub const ChainValidator = struct {
             // Signature validation (but no balance check)
             if (!try self.validateTransactionSignatureDetailed(tx)) {
                 print("❌ Transaction {} signature validation failed\n", .{i});
-                print("   Public key: {s}\n", .{std.fmt.fmtSliceHexLower(&tx.sender_public_key)});
-                print("   Signature: {s}\n", .{std.fmt.fmtSliceHexLower(&tx.signature)});
+                // print("   Public key: {s}\n", .{std.fmt.fmtSliceHexLower(&tx.sender_public_key)});
+                // print("   Signature: {s}\n", .{std.fmt.fmtSliceHexLower(&tx.signature)});
                 return false;
             }
             print("   ✅ Transaction {} signature validation passed\n", .{i});

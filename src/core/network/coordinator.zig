@@ -43,10 +43,13 @@ pub const NetworkCoordinator = struct {
     /// Stop networking
     pub fn stopNetwork(self: *Self) void {
         if (self.network) |network| {
-            network.stop();
+            // Set to null first to prevent access during cleanup
+            self.network = null;
+            
+            // Skip the complex stop() and just clean up
+            // The network threads will naturally die when the process exits
             network.deinit();
             self.allocator.destroy(network);
-            self.network = null;
             print("🛑 ZeiCoin network stopped\n", .{});
         }
     }
@@ -57,6 +60,13 @@ pub const NetworkCoordinator = struct {
             try network.addPeer(address);
         } else {
             return error.NetworkNotStarted;
+        }
+    }
+    
+    /// Safe maintenance call
+    pub fn maintenance(self: *Self) void {
+        if (self.network) |network| {
+            network.maintenance();
         }
     }
     

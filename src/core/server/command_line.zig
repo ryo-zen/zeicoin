@@ -91,10 +91,7 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Config {
         } else |_| {}
     }
     
-    // Default bootstrap nodes if none specified
-    if (bootstrap_list.items.len == 0) {
-        try bootstrap_list.append(.{ .ip = "127.0.0.1", .port = network.DEFAULT_PORT });
-    }
+    // No default bootstrap nodes - nodes without bootstrap config act as bootstrap nodes themselves
     
     config.bootstrap_nodes = try bootstrap_list.toOwnedSlice();
     return config;
