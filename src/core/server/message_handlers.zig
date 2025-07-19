@@ -60,7 +60,7 @@ pub const MessageHandlerImpl = struct {
             std.log.info("🚀 [PEER CONNECT] Peer has higher height! Starting sync process...", .{});
             if (self.blockchain.sync_manager != null) {
                 std.log.info("🔄 [PEER CONNECT] Sync manager available, starting sync with peer at height {}", .{peer.height});
-                try self.blockchain.sync_manager.?.startSync(peer, peer.height);
+                try self.blockchain.sync_manager.?.startBatchSync(peer, peer.height);
                 std.log.info("✅ [PEER CONNECT] Sync started successfully", .{});
             } else {
                 std.log.warn("❌ [PEER CONNECT] Sync manager is null, cannot start sync!", .{});
@@ -146,7 +146,7 @@ pub const MessageHandlerImpl = struct {
                 // Check if we need to start a new sync operation
                 if (latest_header_height > current_height and !sync_manager.isActive()) {
                     std.log.info("🚀 [HEADERS] Peer has {} blocks ahead, starting sync...", .{ latest_header_height - current_height });
-                    try sync_manager.startSync(peer, @intCast(latest_header_height));
+                    try sync_manager.startBatchSync(peer, @intCast(latest_header_height));
                     std.log.info("✅ [HEADERS] Sync started successfully", .{});
                 }
             }

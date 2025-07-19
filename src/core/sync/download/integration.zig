@@ -92,7 +92,7 @@ pub const EnhancedSyncManager = struct {
             
             // Use traditional sync as fallback
             if (available_peers.len > 0) {
-                try self.sync_manager.startSync(available_peers[0], target_height);
+                try self.sync_manager.startBatchSync(available_peers[0], target_height);
             } else {
                 return error.NoPeersAvailable;
             }

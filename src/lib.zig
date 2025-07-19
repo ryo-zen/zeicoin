@@ -31,6 +31,15 @@ pub const mempool = struct {
 pub const peer = @import("core/network/peer.zig");
 pub const server = @import("core/server/server.zig");
 
+// libp2p transport layer
+pub const libp2p = struct {
+    pub const upgrader = @import("core/libp2p/upgrader/connection_upgrader.zig");
+    pub const session = @import("core/libp2p/upgrader/upgrade_session.zig");
+    pub const negotiator = @import("core/libp2p/protocol/multistream_negotiator.zig");
+    pub const parser = @import("core/libp2p/protocol/multistream_parser.zig");
+    pub const tcp_context = @import("core/libp2p/transport/tcp_async_context.zig");
+};
+
 // Sync components (new modular system)
 pub const sync = @import("core/sync/sync.zig");
 

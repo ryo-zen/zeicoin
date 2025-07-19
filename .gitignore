@@ -53,3 +53,4 @@ fuzz/bech32_simple_fuzz.zig
 fuzz/network_message_fuzz.zig
 docker-compose.sync-proof-test.yml
 Dockerfile
+docker-compose.libp2p-test.yml

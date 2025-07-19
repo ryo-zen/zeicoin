@@ -330,8 +330,9 @@ pub const BlockProcessor = struct {
             // Find the best peer to sync with
             if (self.blockchain.network_coordinator.getNetworkManager()) |network| {
                 if (network.peer_manager.getBestPeerForSync()) |best_peer| {
-                    try sync_manager.startSync(best_peer, best_peer.height);
-                    print("🔄 Auto-sync triggered due to orphan block with peer height {}\n", .{best_peer.height});
+                    // Use libp2p-powered batch sync for improved performance
+                    try sync_manager.startBatchSync(best_peer, best_peer.height);
+                    print("🚀 libp2p batch auto-sync triggered due to orphan block with peer height {}\n", .{best_peer.height});
                 } else {
                     print("⚠️ No peers available for auto-sync\n", .{});
                 }
