@@ -1,5 +1,5 @@
 // sync.zig - Sync Module Public API
-// Main entry point for the modular sync system
+// ZSP-001 compliant synchronization system
 
 // Core sync components
 pub const manager = @import("manager.zig");
@@ -12,9 +12,11 @@ pub const protocol = @import("protocol/lib.zig");
 pub const SyncManager = manager.SyncManager;
 pub const SyncState = state.SyncState;
 pub const SyncProgress = state.SyncProgress;
-pub const HeadersProgress = state.HeadersProgress;
 pub const SyncStateManager = state.SyncStateManager;
 
-// Protocol types
+// ZSP-001 Protocol types
+pub const BatchSyncProtocol = protocol.BatchSyncProtocol;
+pub const sequential = protocol.sequential;
+
+// Legacy protocol (to be phased out)
 pub const BlockSyncProtocol = protocol.BlockSyncProtocol;
-pub const HeadersFirstProtocol = protocol.HeadersFirstProtocol;

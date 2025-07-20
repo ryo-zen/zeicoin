@@ -261,50 +261,35 @@ pub const NetworkManager = struct {
     }
     
     /// Broadcast a new block to all connected peers
+    /// ZSP-001: Direct block broadcast instead of inventory system
     pub fn broadcastBlock(self: *Self, block: types.Block) !void {
-        // Create inventory item for the block
-        const block_hash = block.hash();
-        const item = messages.InventoryItem{
-            .item_type = .block,
-            .hash = block_hash,
-        };
-        
-        // Create announce message
-        var items = [_]messages.InventoryItem{item};
-        const announce = try messages.AnnounceMessage.init(self.allocator, &items);
+        // ZSP-001: Broadcast block directly instead of using inventory system
+        const block_msg = messages.BlockMessage{ .block = block };
         
         // Broadcast to all peers
-        self.broadcast(.announce, announce) catch |err| {
+        self.broadcast(.block, block_msg) catch |err| {
             std.log.warn("Failed to broadcast block: {}", .{err});
         };
         
-        std.log.info("Broadcasted block {} to peers", .{
+        const block_hash = block.hash();
+        std.log.info("Broadcasted block {} directly to peers (ZSP-001)", .{
             std.fmt.fmtSliceHexLower(&block_hash)
         });
     }
     
     /// Broadcast a new transaction to all connected peers
+    /// ZSP-001: Direct transaction broadcast instead of inventory system
     pub fn broadcastTransaction(self: *Self, tx: types.Transaction) void {
-        // Create inventory item for the transaction
-        const tx_hash = tx.hash();
-        const item = messages.InventoryItem{
-            .item_type = .transaction,
-            .hash = tx_hash,
-        };
-        
-        // Create announce message
-        var items = [_]messages.InventoryItem{item};
-        const announce = messages.AnnounceMessage.init(self.allocator, &items) catch |err| {
-            std.log.warn("Failed to create announce message: {}", .{err});
-            return;
-        };
+        // ZSP-001: Broadcast transaction directly instead of using inventory system
+        const tx_msg = messages.TransactionMessage{ .transaction = tx };
         
         // Broadcast to all peers
-        self.broadcast(.announce, announce) catch |err| {
+        self.broadcast(.transaction, tx_msg) catch |err| {
             std.log.warn("Failed to broadcast transaction: {}", .{err});
         };
         
-        std.log.debug("Broadcasted transaction {} to peers", .{
+        const tx_hash = tx.hash();
+        std.log.debug("Broadcasted transaction {} directly to peers (ZSP-001)", .{
             std.fmt.fmtSliceHexLower(&tx_hash)
         });
     }

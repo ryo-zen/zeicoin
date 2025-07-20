@@ -142,7 +142,7 @@ pub const BlockProcessor = struct {
         // Check if we're currently syncing - if so, use sync-aware validation
         const current_height = self.blockchain.getHeight() catch 0;
         const is_syncing = if (self.blockchain.sync_manager) |sync_manager| 
-            sync_manager.state_manager.isActive() or (current_height < block_height and block_height <= current_height + 10)
+            sync_manager.isActive() or (current_height < block_height and block_height <= current_height + 10)
         else 
             (current_height < block_height and block_height <= current_height + 10);
             
@@ -331,7 +331,7 @@ pub const BlockProcessor = struct {
             if (self.blockchain.network_coordinator.getNetworkManager()) |network| {
                 if (network.peer_manager.getBestPeerForSync()) |best_peer| {
                     // Use libp2p-powered batch sync for improved performance
-                    try sync_manager.startBatchSync(best_peer, best_peer.height);
+                    try sync_manager.startSync(best_peer, best_peer.height);
                     print("🚀 libp2p batch auto-sync triggered due to orphan block with peer height {}\n", .{best_peer.height});
                 } else {
                     print("⚠️ No peers available for auto-sync\n", .{});

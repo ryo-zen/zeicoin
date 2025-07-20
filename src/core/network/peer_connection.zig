@@ -141,18 +141,18 @@ pub const PeerConnection = struct {
             .handshake_ack => try self.handleHandshakeAck(),
             .ping => |ping| try self.handlePing(ping),
             .pong => |pong| try self.handlePong(pong),
-            .get_headers => |get_headers| try self.handleGetHeaders(get_headers),
-            .headers => |headers| try self.handleHeaders(headers),
-            .announce => |announce| try self.handleAnnounce(announce),
-            .request => |request| try self.handleRequest(request),
+            // .get_headers => |get_headers| try self.handleGetHeaders(get_headers), // ZSP-001: Disabled
+            // .headers => |headers| try self.handleHeaders(headers), // ZSP-001: Disabled
+            // .announce => |announce| try self.handleAnnounce(announce), // ZSP-001: Inventory disabled
+            // .request => |request| try self.handleRequest(request), // ZSP-001: Inventory disabled
             .block => |block| try self.handleBlock(block),
             .transaction => |transaction| try self.handleTransaction(transaction),
             .get_blocks => |get_blocks| try self.handleGetBlocks(get_blocks),
             .blocks => |blocks| try self.handleBlocks(blocks),
             .get_peers => |get_peers| try self.handleGetPeers(get_peers),
             .peers => |peers| try self.handlePeers(peers),
-            .not_found => |not_found| try self.handleNotFound(not_found),
-            .reject => |reject| try self.handleReject(reject),
+            // .not_found => |not_found| try self.handleNotFound(not_found), // ZSP-001: Inventory disabled
+            // .reject => |reject| try self.handleReject(reject), // ZSP-001: Error handling disabled
         }
     }
     
@@ -218,21 +218,23 @@ pub const PeerConnection = struct {
         }
     }
     
-    fn handleGetHeaders(self: *Self, get_headers: messages.GetHeadersMessage) !void {
-        try self.message_handler.onGetHeaders(self.peer, get_headers);
-    }
+    // ZSP-001: Headers-first disabled - functions commented out
+    // fn handleGetHeaders(self: *Self, get_headers: messages.GetHeadersMessage) !void {
+    //     try self.message_handler.onGetHeaders(self.peer, get_headers);
+    // }
+    // 
+    // fn handleHeaders(self: *Self, headers: messages.HeadersMessage) !void {
+    //     try self.message_handler.onHeaders(self.peer, headers);
+    // }
     
-    fn handleHeaders(self: *Self, headers: messages.HeadersMessage) !void {
-        try self.message_handler.onHeaders(self.peer, headers);
-    }
-    
-    fn handleAnnounce(self: *Self, announce: messages.AnnounceMessage) !void {
-        try self.message_handler.onAnnounce(self.peer, announce);
-    }
-    
-    fn handleRequest(self: *Self, request: messages.RequestMessage) !void {
-        try self.message_handler.onRequest(self.peer, request);
-    }
+    // ZSP-001: Inventory messages disabled - functions commented out
+    // fn handleAnnounce(self: *Self, announce: messages.AnnounceMessage) !void {
+    //     try self.message_handler.onAnnounce(self.peer, announce);
+    // }
+    // 
+    // fn handleRequest(self: *Self, request: messages.RequestMessage) !void {
+    //     try self.message_handler.onRequest(self.peer, request);
+    // }
     
     fn handleBlock(self: *Self, block: messages.BlockMessage) !void {
         try self.message_handler.onBlock(self.peer, block);
@@ -260,13 +262,15 @@ pub const PeerConnection = struct {
         try self.message_handler.onPeers(self.peer, peers);
     }
     
-    fn handleNotFound(self: *Self, not_found: messages.NotFoundMessage) !void {
-        try self.message_handler.onNotFound(self.peer, not_found);
-    }
+    // ZSP-001: Inventory disabled - function commented out
+    // fn handleNotFound(self: *Self, not_found: messages.NotFoundMessage) !void {
+    //     try self.message_handler.onNotFound(self.peer, not_found);
+    // }
     
-    fn handleReject(self: *Self, reject: messages.RejectMessage) !void {
-        try self.message_handler.onReject(self.peer, reject);
-    }
+    // ZSP-001: Error handling disabled - function commented out
+    // fn handleReject(self: *Self, reject: messages.RejectMessage) !void {
+    //     try self.message_handler.onReject(self.peer, reject);
+    // }
 };
 
 /// Message handler interface
@@ -277,17 +281,19 @@ pub const MessageHandler = struct {
     /// Called when peer connects
     onPeerConnected: *const fn (peer: *Peer) anyerror!void,
     
-    /// Handle get headers request
-    onGetHeaders: *const fn (peer: *Peer, msg: messages.GetHeadersMessage) anyerror!void,
+    // ZSP-001: Headers-first disabled - callbacks commented out
+    // /// Handle get headers request
+    // onGetHeaders: *const fn (peer: *Peer, msg: messages.GetHeadersMessage) anyerror!void,
+    // 
+    // /// Handle headers message
+    // onHeaders: *const fn (peer: *Peer, msg: messages.HeadersMessage) anyerror!void,
     
-    /// Handle headers message
-    onHeaders: *const fn (peer: *Peer, msg: messages.HeadersMessage) anyerror!void,
-    
-    /// Handle inventory announcement
-    onAnnounce: *const fn (peer: *Peer, msg: messages.AnnounceMessage) anyerror!void,
-    
-    /// Handle data request
-    onRequest: *const fn (peer: *Peer, msg: messages.RequestMessage) anyerror!void,
+    // ZSP-001: Inventory messages disabled - callbacks commented out
+    // /// Handle inventory announcement
+    // onAnnounce: *const fn (peer: *Peer, msg: messages.AnnounceMessage) anyerror!void,
+    // 
+    // /// Handle data request
+    // onRequest: *const fn (peer: *Peer, msg: messages.RequestMessage) anyerror!void,
     
     /// Handle block data
     onBlock: *const fn (peer: *Peer, msg: messages.BlockMessage) anyerror!void,
@@ -304,11 +310,13 @@ pub const MessageHandler = struct {
     /// Handle peers message
     onPeers: *const fn (peer: *Peer, msg: messages.PeersMessage) anyerror!void,
     
-    /// Handle not found message
-    onNotFound: *const fn (peer: *Peer, msg: messages.NotFoundMessage) anyerror!void,
+    // ZSP-001: Inventory disabled - callback commented out
+    // /// Handle not found message
+    // onNotFound: *const fn (peer: *Peer, msg: messages.NotFoundMessage) anyerror!void,
     
-    /// Handle reject message
-    onReject: *const fn (peer: *Peer, msg: messages.RejectMessage) anyerror!void,
+    // ZSP-001: Error handling disabled - callback commented out
+    // /// Handle reject message
+    // onReject: *const fn (peer: *Peer, msg: messages.RejectMessage) anyerror!void,
 };
 
 /// TCP send callback function

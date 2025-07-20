@@ -11,7 +11,7 @@ const NetworkCoordinator = @import("network/coordinator.zig").NetworkCoordinator
 const randomx = @import("crypto/randomx.zig");
 const genesis = @import("chain/genesis.zig");
 const forkmanager = @import("fork/main.zig");
-const headerchain = @import("network/headerchain.zig");
+// const headerchain = @import("network/headerchain.zig"); // ZSP-001: Disabled headers-first sync
 const sync_mod = @import("sync/manager.zig");
 const message_handler = @import("network/message_handler.zig");
 const validator_mod = @import("validation/validator.zig");
@@ -36,7 +36,7 @@ pub const ZeiCoin = struct {
     network_coordinator: NetworkCoordinator,
     allocator: std.mem.Allocator,
     fork_manager: forkmanager.ForkManager,
-    header_chain: headerchain.HeaderChain,
+    // header_chain: headerchain.HeaderChain, // ZSP-001: Disabled headers-first sync
     sync_manager: ?*sync_mod.SyncManager,
     message_handler: message_handler.NetworkMessageHandler,
     chain_validator: validator_mod.ChainValidator,
@@ -71,8 +71,8 @@ pub const ZeiCoin = struct {
         var fork_manager = forkmanager.ForkManager.init(allocator);
         errdefer fork_manager.deinit();
 
-        var header_chain = headerchain.HeaderChain.init(allocator);
-        errdefer header_chain.deinit();
+        // var header_chain = headerchain.HeaderChain.init(allocator); // ZSP-001: Disabled headers-first sync
+        // errdefer header_chain.deinit(); // ZSP-001: Disabled headers-first sync
 
         const chain_state = @import("chain/state.zig").ChainState.init(allocator, database);
 
@@ -82,7 +82,7 @@ pub const ZeiCoin = struct {
             .network_coordinator = undefined,
             .allocator = allocator,
             .fork_manager = fork_manager,
-            .header_chain = header_chain,
+            // .header_chain = header_chain, // ZSP-001: Disabled headers-first sync
             .sync_manager = null,
             .message_handler = undefined,
             .chain_validator = undefined,
@@ -239,7 +239,7 @@ pub const ZeiCoin = struct {
         self.network_coordinator.deinit();
         self.message_handler.deinit();
 
-        self.header_chain.deinit();
+        // self.header_chain.deinit(); // ZSP-001: Disabled headers-first sync
         self.fork_manager.deinit();
 
         if (self.sync_manager) |sm| {

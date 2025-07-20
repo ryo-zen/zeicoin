@@ -35,32 +35,33 @@ pub const MessageType = enum(u8) {
     ping = 2,
     pong = 3,
     
-    // Sync messages
-    get_headers = 4,
-    headers = 5,
+    // Sync messages (ZSP-001 batch sync only)
+    // get_headers = 4,  // Removed per ZSP-001
+    // headers = 5,      // Removed per ZSP-001
     get_blocks = 6,
     blocks = 7,
     
-    // Inventory messages
-    announce = 8,
-    request = 9,
-    not_found = 10,
+    // ZSP-001: Inventory messages disabled for batch sync  
+    // announce = 8,     // Disabled
+    // request = 9,      // Disabled  
+    // not_found = 10,   // Disabled
     
-    // Transaction/Block transfer
+    // Transaction/Block transfer (ZSP-001 core messages)
     transaction = 11,
     block = 12,
     
-    // Peer discovery
+    // Peer discovery (essential for network)
     get_peers = 13,
     peers = 14,
     
-    // Error handling
-    reject = 15,
+    // Error handling (disabled for ZSP-001 simplicity)
+    // reject = 15,      // Disabled
     
     _,
     
     pub fn isValid(self: MessageType) bool {
-        return @intFromEnum(self) <= @intFromEnum(MessageType.reject);
+        // ZSP-001: Updated valid range to exclude disabled messages
+        return @intFromEnum(self) <= @intFromEnum(MessageType.peers);
     }
 };
 
@@ -73,7 +74,7 @@ pub const ServiceFlags = struct {
     pub const MEMPOOL: u64 = 0x8;           // Has active mempool
     
     // Sync protocol capabilities
-    pub const HEADERS_FIRST: u64 = 0x10;    // Supports headers-first sync
+    // pub const HEADERS_FIRST: u64 = 0x10;    // Removed per ZSP-001
     pub const PARALLEL_DOWNLOAD: u64 = 0x20; // Can handle parallel block requests
     pub const FAST_SYNC: u64 = 0x40;        // Supports optimized fast sync
     pub const CHECKPOINT_SYNC: u64 = 0x80;  // Supports checkpoint-based sync
@@ -87,10 +88,10 @@ pub const ServiceFlags = struct {
     pub const MINING: u64 = 0x1000;         // Active miner
     pub const VALIDATION: u64 = 0x2000;     // Full transaction validation
     
-    // Service combinations for common node types
-    pub const FULL_NODE: u64 = NETWORK | MEMPOOL | HEADERS_FIRST | VALIDATION;
+    // ZSP-001: Service combinations for common node types (headers-first removed)
+    pub const FULL_NODE: u64 = NETWORK | MEMPOOL | VALIDATION;
     pub const FAST_NODE: u64 = FULL_NODE | PARALLEL_DOWNLOAD | FAST_SYNC;
-    pub const PRUNED_NODE: u64 = PRUNED | MEMPOOL | HEADERS_FIRST | VALIDATION;
+    pub const PRUNED_NODE: u64 = PRUNED | MEMPOOL | VALIDATION;
     pub const MINING_NODE: u64 = FULL_NODE | MINING;
     
     /// Check if a service set represents a full node
@@ -98,14 +99,14 @@ pub const ServiceFlags = struct {
         return (services & NETWORK) != 0 and (services & VALIDATION) != 0;
     }
     
-    /// Check if a service set supports efficient sync
-    pub fn supportsFastSync(services: u64) bool {
-        return (services & HEADERS_FIRST) != 0 and (services & PARALLEL_DOWNLOAD) != 0;
+    /// Check if a service set supports ZSP-001 batch sync
+    pub fn supportsBatchSync(services: u64) bool {
+        return (services & PARALLEL_DOWNLOAD) != 0 or (services & FAST_SYNC) != 0;
     }
     
-    /// Check if a service set is suitable for sync peer
+    /// Check if a service set is suitable for sync peer (ZSP-001 compliant)
     pub fn isSuitableForSync(services: u64) bool {
-        return isFullNode(services) and (services & HEADERS_FIRST) != 0;
+        return isFullNode(services) and supportsBatchSync(services);
     }
     
     /// Get human-readable service description
@@ -122,8 +123,8 @@ pub const ServiceFlags = struct {
         if ((services & NETWORK) != 0) try parts.append("NETWORK");
         if ((services & PRUNED) != 0) try parts.append("PRUNED");
         if ((services & MEMPOOL) != 0) try parts.append("MEMPOOL");
-        if ((services & HEADERS_FIRST) != 0) try parts.append("HEADERS_FIRST");
         if ((services & PARALLEL_DOWNLOAD) != 0) try parts.append("PARALLEL");
+        if ((services & FAST_SYNC) != 0) try parts.append("FAST_SYNC");
         if ((services & MINING) != 0) try parts.append("MINING");
         
         return try std.mem.join(allocator, "|", parts.items);

@@ -82,7 +82,7 @@ pub fn initializeNode(allocator: std.mem.Allocator, config: command_line.Config)
     
     // Initialize sync manager following ZeiCoin ownership principles
     const sync_manager = try allocator.create(sync.SyncManager);
-    sync_manager.* = sync.SyncManager.init(allocator, blockchain);
+    sync_manager.* = try sync.SyncManager.init(allocator, blockchain);
     blockchain.sync_manager = sync_manager;
     
     // Start network listening

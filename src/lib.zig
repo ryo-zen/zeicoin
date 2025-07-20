@@ -5,7 +5,6 @@
 pub const blockchain = @import("core/node.zig");
 pub const genesis = @import("core/chain/genesis.zig");
 pub const forkmanager = @import("core/fork/main.zig");
-pub const headerchain = @import("core/network/headerchain.zig");
 pub const miner = @import("core/miner/main.zig");
 
 // Chain management components

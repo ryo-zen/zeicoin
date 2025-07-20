@@ -45,6 +45,11 @@ pub const Peer = struct {
     syncing: bool,
     headers_requested: bool,
     
+    // ZSP-001 Performance tracking
+    ping_time_ms: u32,
+    consecutive_successful_requests: u32,
+    consecutive_failures: u32,
+    
     // TCP send callback
     tcp_send_fn: ?*const fn(ctx: ?*anyopaque, data: []const u8) anyerror!void,
     tcp_send_ctx: ?*anyopaque,
@@ -67,6 +72,9 @@ pub const Peer = struct {
             .ping_nonce = null,
             .syncing = false,
             .headers_requested = false,
+            .ping_time_ms = 0,
+            .consecutive_successful_requests = 0,
+            .consecutive_failures = 0,
             .tcp_send_fn = null,
             .tcp_send_ctx = null,
         };
@@ -81,17 +89,11 @@ pub const Peer = struct {
     
     /// Send a message to this peer
     pub fn sendMessage(self: *Self, msg_type: protocol.MessageType, msg: anytype) ![]const u8 {
-        print("📤 [PEER SEND] Peer {} sending message type: {}\n", .{self.id, msg_type});
         const result = try self.connection.sendMessage(msg_type, msg);
-        print("✅ [PEER SEND] Peer {} message created, size: {} bytes\n", .{self.id, result.len});
         
         // If we have a TCP send callback, use it to actually send the data
         if (self.tcp_send_fn) |send_fn| {
-            print("🌐 [PEER TCP] Peer {} sending {} bytes over TCP callback\n", .{self.id, result.len});
             try send_fn(self.tcp_send_ctx, result);
-            print("✅ [PEER TCP] Peer {} TCP send completed successfully\n", .{self.id});
-        } else {
-            print("⚠️ [PEER TCP] Peer {} has no TCP callback, message not sent!\n", .{self.id});
         }
         
         return result;
@@ -113,8 +115,8 @@ pub const Peer = struct {
     /// Try to read next message
     pub fn readMessage(self: *Self) !?message_mod.MessageEnvelope {
         const result = try self.connection.readMessage();
-        if (result) |envelope| {
-            print("📥 [PEER RECV] Peer {} received message type: {}\n", .{self.id, envelope.header.message_type});
+        if (result) |_| {
+            self.last_recv = std.time.timestamp();
         }
         return result;
     }
@@ -149,36 +151,80 @@ pub const Peer = struct {
         _ = try self.sendMessage(.get_blocks, msg);
     }
     
-    /// Send request for specific block by height
+    /// Send ZSP-001 compliant request for specific block by height
+    /// Uses height encoding with 0xDEADBEEF magic marker for backward compatibility
     pub fn sendGetBlockByHeight(self: *Self, height: u32) !void {
-        print("📤 [PEER REQUEST] Sending getBlock request for height {} to peer {}\n", .{height, self.id});
-        print("🔍 [PEER REQUEST] Peer state: {}, connected: {}\n", .{self.state, self.isConnected()});
+        print("📤 [ZSP-001 PEER] Sending height-encoded block request for height {} to peer {}\n", .{height, self.id});
+        print("🔍 [ZSP-001 PEER] Peer state: {}, connected: {}\n", .{self.state, self.isConnected()});
         
-        // For height-based requests, we'll use a special encoding in the GetBlocksMessage
-        // We'll encode the height as a 32-byte hash where the first 4 bytes contain the height
-        // and the rest are zeros. The receiving peer can detect this pattern.
+        // ZSP-001 SPECIFICATION: Height-Encoded Block Requests
+        // For height-based requests, we encode the height as a 32-byte hash using the
+        // ZSP-001 specification format for backward compatibility with hash-based requests:
+        // 
+        // Bytes 0-3:   Height (little-endian u32)
+        // Bytes 4-7:   Magic marker 0xDEADBEEF (ZSP-001 identifier)
+        // Bytes 8-31:  Zero padding
+        //
+        // This encoding allows peers to distinguish between real block hashes and
+        // height-based requests while maintaining protocol compatibility.
+        
         var height_hash: [32]u8 = [_]u8{0} ** 32;
+        
+        // Encode height in first 4 bytes (ZSP-001 format)
         std.mem.writeInt(u32, height_hash[0..4], height, .little);
         
-        // Set a magic marker in bytes 4-8 to indicate this is a height request
-        const HEIGHT_REQUEST_MAGIC: u32 = 0xDEADBEEF;
-        std.mem.writeInt(u32, height_hash[4..8], HEIGHT_REQUEST_MAGIC, .little);
+        // Set ZSP-001 magic marker in bytes 4-8 to indicate height-encoded request
+        const ZSP_001_HEIGHT_MAGIC: u32 = 0xDEADBEEF;
+        std.mem.writeInt(u32, height_hash[4..8], ZSP_001_HEIGHT_MAGIC, .little);
         
+        // Remaining bytes stay zero as per ZSP-001 specification
+        
+        // Send as single-item GetBlocksMessage
         var hashes = [_][32]u8{height_hash};
         var msg = try messages.GetBlocksMessage.init(self.allocator, &hashes);
         defer msg.deinit(self.allocator);
         
-        print("🔍 [PEER REQUEST] Sending height {} as encoded hash request\n", .{height});
+        print("🔧 [ZSP-001 PEER] Encoded height {} with magic marker: {X:0>8}\n", .{height, ZSP_001_HEIGHT_MAGIC});
+        print("📡 [ZSP-001 PEER] Transmitting height-encoded request\n", .{});
+        
         _ = try self.sendMessage(.get_blocks, msg);
-        print("✅ [PEER REQUEST] Block request sent successfully for height {}\n", .{height});
+        
+        print("✅ [ZSP-001 PEER] Height-encoded block request sent successfully for height {}\n", .{height});
     }
     
-    /// Send request for multiple blocks by hash
+    /// Send ZSP-001 compliant request for multiple blocks (batch sync)
+    /// Supports both hash-based and height-encoded requests in the same batch
     pub fn sendGetBlocks(self: *Self, hashes: []const [32]u8) !void {
+        print("📤 [ZSP-001 BATCH] Sending batch block request for {} items to peer {}\n", .{hashes.len, self.id});
+        
+        // Analyze the batch to determine if it contains height-encoded requests
+        var height_encoded_count: usize = 0;
+        var hash_requests_count: usize = 0;
+        
+        for (hashes) |hash| {
+            const magic_marker = std.mem.readInt(u32, hash[4..8], .little);
+            if (magic_marker == 0xDEADBEEF) {
+                const height = std.mem.readInt(u32, hash[0..4], .little);
+                print("🔧 [ZSP-001 BATCH] Height-encoded request detected: height {}\n", .{height});
+                height_encoded_count += 1;
+            } else {
+                print("🔧 [ZSP-001 BATCH] Hash-based request: {s}\n", .{std.fmt.fmtSliceHexLower(hash[0..8])});
+                hash_requests_count += 1;
+            }
+        }
+        
+        print("📊 [ZSP-001 BATCH] Batch analysis: {} height-encoded, {} hash-based requests\n", .{
+            height_encoded_count, hash_requests_count
+        });
+        
+        // Create and send the batch message
         var msg = try messages.GetBlocksMessage.init(self.allocator, hashes);
         defer msg.deinit(self.allocator);
         
+        print("📡 [ZSP-001 BATCH] Transmitting batch request\n", .{});
         _ = try self.sendMessage(.get_blocks, msg);
+        
+        print("✅ [ZSP-001 BATCH] Batch block request sent successfully ({} items)\n", .{hashes.len});
     }
     
     /// Send request for headers using block locator pattern
@@ -214,6 +260,94 @@ pub const Peer = struct {
     /// Send request for specific block (wrapper method)
     pub fn sendGetBlock(self: *Self, height: u32) !void {
         return self.sendGetBlockByHeight(height);
+    }
+    
+    // ========================================================================
+    // ZSP-001 ENHANCED PEER FUNCTIONALITY
+    // ========================================================================
+    
+    /// Check if peer supports ZSP-001 batch synchronization
+    /// Based on advertised service flags during handshake
+    pub fn supportsBatchSync(self: *const Self) bool {
+        // Check for ZSP-001 batch sync capability flags
+        const has_parallel_download = (self.services & protocol.ServiceFlags.PARALLEL_DOWNLOAD) != 0;
+        const has_fast_sync = (self.services & protocol.ServiceFlags.FAST_SYNC) != 0;
+        
+        return has_parallel_download or has_fast_sync;
+    }
+    
+    /// Get peer performance score for sync peer selection
+    /// Used by sync manager to choose optimal peers for batch sync
+    pub fn getSyncPerformanceScore(self: *const Self) f64 {
+        // Base performance score
+        var score: f64 = 100.0;
+        
+        // Penalize high ping times (prefer low-latency peers)
+        if (self.ping_time_ms > 0) {
+            const ping_penalty = @as(f64, @floatFromInt(self.ping_time_ms)) * 0.1;
+            score -= ping_penalty;
+        }
+        
+        // Bonus for stable connections
+        if (self.consecutive_successful_requests > 10) {
+            score += 20.0;
+        }
+        
+        // Penalty for recent failures
+        const failure_penalty = @as(f64, @floatFromInt(self.consecutive_failures)) * 5.0;
+        score -= failure_penalty;
+        
+        // Bonus for batch sync capability
+        if (self.supportsBatchSync()) {
+            score += 50.0; // Significant bonus for ZSP-001 capability
+        }
+        
+        return @max(1.0, score);
+    }
+    
+    /// Update peer statistics after successful block request
+    pub fn recordSuccessfulRequest(self: *Self) void {
+        self.consecutive_successful_requests += 1;
+        self.consecutive_failures = 0;
+        
+        print("📈 [ZSP-001 PEER] Peer {} successful requests: {}\n", .{
+            self.id, self.consecutive_successful_requests
+        });
+    }
+    
+    /// Update peer statistics after failed block request
+    pub fn recordFailedRequest(self: *Self) void {
+        self.consecutive_failures += 1;
+        self.consecutive_successful_requests = 0;
+        
+        print("📉 [ZSP-001 PEER] Peer {} consecutive failures: {}\n", .{
+            self.id, self.consecutive_failures
+        });
+    }
+    
+    /// Check if peer should be considered for sync operations
+    pub fn isEligibleForSync(self: *const Self) bool {
+        // Must be connected
+        if (!self.isConnected()) return false;
+        
+        // Too many recent failures
+        if (self.consecutive_failures >= 5) return false;
+        
+        // High ping time threshold
+        if (self.ping_time_ms > 2000) return false; // 2 second max
+        
+        return true;
+    }
+    
+    /// Get human-readable peer status for debugging
+    pub fn getStatusString(self: *const Self, buf: []u8) []const u8 {
+        return std.fmt.bufPrint(buf, "Peer[{}] state:{} ping:{}ms batch:{} score:{d:.1}", .{
+            self.id,
+            self.state,
+            self.ping_time_ms,
+            self.supportsBatchSync(),
+            self.getSyncPerformanceScore(),
+        }) catch "status error";
     }
     
     /// Format peer for logging
@@ -273,43 +407,106 @@ pub const PeerManager = struct {
     
     /// Add a new peer connection
     pub fn addPeer(self: *Self, address: net.Address) !*Peer {
+        print("\n══════════════════════════════════════════════════════════════════\n", .{});
+        print("🔗 [PEER MANAGER] ADDING NEW PEER CONNECTION\n", .{});
+        print("══════════════════════════════════════════════════════════════════\n", .{});
+        print("📊 [PEER MANAGER] Connection request for: {any}\n", .{address});
+        
         self.mutex.lock();
         defer self.mutex.unlock();
         
+        print("🔍 [PEER MANAGER] STEP 1: Checking for duplicate connections...\n", .{});
         // Check if already connected
         for (self.peers.items) |peer| {
             if (peer.address.eql(address)) {
+                print("❌ [PEER MANAGER] STEP 1 FAILED: Peer already connected\n", .{});
+                print("⚠️ [PEER MANAGER] Existing peer ID: {}\n", .{peer.id});
+                print("💡 [PEER MANAGER] Suggestion: Use existing connection\n", .{});
                 return error.AlreadyConnected;
             }
         }
+        print("✅ [PEER MANAGER] STEP 1 PASSED: No duplicate connections found\n", .{});
         
+        print("🔍 [PEER MANAGER] STEP 2: Checking peer capacity...\n", .{});
+        print("📊 [PEER MANAGER] Current peers: {}/{}\n", .{self.peers.items.len, self.max_peers});
         // Check peer limit
         if (self.peers.items.len >= self.max_peers) {
+            print("❌ [PEER MANAGER] STEP 2 FAILED: Peer limit reached\n", .{});
+            print("📊 [PEER MANAGER] Maximum peers: {} (consider increasing limit)\n", .{self.max_peers});
             return error.TooManyPeers;
         }
+        print("✅ [PEER MANAGER] STEP 2 PASSED: Capacity available\n", .{});
         
+        print("🔍 [PEER MANAGER] STEP 3: Creating new peer instance...\n", .{});
         // Create new peer
         const peer = try self.allocator.create(Peer);
-        peer.* = Peer.init(self.allocator, self.next_peer_id, address);
+        const assigned_id = self.next_peer_id;
+        peer.* = Peer.init(self.allocator, assigned_id, address);
         self.next_peer_id += 1;
         
+        print("✅ [PEER MANAGER] STEP 3 COMPLETED: Peer instance created\n", .{});
+        print("📊 [PEER MANAGER] Assigned peer ID: {}\n", .{assigned_id});
+        print("📊 [PEER MANAGER] Next available ID: {}\n", .{self.next_peer_id});
+        
+        print("🔍 [PEER MANAGER] STEP 4: Adding peer to peer list...\n", .{});
         try self.peers.append(peer);
+        print("✅ [PEER MANAGER] STEP 4 COMPLETED: Peer added to list\n", .{});
+        
+        print("\n🎉 [PEER MANAGER] PEER SUCCESSFULLY ADDED!\n", .{});
+        print("📊 [PEER MANAGER] Final stats:\n", .{});
+        print("   └─ Total peers: {}\n", .{self.peers.items.len});
+        print("   └─ New peer ID: {}\n", .{assigned_id});
+        print("   └─ Address: {any}\n", .{address});
+        print("══════════════════════════════════════════════════════════════════\n", .{});
+        
         return peer;
     }
     
     /// Remove a peer
     pub fn removePeer(self: *Self, peer_id: u64) void {
+        print("\n══════════════════════════════════════════════════════════════════\n", .{});
+        print("🔌 [PEER MANAGER] REMOVING PEER CONNECTION\n", .{});
+        print("══════════════════════════════════════════════════════════════════\n", .{});
+        print("📊 [PEER MANAGER] Removal request for peer ID: {}\n", .{peer_id});
+        
         self.mutex.lock();
         defer self.mutex.unlock();
         
+        print("🔍 [PEER MANAGER] Searching for peer in active connections...\n", .{});
+        print("📊 [PEER MANAGER] Current peer count: {}\n", .{self.peers.items.len});
+        
+        var found = false;
         for (self.peers.items, 0..) |peer, i| {
             if (peer.id == peer_id) {
+                found = true;
+                print("✅ [PEER MANAGER] Peer found at index {}\n", .{i});
+                print("📊 [PEER MANAGER] Peer details:\n", .{});
+                print("   └─ ID: {}\n", .{peer.id});
+                print("   └─ Address: {any}\n", .{peer.address});
+                print("   └─ State: {}\n", .{peer.state});
+                
+                print("🧹 [PEER MANAGER] Cleaning up peer resources...\n", .{});
                 peer.deinit();
                 self.allocator.destroy(peer);
+                
+                print("🗑️ [PEER MANAGER] Removing peer from active list...\n", .{});
                 _ = self.peers.orderedRemove(i);
+                
+                print("✅ [PEER MANAGER] Peer removal completed successfully\n", .{});
                 break;
             }
         }
+        
+        if (!found) {
+            print("⚠️ [PEER MANAGER] Peer ID {} not found in active connections\n", .{peer_id});
+            print("📊 [PEER MANAGER] Available peer IDs:\n", .{});
+            for (self.peers.items) |peer| {
+                print("   └─ ID: {} ({any})\n", .{peer.id, peer.address});
+            }
+        }
+        
+        print("📊 [PEER MANAGER] Final peer count: {}\n", .{self.peers.items.len});
+        print("══════════════════════════════════════════════════════════════════\n", .{});
     }
     
     /// Get peer by ID
@@ -339,19 +536,76 @@ pub const PeerManager = struct {
     
     /// Get best peer for sync (highest height)
     pub fn getBestPeerForSync(self: *Self) ?*Peer {
+        print("\n╔══════════════════════════════════════════════════════════════════╗\n", .{});
+        print("║                      PEER SELECTION PROCESS                     ║\n", .{});
+        print("╚══════════════════════════════════════════════════════════════════╝\n", .{});
+        
         self.mutex.lock();
         defer self.mutex.unlock();
         
+        print("🔍 [PEER SELECTION] Analyzing available peers...\n", .{});
+        print("📊 [PEER SELECTION] Total peers: {}\n", .{self.peers.items.len});
+        
         var best: ?*Peer = null;
         var best_height: u32 = 0;
+        var connected_count: u32 = 0;
+        var sync_capable_count: u32 = 0;
         
+        // First pass: count and analyze peers
         for (self.peers.items) |peer| {
-            if (peer.state == .connected and peer.height > best_height) {
-                best = peer;
-                best_height = peer.height;
+            if (peer.state == .connected) {
+                connected_count += 1;
+                
+                // Check ZSP-001 capabilities
+                const sync_capable = peer.supportsBatchSync();
+                if (sync_capable) sync_capable_count += 1;
+                
+                print("📊 [PEER SELECTION] Peer {any}:\n", .{peer.address});
+                print("   └─ State: {}\n", .{peer.state});
+                print("   └─ Height: {}\n", .{peer.height});
+                print("   └─ ZSP-001 capable: {}\n", .{sync_capable});
+                print("   └─ Performance score: {d:.1}\n", .{peer.getSyncPerformanceScore()});
+                
+                if (peer.height > best_height) {
+                    if (best) |old_best| {
+                        print("🔄 [PEER SELECTION] New best peer found: {} → {any} (height {} → {})\n", .{
+                            old_best.address, peer.address, best_height, peer.height
+                        });
+                    } else {
+                        print("✨ [PEER SELECTION] First candidate: {any} (height {})\n", .{peer.address, peer.height});
+                    }
+                    best = peer;
+                    best_height = peer.height;
+                }
+            } else {
+                print("⚠️ [PEER SELECTION] Peer {any}: state {} (not connected)\n", .{peer.address, peer.state});
             }
         }
         
+        print("\n📊 [PEER SELECTION] SELECTION SUMMARY:\n", .{});
+        print("   └─ Total peers: {}\n", .{self.peers.items.len});
+        print("   └─ Connected peers: {}\n", .{connected_count});
+        print("   └─ ZSP-001 capable: {}\n", .{sync_capable_count});
+        
+        if (best) |selected_peer| {
+            print("✅ [PEER SELECTION] BEST PEER SELECTED:\n", .{});
+            print("   └─ Address: {any}\n", .{selected_peer.address});
+            print("   └─ Height: {}\n", .{selected_peer.height});
+            print("   └─ ZSP-001 capable: {}\n", .{selected_peer.supportsBatchSync()});
+            print("   └─ Performance score: {d:.1}\n", .{selected_peer.getSyncPerformanceScore()});
+            print("🚀 [PEER SELECTION] Ready for synchronization!\n", .{});
+        } else {
+            print("❌ [PEER SELECTION] NO SUITABLE PEER FOUND\n", .{});
+            if (connected_count == 0) {
+                print("🔌 [PEER SELECTION] Issue: No connected peers available\n", .{});
+                print("💡 [PEER SELECTION] Suggestion: Check network connectivity\n", .{});
+            } else {
+                print("⚠️ [PEER SELECTION] Issue: Connected peers have height 0 or lower\n", .{});
+                print("💡 [PEER SELECTION] Suggestion: Wait for peer height updates\n", .{});
+            }
+        }
+        
+        print("╔══════════════════════════════════════════════════════════════════╗\n", .{});
         return best;
     }
     
@@ -360,12 +614,22 @@ pub const PeerManager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         
+        var successful_sends: usize = 0;
+        var failed_sends: usize = 0;
+        
         for (self.peers.items) |peer| {
             if (peer.state == .connected) {
                 _ = peer.sendMessage(msg_type, msg) catch |err| {
-                    std.log.warn("Failed to send to {}: {}", .{ peer, err });
+                    failed_sends += 1;
+                    print("❌ [PEER MANAGER] Failed to send {} to peer {}: {}\n", .{msg_type, peer.id, err});
+                    continue;
                 };
+                successful_sends += 1;
             }
+        }
+        
+        if (failed_sends > 0) {
+            print("📡 [PEER MANAGER] Broadcast {}: {}/{} peers successful\n", .{msg_type, successful_sends, successful_sends + failed_sends});
         }
     }
     
@@ -402,17 +666,25 @@ pub const PeerManager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         
+        var removed_count: usize = 0;
+        
         var i: usize = 0;
         while (i < self.peers.items.len) {
             const peer = self.peers.items[i];
             if (peer.isTimedOut()) {
-                std.log.info("Peer {} timed out, removing", .{peer});
+                print("⏰ [PEER MANAGER] Removing timed out peer {} (last activity: {}s ago)\n", .{peer.id, std.time.timestamp() - peer.last_recv});
                 peer.deinit();
                 self.allocator.destroy(peer);
                 _ = self.peers.orderedRemove(i);
+                removed_count += 1;
+                // Don't increment i since we removed an item
             } else {
                 i += 1;
             }
+        }
+        
+        if (removed_count > 0) {
+            print("🧹 [PEER MANAGER] Cleanup completed: {} timed out peers removed\n", .{removed_count});
         }
     }
     

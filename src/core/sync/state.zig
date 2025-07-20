@@ -96,61 +96,16 @@ pub const SyncProgress = struct {
     }
 };
 
-/// Progress tracking for headers-first synchronization
-pub const HeadersProgress = struct {
-    target_height: u32,
-    current_height: u32,
-    headers_downloaded: u32,
-    start_time: i64,
-    last_header_time: i64,
-    
-    pub fn init(current: u32, target: u32) HeadersProgress {
-        const now = util.getTime();
-        return .{
-            .target_height = target,
-            .current_height = current,
-            .headers_downloaded = 0,
-            .start_time = now,
-            .last_header_time = now,
-        };
-    }
-    
-    pub fn getProgress(self: *const HeadersProgress) f64 {
-        if (self.target_height <= self.current_height) return 100.0;
-        const total = self.target_height - self.current_height;
-        if (total == 0) return 100.0;
-        return (@as(f64, @floatFromInt(self.headers_downloaded)) / @as(f64, @floatFromInt(total))) * 100.0;
-    }
-    
-    pub fn getHeadersPerSecond(self: *const HeadersProgress) f64 {
-        const elapsed = util.getTime() - self.start_time;
-        if (elapsed == 0) return 0.0;
-        return @as(f64, @floatFromInt(self.headers_downloaded)) / @as(f64, @floatFromInt(elapsed));
-    }
-
-    /// Update progress with new headers
-    pub fn updateProgress(self: *HeadersProgress, headers_received: u32) void {
-        self.headers_downloaded += headers_received;
-        self.last_header_time = util.getTime();
-    }
-
-    /// Check if headers sync is complete
-    pub fn isComplete(self: *const HeadersProgress) bool {
-        return self.headers_downloaded >= (self.target_height - self.current_height);
-    }
-};
 
 /// Sync state manager for coordinating state transitions
 pub const SyncStateManager = struct {
     state: SyncState,
     progress: ?SyncProgress,
-    headers_progress: ?HeadersProgress,
     
     pub fn init() SyncStateManager {
         return .{
             .state = .synced,
             .progress = null,
-            .headers_progress = null,
         };
     }
 
@@ -160,17 +115,10 @@ pub const SyncStateManager = struct {
         self.progress = SyncProgress.init(current_height, target_height);
     }
 
-    /// Start headers-first sync
-    pub fn startHeadersSync(self: *SyncStateManager, current_height: u32, target_height: u32) void {
-        self.state = .syncing;
-        self.headers_progress = HeadersProgress.init(current_height, target_height);
-    }
-
     /// Complete sync operation
     pub fn completeSync(self: *SyncStateManager) void {
         self.state = .sync_complete;
         self.progress = null;
-        self.headers_progress = null;
     }
 
     /// Fail sync operation
@@ -183,7 +131,6 @@ pub const SyncStateManager = struct {
     pub fn resetToSynced(self: *SyncStateManager) void {
         self.state = .synced;
         self.progress = null;
-        self.headers_progress = null;
     }
 
     /// Get current sync state

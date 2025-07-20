@@ -8,38 +8,50 @@ const protocol = @import("../protocol.zig");
 pub const HandshakeMessage = @import("handshake.zig").HandshakeMessage;
 pub const PingMessage = @import("ping.zig").PingMessage;
 pub const PongMessage = @import("pong.zig").PongMessage;
-pub const GetHeadersMessage = @import("get_headers.zig").GetHeadersMessage;
-pub const HeadersMessage = @import("headers.zig").HeadersMessage;
+// Headers-first messages removed per ZSP-001 (batch sync only)
+// pub const GetHeadersMessage = @import("get_headers.zig").GetHeadersMessage;
+// pub const HeadersMessage = @import("headers.zig").HeadersMessage;
 pub const GetBlocksMessage = @import("get_blocks.zig").GetBlocksMessage;
 pub const BlockMessage = @import("block.zig").BlockMessage;
 pub const TransactionMessage = @import("transaction.zig").TransactionMessage;
-pub const AnnounceMessage = @import("announce.zig").AnnounceMessage;
-pub const InventoryItem = @import("announce.zig").InventoryItem;
-pub const RequestMessage = @import("request.zig").RequestMessage;
-pub const NotFoundMessage = @import("not_found.zig").NotFoundMessage;
+
+// ZSP-001: Inventory-based sync messages (disabled in favor of batch sync)
+// pub const AnnounceMessage = @import("announce.zig").AnnounceMessage;
+// pub const InventoryItem = @import("announce.zig").InventoryItem;
+// pub const RequestMessage = @import("request.zig").RequestMessage;
+// pub const NotFoundMessage = @import("not_found.zig").NotFoundMessage;
+// pub const RejectMessage = @import("reject.zig").RejectMessage;
+
+// Peer discovery messages (kept for network functionality)
 pub const GetPeersMessage = @import("get_peers.zig").GetPeersMessage;
 pub const PeersMessage = @import("peers.zig").PeersMessage;
 pub const PeerAddress = @import("peers.zig").PeerAddress;
-pub const RejectMessage = @import("reject.zig").RejectMessage;
 
-/// Union of all message types
+/// Union of all message types (ZSP-001 compliant)
 pub const Message = union(protocol.MessageType) {
     handshake: HandshakeMessage,
     handshake_ack: void, // Simple ack, no payload
     ping: PingMessage,
     pong: PongMessage,
-    get_headers: GetHeadersMessage,
-    headers: HeadersMessage,
+    // Headers-first messages removed per ZSP-001
+    // get_headers: GetHeadersMessage,
+    // headers: HeadersMessage,
     get_blocks: GetBlocksMessage,
     blocks: void, // Uses streaming for large payloads
-    announce: AnnounceMessage,
-    request: RequestMessage,
-    not_found: NotFoundMessage,
+    
+    // ZSP-001: Core sync messages only
     transaction: TransactionMessage,
     block: BlockMessage,
+    
+    // Peer discovery (essential for network)
     get_peers: GetPeersMessage,
     peers: PeersMessage,
-    reject: RejectMessage,
+    
+    // Inventory-based messages disabled for ZSP-001 batch sync
+    // announce: AnnounceMessage,
+    // request: RequestMessage,
+    // not_found: NotFoundMessage,
+    // reject: RejectMessage,
     
     /// Encode any message type
     pub fn encode(self: Message, writer: anytype) !void {
@@ -61,18 +73,25 @@ pub const Message = union(protocol.MessageType) {
             .handshake_ack => .{ .handshake_ack = {} },
             .ping => .{ .ping = try PingMessage.decode(reader) },
             .pong => .{ .pong = try PongMessage.decode(reader) },
-            .get_headers => .{ .get_headers = try GetHeadersMessage.decode(allocator, reader) },
-            .headers => .{ .headers = try HeadersMessage.decode(allocator, reader) },
+            // Headers-first messages removed per ZSP-001
+            // .get_headers => .{ .get_headers = try GetHeadersMessage.decode(allocator, reader) },
+            // .headers => .{ .headers = try HeadersMessage.decode(allocator, reader) },
             .get_blocks => .{ .get_blocks = try GetBlocksMessage.decode(allocator, reader) },
             .blocks => .{ .blocks = {} }, // Handled separately
-            .announce => .{ .announce = try AnnounceMessage.decode(allocator, reader) },
-            .request => .{ .request = try RequestMessage.decode(allocator, reader) },
-            .not_found => .{ .not_found = try NotFoundMessage.decode(allocator, reader) },
+            
+            // ZSP-001: Core sync messages only
             .transaction => .{ .transaction = try TransactionMessage.decode(allocator, reader) },
             .block => .{ .block = try BlockMessage.decode(allocator, reader) },
+            
+            // Peer discovery (essential for network)
             .get_peers => .{ .get_peers = try GetPeersMessage.decode(reader) },
             .peers => .{ .peers = try PeersMessage.decode(allocator, reader) },
-            .reject => .{ .reject = try RejectMessage.decode(allocator, reader) },
+            
+            // Inventory-based messages disabled for ZSP-001 batch sync
+            // .announce => .{ .announce = try AnnounceMessage.decode(allocator, reader) },
+            // .request => .{ .request = try RequestMessage.decode(allocator, reader) },
+            // .not_found => .{ .not_found = try NotFoundMessage.decode(allocator, reader) },
+            // .reject => .{ .reject = try RejectMessage.decode(allocator, reader) },
             _ => error.UnknownMessageType,
         };
     }

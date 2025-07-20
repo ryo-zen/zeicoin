@@ -31,17 +31,17 @@ pub const MessageHandlerImpl = struct {
         return network.MessageHandler{
             .getHeight = getHeightGlobal,
             .onPeerConnected = onPeerConnectedGlobal,
-            .onGetHeaders = onGetHeadersGlobal,
-            .onHeaders = onHeadersGlobal,
-            .onAnnounce = onAnnounceGlobal,
-            .onRequest = onRequestGlobal,
+            // .onGetHeaders = onGetHeadersGlobal, // ZSP-001: Headers-first disabled
+            // .onHeaders = onHeadersGlobal, // ZSP-001: Headers-first disabled
+            // .onAnnounce = onAnnounceGlobal, // ZSP-001: Inventory disabled
+            // .onRequest = onRequestGlobal, // ZSP-001: Inventory disabled
             .onBlock = onBlockGlobal,
             .onTransaction = onTransactionGlobal,
             .onGetBlocks = onGetBlocksGlobal,
             .onGetPeers = onGetPeersGlobal,
             .onPeers = onPeersGlobal,
-            .onNotFound = onNotFoundGlobal,
-            .onReject = onRejectGlobal,
+            // .onNotFound = onNotFoundGlobal, // ZSP-001: Inventory disabled
+            // .onReject = onRejectGlobal, // ZSP-001: Error handling disabled
         };
     }
     
@@ -63,14 +63,14 @@ pub const MessageHandlerImpl = struct {
             std.log.info("🚀 [PEER CONNECT] Peer has {} more blocks! Starting sync process...", .{blocks_behind});
             
             if (self.blockchain.sync_manager) |sync_manager| {
-                std.log.info("🔄 [PEER CONNECT] Sync manager available, checking if already syncing: {}", .{sync_manager.isActive()});
+                std.log.info("🔄 [PEER CONNECT] Sync manager available, checking if sync can start: {}", .{sync_manager.getSyncState().canStart()});
                 
-                if (!sync_manager.isActive()) {
+                if (sync_manager.getSyncState().canStart()) {
                     std.log.info("📥 [PEER CONNECT] Starting batch sync to download {} blocks", .{blocks_behind});
-                    try sync_manager.startBatchSync(peer, peer.height);
+                    try sync_manager.startSync(peer, peer.height);
                     std.log.info("✅ [PEER CONNECT] Batch sync started successfully", .{});
                 } else {
-                    std.log.info("⏳ [PEER CONNECT] Sync already active, skipping new sync request", .{});
+                    std.log.info("⏳ [PEER CONNECT] Sync cannot start (state: {}), skipping new sync request", .{sync_manager.getSyncState()});
                 }
             } else {
                 std.log.warn("❌ [PEER CONNECT] Sync manager is null, cannot start sync!", .{});
@@ -308,17 +308,14 @@ pub const MessageHandlerImpl = struct {
         if (self.blockchain.sync_manager) |sync_manager| {
             std.log.info("🔍 [BLOCK RECV] Checking sync manager... Active: {}", .{sync_manager.isActive()});
             if (sync_manager.isActive()) {
-                if (sync_manager.sync_peer == peer) {
-                    std.log.info("🔄 [BLOCK RECV] This is our sync peer! Routing to sync manager...", .{});
-                    // Route block to sync manager for headers-first sync
-                    sync_manager.handleSyncBlock(&block) catch |err| {
-                        std.log.warn("❌ [BLOCK RECV] Failed to process sync block from {any}: {}", .{ peer.address, err });
-                    };
-                    std.log.info("✅ [BLOCK RECV] Block routed to sync manager successfully", .{});
-                    return;
-                } else {
-                    std.log.info("🔍 [BLOCK RECV] Block from different peer (not sync peer), processing normally", .{});
-                }
+                // ZSP-001: Block handling integrated into batch sync protocol
+                std.log.info("🔄 [BLOCK RECV] Routing block to sync manager (ZSP-001)...", .{});
+                const block_height = self.blockchain.getHeight() catch 0;
+                sync_manager.handleSyncBlock(&block, block_height + 1) catch |err| {
+                    std.log.warn("❌ [BLOCK RECV] Failed to process sync block from {any}: {}", .{ peer.address, err });
+                };
+                std.log.info("✅ [BLOCK RECV] Block routed to sync manager successfully", .{});
+                return;
             } else {
                 std.log.info("🔍 [BLOCK RECV] Sync not active, processing block normally", .{});
             }
@@ -331,27 +328,28 @@ pub const MessageHandlerImpl = struct {
         self.blockchain.handleIncomingBlock(block, peer) catch |err| {
             std.log.warn("❌ [BLOCK RECV] Failed to process block from {any}: {}", .{ peer.address, err });
             
-            // Send reject message back to peer
-            const reject_info = self.mapErrorToReject(err);
-            const reject_block_hash = block.hash();
-            var reject_msg = network.messages.RejectMessage.init(
-                self.blockchain.allocator,
-                .block,
-                reject_info.code,
-                reject_info.reason,
-                &reject_block_hash
-            ) catch |reject_err| {
-                std.log.debug("Failed to create reject message: {}", .{reject_err});
-                return;
-            };
-            defer reject_msg.deinit(self.blockchain.allocator);
+            // ZSP-001: Error handling simplified - reject messages disabled
+            // const reject_info = self.mapErrorToReject(err);
+            // const reject_block_hash = block.hash();
+            // var reject_msg = network.messages.RejectMessage.init(
+            //     self.blockchain.allocator,
+            //     .block,
+            //     reject_info.code,
+            //     reject_info.reason,
+            //     &reject_block_hash
+            // ) catch |reject_err| {
+            //     std.log.debug("Failed to create reject message: {}", .{reject_err});
+            //     return;
+            // };
+            // defer reject_msg.deinit(self.blockchain.allocator);
             
-            _ = peer.sendMessage(.reject, reject_msg) catch |send_err| {
-                std.log.debug("Failed to send block reject to {any}: {}", .{ peer.address, send_err });
-                return;
-            };
+            // ZSP-001: Reject messages disabled
+            // _ = peer.sendMessage(.reject, reject_msg) catch |send_err| {
+            //     std.log.debug("Failed to send block reject to {any}: {}", .{ peer.address, send_err });
+            //     return;
+            // };
             
-            std.log.info("📤 [BLOCK RECV] Sent block reject to {any}: {s}", .{ peer.address, reject_info.reason });
+            // std.log.info("📤 [BLOCK RECV] Sent block reject to {any}: {s}", .{ peer.address, reject_info.reason });
         };
     }
     
@@ -361,27 +359,27 @@ pub const MessageHandlerImpl = struct {
         self.blockchain.handleIncomingTransaction(msg.transaction) catch |err| {
             std.log.debug("Failed to process transaction from {any}: {}", .{ peer.address, err });
             
-            // Send reject message back to peer
-            const reject_info = self.mapErrorToReject(err);
-            const tx_hash = msg.transaction.hash();
-            var reject_msg = network.messages.RejectMessage.init(
-                self.blockchain.allocator,
-                .transaction,
-                reject_info.code,
-                reject_info.reason,
-                &tx_hash
-            ) catch |reject_err| {
-                std.log.debug("Failed to create reject message: {}", .{reject_err});
-                return;
-            };
-            defer reject_msg.deinit(self.blockchain.allocator);
-            
-            _ = peer.sendMessage(.reject, reject_msg) catch |send_err| {
-                std.log.debug("Failed to send transaction reject to {any}: {}", .{ peer.address, send_err });
-                return;
-            };
-            
-            std.log.debug("Sent transaction reject to {any}: {s}", .{ peer.address, reject_info.reason });
+            // ZSP-001: Error handling simplified - reject messages disabled
+            // const reject_info = self.mapErrorToReject(err);
+            // const tx_hash = msg.transaction.hash();
+            // var reject_msg = network.messages.RejectMessage.init(
+            //     self.blockchain.allocator,
+            //     .transaction,
+            //     reject_info.code,
+            //     reject_info.reason,
+            //     &tx_hash
+            // ) catch |reject_err| {
+            //     std.log.debug("Failed to create reject message: {}", .{reject_err});
+            //     return;
+            // };
+            // defer reject_msg.deinit(self.blockchain.allocator);
+            // 
+            // _ = peer.sendMessage(.reject, reject_msg) catch |send_err| {
+            //     std.log.debug("Failed to send transaction reject to {any}: {}", .{ peer.address, send_err });
+            //     return;
+            // };
+            // 
+            // std.log.debug("Sent transaction reject to {any}: {s}", .{ peer.address, reject_info.reason });
         };
     }
     
@@ -441,11 +439,11 @@ pub const MessageHandlerImpl = struct {
             for (msg.hashes) |hash| {
                 // Check if this is a height-based request (encoded as special hash)
                 const HEIGHT_REQUEST_MAGIC: u32 = 0xDEADBEEF;
-                const maybe_magic = std.mem.readInt(u32, hash[4..8], .little);
+                const maybe_magic = std.mem.readInt(u32, hash[0..4], .little);
                 
                 if (maybe_magic == HEIGHT_REQUEST_MAGIC) {
                     // This is a height-based request
-                    const requested_height = std.mem.readInt(u32, hash[0..4], .little);
+                    const requested_height = std.mem.readInt(u32, hash[4..8], .little);
                     std.log.info("🔍 [GET BLOCKS] Height-based request for block at height {}", .{requested_height});
                     
                     var block = self.blockchain.chain_query.getBlock(requested_height) catch |err| {
