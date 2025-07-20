@@ -161,8 +161,8 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
             try ctx.blockchain.chain_state.processTransaction(tx);
         }
 
-        // Save block to database
-        const block_height = try ctx.blockchain.getHeight();
+        // Save block to database at next height
+        const block_height = current_height + 1;
         try ctx.database.saveBlock(block_height, new_block);
         
         // Check for matured coinbase rewards (100 block maturity)

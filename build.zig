@@ -157,36 +157,6 @@ pub fn build(b: *std.Build) !void {
         run_step.dependOn(&run_cmd.step);
     }
 
-    // **************************************************************
-    // *              LIBP2P SIMPLE TEST AS AN EXECUTABLE          *
-    // **************************************************************
-    {
-        const exe = b.addExecutable(.{
-            .name = "libp2p_simple_test",
-            .root_source_file = b.path("src/apps/libp2p_simple_test.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        // Add dependency modules to the executable.
-        for (deps) |mod| exe.root_module.addImport(
-            mod.name,
-            mod.module,
-        );
-        exe.root_module.addImport("zeicoin", lib.root_module);
-        exe.linkLibC();
-
-        b.installArtifact(exe);
-
-        const run_cmd = b.addRunArtifact(exe);
-        run_cmd.step.dependOn(b.getInstallStep());
-
-        if (b.args) |args| {
-            run_cmd.addArgs(args);
-        }
-
-        const run_step = b.step("run-libp2p-simple-test", "Run the simple libp2p test application");
-        run_step.dependOn(&run_cmd.step);
-    }
 
     // **************************************************************
     // *              CHECK FOR FAST FEEDBACK LOOP                  *

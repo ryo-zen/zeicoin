@@ -206,20 +206,33 @@ pub const Database = struct {
         return account;
     }
 
-    /// Get blockchain height (count block files)
+    /// Get blockchain height (highest block number, genesis is 0)
     pub fn getHeight(self: *Database) !u32 {
         var dir = std.fs.cwd().openDir(self.blocks_dir[0..self.blocks_dir_len], .{ .iterate = true }) catch return 0;
         defer dir.close();
 
-        var count: u32 = 0;
+        var highest_block: u32 = 0;
+        var found_any = false;
         var iterator = dir.iterate();
+        
         while (try iterator.next()) |entry| {
             if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".block")) {
-                count += 1;
+                // Extract block number from filename (e.g., "000005.block" -> 5)
+                const basename = std.fs.path.basename(entry.name);
+                if (basename.len >= 7) { // At least "0.block"
+                    const num_part = basename[0..basename.len - 6]; // Remove ".block"
+                    const block_num = std.fmt.parseInt(u32, num_part, 10) catch continue;
+                    
+                    if (!found_any or block_num > highest_block) {
+                        highest_block = block_num;
+                        found_any = true;
+                    }
+                }
             }
         }
 
-        return count;
+        // Return highest block number (genesis at 0, first mined block at 1, etc.)
+        return if (found_any) highest_block else 0;
     }
 
     /// Get number of accounts (count account files)

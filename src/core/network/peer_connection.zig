@@ -157,7 +157,10 @@ pub const PeerConnection = struct {
     }
     
     fn handleHandshake(self: *Self, handshake: messages.HandshakeMessage) !void {
-        std.log.info("Received handshake from peer {} with height {}", .{ self.peer.id, handshake.start_height });
+        const our_height = try self.message_handler.getHeight();
+        std.log.info("🤝 [HANDSHAKE] Received from peer {} - their height: {}, our height: {}", .{ 
+            self.peer.id, handshake.start_height, our_height 
+        });
         
         // Validate handshake
         try handshake.validate();
@@ -172,22 +175,30 @@ pub const PeerConnection = struct {
         self.peer.user_agent = try self.allocator.dupe(u8, handshake.user_agent);
         
         // Send handshake ack
-        std.log.info("Sending handshake ack to peer {}", .{self.peer.id});
+        std.log.info("📤 [HANDSHAKE] Sending ack to peer {} (we are at height {})", .{self.peer.id, our_height});
         _ = try self.peer.sendMessage(.handshake_ack, {});
         
         self.peer.state = .connected;
-        std.log.info("Handshake complete with {}: height={}, agent={s}", .{
-            self.peer, handshake.start_height, handshake.user_agent
+        std.log.info("✅ [HANDSHAKE] Complete with {}: peer_height={}, our_height={}, agent={s}", .{
+            self.peer, handshake.start_height, our_height, handshake.user_agent
         });
         
-        // Call handler
-        std.log.info("Calling onPeerConnected handler for peer {}", .{self.peer.id});
+        // Call handler - THIS is where sync should be triggered
+        std.log.info("🔄 [HANDSHAKE] Calling onPeerConnected to check sync requirements", .{});
         try self.message_handler.onPeerConnected(self.peer);
     }
     
     fn handleHandshakeAck(self: *Self) !void {
         if (self.peer.state == .handshaking) {
+            const our_height = try self.message_handler.getHeight();
+            std.log.info("✅ [HANDSHAKE ACK] Received - peer height: {}, our height: {}", .{
+                self.peer.height, our_height
+            });
+            
             self.peer.state = .connected;
+            
+            // CRITICAL: The initiating side (sync node) needs to check sync here too!
+            std.log.info("🔄 [HANDSHAKE ACK] Connection established, checking if we need to sync", .{});
             try self.message_handler.onPeerConnected(self.peer);
         }
     }

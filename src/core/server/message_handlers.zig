@@ -55,18 +55,31 @@ pub const MessageHandlerImpl = struct {
             peer.address, peer.height, our_height
         });
         std.log.info("🔍 [PEER CONNECT] Peer state: {}, services: 0x{x}", .{peer.state, peer.services});
+        std.log.info("🔍 [PEER CONNECT] Sync manager status: {}", .{self.blockchain.sync_manager != null});
         
+        // Check if we need to sync from peer (they have more blocks)
         if (peer.height > our_height) {
-            std.log.info("🚀 [PEER CONNECT] Peer has higher height! Starting sync process...", .{});
-            if (self.blockchain.sync_manager != null) {
-                std.log.info("🔄 [PEER CONNECT] Sync manager available, starting sync with peer at height {}", .{peer.height});
-                try self.blockchain.sync_manager.?.startBatchSync(peer, peer.height);
-                std.log.info("✅ [PEER CONNECT] Sync started successfully", .{});
+            const blocks_behind = peer.height - our_height;
+            std.log.info("🚀 [PEER CONNECT] Peer has {} more blocks! Starting sync process...", .{blocks_behind});
+            
+            if (self.blockchain.sync_manager) |sync_manager| {
+                std.log.info("🔄 [PEER CONNECT] Sync manager available, checking if already syncing: {}", .{sync_manager.isActive()});
+                
+                if (!sync_manager.isActive()) {
+                    std.log.info("📥 [PEER CONNECT] Starting batch sync to download {} blocks", .{blocks_behind});
+                    try sync_manager.startBatchSync(peer, peer.height);
+                    std.log.info("✅ [PEER CONNECT] Batch sync started successfully", .{});
+                } else {
+                    std.log.info("⏳ [PEER CONNECT] Sync already active, skipping new sync request", .{});
+                }
             } else {
                 std.log.warn("❌ [PEER CONNECT] Sync manager is null, cannot start sync!", .{});
             }
+        } else if (our_height > peer.height) {
+            const blocks_ahead = our_height - peer.height;
+            std.log.info("📤 [PEER CONNECT] We are {} blocks ahead of peer (they may sync from us)", .{blocks_ahead});
         } else {
-            std.log.info("✅ [PEER CONNECT] Peer height {} is not higher than our height {}, no sync needed", .{ peer.height, our_height });
+            std.log.info("✅ [PEER CONNECT] Both nodes at same height {}, no sync needed", .{our_height});
         }
     }
     
@@ -74,14 +87,14 @@ pub const MessageHandlerImpl = struct {
         std.log.debug("GetHeaders request received with {} locator hashes", .{msg.block_locator.len});
         
         // Find the best common block from the locator
-        var start_height: u32 = 1; // Start from block 1 (after genesis)
+        var start_height: u32 = 0; // Start from genesis (height 0)
         var found_common = false;
         
         for (msg.block_locator) |locator_hash| {
             // Check if this is genesis hash (all zeros)
             const is_genesis = std.mem.allEqual(u8, &locator_hash, 0);
             if (is_genesis) {
-                start_height = 1; // Start from block 1 (after genesis)
+                start_height = 1; // Genesis found at 0, so start from height 1
                 found_common = true;
                 std.log.debug("Found genesis locator, starting from height 1", .{});
                 break;
@@ -100,7 +113,7 @@ pub const MessageHandlerImpl = struct {
         
         if (!found_common) {
             std.log.debug("No common block found in locator, starting from genesis", .{});
-            start_height = 1;
+            start_height = 0; // Start from genesis at height 0
         }
         
         const current_height = try self.blockchain.getHeight();
