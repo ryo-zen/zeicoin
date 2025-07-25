@@ -41,11 +41,14 @@ pub const NodeComponents = struct {
         self.network_manager.deinit();
         self.allocator.destroy(self.network_manager);
         
-        // 4. Clean up message handler
+        // 4. Clear network reference in blockchain to prevent double-free
+        self.blockchain.network_coordinator.network = null;
+        
+        // 5. Clean up message handler
         @import("message_handlers.zig").clearGlobalHandler();
         self.allocator.destroy(self.message_handler_impl);
         
-        // 5. Finally blockchain
+        // 6. Finally blockchain (network_coordinator.deinit won't double-free now)
         self.blockchain.deinit();
         self.allocator.destroy(self.blockchain);
     }
@@ -56,7 +59,10 @@ pub fn initializeNode(allocator: std.mem.Allocator, config: command_line.Config)
     
     // Initialize blockchain
     const blockchain = try zen.ZeiCoin.init(allocator);
-    errdefer blockchain.deinit();
+    errdefer {
+        blockchain.deinit();
+        allocator.destroy(blockchain);
+    }
     
     try blockchain.initializeBlockchain();
     std.log.info("Blockchain initialized", .{});
@@ -68,10 +74,8 @@ pub fn initializeNode(allocator: std.mem.Allocator, config: command_line.Config)
     // Initialize network
     var network_manager = try allocator.create(network.NetworkManager);
     network_manager.* = network.NetworkManager.init(allocator, handler_result.handler);
-    errdefer {
-        network_manager.deinit();
-        allocator.destroy(network_manager);
-    }
+    // Note: network_manager ownership is transferred to blockchain.network_coordinator
+    // No errdefer needed - NodeComponents.deinit() handles cleanup
     
     // Connect components
     blockchain.mempool_manager.setNetworkManager(network_manager);
@@ -164,8 +168,14 @@ fn initializeMining(blockchain: *zen.ZeiCoin, miner_wallet_name: []const u8) !vo
     std.log.info("Loading mining wallet from: {s}", .{wallet_path});
     
     wallet_obj.loadFromFile(wallet_path, "zen") catch |err| {
-        std.log.err("Failed to load mining wallet '{s}' from path: {s}", .{wallet_name, wallet_path});
-        std.log.err("Error: {}", .{err});
+        std.log.err("❌ Failed to load mining wallet '{s}' from path: {s}", .{wallet_name, wallet_path});
+        std.log.err("❌ Error: {}", .{err});
+        std.log.err("", .{});
+        std.log.err("💡 To fix this issue:", .{});
+        std.log.err("   1. Create the wallet first: ZEICOIN_SERVER=127.0.0.1 ./zig-out/bin/zeicoin wallet create {s}", .{wallet_name});
+        std.log.err("   2. Then restart the server with mining: --mine {s}", .{wallet_name});
+        std.log.err("", .{});
+        std.log.err("🔄 Or start the server without mining and create the wallet later", .{});
         return err;
     };
     

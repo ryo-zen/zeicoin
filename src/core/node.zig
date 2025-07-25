@@ -184,7 +184,17 @@ pub const ZeiCoin = struct {
             return error.DatabaseCorrupted;
         }
 
-        if (try instance_ptr.getHeight() == 0) {
+        // Check if genesis block already exists in database
+        const genesis_exists = blk: {
+            var genesis_block = instance_ptr.database.getBlock(0) catch |err| switch (err) {
+                db.DatabaseError.NotFound => break :blk false,
+                else => return err,
+            };
+            defer genesis_block.deinit(instance_ptr.allocator);
+            break :blk true;
+        };
+        
+        if (!genesis_exists) {
             print("🌐 No blockchain found - creating canonical genesis block\n", .{});
             try instance_ptr.createCanonicalGenesis();
             print("✅ Genesis block created successfully!\n", .{});
@@ -204,17 +214,13 @@ pub const ZeiCoin = struct {
     }
 
     pub fn initializeBlockchain(self: *ZeiCoin) !void {
-        const current_height = self.getHeight() catch 0;
+        const current_height = self.getHeight() catch {
+            print("❌ CRITICAL ERROR: Cannot retrieve blockchain height!\n", .{});
+            return error.BlockchainNotInitialized;
+        };
         
-        // Create genesis block if blockchain is empty
-        if (current_height == 0) {
-            print("🌟 Creating genesis block for new blockchain...\n", .{});
-            try self.createCanonicalGenesis();
-            const new_height = try self.getHeight();
-            print("✅ Genesis block created, blockchain at height {}\n", .{new_height});
-        } else {
-            print("🔗 Blockchain initialized at height {}, ready for network sync\n", .{current_height});
-        }
+        // Genesis block is at height 0, so this is normal
+        print("🔗 Blockchain initialized at height {}, ready for network sync\n", .{current_height});
     }
 
     pub fn deinit(self: *ZeiCoin) void {

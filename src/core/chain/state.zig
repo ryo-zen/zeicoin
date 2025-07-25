@@ -97,7 +97,8 @@ pub const ChainState = struct {
     pub fn getAccount(self: *Self, address: Address) !types.Account {
         // Try to load from database
         if (self.database.getAccount(address)) |account| {
-            print("🔍 [ACCOUNT LOAD] Found existing account {x}: balance={}, nonce={}\n", .{address.hash, account.balance, account.nonce});
+            const balance_zei = @as(f64, @floatFromInt(account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+            print("🔍 [ACCOUNT LOAD] Found existing account {x}: balance={d:.8} ZEI, nonce={}\n", .{address.hash, balance_zei, account.nonce});
             return account;
         } else |err| switch (err) {
             db.DatabaseError.NotFound => {
@@ -107,7 +108,8 @@ pub const ChainState = struct {
                     .balance = 0,
                     .nonce = 0,
                 };
-                print("🔍 [ACCOUNT LOAD] Created new account {x}: balance={}, nonce={}\n", .{address.hash, new_account.balance, new_account.nonce});
+                const balance_zei = @as(f64, @floatFromInt(new_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+                print("🔍 [ACCOUNT LOAD] Created new account {x}: balance={d:.8} ZEI, nonce={}\n", .{address.hash, balance_zei, new_account.nonce});
                 // Save to database immediately
                 try self.database.saveAccount(address, new_account);
                 return new_account;
@@ -144,9 +146,13 @@ pub const ChainState = struct {
         var recipient_account = try self.getAccount(tx.recipient);
 
         print("🔍 [TX VALIDATION] Processing transaction from sender: {x}\n", .{tx.sender.hash});
-        print("🔍 [TX VALIDATION] Sender balance: {} ZEI, nonce: {}\n", .{sender_account.balance, sender_account.nonce});
-        print("🔍 [TX VALIDATION] Recipient balance: {} ZEI, nonce: {}\n", .{recipient_account.balance, recipient_account.nonce});
-        print("🔍 [TX VALIDATION] Transaction amount: {} ZEI, fee: {} ZEI\n", .{tx.amount, tx.fee});
+        const sender_balance_zei = @as(f64, @floatFromInt(sender_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+        const recipient_balance_zei = @as(f64, @floatFromInt(recipient_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+        const amount_zei = @as(f64, @floatFromInt(tx.amount)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+        const fee_zei = @as(f64, @floatFromInt(tx.fee)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+        print("🔍 [TX VALIDATION] Sender balance: {d:.8} ZEI, nonce: {}\n", .{sender_balance_zei, sender_account.nonce});
+        print("🔍 [TX VALIDATION] Recipient balance: {d:.8} ZEI, nonce: {}\n", .{recipient_balance_zei, recipient_account.nonce});
+        print("🔍 [TX VALIDATION] Transaction amount: {d:.8} ZEI, fee: {d:.8} ZEI\n", .{amount_zei, fee_zei});
 
         // 💰 Apply transaction with fee deduction
         // Check for integer overflow in addition
@@ -155,12 +161,16 @@ pub const ChainState = struct {
             return error.IntegerOverflow;
         };
 
-        print("🔍 [TX VALIDATION] Total cost: {} ZEI\n", .{total_cost});
+        const total_cost_zei = @as(f64, @floatFromInt(total_cost)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+        print("🔍 [TX VALIDATION] Total cost: {d:.8} ZEI\n", .{total_cost_zei});
 
         // Safety check for sufficient balance
         if (sender_account.balance < total_cost) {
-            print("❌ [TX VALIDATION] INSUFFICIENT BALANCE! Sender has {} ZEI, needs {} ZEI\n", .{sender_account.balance, total_cost});
-            print("❌ [TX VALIDATION] Shortfall: {} ZEI\n", .{total_cost - sender_account.balance});
+            const sender_balance_zei_err = @as(f64, @floatFromInt(sender_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+            const needed_zei = @as(f64, @floatFromInt(total_cost)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+            const shortfall_zei = @as(f64, @floatFromInt(total_cost - sender_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+            print("❌ [TX VALIDATION] INSUFFICIENT BALANCE! Sender has {d:.8} ZEI, needs {d:.8} ZEI\n", .{sender_balance_zei_err, needed_zei});
+            print("❌ [TX VALIDATION] Shortfall: {d:.8} ZEI\n", .{shortfall_zei});
             return error.InsufficientBalance;
         }
 
@@ -196,7 +206,9 @@ pub const ChainState = struct {
             .nonce = 0,
         };
 
-        print("🔍 [COINBASE TX] Miner account BEFORE: balance={}, immature={}, nonce={}\n", .{miner_account.balance, miner_account.immature_balance, miner_account.nonce});
+        const balance_before = @as(f64, @floatFromInt(miner_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+        const immature_before = @as(f64, @floatFromInt(miner_account.immature_balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+        print("🔍 [COINBASE TX] Miner account BEFORE: balance={d:.8} ZEI, immature={d:.8} ZEI, nonce={}\n", .{balance_before, immature_before, miner_account.nonce});
 
         // Check if this is a genesis block (height 0) transaction
         if (current_height == 0) {
@@ -209,7 +221,9 @@ pub const ChainState = struct {
             miner_account.immature_balance += coinbase_tx.amount;
         }
 
-        print("🔍 [COINBASE TX] Miner account AFTER: balance={}, immature={}, nonce={}\n", .{miner_account.balance, miner_account.immature_balance, miner_account.nonce});
+        const balance_after = @as(f64, @floatFromInt(miner_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+        const immature_after = @as(f64, @floatFromInt(miner_account.immature_balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+        print("🔍 [COINBASE TX] Miner account AFTER: balance={d:.8} ZEI, immature={d:.8} ZEI, nonce={}\n", .{balance_after, immature_after, miner_account.nonce});
 
         // Save miner account
         try self.database.saveAccount(miner_address, miner_account);

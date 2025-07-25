@@ -154,7 +154,9 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
 
     if (found_nonce) {
         // Process coinbase transaction (create new coins!)
-        try ctx.blockchain.chain_state.processCoinbaseTransaction(coinbase_tx, mining_address, current_height);
+        // Note: new block height = current_height + 1
+        const new_block_height = current_height + 1;
+        try ctx.blockchain.chain_state.processCoinbaseTransaction(coinbase_tx, mining_address, new_block_height);
 
         // Process regular transactions
         for (new_block.transactions[1..]) |tx| {

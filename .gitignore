@@ -28,6 +28,10 @@ tests/
 # Docs Folder
 /docs
 
+#MCP
+
+/mcp
+
 # SQL Scripts
 /sql
 
@@ -54,3 +58,10 @@ fuzz/network_message_fuzz.zig
 docker-compose.sync-proof-test.yml
 Dockerfile
 docker-compose.libp2p-test.yml
+.mcp.json
+docker-compose.mempool-gossip-test.yml
+docker-compose.single-test.yml
+run-mempool-gossip-test.sh
+zig_docs
+zig_docs_std
+scripts/deploy_files_simple.sh
