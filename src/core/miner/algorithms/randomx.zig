@@ -44,7 +44,7 @@ pub fn zenProofOfWorkRandomX(ctx: MiningContext, block: *types.Block) bool {
         // Check if blockchain height changed (another miner found a block)
         const current_height = ctx.blockchain.getHeight() catch starting_height;
         if (current_height > starting_height) {
-            print("🛑 Mining stopped - new block received at height {}\n", .{current_height});
+            print("🛑 [MINING PREEMPTED] New block received at height {} (was mining height {})\n", .{current_height, starting_height});
             return false; // Stop mining this obsolete block
         }
 

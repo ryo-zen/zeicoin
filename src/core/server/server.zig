@@ -67,10 +67,49 @@ pub fn main() !void {
     
     // Main loop - wait for shutdown signal
     var last_status_time = std.time.timestamp();
+    var mining_started = false;
+    var initial_sync_done = false;
+    
     while (running.load(.acquire)) {
         // Periodic maintenance (only if still running)
         if (running.load(.acquire)) {
             components.network_manager.maintenance();
+        }
+        
+        // Check if we should start mining after initial sync
+        if (!mining_started and components.blockchain.mining_manager != null) {
+            const should_start_mining = blk: {
+                // If no peers connected yet, wait a bit for network to settle
+                const peer_stats = components.network_manager.getPeerStats();
+                if (peer_stats.connected == 0) {
+                    if (!initial_sync_done) {
+                        // Give network 5 seconds to connect before starting mining on empty network
+                        const startup_time = 5;
+                        std.time.sleep(startup_time * std.time.ns_per_s);
+                        initial_sync_done = true;
+                        std.log.info("⛏️  No peers found after startup delay - starting mining on local chain", .{});
+                        break :blk true;
+                    } else {
+                        break :blk false;
+                    }
+                }
+                
+                // If we have peers, check if sync is complete
+                if (components.sync_manager.isActive()) {
+                    break :blk false; // Still syncing
+                }
+                
+                // Sync is complete or we're up to date
+                break :blk true;
+            };
+            
+            if (should_start_mining) {
+                if (startMiningAfterSync(&components)) {
+                    mining_started = true;
+                } else {
+                    std.log.warn("⚠️ Failed to start mining after sync", .{});
+                }
+            }
         }
         
         // Print status every 30 seconds
@@ -106,6 +145,25 @@ fn printBanner() void {
     std.debug.print("║                    Modular Architecture                           ║\n", .{});
     std.debug.print("╚═══════════════════════════════════════════════════════════════════╝\n", .{});
     std.debug.print("\n", .{});
+}
+
+fn startMiningAfterSync(components: *const initialization.NodeComponents) bool {
+    if (components.blockchain.mining_manager) |mining_manager| {
+        // Get the wallet information that was stored during initialization
+        // For now, we'll need to get the keypair from the mining manager
+        std.log.info("⛏️  Starting mining after initial sync completion", .{});
+        
+        // The mining manager should already have the keypair from initialization
+        // We just need to start the mining process
+        mining_manager.startMiningDeferred() catch |err| {
+            std.log.err("❌ Failed to start mining after sync: {}", .{err});
+            return false;
+        };
+        
+        std.log.info("✅ Mining started successfully after sync", .{});
+        return true;
+    }
+    return false;
 }
 
 fn printStatus(components: *const initialization.NodeComponents) void {

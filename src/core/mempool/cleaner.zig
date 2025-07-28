@@ -63,6 +63,10 @@ pub const MempoolCleaner = struct {
         
         for (block.transactions, 0..) |tx, i| {
             block_tx_hashes[i] = tx.hash();
+            const amount_zei = @as(f64, @floatFromInt(tx.amount)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+            print("🔄 [TX LIFECYCLE] Transaction {s} included in block (mempool → blockchain): {d:.8} ZEI\n", .{
+                std.fmt.fmtSliceHexLower(tx.hash()[0..8]), amount_zei
+            });
         }
         
         // Remove transactions from mempool that match block transactions
@@ -74,8 +78,9 @@ pub const MempoolCleaner = struct {
         
         if (removed_count > 0) {
             const elapsed = util.getTime() - start_time;
-            print("🧹 Cleaned {} confirmed transactions from mempool ({}ms)\\n", .{
-                removed_count, elapsed
+            const mempool_size = self.storage.getTransactionCount();
+            print("🧹 [TX LIFECYCLE] Cleaned {} confirmed transactions from mempool ({}ms, mempool size: {})\n", .{
+                removed_count, elapsed, mempool_size
             });
         }
         

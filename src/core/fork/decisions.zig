@@ -73,12 +73,20 @@ pub const DecisionEngine = struct {
             else 
                 active_chain.tip_height - block_height;
                 
+            // Log detailed consensus information
+            print("🔄 [CONSENSUS] Competing chain detected!\n", .{});
+            print("   - Current chain: height={}, work={}\n", .{active_chain.tip_height, active_chain.cumulative_work});
+            print("   - New chain: height={}, work={}\n", .{block_height, cumulative_work});
+            print("   - Work difference: {} (new chain has MORE work)\n", .{cumulative_work - active_chain.cumulative_work});
+            print("   - Reorganization depth: {} blocks\n", .{reorg_depth});
+                
             if (isReorgTooDeep(reorg_depth)) {
-                print("⚠️  Reorganization too deep ({} blocks), storing as orphan\n", .{reorg_depth});
+                print("⚠️  [CONSENSUS] Reorganization too deep ({} blocks > {} max), storing as orphan\n", .{reorg_depth, MAX_REORG_DEPTH});
                 return ForkDecision.store_orphan;
             }
             
-            print("🔄 Potential reorganization: new chain has more work\n", .{});
+            print("🔄 [CONSENSUS] CHAIN REORGANIZATION TRIGGERED!\n", .{});
+            print("   - Switching to chain with more proof-of-work\n", .{});
             return ForkDecision{ .extends_chain = .{
                 .chain_index = chain_tracker.active_chain_index,
                 .requires_reorg = true,

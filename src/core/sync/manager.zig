@@ -165,9 +165,20 @@ pub const SyncManager = struct {
         // Ensure genesis block exists before syncing
         print("🔍 [SYNC MANAGER] STEP 3: Validating genesis block...\n", .{});
         if (current_height == 0) {
-            print("🌟 [SYNC MANAGER] Creating canonical genesis block...\n", .{});
-            try self.blockchain.createCanonicalGenesis();
-            print("✅ [SYNC MANAGER] Genesis block created successfully\n", .{});
+            // Check if genesis block actually exists in database
+            const genesis_exists = blk: {
+                var genesis_block = self.blockchain.database.getBlock(0) catch break :blk false;
+                genesis_block.deinit(self.allocator);
+                break :blk true;
+            };
+            
+            if (!genesis_exists) {
+                print("🌟 [SYNC MANAGER] Creating canonical genesis block...\n", .{});
+                try self.blockchain.createCanonicalGenesis();
+                print("✅ [SYNC MANAGER] Genesis block created successfully\n", .{});
+            } else {
+                print("✅ [SYNC MANAGER] Genesis block already exists in database\n", .{});
+            }
         } else {
             print("✅ [SYNC MANAGER] Genesis block already exists (height > 0)\n", .{});
         }
@@ -235,6 +246,14 @@ pub const SyncManager = struct {
         print("   └─ End height: {}\n", .{start_height + @as(u32, @intCast(blocks.len)) - 1});
         print("   └─ Current sync state: {}\n", .{self.sync_state});
         print("   └─ Progress: {d:.1}%\n", .{self.getProgress()});
+        
+        // CRITICAL: Validate bulk blocks for chain continuity before processing
+        print("🔍 [BULK VALIDATION] Validating batch block continuity...\n", .{});
+        if (!try validateBulkBlocks(blocks, start_height, self.blockchain)) {
+            print("❌ [BULK VALIDATION] Batch validation failed - rejecting entire batch\n", .{});
+            return error.InvalidBatch;
+        }
+        print("✅ [BULK VALIDATION] Batch passed validation checks\n", .{});
         
         // Forward to batch sync protocol for processing
         print("🔍 [SYNC MANAGER] Delegating to ZSP-001 batch sync protocol...\n", .{});
@@ -489,12 +508,151 @@ pub const SyncManager = struct {
     
     /// Validate block before applying (dependency injection implementation)
     fn validateBlockBeforeApply(block: Block, height: u32) !bool {
-        _ = block;
-        _ = height;
+        print("🔍 [SYNC MANAGER] Validating sync block at height {}\n", .{height});
         
-        // This would be implemented to validate the block
-        // For now, always return true
-        print("🔍 [SYNC MANAGER] Validating block (stub implementation)\n", .{});
+        // CRITICAL: Access to blockchain is needed for proper validation
+        // This is a limitation of the dependency injection pattern - we need blockchain reference
+        // For now, implement basic validation that prevents the fork issue
+        
+        // 1. Basic block structure validation
+        if (!block.isValid()) {
+            print("❌ [SYNC VALIDATION] Block structure invalid\n", .{});
+            return false;
+        }
+        
+        // 2. Check block size limits
+        const block_size = block.getSize();
+        if (block_size > types.BlockLimits.MAX_BLOCK_SIZE) {
+            print("❌ [SYNC VALIDATION] Block size {} exceeds limit {}\n", .{block_size, types.BlockLimits.MAX_BLOCK_SIZE});
+            return false;
+        }
+        
+        // 3. Verify timestamp is reasonable (not too far in future)
+        const current_time = std.time.timestamp();
+        if (block.header.timestamp > current_time + 7200) { // 2 hours tolerance
+            print("❌ [SYNC VALIDATION] Block timestamp too far in future\n", .{});
+            return false;
+        }
+        
+        // 4. Verify all transactions in block are valid
+        for (block.transactions, 0..) |tx, i| {
+            if (!tx.isValid()) {
+                print("❌ [SYNC VALIDATION] Transaction {} in block is invalid\n", .{i});
+                return false;
+            }
+        }
+        
+        print("✅ [SYNC VALIDATION] Block passed validation checks\n", .{});
+        return true;
+    }
+    
+    /// Validate a batch of blocks for chain continuity (prevents fork issue)
+    fn validateBulkBlocks(blocks: []const Block, start_height: u32, blockchain: *ZeiCoin) !bool {
+        print("🔍 [BULK VALIDATION] Validating {} blocks starting at height {}\n", .{blocks.len, start_height});
+        
+        if (blocks.len == 0) {
+            print("⚠️ [BULK VALIDATION] Empty batch - nothing to validate\n", .{});
+            return true;
+        }
+        
+        // Check if we have the parent block for the first block in batch
+        if (start_height > 0) {
+            const parent_exists = blk: {
+                var parent = blockchain.database.getBlock(start_height - 1) catch break :blk false;
+                parent.deinit(blockchain.allocator);
+                break :blk true;
+            };
+            if (!parent_exists) {
+                print("❌ [BULK VALIDATION] Missing parent block at height {}\n", .{start_height - 1});
+                return false;
+            }
+            
+            // Get parent block to verify connection
+            var parent_block = blockchain.database.getBlock(start_height - 1) catch {
+                print("❌ [BULK VALIDATION] Cannot read parent block at height {}\n", .{start_height - 1});
+                return false;
+            };
+            defer parent_block.deinit(blockchain.allocator);
+            
+            const parent_hash = parent_block.hash();
+            if (!std.mem.eql(u8, &blocks[0].header.previous_hash, &parent_hash)) {
+                print("❌ [BULK VALIDATION] First block doesn't connect to parent\n", .{});
+                return false;
+            }
+        }
+        
+        // Verify each block connects to the previous block in the batch
+        var prev_hash = if (start_height > 0) blk: {
+            var parent = blockchain.database.getBlock(start_height - 1) catch {
+                return false;
+            };
+            defer parent.deinit(blockchain.allocator);
+            break :blk parent.hash();
+        } else [_]u8{0} ** 32; // Genesis case
+        
+        for (blocks, 0..) |block, i| {
+            const block_height = start_height + @as(u32, @intCast(i));
+            
+            // Check block connects to previous
+            if (!std.mem.eql(u8, &block.header.previous_hash, &prev_hash)) {
+                print("❌ [BULK VALIDATION] Block {} doesn't connect to previous block\n", .{block_height});
+                print("   Expected: {s}\n", .{std.fmt.fmtSliceHexLower(&prev_hash)});
+                print("   Got:      {s}\n", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+                return false;
+            }
+            
+            // Basic validation for each block
+            if (!block.isValid()) {
+                print("❌ [BULK VALIDATION] Block {} has invalid structure\n", .{block_height});
+                return false;
+            }
+            
+            // Update prev_hash for next iteration
+            prev_hash = block.hash();
+        }
+        
+        print("✅ [BULK VALIDATION] All {} blocks form a valid chain\n", .{blocks.len});
+        return true;
+    }
+    
+    /// Verify block hash consensus with connected peers (optional additional security)
+    fn verifyBlockConsensus(blockchain: *ZeiCoin, block: Block, height: u32) !bool {
+        print("🔍 [CONSENSUS CHECK] Verifying block consensus at height {}\n", .{height});
+        
+        // Get network coordinator to access peers
+        const network_coordinator = blockchain.network_coordinator orelse {
+            print("⚠️ [CONSENSUS CHECK] No network coordinator available\n", .{});
+            return true; // Skip consensus check if no network
+        };
+        
+        const network_manager = network_coordinator.getNetworkManager() orelse {
+            print("⚠️ [CONSENSUS CHECK] No network manager available\n", .{});
+            return true; // Skip consensus check if no network
+        };
+        
+        // Get connected peers
+        var connected_peers = std.ArrayList(*Peer).init(blockchain.allocator);
+        defer connected_peers.deinit();
+        
+        try network_manager.peer_manager.getConnectedPeers(&connected_peers);
+        
+        if (connected_peers.items.len == 0) {
+            print("⚠️ [CONSENSUS CHECK] No connected peers for consensus verification\n", .{});
+            return true; // Can't verify consensus without peers
+        }
+        
+        const block_hash = block.hash();
+        
+        // Note: This is a simplified implementation
+        // In a full implementation, we would query peers for their block hash at this height
+        // For now, we just log the attempt and assume consensus
+        
+        print("📊 [CONSENSUS CHECK] Connected peers: {}\n", .{connected_peers.items.len});
+        print("📊 [CONSENSUS CHECK] Block hash: {s}\n", .{std.fmt.fmtSliceHexLower(block_hash[0..8])});
+        
+        // TODO: Implement actual peer querying for block hashes
+        // For now, return true to not block sync while this is being developed
+        print("⚠️ [CONSENSUS CHECK] Peer querying not yet implemented - assuming consensus\n", .{});
         return true;
     }
     

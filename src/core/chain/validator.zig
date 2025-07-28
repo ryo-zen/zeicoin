@@ -40,7 +40,7 @@ pub const ChainValidator = struct {
             .fork_manager = null,
         };
     }
-    
+
     /// Initialize ChainValidator with all dependencies
     pub fn initWithDependencies(
         allocator: std.mem.Allocator,
@@ -66,9 +66,9 @@ pub const ChainValidator = struct {
     // - validateReorgBlock()
     // - validateTransaction()
     // - validateTransactionSignature()
-    
+
     // Validation Methods extracted from node.zig
-    
+
     /// Validate a regular transaction (balance, nonce, signature, etc.)
     pub fn validateTransaction(self: *Self, tx: Transaction) !bool {
         // Basic structure validation
@@ -131,7 +131,7 @@ pub const ChainValidator = struct {
     /// Validate transaction signature only
     pub fn validateTransactionSignature(self: *Self, tx: Transaction) !bool {
         _ = self;
-        
+
         // Verify transaction signature
         const tx_hash = tx.hashForSigning();
         if (!key.verify(tx.sender_public_key, &tx_hash, tx.signature)) {
@@ -164,6 +164,14 @@ pub const ChainValidator = struct {
     /// Validate a complete block (structure, PoW, transactions)
     /// Full validation from node.zig with all consensus rules
     pub fn validateBlock(self: *Self, block: Block, expected_height: u32) !bool {
+        // CRITICAL: Check for duplicate block hash before any other validation
+        const block_hash = block.hash();
+        if (self.chain_state.hasBlock(block_hash)) {
+            const existing_height = self.chain_state.block_index.getHeight(block_hash) orelse unreachable;
+            print("❌ [CONSENSUS] Block validation failed: duplicate block hash {s} already exists at height {}\n", .{ std.fmt.fmtSliceHexLower(block_hash[0..8]), existing_height });
+            return false;
+        }
+
         // Special validation for genesis block (height 0)
         if (expected_height == 0) {
             if (!genesis.validateGenesis(block)) {
@@ -222,15 +230,38 @@ pub const ChainValidator = struct {
                 print("❌ Previous hash validation failed\n", .{});
                 print("   Expected: {s}\n", .{std.fmt.fmtSliceHexLower(&prev_hash)});
                 print("   Received: {s}\n", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+
+                // CRITICAL: Check if this is actually a duplicate of a different block
+                // This catches the case where the same block is submitted at multiple heights
+                const submitted_hash = block.hash();
+                if (self.chain_state.hasBlock(submitted_hash)) {
+                    const existing_height = self.chain_state.block_index.getHeight(submitted_hash) orelse unreachable;
+                    print("❌ [CHAIN CONTINUITY] This block is a duplicate of block at height {}!\n", .{existing_height});
+                    print("   Block hash: {s}\n", .{std.fmt.fmtSliceHexLower(submitted_hash[0..8])});
+                }
+
                 return false;
             }
+        }
+
+        // SECURITY: Calculate required difficulty
+        var difficulty_calc = @import("difficulty.zig").DifficultyCalculator.init(self.allocator, self.chain_state.database);
+        const required_difficulty = difficulty_calc.calculateNextDifficulty() catch {
+            print("❌ Failed to calculate required difficulty\n", .{});
+            return false;
+        };
+
+        // SECURITY: Verify block claims correct difficulty
+        const claimed_difficulty = block.header.getDifficultyTarget();
+        if (claimed_difficulty.toU64() != required_difficulty.toU64()) {
+            print("❌ SECURITY: Block difficulty mismatch! Required: {}, Claimed: {}\n", .{ required_difficulty.toU64(), claimed_difficulty.toU64() });
+            return false;
         }
 
         // Check proof-of-work with dynamic difficulty
         if (@import("builtin").mode == .Debug) {
             // In test mode, use dynamic difficulty with SHA256 for speed
-            const difficulty_target = block.header.getDifficultyTarget();
-            if (!difficulty_target.meetsDifficulty(block.header.hash())) {
+            if (!required_difficulty.meetsDifficulty(block.header.hash())) {
                 print("❌ Proof-of-work validation failed\n", .{});
                 return false;
             }
@@ -270,6 +301,14 @@ pub const ChainValidator = struct {
     pub fn validateSyncBlock(self: *Self, block: *const Block, expected_height: u32) !bool {
         print("🔍 validateSyncBlock: Starting validation for height {}\n", .{expected_height});
 
+        // CRITICAL: Check for duplicate block hash even during sync
+        const block_hash = block.hash();
+        if (self.chain_state.hasBlock(block_hash)) {
+            const existing_height = self.chain_state.block_index.getHeight(block_hash) orelse unreachable;
+            print("❌ [SYNC] Block validation failed: duplicate block hash {s} already exists at height {}\n", .{ std.fmt.fmtSliceHexLower(block_hash[0..8]), existing_height });
+            return false;
+        }
+
         // Special validation for genesis block (height 0)
         if (expected_height == 0) {
             print("🔍 validateSyncBlock: Processing genesis block (height 0)\n", .{});
@@ -298,20 +337,20 @@ pub const ChainValidator = struct {
 
         print("🔍 validateSyncBlock: About to check basic block structure for height {}\n", .{expected_height});
         print("🔍 validateSyncBlock: Block pointer address: {*}\n", .{&block});
-        
+
         // Try to access block fields safely first
         print("🔍 validateSyncBlock: Checking block field access...\n", .{});
-        
+
         // Check if we can access basic fields
         const tx_count = block.txCount();
         print("🔍 validateSyncBlock: Block transaction count: {}\n", .{tx_count});
-        
+
         const timestamp = block.header.timestamp;
         print("🔍 validateSyncBlock: Block timestamp: {}\n", .{timestamp});
-        
+
         const difficulty = block.header.difficulty;
         print("🔍 validateSyncBlock: Block difficulty: {}\n", .{difficulty});
-        
+
         print("🔍 validateSyncBlock: Basic field access successful, now calling isValid()...\n", .{});
 
         // Check basic block structure
@@ -334,15 +373,28 @@ pub const ChainValidator = struct {
 
         print("🔍 validateSyncBlock: Checking proof-of-work for height {}\n", .{expected_height});
 
+        // SECURITY: Calculate required difficulty for sync blocks
+        var difficulty_calc = @import("difficulty.zig").DifficultyCalculator.init(self.allocator, self.chain_state.database);
+        const required_difficulty = difficulty_calc.calculateNextDifficulty() catch {
+            print("❌ Failed to calculate required difficulty for sync block\n", .{});
+            return false;
+        };
+
+        // SECURITY: Verify sync block claims correct difficulty
+        const claimed_difficulty = block.header.getDifficultyTarget();
+        if (claimed_difficulty.toU64() != required_difficulty.toU64()) {
+            print("❌ SECURITY: Sync block difficulty mismatch! Required: {}, Claimed: {}\n", .{ required_difficulty.toU64(), claimed_difficulty.toU64() });
+            return false;
+        }
+
         // Check proof-of-work with dynamic difficulty
         if (@import("builtin").mode == .Debug) {
             // In test mode, use dynamic difficulty with SHA256 for speed
-            const difficulty_target = block.header.getDifficultyTarget();
-            const block_hash = block.header.hash();
-            print("   Difficulty target: {}\n", .{difficulty_target.toU64()});
+            const genesis_block_hash = block.header.hash();
+            print("   Required difficulty target: {}\n", .{required_difficulty.toU64()});
             // print("   Block hash: {s}\n", .{std.fmt.fmtSliceHexLower(&block_hash)});
 
-            if (!difficulty_target.meetsDifficulty(block_hash)) {
+            if (!required_difficulty.meetsDifficulty(genesis_block_hash)) {
                 print("❌ Proof-of-work validation failed for height {}\n", .{expected_height});
                 print("   Difficulty target does not meet required threshold\n", .{});
                 return false;
@@ -470,10 +522,23 @@ pub const ChainValidator = struct {
             return false;
         }
 
+        // SECURITY: Calculate required difficulty for reorg blocks - DO NOT trust block header!
+        var difficulty_calc = @import("difficulty.zig").DifficultyCalculator.init(self.allocator, self.chain_state.database);
+        const required_difficulty = difficulty_calc.calculateNextDifficulty() catch {
+            print("❌ Failed to calculate required difficulty for reorg block\n", .{});
+            return false;
+        };
+
+        // SECURITY: Verify reorg block claims correct difficulty
+        const claimed_difficulty = block.header.getDifficultyTarget();
+        if (claimed_difficulty.toU64() != required_difficulty.toU64()) {
+            print("❌ SECURITY: Reorg block difficulty mismatch! Required: {}, Claimed: {}\n", .{ required_difficulty.toU64(), claimed_difficulty.toU64() });
+            return false;
+        }
+
         // Check proof-of-work
         if (@import("builtin").mode == .Debug) {
-            const difficulty_target = block.header.getDifficultyTarget();
-            if (!difficulty_target.meetsDifficulty(block.header.hash())) {
+            if (!required_difficulty.meetsDifficulty(block.header.hash())) {
                 print("❌ Reorg block proof-of-work validation failed\n", .{});
                 return false;
             }
@@ -488,12 +553,12 @@ pub const ChainValidator = struct {
         for (block.transactions, 0..) |tx, i| {
             // Skip coinbase transaction
             if (i == 0) continue;
-            
+
             if (!tx.isValid()) {
                 print("❌ Reorg transaction {} structure validation failed\n", .{i});
                 return false;
             }
-            
+
             if (!try self.validateTransactionSignature(tx)) {
                 print("❌ Reorg transaction {} signature validation failed\n", .{i});
                 return false;

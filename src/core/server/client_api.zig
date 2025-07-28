@@ -127,6 +127,10 @@ pub const ClientApiServer = struct {
                 self.handleTriggerSync(connection) catch |err| {
                     std.log.err("Failed to trigger sync: {}", .{err});
                 };
+            } else if (std.mem.startsWith(u8, message, "GET_BLOCK:")) {
+                self.handleGetBlock(connection, message) catch |err| {
+                    std.log.err("Failed to get block: {}", .{err});
+                };
             } else {
                 _ = connection.stream.write("ERROR: Unknown command\n") catch {};
             }
@@ -154,6 +158,58 @@ pub const ClientApiServer = struct {
         // In a full implementation, this would trigger a sync with peers
         // For now, we return success as the node is always syncing
         std.log.info("Manual sync triggered via client API", .{});
+    }
+    
+    fn handleGetBlock(self: *Self, connection: net.Server.Connection, message: []const u8) !void {
+        const height_str = std.mem.trim(u8, message[10..], " \n\r"); // "GET_BLOCK:" is 10 chars
+        
+        const height = std.fmt.parseUnsigned(u32, height_str, 10) catch {
+            _ = try connection.stream.write("ERROR: Invalid height format\n");
+            return;
+        };
+        
+        const block = self.blockchain.getBlockByHeight(height) catch |err| switch (err) {
+            error.NotFound => {
+                _ = try connection.stream.write("ERROR: Block not found\n");
+                return;
+            },
+            else => {
+                const error_msg = try std.fmt.allocPrint(
+                    self.allocator,
+                    "ERROR: Failed to get block: {}\n",
+                    .{err}
+                );
+                defer self.allocator.free(error_msg);
+                _ = try connection.stream.write(error_msg);
+                return;
+            },
+        };
+        
+        // Format block information as JSON-like response
+        const block_hash = block.hash();
+        var hash_hex: [64]u8 = undefined;
+        _ = try std.fmt.bufPrint(&hash_hex, "{}", .{std.fmt.fmtSliceHexLower(&block_hash)});
+        
+        var prev_hash_hex: [64]u8 = undefined;
+        _ = try std.fmt.bufPrint(&prev_hash_hex, "{}", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+        
+        const response = try std.fmt.allocPrint(
+            self.allocator,
+            "BLOCK:{{\n  \"height\": {},\n  \"hash\": \"{s}\",\n  \"version\": {},\n  \"previous_hash\": \"{s}\",\n  \"timestamp\": {},\n  \"difficulty\": {},\n  \"nonce\": {},\n  \"tx_count\": {}\n}}\n",
+            .{
+                height,
+                &hash_hex,
+                block.header.version,
+                &prev_hash_hex,
+                block.header.timestamp,
+                block.header.difficulty,
+                block.header.nonce,
+                block.transactions.len,
+            }
+        );
+        defer self.allocator.free(response);
+        
+        _ = try connection.stream.write(response);
     }
     
     fn handleBalance(self: *Self, connection: net.Server.Connection, message: []const u8) !void {
@@ -298,12 +354,14 @@ pub const ClientApiServer = struct {
             _ = try connection.stream.write("ERROR: Failed to get nonce");
             return;
         };
-        const nonce = account.nonce;
+        
+        // Get the next available nonce considering pending transactions in mempool
+        const next_nonce = self.blockchain.getNextAvailableNonce(address) catch account.nonce;
         
         const response = try std.fmt.allocPrint(
             self.allocator,
             "NONCE:{}",
-            .{nonce}
+            .{next_nonce}
         );
         defer self.allocator.free(response);
         

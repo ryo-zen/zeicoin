@@ -1,12 +1,11 @@
 // protocol.zig - Core protocol constants and types for ZeiCoin
-// Clean, modern design without Bitcoin legacy
 
 const std = @import("std");
 
 // Protocol version - start fresh at 1
 pub const PROTOCOL_VERSION: u16 = 101; // 1.01 represented as 101
 
-// Network magic bytes - "ZEIC" 
+// Network magic bytes - "ZEIC"
 pub const MAGIC: u32 = 0x5A454943;
 
 // Default network port
@@ -34,31 +33,31 @@ pub const MessageType = enum(u8) {
     handshake_ack = 1,
     ping = 2,
     pong = 3,
-    
+
     // Sync messages (ZSP-001 batch sync only)
     // get_headers = 4,  // Removed per ZSP-001
     // headers = 5,      // Removed per ZSP-001
     get_blocks = 6,
     blocks = 7,
-    
-    // ZSP-001: Inventory messages disabled for batch sync  
+
+    // ZSP-001: Inventory messages disabled for batch sync
     // announce = 8,     // Disabled
-    // request = 9,      // Disabled  
+    // request = 9,      // Disabled
     // not_found = 10,   // Disabled
-    
+
     // Transaction/Block transfer (ZSP-001 core messages)
     transaction = 11,
     block = 12,
-    
+
     // Peer discovery (essential for network)
     get_peers = 13,
     peers = 14,
-    
+
     // Error handling (disabled for ZSP-001 simplicity)
     // reject = 15,      // Disabled
-    
+
     _,
-    
+
     pub fn isValid(self: MessageType) bool {
         // ZSP-001: Updated valid range to exclude disabled messages
         return @intFromEnum(self) <= @intFromEnum(MessageType.peers);
@@ -68,47 +67,47 @@ pub const MessageType = enum(u8) {
 // Service flags for node capabilities - clean, modern design
 pub const ServiceFlags = struct {
     // Core node capabilities
-    pub const NETWORK: u64 = 0x1;           // Full node with complete blockchain
-    pub const WITNESS: u64 = 0x2;           // Supports witness data
-    pub const PRUNED: u64 = 0x4;            // Pruned node (partial chain storage)
-    pub const MEMPOOL: u64 = 0x8;           // Has active mempool
-    
+    pub const NETWORK: u64 = 0x1; // Full node with complete blockchain
+    pub const WITNESS: u64 = 0x2; // Supports witness data
+    pub const PRUNED: u64 = 0x4; // Pruned node (partial chain storage)
+    pub const MEMPOOL: u64 = 0x8; // Has active mempool
+
     // Sync protocol capabilities
     // pub const HEADERS_FIRST: u64 = 0x10;    // Removed per ZSP-001
     pub const PARALLEL_DOWNLOAD: u64 = 0x20; // Can handle parallel block requests
-    pub const FAST_SYNC: u64 = 0x40;        // Supports optimized fast sync
-    pub const CHECKPOINT_SYNC: u64 = 0x80;  // Supports checkpoint-based sync
-    
+    pub const FAST_SYNC: u64 = 0x40; // Supports optimized fast sync
+    pub const CHECKPOINT_SYNC: u64 = 0x80; // Supports checkpoint-based sync
+
     // Network optimization capabilities
-    pub const COMPACT_BLOCKS: u64 = 0x100;  // Supports compact block relay
-    pub const BLOOM_FILTER: u64 = 0x200;    // Supports bloom filtered connections
-    pub const FEE_FILTER: u64 = 0x400;      // Supports fee filtering
-    
+    pub const COMPACT_BLOCKS: u64 = 0x100; // Supports compact block relay
+    pub const BLOOM_FILTER: u64 = 0x200; // Supports bloom filtered connections
+    pub const FEE_FILTER: u64 = 0x400; // Supports fee filtering
+
     // Mining and validation
-    pub const MINING: u64 = 0x1000;         // Active miner
-    pub const VALIDATION: u64 = 0x2000;     // Full transaction validation
-    
+    pub const MINING: u64 = 0x1000; // Active miner
+    pub const VALIDATION: u64 = 0x2000; // Full transaction validation
+
     // ZSP-001: Service combinations for common node types (headers-first removed)
     pub const FULL_NODE: u64 = NETWORK | MEMPOOL | VALIDATION;
     pub const FAST_NODE: u64 = FULL_NODE | PARALLEL_DOWNLOAD | FAST_SYNC;
     pub const PRUNED_NODE: u64 = PRUNED | MEMPOOL | VALIDATION;
     pub const MINING_NODE: u64 = FULL_NODE | MINING;
-    
+
     /// Check if a service set represents a full node
     pub fn isFullNode(services: u64) bool {
         return (services & NETWORK) != 0 and (services & VALIDATION) != 0;
     }
-    
+
     /// Check if a service set supports ZSP-001 batch sync
     pub fn supportsBatchSync(services: u64) bool {
         return (services & PARALLEL_DOWNLOAD) != 0 or (services & FAST_SYNC) != 0;
     }
-    
+
     /// Check if a service set is suitable for sync peer (ZSP-001 compliant)
     pub fn isSuitableForSync(services: u64) bool {
         return isFullNode(services) and supportsBatchSync(services);
     }
-    
+
     /// Get human-readable service description
     pub fn describe(services: u64, allocator: std.mem.Allocator) ![]const u8 {
         if (services == 0) return try allocator.dupe(u8, "NONE");
@@ -116,17 +115,17 @@ pub const ServiceFlags = struct {
         if (services == FULL_NODE) return try allocator.dupe(u8, "FULL_NODE");
         if (services == MINING_NODE) return try allocator.dupe(u8, "MINING_NODE");
         if (services == PRUNED_NODE) return try allocator.dupe(u8, "PRUNED_NODE");
-        
+
         var parts = std.ArrayList([]const u8).init(allocator);
         defer parts.deinit();
-        
+
         if ((services & NETWORK) != 0) try parts.append("NETWORK");
         if ((services & PRUNED) != 0) try parts.append("PRUNED");
         if ((services & MEMPOOL) != 0) try parts.append("MEMPOOL");
         if ((services & PARALLEL_DOWNLOAD) != 0) try parts.append("PARALLEL");
         if ((services & FAST_SYNC) != 0) try parts.append("FAST_SYNC");
         if ((services & MINING) != 0) try parts.append("MINING");
-        
+
         return try std.mem.join(allocator, "|", parts.items);
     }
 };
@@ -136,8 +135,8 @@ pub const InventoryType = enum(u32) {
     transaction = 1,
     block = 2,
     filtered_block = 3, // For light clients
-    compact_block = 4,  // For bandwidth optimization
-    
+    compact_block = 4, // For bandwidth optimization
+
     pub fn isValid(self: InventoryType) bool {
         return @intFromEnum(self) >= 1 and @intFromEnum(self) <= 4;
     }
@@ -161,9 +160,9 @@ pub const MessageHeader = packed struct {
     message_type: MessageType,
     payload_length: u32,
     checksum: u32,
-    
+
     pub const SIZE = @sizeOf(MessageHeader);
-    
+
     pub fn init(msg_type: MessageType, payload_len: u32) MessageHeader {
         return .{
             .magic = MAGIC,
@@ -172,32 +171,32 @@ pub const MessageHeader = packed struct {
             .checksum = 0, // Set after payload serialization
         };
     }
-    
+
     pub fn setChecksum(self: *MessageHeader, payload: []const u8) void {
         self.checksum = calculateChecksum(payload);
     }
-    
+
     pub fn verifyChecksum(self: MessageHeader, payload: []const u8) bool {
         return self.checksum == calculateChecksum(payload);
     }
-    
+
     pub fn serialize(self: MessageHeader, writer: anytype) !void {
         try writer.writeInt(u32, self.magic, .little);
         try writer.writeByte(@intFromEnum(self.message_type));
         try writer.writeInt(u32, self.payload_length, .little);
         try writer.writeInt(u32, self.checksum, .little);
     }
-    
+
     pub fn deserialize(reader: anytype) !MessageHeader {
         const magic = try reader.readInt(u32, .little);
         if (magic != MAGIC) return error.InvalidMagic;
-        
+
         const msg_type = try reader.readEnum(MessageType, .little);
         const payload_length = try reader.readInt(u32, .little);
         if (payload_length > MAX_MESSAGE_SIZE) return error.MessageTooLarge;
-        
+
         const checksum = try reader.readInt(u32, .little);
-        
+
         return MessageHeader{
             .magic = magic,
             .message_type = msg_type,
@@ -233,16 +232,16 @@ test "calculateChecksum" {
 // Test message header
 test "MessageHeader serialization" {
     var header = MessageHeader.init(.ping, 8);
-    header.setChecksum(&[_]u8{1, 2, 3, 4, 5, 6, 7, 8});
-    
+    header.setChecksum(&[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 });
+
     var buffer: [MessageHeader.SIZE]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buffer);
-    
+
     try header.serialize(stream.writer());
-    
+
     stream.reset();
     const decoded = try MessageHeader.deserialize(stream.reader());
-    
+
     try std.testing.expectEqual(header.magic, decoded.magic);
     try std.testing.expectEqual(header.message_type, decoded.message_type);
     try std.testing.expectEqual(header.payload_length, decoded.payload_length);

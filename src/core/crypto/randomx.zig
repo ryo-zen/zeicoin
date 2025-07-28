@@ -138,7 +138,7 @@ pub const RandomXContext = struct {
         
         // Parse result: hash_hex:meets_difficulty
         const output_str = stdout.items;
-        std.debug.print("RandomX helper stdout: '{s}' (len={})\n", .{output_str, output_str.len});
+        // std.debug.print("RandomX helper stdout: '{s}' (len={})\n", .{output_str, output_str.len});
         const colon_pos = std.mem.indexOf(u8, output_str, ":") orelse {
             std.debug.print("Failed to find colon in RandomX output\n", .{});
             return RandomXError.HashFailed;

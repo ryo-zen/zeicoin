@@ -5,6 +5,9 @@ const std = @import("std");
 const net = std.net;
 const types = @import("../types/types.zig");
 const command_line = @import("../server/command_line.zig");
+const ip_detection = @import("ip_detection.zig");
+
+const print = std.debug.print;
 
 // Re-export the modular components
 pub const protocol = @import("protocol/protocol.zig");
@@ -29,7 +32,8 @@ pub const NetworkManager = struct {
     message_handler: MessageHandler,
     running: bool,
     stopped: bool,
-    bootstrap_nodes: []const command_line.BootstrapNode,
+    bootstrap_nodes: []command_line.BootstrapNode,
+    owns_bootstrap_nodes: bool,
     last_reconnect_attempt: i64,
     
     const Self = @This();
@@ -47,6 +51,7 @@ pub const NetworkManager = struct {
             .running = false,
             .stopped = false,
             .bootstrap_nodes = &[_]command_line.BootstrapNode{},
+            .owns_bootstrap_nodes = false,
             .last_reconnect_attempt = 0,
         };
     }
@@ -66,7 +71,13 @@ pub const NetworkManager = struct {
         // Clean up peer manager
         self.peer_manager.deinit();
         
-        // Note: bootstrap_nodes is a slice, not owned by us, so no cleanup needed
+        // Clean up bootstrap nodes if we own them
+        if (self.owns_bootstrap_nodes and self.bootstrap_nodes.len > 0) {
+            for (self.bootstrap_nodes) |node| {
+                self.allocator.free(node.ip);
+            }
+            self.allocator.free(self.bootstrap_nodes);
+        }
         
         // Process will exit soon anyway, so threads will be cleaned up by OS
     }
@@ -90,6 +101,12 @@ pub const NetworkManager = struct {
     
     /// Connect to a peer
     pub fn connectToPeer(self: *Self, address: net.Address) !void {
+        // Prevent self-connections by checking if target IP is our public IP
+        if (ip_detection.isSelfConnection(self.allocator, address)) {
+            std.log.warn("🚫 Self-connection prevented: skipping connection to own public IP {}", .{address});
+            return;
+        }
+        
         std.log.info("Attempting to connect to peer at {}", .{address});
         const peer = try self.peer_manager.addPeer(address);
         std.log.info("Added peer {} to peer manager", .{peer.id});
@@ -272,7 +289,7 @@ pub const NetworkManager = struct {
         };
         
         const block_hash = block.hash();
-        std.log.info("Broadcasted block {} directly to peers (ZSP-001)", .{
+        std.log.debug("Broadcasted block {} directly to peers (ZSP-001)", .{
             std.fmt.fmtSliceHexLower(&block_hash)
         });
     }
@@ -310,9 +327,27 @@ pub const NetworkManager = struct {
         return .{ .total = stats.total, .connected = stats.connected, .syncing = stats.syncing };
     }
     
-    /// Set bootstrap nodes for auto-reconnect
-    pub fn setBootstrapNodes(self: *Self, nodes: []const command_line.BootstrapNode) void {
-        self.bootstrap_nodes = nodes;
+    /// Set bootstrap nodes for auto-reconnect (creates a copy)
+    pub fn setBootstrapNodes(self: *Self, nodes: []const command_line.BootstrapNode) !void {
+        // Clean up existing nodes if we own them
+        if (self.owns_bootstrap_nodes and self.bootstrap_nodes.len > 0) {
+            for (self.bootstrap_nodes) |node| {
+                self.allocator.free(node.ip);
+            }
+            self.allocator.free(self.bootstrap_nodes);
+        }
+        
+        // Create a copy of the nodes
+        const nodes_copy = try self.allocator.alloc(command_line.BootstrapNode, nodes.len);
+        for (nodes, 0..) |node, i| {
+            nodes_copy[i] = .{
+                .ip = try self.allocator.dupe(u8, node.ip),
+                .port = node.port,
+            };
+        }
+        
+        self.bootstrap_nodes = nodes_copy;
+        self.owns_bootstrap_nodes = true;
     }
     
     /// Clean up timed out connections and handle auto-reconnect

@@ -221,6 +221,28 @@ pub const MempoolStorage = struct {
         return removed_count;
     }
     
+    /// Get the highest nonce for pending transactions from a specific address
+    /// Returns the highest nonce found in mempool, or a sentinel value if none found
+    pub fn getHighestNonceForAddress(self: *Self, address: types.Address) u64 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        
+        var highest_nonce: u64 = 0;
+        var found = false;
+        
+        for (self.transactions.items) |tx| {
+            if (std.mem.eql(u8, &tx.sender.hash, &address.hash)) {
+                if (!found or tx.nonce > highest_nonce) {
+                    highest_nonce = tx.nonce;
+                    found = true;
+                }
+            }
+        }
+        
+        // Return highest found nonce, or max u64 as sentinel if no transactions found
+        return if (found) highest_nonce else std.math.maxInt(u64);
+    }
+    
     /// Get mempool statistics
     pub fn getStats(self: *Self) MempoolStats {
         self.mutex.lock();

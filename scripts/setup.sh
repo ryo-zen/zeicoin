@@ -96,20 +96,24 @@ fi
 echo "🔨 Building ZeiCoin (Release mode)..."
 zig build -Doptimize=ReleaseFast
 
-# Create mining wallet
+# Create mining wallet with unique random ID
 echo "👛 Creating mining wallet..."
 if [ ! -d "wallets" ]; then
     mkdir -p wallets
 fi
 
-# Create Alice wallet if it doesn't exist
-if [ ! -f "wallets/Alice.wallet" ]; then
-    echo "Creating 'Alice' wallet for mining..."
-    ./zig-out/bin/zeicoin wallet create Alice
-    echo "✅ Alice wallet created!"
-else
-    echo "✅ Alice wallet already exists"
-fi
+# Generate unique miner name with random number
+RANDOM_ID=$(shuf -i 1000000000-9999999999 -n 1)
+MINER_NAME="miner-$RANDOM_ID"
+
+# Create unique miner wallet
+echo "Creating '$MINER_NAME' wallet for mining..."
+./zig-out/bin/zeicoin wallet create "$MINER_NAME"
+echo "✅ $MINER_NAME wallet created!"
+
+# Save miner name for easy reference
+echo "$MINER_NAME" > .miner_name
+echo "📝 Miner name saved to .miner_name file"
 
 # Configure firewall for ZeiCoin ports
 echo "🔥 Configuring firewall..."
@@ -139,16 +143,18 @@ echo "Quick start:"
 echo "  scripts/start_zei_server.sh    # Start public server"
 echo "  zig build test                 # Run all tests"
 echo ""
-echo "Mining wallet created: Alice"
-echo "  ./zig-out/bin/zeicoin balance Alice"
-echo "  ./zig-out/bin/zeicoin address Alice"
+echo "Mining wallet created: $MINER_NAME"
+echo "  ./zig-out/bin/zeicoin balance $MINER_NAME"
+echo "  ./zig-out/bin/zeicoin address $MINER_NAME"
 echo ""
 echo "Start server with mining:"
-echo "  ./zig-out/bin/zen_server --mine Alice"
+echo "  ./zig-out/bin/zen_server --mine $MINER_NAME"
+echo "  # OR use convenient script: scripts/start_mining.sh"
+echo "  # OR use saved name: ./zig-out/bin/zen_server --mine \$(cat .miner_name)"
 echo ""
 echo "For public server deployment with mining:"
-echo "  ZEICOIN_MINER_WALLET=ryo scripts/start_zei_server.sh"
-echo "  # Replace 'ryo' with your wallet name"
+echo "  ZEICOIN_MINER_WALLET=$MINER_NAME scripts/start_zei_server.sh"
+echo "  # Your unique miner wallet name: $MINER_NAME"
 echo "  # Server will auto-detect public IP and start RandomX mining"
 echo ""
 # Create systemd service for production deployment
@@ -159,7 +165,7 @@ if command -v systemctl &> /dev/null; then
     
     sudo tee /etc/systemd/system/zeicoin-mining.service > /dev/null <<EOF
 [Unit]
-Description=ZeiCoin Mining Server
+Description=ZeiCoin Mining Server ($MINER_NAME)
 After=network.target
 Wants=network.target
 
@@ -170,7 +176,7 @@ Group=root
 WorkingDirectory=$CURRENT_DIR
 Environment="ZEICOIN_SERVER=127.0.0.1"
 Environment="ZEICOIN_BIND_IP=0.0.0.0"
-ExecStart=$CURRENT_DIR/zig-out/bin/zen_server --mine Alice
+ExecStart=$CURRENT_DIR/zig-out/bin/zen_server --mine $MINER_NAME
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
@@ -188,20 +194,7 @@ EOF
     sudo systemctl enable zeicoin-mining.service
     
     echo "✅ Systemd service created and enabled!"
-    
-    # Test the service
-    echo "🧪 Testing service configuration..."
-    if sudo systemctl start zeicoin-mining.service; then
-        sleep 3
-        if sudo systemctl is-active --quiet zeicoin-mining.service; then
-            echo "✅ Service started successfully!"
-            sudo systemctl stop zeicoin-mining.service
-        else
-            echo "❌ Service failed to start - check logs: sudo journalctl -u zeicoin-mining.service"
-        fi
-    else
-        echo "❌ Service failed to start - check configuration"
-    fi
+    echo "⚠️  Service is created but not started - you control when mining begins"
     
     echo ""
     echo "Service management:"

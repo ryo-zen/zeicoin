@@ -55,9 +55,8 @@ pub fn calculateBlockWork(difficulty_bits: u32) u128 {
     // Extract exponent and mantissa from compact bits
     const exponent = @as(u32, difficulty_bits >> 24) & 0xff;
     const mantissa = difficulty_bits & 0xffffff;
-    
+
     // Basic work approximation: higher difficulty = more work
-    // This is simplified - Bitcoin uses more complex calculation
     if (exponent <= 3) {
         return mantissa >> @intCast(8 * (3 - exponent));
     } else {
@@ -100,11 +99,11 @@ pub fn addTimeData(ip: u32, network_time: i64) !void {
             if (debug_mode) {
                 print("WARNING: Time offset is large: {:+} minutes, using time sync module...\n", .{@divTrunc(median, 60)});
             }
-            
+
             // Use the dedicated time synchronization module
             const time_mod = @import("../time/time.zig");
             var time_sync = time_mod.TimeSynchronizer.init(.{ .debug = debug_mode });
-            
+
             // Let time synchronizer handle the verification logic
             var temp_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer temp_allocator.deinit();
@@ -114,7 +113,7 @@ pub fn addTimeData(ip: u32, network_time: i64) !void {
                 }
                 return median;
             };
-            
+
             time_offset = time_sync.getTimeOffset();
         }
 
@@ -164,7 +163,7 @@ pub fn formatMoney(allocator: Allocator, amount: i64, show_plus: bool) ![]u8 {
     return result.toOwnedSlice();
 }
 
-/// Parse money string to satoshi amount (e.g., "1.50" -> 150000000)
+/// Parse money string to zei amount (e.g., "1.50" -> 150000000)
 pub fn parseMoney(input: []const u8) UtilError!i64 {
     var whole_str = std.ArrayList(u8).init(std.heap.page_allocator);
     defer whole_str.deinit();
@@ -350,7 +349,7 @@ pub fn hexNumStr(allocator: Allocator, data: []const u8, prefix_0x: bool) ![]u8 
     return result.toOwnedSlice();
 }
 
-/// Double SHA256 hash (Bitcoin's OG standard hash function)
+/// Double SHA256 hash
 pub fn hash256(data: []const u8) [32]u8 {
     var hasher1 = std.crypto.hash.sha2.Sha256.init(.{});
     hasher1.update(data);
@@ -367,12 +366,11 @@ pub fn hash160(_: Allocator, data: []const u8) ![20]u8 {
     // Use BLAKE3 with 20-byte output (perfect for addresses)
     var hasher = std.crypto.hash.Blake3.init(.{});
     hasher.update(data);
-    
+
     var result: [20]u8 = undefined;
     hasher.final(result[0..]);
     return result;
 }
-
 
 /// Print exception information (Zig equivalent)
 pub fn printException(err: anyerror, thread_name: []const u8) void {

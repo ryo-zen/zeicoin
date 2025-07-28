@@ -66,17 +66,30 @@ fn getServerIP(allocator: std.mem.Allocator) ![]const u8 {
         }
     }
 
-    // 3. Try bootstrap servers from types.zig
-    for (types.BOOTSTRAP_NODES) |bootstrap_addr| {
+    // 3. Try bootstrap servers from JSON config
+    const bootstrap_nodes = types.loadBootstrapNodes(allocator) catch |err| {
+        print("⚠️  Failed to load bootstrap nodes: {}\n", .{err});
+        return error.NoServerFound;
+    };
+    defer types.freeBootstrapNodes(allocator, bootstrap_nodes);
+    
+    print("🔍 Testing bootstrap nodes for health...\n", .{});
+    for (bootstrap_nodes) |bootstrap_addr| {
         // Parse IP from "ip:port" format
         var it = std.mem.splitScalar(u8, bootstrap_addr, ':');
         if (it.next()) |ip_str| {
+            print("  Testing {s}... ", .{ip_str});
             if (testServerConnection(ip_str)) {
-                print("🌐 Found ZeiCoin server at bootstrap node: {s}\n", .{ip_str});
+                print("✅ Healthy!\n", .{});
+                print("🌐 Using healthy bootstrap node: {s}\n", .{ip_str});
                 return allocator.dupe(u8, ip_str);
+            } else {
+                print("❌ Unhealthy or offline\n", .{});
             }
         }
     }
+    
+    print("⚠️  No healthy bootstrap nodes found\n", .{});
 
     // 4. Final fallback to localhost
     print("💡 Using localhost fallback (set ZEICOIN_SERVER to override)\n", .{});
@@ -179,11 +192,19 @@ fn readWithTimeout(stream: net.Stream, buffer: []u8) !usize {
 fn testServerConnection(ip: []const u8) bool {
     const address = net.Address.parseIp4(ip, 10802) catch return false;
 
-    // Quick connection test
+    // Connect and test actual API response
     var stream = connectWithTimeout(address) catch return false;
     defer stream.close();
 
-    return true;
+    // Send status request to verify it's actually a ZeiCoin server
+    stream.writeAll("BLOCKCHAIN_STATUS\n") catch return false;
+
+    // Try to read response - if we get any data, server is healthy
+    var buffer: [64]u8 = undefined;
+    const bytes_read = readWithTimeout(stream, &buffer) catch return false;
+
+    // Server is healthy if it responds with any data
+    return bytes_read > 0;
 }
 
 const Command = enum {
@@ -193,6 +214,7 @@ const Command = enum {
     status,
     address,
     sync,
+    block,
     help,
 };
 
@@ -230,6 +252,7 @@ pub fn main() !void {
         .status => try handleStatusCommand(allocator, args[2..]),
         .address => try handleAddressCommand(allocator, args[2..]),
         .sync => try handleSyncCommand(allocator, args[2..]),
+        .block => try handleBlockCommand(allocator, args[2..]),
         .help => printHelp(),
     }
 }
@@ -650,7 +673,6 @@ fn handleStatusCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     };
     const response = buffer[0..bytes_read];
 
-    print("🌐 Server: {s}:10802\n", .{server_ip});
     print("📨 Status: {s}\n", .{response});
 }
 
@@ -738,6 +760,80 @@ fn handleSyncCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
     print("🌐 Server: {s}:10802\n", .{server_ip});
     print("📨 Sync response: {s}\n", .{response});
+}
+
+fn handleBlockCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+    if (args.len < 1) {
+        print("❌ Block height required\n", .{});
+        print("Usage: zeicoin block <height>\n", .{});
+        return;
+    }
+
+    const height_str = args[0];
+    const height = std.fmt.parseUnsigned(u32, height_str, 10) catch {
+        print("❌ Invalid height format: {s}\n", .{height_str});
+        print("Usage: zeicoin block <height>\n", .{});
+        return;
+    };
+
+    print("🔗 Getting block at height {}...\n", .{height});
+
+    // Connect to server
+    const server_ip = try getServerIP(allocator);
+    defer allocator.free(server_ip);
+
+    const address = net.Address.parseIp4(server_ip, 10802) catch {
+        print("❌ Invalid server address\n", .{});
+        return;
+    };
+
+    const connection = connectWithTimeout(address) catch |err| {
+        switch (err) {
+            error.ConnectionTimeout => {
+                print("❌ Connection timeout to ZeiCoin server at {s}:10802 (5s)\n", .{server_ip});
+                return;
+            },
+            else => {
+                print("❌ Cannot connect to ZeiCoin server at {s}:10802\n", .{server_ip});
+                print("💡 Make sure the server is running\n", .{});
+                return;
+            },
+        }
+    };
+    defer connection.close();
+
+    // Send get block request
+    const request = try std.fmt.allocPrint(allocator, "GET_BLOCK:{}\n", .{height});
+    defer allocator.free(request);
+    try connection.writeAll(request);
+
+    // Read response with timeout
+    var buffer: [2048]u8 = undefined;
+    const bytes_read = readWithTimeout(connection, &buffer) catch |err| {
+        switch (err) {
+            error.ReadTimeout => {
+                print("❌ Server response timeout (5s)\n", .{});
+                return;
+            },
+            else => {
+                print("❌ Failed to read server response\n", .{});
+                return;
+            },
+        }
+    };
+    const response = buffer[0..bytes_read];
+
+    if (std.mem.startsWith(u8, response, "ERROR:")) {
+        print("❌ {s}\n", .{response[7..]});
+        return;
+    }
+
+    if (std.mem.startsWith(u8, response, "BLOCK:")) {
+        print("📦 Block Information:\n", .{});
+        print("{s}\n", .{response[6..]});
+    } else {
+        print("📨 Response: {s}\n", .{response});
+    }
 }
 
 
@@ -1141,13 +1237,15 @@ fn printHelp() void {
     print("NETWORK COMMANDS:\n", .{});
     print("  zeicoin status                   Show network status\n", .{});
     print("  zeicoin sync                     Trigger manual blockchain sync\n", .{});
+    print("  zeicoin block <height>           Inspect block at specific height\n", .{});
     print("  zeicoin address [wallet]         Show wallet address\n\n", .{});
     print("EXAMPLES:\n", .{});
     print("  zeicoin wallet create alice      # Create wallet named 'alice'\n", .{});
     print("  zeicoin balance alice            # Check alice's balance (pre-funded)\n", .{});
     print("  zeicoin send 50 tzei1qr2q...      # Send 50 ZEI to address\n", .{});
     print("  zeicoin send 50 bob               # Send 50 ZEI to wallet 'bob'\n", .{});
-    print("  zeicoin status                   # Check network status\n\n", .{});
+    print("  zeicoin status                   # Check network status\n", .{});
+    print("  zeicoin block 6                  # Inspect block at height 6\n\n", .{});
     print("ENVIRONMENT:\n", .{});
     print("  ZEICOIN_SERVER=ip               Set server IP (default: 127.0.0.1)\n\n", .{});
     print("💡 Default wallet is 'default' if no name specified\n", .{});

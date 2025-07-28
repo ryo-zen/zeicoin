@@ -365,6 +365,18 @@ pub const Database = struct {
         tx.deinit(self.allocator);
         return true;
     }
+
+    /// Check if block exists by height (for sync deduplication)
+    pub fn blockExistsByHeight(self: *Database, height: u32) bool {
+        // Create filename: blocks/000012.block
+        const filename = std.fmt.allocPrint(self.allocator, "{s}/{:0>6}.block", .{ self.blocks_dir[0..self.blocks_dir_len], height }) catch return false;
+        defer self.allocator.free(filename);
+        
+        // Check if file exists
+        const file = std.fs.cwd().openFile(filename, .{}) catch return false;
+        file.close();
+        return true;
+    }
     
     /// Remove a block at a specific height
     pub fn removeBlock(self: *Database, height: u32) !void {

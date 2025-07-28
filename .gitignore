@@ -65,3 +65,9 @@ run-mempool-gossip-test.sh
 zig_docs
 zig_docs_std
 scripts/deploy_files_simple.sh
+docker-compose.sync-mining-test.yml
+.gitignore
+docker-compose.stress-sync-test.yml
+docker-compose.crash-test.yml
+docker-compose.consensus-test.yml
+docker-compose.consensus-debug.yml

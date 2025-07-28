@@ -8,21 +8,27 @@ const types = @import("../types/types.zig");
 const randomx = @import("../crypto/randomx.zig");
 const MiningContext = @import("context.zig").MiningContext;
 
+// Global mutex to prevent concurrent RandomX validation (prevents OOM)
+var randomx_validation_mutex = std.Thread.Mutex{};
+
 /// Validate block proof-of-work using RandomX
 pub fn validateBlockPoW(ctx: MiningContext, block: types.Block) !bool {
+    // Serialize RandomX validation to prevent concurrent subprocess OOM
+    randomx_validation_mutex.lock();
+    defer randomx_validation_mutex.unlock();
     // Initialize RandomX context for validation
     const network_name = switch (types.CURRENT_NETWORK) {
         .testnet => "TestNet",
         .mainnet => "MainNet",
     };
     const chain_key = randomx.createRandomXKey(network_name);
-    
+
     // Convert binary key to hex string for RandomX helper
     var hex_key: [64]u8 = undefined;
     for (chain_key, 0..) |byte, i| {
-        _ = std.fmt.bufPrint(hex_key[i*2..i*2+2], "{x:0>2}", .{byte}) catch unreachable;
+        _ = std.fmt.bufPrint(hex_key[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch unreachable;
     }
-    
+
     const mode: randomx.RandomXMode = if (types.ZenMining.RANDOMX_MODE) .fast else .light;
     var rx_ctx = randomx.RandomXContext.init(ctx.allocator, &hex_key, mode) catch {
         print("❌ Failed to initialize RandomX for validation\n", .{});

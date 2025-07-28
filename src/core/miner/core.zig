@@ -23,12 +23,12 @@ const Address = types.Address;
 /// Mine a new block with transactions from mempool
 pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_address: Address) !types.Block {
     _ = miner_keypair; // Coinbase transactions don't need signatures
-    print("⛏️  zenMineBlock: Starting to mine new block\n", .{});
-    
+    print("⛏️ ZenMineBlock: Starting to mine new block\n", .{});
+
     // Get transactions from mempool manager
     const mempool_transactions = try ctx.mempool_manager.getTransactionsForMining();
     defer ctx.mempool_manager.freeTransactionArray(mempool_transactions);
-    
+
     // 💰 Calculate total fees from mempool transactions
     var total_fees: u64 = 0;
     for (mempool_transactions) |tx| {
@@ -92,16 +92,30 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
 
     // Get previous block hash and calculate next difficulty
     const current_height = try ctx.blockchain.getHeight();
-    
+
     // Update mining state height before mining
     ctx.mining_state.current_height.store(current_height, .release);
     print("🔍 zenMineBlock: storing current_height = {} to atomic\n", .{current_height});
-    const previous_hash = if (current_height > 0) blk: {
-        var prev_block = try ctx.database.getBlock(current_height - 1);
+
+    // Get previous block hash even for block 1 (height 0 = genesis exists)
+    // Check if database is completely empty (no blocks at all)
+    const has_genesis = ctx.database.getBlock(0) catch null != null;
+
+    const previous_hash = if (current_height == 0 and !has_genesis) blk: {
+        // Special case: mining first block when genesis doesn't exist yet
+        // This should only happen during chain initialization
+        break :blk std.mem.zeroes(Hash);
+    } else blk: {
+        // Normal case: get the hash of the previous block (current_height is the existing tip)
+        // When mining block at height N+1, we need hash of block N
+        print("🔍 Mining block at height {}, getting previous block at height {}\n", .{ current_height + 1, current_height });
+        var prev_block = try ctx.database.getBlock(current_height);
         const hash = prev_block.hash();
+        const hash_hex = std.fmt.fmtSliceHexLower(&hash);
+        print("🔍 Previous block hash: {}\n", .{hash_hex});
         prev_block.deinit(ctx.allocator);
         break :blk hash;
-    } else std.mem.zeroes(Hash);
+    };
 
     // Calculate difficulty for new block
     const next_difficulty_target = try ctx.blockchain.calculateNextDifficulty();
@@ -118,7 +132,12 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
             .witness_root = std.mem.zeroes(Hash), // No witness data yet
             .state_root = std.mem.zeroes(Hash), // No state yet
             .extra_nonce = 0,
-            .extra_data = std.mem.zeroes([32]u8), // No extra data
+            .extra_data = blk: {
+                // Add randomness to prevent identical blocks between miners
+                var random_data: [32]u8 = std.mem.zeroes([32]u8);
+                std.crypto.random.bytes(&random_data);
+                break :blk random_data;
+            },
         },
         // Deep copy all transactions to ensure the block owns its memory.
         // This prevents double-frees or invalid frees when the block is deinitialized.
@@ -132,7 +151,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
                 }
                 ctx.allocator.free(allocated_txs);
             }
-            
+
             for (all_transactions, 0..) |tx, i| {
                 allocated_txs[i] = try tx.dupe(ctx.allocator);
                 copied_count += 1;
@@ -147,7 +166,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
     // ZEN PROOF-OF-WORK: Find valid nonce
     // Ensure mining state height is synchronized before mining
     ctx.mining_state.current_height.store(current_height, .release);
-    
+
     const found_nonce = zenProofOfWork(ctx, &new_block);
 
     const mining_time = util.getTime() - start_time;
@@ -165,8 +184,11 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
 
         // Save block to database at next height
         const block_height = current_height + 1;
+        const block_hash_hex = std.fmt.fmtSliceHexLower(&new_block.hash());
+        const prev_hash_hex = std.fmt.fmtSliceHexLower(&new_block.header.previous_hash);
+        print("💾 Saving block {} with hash {} and previous_hash {}\n", .{ block_height, block_hash_hex, prev_hash_hex });
         try ctx.database.saveBlock(block_height, new_block);
-        
+
         // Check for matured coinbase rewards (100 block maturity)
         if (block_height >= types.COINBASE_MATURITY) {
             const maturity_height = block_height - types.COINBASE_MATURITY;
@@ -189,7 +211,8 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
 
         return new_block;
     } else {
-        print("😔 Zen mining failed - nonce not found (the universe wasn't ready)\n", .{});
+        const height = ctx.blockchain.getHeight() catch 0;
+        print("😔 [MINING TIMEOUT] Height {} - nonce not found (the universe wasn't ready)\n", .{height});
         // Free block memory and return error
         new_block.deinit(ctx.allocator);
         return error.MiningFailed;

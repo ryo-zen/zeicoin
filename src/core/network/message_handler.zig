@@ -82,13 +82,13 @@ pub const NetworkMessageHandler = struct {
     
     /// Broadcast new block to network peers (delegates to blockchain's network coordinator)
     pub fn broadcastNewBlock(self: *Self, block: Block) !void {
-        print("🔧 [BROADCAST] Attempting to broadcast block...\n", .{});
-        print("🔧 [BROADCAST] Network coordinator ptr: {*}\n", .{&self.blockchain.network_coordinator});
+        // print("🔧 [BROADCAST] Attempting to broadcast block...\n", .{});
+        // print("🔧 [BROADCAST] Network coordinator ptr: {*}\n", .{&self.blockchain.network_coordinator});
         if (self.blockchain.network_coordinator.getNetworkManager()) |network| {
-            print("📡 Broadcasting new block to {} peers\n", .{network.peer_manager.getConnectedCount()});
+            // print("📡 Broadcasting new block to {} peers\n", .{network.peer_manager.getConnectedCount()});
             try network.broadcastBlock(block);
         } else {
-            print("⚠️  No network manager - block not broadcasted\n", .{});
+            // print("⚠️  No network manager - block not broadcasted\n", .{});
         }
     }
     

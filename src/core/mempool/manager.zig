@@ -103,15 +103,28 @@ pub const MempoolManager = struct {
     
     /// Add transaction from local source (CLI, RPC, etc.)
     pub fn addTransaction(self: *Self, transaction: Transaction) !void {
+        const tx_hash = transaction.hash();
+        const amount_zei = @as(f64, @floatFromInt(transaction.amount)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+        const fee_zei = @as(f64, @floatFromInt(transaction.fee)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+        
+        print("🔄 [TX LIFECYCLE] Received transaction {s} from {x} → {x}: {d:.8} ZEI (fee: {d:.8}, nonce: {})\n", .{
+            std.fmt.fmtSliceHexLower(tx_hash[0..8]), transaction.sender.hash, transaction.recipient.hash, amount_zei, fee_zei, transaction.nonce
+        });
+        
         const result = try self.network_handler.processLocalTransaction(transaction);
         
         if (!result.accepted) {
+            const reject_tx_hash = transaction.hash();
             switch (result.reason) {
                 .accepted => {}, // This shouldn't happen when !result.accepted, but required for completeness
-                .duplicate_in_mempool => return error.DuplicateTransaction,
+                .duplicate_in_mempool => {
+                    print("❌ [TX LIFECYCLE] Transaction {s} REJECTED: duplicate in mempool\n", .{std.fmt.fmtSliceHexLower(reject_tx_hash[0..8])});
+                    return error.DuplicateTransaction;
+                },
                 .validation_failed => {
                     // Check if we have a specific validation error
                     if (result.validation_error) |validation_error| {
+                        print("❌ [TX LIFECYCLE] Transaction {s} REJECTED: validation failed ({})\n", .{std.fmt.fmtSliceHexLower(reject_tx_hash[0..8]), validation_error});
                         switch (validation_error) {
                             error.InsufficientBalance => return error.InsufficientBalance,
                             error.FeeTooLow => return error.FeeTooLow,
@@ -120,11 +133,19 @@ pub const MempoolManager = struct {
                             else => return error.InvalidTransaction,
                         }
                     }
+                    print("❌ [TX LIFECYCLE] Transaction {s} REJECTED: validation failed (unknown)\n", .{std.fmt.fmtSliceHexLower(reject_tx_hash[0..8])});
                     return error.InvalidTransaction;
                 },
-                .mempool_limits_exceeded => return error.MempoolFull,
+                .mempool_limits_exceeded => {
+                    print("❌ [TX LIFECYCLE] Transaction {s} REJECTED: mempool full\n", .{std.fmt.fmtSliceHexLower(reject_tx_hash[0..8])});
+                    return error.MempoolFull;
+                },
             }
         }
+        
+        const accept_tx_hash = transaction.hash();
+        const mempool_size = self.getTransactionCount();
+        print("✅ [TX LIFECYCLE] Transaction {s} ACCEPTED and added to mempool (size: {})\n", .{std.fmt.fmtSliceHexLower(accept_tx_hash[0..8]), mempool_size});
         
         // Signal mining thread if available
         if (self.mining_state) |mining_state| {
@@ -316,6 +337,11 @@ pub const MempoolManager = struct {
         };
     }
     
+    /// Get the highest nonce for pending transactions from a specific address
+    pub fn getHighestPendingNonce(self: *Self, address: types.Address) u64 {
+        return self.storage.getHighestNonceForAddress(address);
+    }
+
     /// Print mempool status
     pub fn printStatus(self: *Self) void {
         const stats = self.getStats();

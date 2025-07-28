@@ -18,6 +18,61 @@ fn acceptConnectionsThread(network_manager: *network.NetworkManager) void {
     };
 }
 
+/// Load bootstrap nodes from JSON config, with command line fallback
+fn loadBootstrapNodes(allocator: std.mem.Allocator, cmd_line_nodes: []const command_line.BootstrapNode) ![]const command_line.BootstrapNode {
+    // If command line nodes are provided, use them (they override JSON)
+    if (cmd_line_nodes.len > 0) {
+        std.log.info("Using {} command line bootstrap nodes", .{cmd_line_nodes.len});
+        // Duplicate the slice to ensure consistent memory management
+        var result = try allocator.alloc(command_line.BootstrapNode, cmd_line_nodes.len);
+        for (cmd_line_nodes, 0..) |node, i| {
+            result[i] = command_line.BootstrapNode{
+                .ip = try allocator.dupe(u8, node.ip),
+                .port = node.port,
+            };
+        }
+        return result;
+    }
+    
+    // Try to load from JSON config
+    const json_nodes = types.loadBootstrapNodes(allocator) catch |err| {
+        std.log.warn("Failed to load bootstrap nodes from JSON: {}", .{err});
+        // Return empty slice if both JSON and command line fail
+        return try allocator.alloc(command_line.BootstrapNode, 0);
+    };
+    defer types.freeBootstrapNodes(allocator, json_nodes);
+    
+    std.log.info("Loaded {} bootstrap nodes from JSON config", .{json_nodes.len});
+    
+    // Convert JSON format (ip:port strings) to BootstrapNode format
+    var result = try allocator.alloc(command_line.BootstrapNode, json_nodes.len);
+    for (json_nodes, 0..) |node_str, i| {
+        // Parse "ip:port" format
+        var it = std.mem.splitScalar(u8, node_str, ':');
+        const ip_str = it.next() orelse {
+            std.log.warn("Invalid bootstrap node format: {s}", .{node_str});
+            continue;
+        };
+        const port_str = it.next() orelse "10801"; // Default port
+        const port = std.fmt.parseInt(u16, port_str, 10) catch 10801;
+        
+        result[i] = command_line.BootstrapNode{
+            .ip = try allocator.dupe(u8, ip_str),
+            .port = port,
+        };
+    }
+    
+    return result;
+}
+
+/// Free bootstrap nodes memory
+fn freeBootstrapNodes(allocator: std.mem.Allocator, nodes: []const command_line.BootstrapNode) void {
+    for (nodes) |node| {
+        allocator.free(node.ip);
+    }
+    allocator.free(nodes);
+}
+
 
 pub const NodeComponents = struct {
     blockchain: *zen.ZeiCoin,
@@ -99,12 +154,16 @@ pub fn initializeNode(allocator: std.mem.Allocator, config: command_line.Config)
     std.log.info("Connection accept thread started", .{});
     
     
-    // Set bootstrap nodes for auto-reconnect
-    network_manager.setBootstrapNodes(config.bootstrap_nodes);
+    // Load bootstrap nodes - JSON first, then command line fallback
+    const bootstrap_nodes = try loadBootstrapNodes(allocator, config.bootstrap_nodes);
+    defer freeBootstrapNodes(allocator, bootstrap_nodes);
+    
+    // Set bootstrap nodes for auto-reconnect (NetworkManager will copy them)
+    try network_manager.setBootstrapNodes(bootstrap_nodes);
     
     // Connect to bootstrap nodes
-    std.log.info("Connecting to {} bootstrap nodes", .{config.bootstrap_nodes.len});
-    for (config.bootstrap_nodes) |node| {
+    std.log.info("Connecting to {} bootstrap nodes", .{bootstrap_nodes.len});
+    for (bootstrap_nodes) |node| {
         std.log.info("Attempting to connect to bootstrap node {s}:{}", .{ node.ip, node.port });
         const address = std.net.Address.parseIp(node.ip, node.port) catch |err| {
             std.log.warn("Failed to parse bootstrap node {s}:{} - {}", .{ node.ip, node.port, err });
@@ -116,10 +175,11 @@ pub fn initializeNode(allocator: std.mem.Allocator, config: command_line.Config)
         };
     }
     
-    // Initialize mining if enabled
+    // Initialize mining if enabled - but delay actual mining start until after sync
     if (config.enable_mining) {
         // miner_wallet is guaranteed to be non-null when enable_mining is true
-        try initializeMining(blockchain, config.miner_wallet.?);
+        try initializeMiningSystem(blockchain, config.miner_wallet.?);
+        std.log.info("⛏️  Mining system initialized - will start mining after initial sync", .{});
     }
     
     return NodeComponents{
@@ -149,7 +209,7 @@ fn createMessageHandler(allocator: std.mem.Allocator, blockchain: *zen.ZeiCoin) 
     };
 }
 
-fn initializeMining(blockchain: *zen.ZeiCoin, miner_wallet_name: []const u8) !void {
+fn initializeMiningSystem(blockchain: *zen.ZeiCoin, miner_wallet_name: []const u8) !void {
     const allocator = blockchain.allocator;
     
     // Load specified mining wallet
@@ -215,8 +275,9 @@ fn initializeMining(blockchain: *zen.ZeiCoin, miner_wallet_name: []const u8) !vo
                 blockchain.mining_manager.?.* = miner_mod.MiningManager.init(mining_context, mining_address);
             }
             
-            // Start mining
-            try blockchain.mining_manager.?.startMining(keypair);
+            // Store keypair for deferred mining start
+            blockchain.mining_keypair = keypair;
+            std.log.info("⛏️  Mining keypair stored for deferred start", .{});
         } else {
             return error.WalletKeyPairNotFound;
         }

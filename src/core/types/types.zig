@@ -6,6 +6,8 @@ const std = @import("std");
 const util = @import("../util/util.zig");
 const bech32 = @import("../crypto/bech32.zig");
 
+const print = std.debug.print;
+
 // Money constants - ZeiCoin monetary units
 pub const ZEI_COIN: u64 = 100000000; // 1 Zeicoin = 100,000,000 zei
 pub const ZEI_CENT: u64 = 1000000; // 1 cent = 1,000,000 zei
@@ -44,7 +46,6 @@ pub const SYNC = struct {
     pub const MAX_DOWNLOAD_RETRIES: u8 = 3; // Maximum retry attempts
 };
 
-
 // Block versioning - for protocol upgrades
 pub const BlockVersion = enum(u32) {
     V0 = 0, // Initial protocol version
@@ -58,14 +59,61 @@ pub const CURRENT_BLOCK_VERSION: u32 = @intFromEnum(BlockVersion.V0);
 // Mining constants
 pub const COINBASE_MATURITY: u32 = 100; // Coinbase rewards require 100 confirmations
 
-// Network constants - Bootstrap nodes for peer discovery
-pub const BOOTSTRAP_NODES = [_][]const u8{
-    "134.199.168.129:10801", // Public bootstrap node 1
-    "161.189.98.149:10801", // Public bootstrap node 2
-    "134.199.170.129:10801", // Public bootstrap node 3
-    // Note: Local/private IPs should not be hardcoded as bootstrap nodes
-    // They will be discovered via local network scanning if available
+// Bootstrap node configuration structure
+pub const BootstrapConfig = struct {
+    network: []const u8,
+    nodes: [][]const u8,
 };
+
+// Load bootstrap nodes from JSON configuration
+pub fn loadBootstrapNodes(allocator: std.mem.Allocator) ![][]const u8 {
+    const config_path = "config/bootstrap_testnet.json";
+
+    // Read the JSON file
+    const file = std.fs.cwd().openFile(config_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            // Fallback to hardcoded nodes if config file not found
+            const fallback_nodes = [_][]const u8{
+                "209.38.31.77:10801",
+                "134.199.170.129:10801",
+            };
+            var result = try allocator.alloc([]const u8, fallback_nodes.len);
+            for (fallback_nodes, 0..) |node, i| {
+                result[i] = try allocator.dupe(u8, node);
+            }
+            return result;
+        },
+        else => return err,
+    };
+    defer file.close();
+
+    const file_size = try file.getEndPos();
+    const contents = try allocator.alloc(u8, file_size);
+    defer allocator.free(contents);
+    _ = try file.readAll(contents);
+
+    // Parse JSON
+    const parsed = try std.json.parseFromSlice(BootstrapConfig, allocator, contents, .{});
+    defer parsed.deinit();
+
+    const config = parsed.value;
+
+    // Copy nodes to owned memory
+    var result = try allocator.alloc([]const u8, config.nodes.len);
+    for (config.nodes, 0..) |node, i| {
+        result[i] = try allocator.dupe(u8, node);
+    }
+
+    return result;
+}
+
+// Free bootstrap nodes memory
+pub fn freeBootstrapNodes(allocator: std.mem.Allocator, nodes: [][]const u8) void {
+    for (nodes) |node| {
+        allocator.free(node);
+    }
+    allocator.free(nodes);
+}
 
 // Network ports - ZeiCoin zen networking
 pub const NETWORK_PORTS = struct {
@@ -473,7 +521,7 @@ pub const DifficultyTarget = struct {
         return switch (network) {
             .testnet => DifficultyTarget{
                 .base_bytes = 1,
-                .threshold = 0x80000000, // Middle of 1-byte range
+                .threshold = 0xFF000000, // Very easy for fast testing (was 0xF0000000)
             },
             .mainnet => DifficultyTarget{
                 .base_bytes = 2,
@@ -543,16 +591,17 @@ pub const DifficultyTarget = struct {
     }
 
     /// Calculate work contribution of this difficulty target
+    /// ZeiCoin implementation - CRITICAL CONSENSUS CODE
+    /// Work = 2^256 / target for Nakamoto Consensus
     pub fn toWork(self: DifficultyTarget) ChainWork {
-        // Work = 2^128 / (target_value + 1)
-        // For simplicity, use approximation: work = base_bytes * 256^28 + inverse(threshold)
-        const base_work: ChainWork = (@as(ChainWork, self.base_bytes) << 112); // Heavy weight for zero bytes
-        const threshold_work: ChainWork = if (self.threshold > 0)
-            @as(ChainWork, 0xFFFFFFFF) / @as(ChainWork, self.threshold)
-        else
-            @as(ChainWork, 0xFFFFFFFF);
+        // Import the work calculation
+        const consensus = @import("../consensus/work.zig");
 
-        return base_work + threshold_work;
+        // Convert ZeiCoin difficulty format to 256-bit target
+        const target = consensus.zeiCoinToTarget(self.base_bytes, self.threshold);
+
+        // Use industry-standard work calculation (zero tolerance for error)
+        return consensus.calculateWork(target);
     }
 };
 
@@ -580,7 +629,7 @@ pub const BlockHeader = struct {
         try writer.writeInt(u64, self.timestamp, .little);
         try writer.writeInt(u64, self.difficulty, .little);
         try writer.writeInt(u32, self.nonce, .little);
-        
+
         // New future-proof fields
         try writer.writeAll(&self.witness_root);
         try writer.writeAll(&self.state_root);
@@ -598,7 +647,7 @@ pub const BlockHeader = struct {
         header.timestamp = try reader.readInt(u64, .little);
         header.difficulty = try reader.readInt(u64, .little);
         header.nonce = try reader.readInt(u32, .little);
-        
+
         // New future-proof fields
         _ = try reader.readAll(&header.witness_root);
         _ = try reader.readAll(&header.state_root);
@@ -630,16 +679,14 @@ pub const BlockHeader = struct {
     /// Calculate the work contribution of this block
     pub fn getWork(self: *const BlockHeader) ChainWork {
         const target = self.getDifficultyTarget();
+        const work = target.toWork();
 
-        // Work = 2^128 / (target_value + 1)
-        // For simplicity, use approximation: work = base_bytes * 256^28 + inverse(threshold)
-        const base_work: ChainWork = (@as(ChainWork, target.base_bytes) << 112); // Heavy weight for zero bytes
-        const threshold_work: ChainWork = if (target.threshold > 0)
-            @as(ChainWork, 0xFFFFFFFF) / @as(ChainWork, target.threshold)
-        else
-            @as(ChainWork, 0xFFFFFFFF);
+        // Log work calculation for consensus debugging
+        if (work > 1000000) { // Only log significant work values
+            print("⚡ [CONSENSUS] Block work calculated: {} (difficulty: base_bytes={}, threshold={x})\n", .{ work, target.base_bytes, target.threshold });
+        }
 
-        return base_work + threshold_work;
+        return work;
     }
 };
 
@@ -718,19 +765,19 @@ pub const Block = struct {
         if (!std.mem.eql(u8, &self.header.hash(), &other.header.hash())) {
             return false;
         }
-        
+
         // Compare transaction count
         if (self.transactions.len != other.transactions.len) {
             return false;
         }
-        
+
         // Compare each transaction
         for (self.transactions, other.transactions) |tx1, tx2| {
             if (!std.mem.eql(u8, &tx1.hash(), &tx2.hash())) {
                 return false;
             }
         }
-        
+
         return true;
     }
 
@@ -745,7 +792,7 @@ pub const Block = struct {
         // Then free the transactions array itself
         allocator.free(self.transactions);
     }
-    
+
     /// Create a deep copy of this block
     /// The caller owns the returned block and must call deinit on it
     pub fn dupe(self: *const Block, allocator: std.mem.Allocator) !Block {
@@ -754,7 +801,7 @@ pub const Block = struct {
             .header = self.header,
             .transactions = undefined,
         };
-        
+
         // Allocate array for transactions
         new_block.transactions = try allocator.alloc(Transaction, self.transactions.len);
         var copied_count: usize = 0;
@@ -765,13 +812,13 @@ pub const Block = struct {
             }
             allocator.free(new_block.transactions);
         }
-        
+
         // Deep copy each transaction
         for (self.transactions, 0..) |tx, i| {
             new_block.transactions[i] = try tx.dupe(allocator);
             copied_count += 1;
         }
-        
+
         return new_block;
     }
 };
@@ -784,10 +831,12 @@ pub const GenesisConfig = struct {
     nonce: u64, // Unique nonce for each network
 };
 
-/// Chain work - cumulative proof of work (use u128 for now, upgrade to u256 if needed)
-pub const ChainWork = u128;
+/// Chain work - cumulative proof of work (u256 for maximum precision)
+/// This is critical consensus code for ZeiCoin's highest cumulative work rule
+pub const ChainWork = u256;
 
 /// Chain state for tracking competing blockchain forks
+/// This implements the core of Nakamoto Consensus - highest cumulative work rule
 pub const ChainState = struct {
     tip_hash: BlockHash,
     tip_height: u32,
@@ -802,6 +851,7 @@ pub const ChainState = struct {
     }
 
     /// Compare two chains by cumulative work
+    /// The chain with more cumulative proof-of-work wins
     pub fn hasMoreWork(self: ChainState, other: ChainState) bool {
         return self.cumulative_work > other.cumulative_work;
     }
@@ -891,7 +941,7 @@ pub const Genesis = struct {
 pub const NetworkType = enum {
     testnet,
     mainnet,
-    
+
     /// Get the network ID for protocol identification
     pub fn getNetworkId(self: NetworkType) u32 {
         return switch (self) {
@@ -899,7 +949,7 @@ pub const NetworkType = enum {
             .mainnet => 0x6D61696E, // 'main' in hex
         };
     }
-    
+
     /// Get the data directory name for the network
     pub fn getDataDir(self: NetworkType) []const u8 {
         return switch (self) {

@@ -47,6 +47,7 @@ pub const ZeiCoin = struct {
     mempool_manager: *MempoolManager,
     mining_state: types.MiningState,
     mining_manager: ?*miner_mod.MiningManager,
+    mining_keypair: ?@import("crypto/key.zig").KeyPair,
 
     pub fn init(allocator: std.mem.Allocator) !*ZeiCoin {
         const data_dir = switch (types.CURRENT_NETWORK) {
@@ -93,6 +94,7 @@ pub const ZeiCoin = struct {
             .mempool_manager = undefined,
             .mining_state = types.MiningState.init(),
             .mining_manager = null,
+            .mining_keypair = null,
         };
 
         var components_initialized: u8 = 0;
@@ -175,7 +177,7 @@ pub const ZeiCoin = struct {
 
         instance_ptr.mempool_manager.setMiningState(&instance_ptr.mining_state);
         instance_ptr.chain_processor.setMempoolManager(instance_ptr.mempool_manager);
-        
+
         // Wire up network coordinator for sync triggers
         instance_ptr.mempool_manager.network_handler.setNetworkCoordinator(&instance_ptr.network_coordinator);
 
@@ -193,7 +195,7 @@ pub const ZeiCoin = struct {
             defer genesis_block.deinit(instance_ptr.allocator);
             break :blk true;
         };
-        
+
         if (!genesis_exists) {
             print("🌐 No blockchain found - creating canonical genesis block\n", .{});
             try instance_ptr.createCanonicalGenesis();
@@ -215,10 +217,10 @@ pub const ZeiCoin = struct {
 
     pub fn initializeBlockchain(self: *ZeiCoin) !void {
         const current_height = self.getHeight() catch {
-            print("❌ CRITICAL ERROR: Cannot retrieve blockchain height!\n", .{});
+            print("❌ ERROR: Cannot retrieve blockchain height!\n", .{});
             return error.BlockchainNotInitialized;
         };
-        
+
         // Genesis block is at height 0, so this is normal
         print("🔗 Blockchain initialized at height {}, ready for network sync\n", .{current_height});
     }
@@ -357,10 +359,28 @@ pub const ZeiCoin = struct {
         try self.mempool_manager.handleIncomingTransaction(transaction);
     }
 
+    /// Get total cumulative work for the main chain
+    /// This implements proper Nakamoto Consensus by summing proof-of-work
     pub fn getTotalWork(self: *ZeiCoin) !types.ChainWork {
         const current_height = try self.database.getHeight();
+        var cumulative_work: types.ChainWork = 0;
 
-        return @as(types.ChainWork, current_height);
+        // Sum the work contribution of each block in the chain
+        for (0..current_height + 1) |height| {
+            var block = self.database.getBlock(@intCast(height)) catch {
+                print("⚠️  Failed to load block at height {} for work calculation\n", .{height});
+                continue;
+            };
+            defer block.deinit(self.allocator);
+
+            const block_work = block.header.getWork();
+            cumulative_work = std.math.add(types.ChainWork, cumulative_work, block_work) catch {
+                // Saturate at max value if overflow
+                return std.math.maxInt(types.ChainWork);
+            };
+        }
+
+        return cumulative_work;
     }
 
     fn handleChainReorganization(self: *ZeiCoin, new_block: types.Block, new_chain_state: types.ChainState) !void {
@@ -449,6 +469,24 @@ pub const ZeiCoin = struct {
 
     pub fn getHeadersRange(self: *ZeiCoin, start_height: u32, count: u32) ![]BlockHeader {
         return try self.chain_query.getHeadersRange(start_height, count);
+    }
+
+    /// Get the next available nonce for an address, considering pending transactions in mempool
+    pub fn getNextAvailableNonce(self: *ZeiCoin, address: types.Address) !u64 {
+        // Get current account nonce
+        const account = try self.chain_query.getAccount(address);
+        var next_nonce = account.nonce;
+
+        // Check mempool for pending transactions from this address
+        const highest_pending_nonce = self.mempool_manager.getHighestPendingNonce(address);
+
+        // If there are pending transactions, use highest nonce + 1
+        // getHighestPendingNonce returns maxInt(u64) as sentinel if no transactions found
+        if (highest_pending_nonce != std.math.maxInt(u64)) {
+            next_nonce = highest_pending_nonce + 1;
+        }
+
+        return next_nonce;
     }
 
     fn startBlockDownloads(self: *ZeiCoin) !void {

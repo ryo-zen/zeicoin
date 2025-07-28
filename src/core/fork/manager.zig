@@ -32,7 +32,7 @@ pub const BlockEffect = struct {
     block_hash: BlockHash,
     account_changes: std.ArrayList(AccountSnapshot),
     transactions: std.ArrayList(types.Transaction),
-    
+
     pub fn init(allocator: std.mem.Allocator, height: u32, hash: BlockHash) BlockEffect {
         return .{
             .block_height = height,
@@ -41,7 +41,7 @@ pub const BlockEffect = struct {
             .transactions = std.ArrayList(types.Transaction).init(allocator),
         };
     }
-    
+
     pub fn deinit(self: *BlockEffect) void {
         self.account_changes.deinit();
         self.transactions.deinit();
@@ -51,16 +51,16 @@ pub const BlockEffect = struct {
 /// Main Fork Manager - coordinates all fork management operations
 pub const ForkManager = struct {
     allocator: std.mem.Allocator,
-    
+
     // Specialized components
     chain_tracker: chains.ChainTracker,
     orphan_manager: orphans.OrphanManager,
     decision_engine: decisions.DecisionEngine,
     side_chain_manager: sidechains.SideChainManager,
-    
+
     // Rollback state tracking
     block_effects: std.ArrayList(BlockEffect),
-    
+
     pub fn init(allocator: std.mem.Allocator) ForkManager {
         return ForkManager{
             .allocator = allocator,
@@ -71,7 +71,7 @@ pub const ForkManager = struct {
             .block_effects = std.ArrayList(BlockEffect).init(allocator),
         };
     }
-    
+
     pub fn deinit(self: *ForkManager) void {
         self.orphan_manager.deinit();
         self.side_chain_manager.deinit();
@@ -81,32 +81,32 @@ pub const ForkManager = struct {
         }
         self.block_effects.deinit();
     }
-    
+
     /// Initialize with genesis chain
     pub fn initWithGenesis(self: *ForkManager, genesis_hash: BlockHash, genesis_work: ChainWork) void {
         self.chain_tracker.initWithGenesis(genesis_hash, genesis_work);
     }
-    
+
     /// Get the currently active chain
     pub fn getActiveChain(self: *const ForkManager) ?types.ChainState {
         return self.chain_tracker.getActiveChain();
     }
-    
+
     /// Check if a block hash was recently seen
     pub fn wasRecentlySeen(self: *ForkManager, block_hash: BlockHash) bool {
         return self.orphan_manager.wasRecentlySeen(block_hash);
     }
-    
+
     /// Mark a block as recently seen
     pub fn markAsSeen(self: *ForkManager, block_hash: BlockHash) !void {
         try self.orphan_manager.markAsSeen(block_hash);
     }
-    
+
     /// Evaluate a new block and decide how to handle it
     pub fn evaluateBlock(self: *ForkManager, block: Block, block_height: u32, cumulative_work: ChainWork) !ForkDecision {
         return self.evaluateBlockWithSyncFlag(block, block_height, cumulative_work, false);
     }
-    
+
     /// Evaluate a new block with sync flag (skips recent block checking during sync)
     pub fn evaluateBlockWithSyncFlag(self: *ForkManager, block: Block, block_height: u32, cumulative_work: ChainWork, is_sync_block: bool) !ForkDecision {
         const decision = decisions.DecisionEngine.evaluateBlockWithSyncFlag(
@@ -117,7 +117,7 @@ pub const ForkManager = struct {
             cumulative_work,
             is_sync_block,
         );
-        
+
         // Handle the decision
         switch (decision) {
             .ignore => {
@@ -141,31 +141,31 @@ pub const ForkManager = struct {
                 print("🏆 New best chain detected: chain {}\n", .{chain_index});
             },
         }
-        
+
         return decision;
     }
-    
+
     /// Update a specific chain's state
     pub fn updateChain(self: *ForkManager, chain_index: u8, new_chain_state: types.ChainState) void {
         self.chain_tracker.updateChain(chain_index, new_chain_state);
     }
-    
+
     /// Update the best chain with a new block
     pub fn updateBestChain(self: *ForkManager, new_block: *const Block, new_height: u32, new_cumulative_work: ChainWork) void {
         const new_block_hash = new_block.hash();
         self.chain_tracker.updateBestChain(new_block_hash, new_height, new_cumulative_work);
     }
-    
+
     /// Check if a reorganization depth exceeds safety limits
     pub fn isReorgTooDeep(self: *const ForkManager, from_height: u32, to_height: u32) bool {
         _ = self; // unused parameter
-        const reorg_depth = if (to_height > from_height) 
-            to_height - from_height 
-        else 
+        const reorg_depth = if (to_height > from_height)
+            to_height - from_height
+        else
             from_height - to_height;
         return decisions.DecisionEngine.isReorgTooDeep(reorg_depth);
     }
-    
+
     /// Get fork management statistics
     pub fn getStats(self: *const ForkManager) ForkStats {
         return ForkStats{
@@ -175,7 +175,7 @@ pub const ForkManager = struct {
             .recent_blocks_count = self.orphan_manager.getRecentBlocksCount(),
         };
     }
-    
+
     /// Perform maintenance (cleanup old orphans and recent blocks)
     pub fn performMaintenance(self: *ForkManager) void {
         self.orphan_manager.cleanupOrphanBlocks();
@@ -209,7 +209,7 @@ pub const ForkManager = struct {
 
         // Update fork manager
         self.updateChain(0, new_chain_state); // Update main chain
-        
+
         // Clear block effects after successful reorganization
         self.clearBlockEffects();
 
@@ -229,7 +229,7 @@ pub const ForkManager = struct {
     /// Rollback blockchain to a specific height
     fn rollbackToHeight(self: *ForkManager, blockchain: anytype, target_height: u32) !void {
         const current_height = try blockchain.getHeight();
-        
+
         if (target_height >= current_height) {
             return; // Nothing to rollback
         }
@@ -244,21 +244,21 @@ pub const ForkManager = struct {
         var height = current_height;
         while (height > target_height) : (height -= 1) {
             print("⏪ Rolling back block at height {}\n", .{height});
-            
+
             // Get the block to rollback
             var block = try blockchain.database.getBlock(height);
             defer block.deinit(self.allocator);
-            
+
             // Create block effect to track changes
             var effect = BlockEffect.init(self.allocator, height, block.hash());
             errdefer effect.deinit();
-            
+
             // Reverse all transactions in the block (process in reverse order)
             var i = block.transactions.len;
             while (i > 0) {
                 i -= 1;
                 const tx = block.transactions[i];
-                
+
                 if (blockchain.chain_state.isCoinbaseTransaction(tx)) {
                     // Reverse coinbase transaction
                     try self.reverseCoinbaseTransaction(blockchain, tx, &effect);
@@ -269,17 +269,17 @@ pub const ForkManager = struct {
                     try orphaned_transactions.append(tx);
                 }
             }
-            
+
             // Store the effect for potential redo
             try self.block_effects.append(effect);
-            
+
             // Remove the block from database
             try blockchain.database.removeBlock(height);
         }
-        
+
         // Update chain height
         try blockchain.database.saveHeight(target_height);
-        
+
         // Restore valid orphaned transactions to mempool
         print("💾 Restoring {} orphaned transactions to mempool\n", .{orphaned_transactions.items.len});
         for (orphaned_transactions.items) |tx| {
@@ -290,7 +290,7 @@ pub const ForkManager = struct {
                 };
             }
         }
-        
+
         print("✅ Rollback complete! New height: {}\n", .{target_height});
     }
 
@@ -347,13 +347,13 @@ pub const ForkManager = struct {
         _ = self;
         _ = block;
         _ = fork_height;
-        print("⚠️ Fork storage not yet implemented - longest chain rule needed\n", .{});
+        print("⚠️ Fork storage not yet implemented - highest cumulative work rule needed\n", .{});
     }
 
     /// Reverse a coinbase transaction
     fn reverseCoinbaseTransaction(self: *ForkManager, blockchain: anytype, tx: types.Transaction, effect: *BlockEffect) !void {
         _ = self; // We use blockchain directly
-        
+
         // Snapshot current miner account state
         var miner_account = try blockchain.database.getAccount(tx.recipient);
         try effect.account_changes.append(AccountSnapshot{
@@ -362,7 +362,7 @@ pub const ForkManager = struct {
             .nonce = miner_account.nonce,
             .immature_balance = miner_account.immature_balance,
         });
-        
+
         // Remove the coinbase reward from immature balance
         if (miner_account.immature_balance >= tx.amount) {
             miner_account.immature_balance -= tx.amount;
@@ -371,21 +371,21 @@ pub const ForkManager = struct {
             print("⚠️ Warning: Immature balance mismatch during rollback\n", .{});
             miner_account.immature_balance = 0;
         }
-        
+
         // Save updated account
         try blockchain.database.saveAccount(tx.recipient, miner_account);
-        
+
         print("⏪ Reversed coinbase: {} ZEI from miner\n", .{tx.amount});
     }
 
     /// Reverse a regular transaction
     fn reverseRegularTransaction(self: *ForkManager, blockchain: anytype, tx: types.Transaction, effect: *BlockEffect) !void {
         _ = self; // We use blockchain directly
-        
+
         // Get current account states
         var sender_account = try blockchain.database.getAccount(tx.sender);
         var recipient_account = try blockchain.database.getAccount(tx.recipient);
-        
+
         // Snapshot both accounts before reversal
         try effect.account_changes.append(AccountSnapshot{
             .address = tx.sender,
@@ -399,7 +399,7 @@ pub const ForkManager = struct {
             .nonce = recipient_account.nonce,
             .immature_balance = recipient_account.immature_balance,
         });
-        
+
         // Reverse the transaction
         // Return funds to sender (amount + fee)
         sender_account.balance += tx.amount + tx.fee;
@@ -407,7 +407,7 @@ pub const ForkManager = struct {
         if (sender_account.nonce > 0) {
             sender_account.nonce -= 1;
         }
-        
+
         // Remove funds from recipient
         if (recipient_account.balance >= tx.amount) {
             recipient_account.balance -= tx.amount;
@@ -416,14 +416,14 @@ pub const ForkManager = struct {
             print("⚠️ Warning: Insufficient recipient balance during rollback\n", .{});
             recipient_account.balance = 0;
         }
-        
+
         // Save updated accounts
         try blockchain.database.saveAccount(tx.sender, sender_account);
         try blockchain.database.saveAccount(tx.recipient, recipient_account);
-        
+
         // Store transaction for potential replay
         try effect.transactions.append(tx);
-        
+
         print("⏪ Reversed transaction: {} ZEI from {} to {}\n", .{
             tx.amount,
             std.fmt.fmtSliceHexLower(tx.recipient.hash[0..8]),
@@ -438,30 +438,30 @@ pub const ForkManager = struct {
         }
         self.block_effects.clearRetainingCapacity();
     }
-    
+
     /// Handle a side chain block
     pub fn handleSideChainBlock(self: *ForkManager, block: Block, parent_hash: BlockHash, parent_height: u32, block_work: ChainWork) !sidechains.ChainAction {
         // Add to side chain manager
         const action = try self.side_chain_manager.addSideChainBlock(block, parent_hash, parent_height, block_work);
-        
+
         // Perform maintenance periodically
         if (self.side_chain_manager.total_blocks_stored % 10 == 0) {
             self.side_chain_manager.pruneOldChains();
         }
-        
+
         return action;
     }
-    
+
     /// Check if any side chain should trigger reorganization
     pub fn evaluateSideChains(self: *ForkManager, main_chain_work: ChainWork) ?*sidechains.SideChainInfo {
         return self.side_chain_manager.evaluateSideChains(main_chain_work);
     }
-    
+
     /// Get side chain blocks for reorganization
     pub fn getSideChainBlocks(self: *ForkManager, chain_tip: BlockHash) !std.ArrayList(Block) {
         return try self.side_chain_manager.extractChainBlocks(chain_tip);
     }
-    
+
     /// Get side chain statistics
     pub fn getSideChainStats(self: *const ForkManager) struct {
         chain_count: usize,
@@ -484,7 +484,7 @@ test "AccountSnapshot creation" {
         .nonce = 5,
         .immature_balance = 500,
     };
-    
+
     try std.testing.expectEqual(@as(u64, 1000), snapshot.balance);
     try std.testing.expectEqual(@as(u64, 5), snapshot.nonce);
     try std.testing.expectEqual(@as(u64, 500), snapshot.immature_balance);
@@ -494,11 +494,11 @@ test "BlockEffect init and deinit" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
-    
+
     const test_hash = std.mem.zeroes(BlockHash);
     var effect = BlockEffect.init(allocator, 100, test_hash);
     defer effect.deinit();
-    
+
     try std.testing.expectEqual(@as(u32, 100), effect.block_height);
     try std.testing.expectEqual(test_hash, effect.block_hash);
     try std.testing.expectEqual(@as(usize, 0), effect.account_changes.items.len);

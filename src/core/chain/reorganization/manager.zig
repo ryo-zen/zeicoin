@@ -144,11 +144,17 @@ pub const ReorgManager = struct {
             };
         }
         
+        print("\n🔄 [CONSENSUS] === CHAIN REORGANIZATION STARTING ===\n", .{});
+        print("   - New chain tip: {s}\n", .{std.fmt.fmtSliceHexLower(new_chain_tip[0..8])});
+        print("   - New block height: {}\n", .{new_block.header.timestamp});
+        print("   - Current time: {}\n", .{std.time.milliTimestamp()});
+        
         // Record operation start time
         self.operation_start_time = std.time.milliTimestamp();
         
         // Execute state machine
         var result = self.executeStateMachine(new_block, new_chain_tip) catch |err| {
+            print("❌ [CONSENSUS] Reorganization failed: {}\n", .{err});
             // Ensure cleanup on any error
             self.cleanup();
             return ReorgResult{
