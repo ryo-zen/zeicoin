@@ -96,24 +96,50 @@ fi
 echo "🔨 Building ZeiCoin (Release mode)..."
 zig build -Doptimize=ReleaseFast
 
-# Create mining wallet with unique random ID
-echo "👛 Creating mining wallet..."
-if [ ! -d "wallets" ]; then
-    mkdir -p wallets
+# Create or use existing mining wallet
+echo "👛 Setting up mining wallet..."
+
+# Check if we already have a saved miner name
+if [ -f ".miner_name" ]; then
+    EXISTING_MINER=$(cat .miner_name)
+    echo "📝 Found existing miner configuration: $EXISTING_MINER"
+    
+    # Verify wallet still exists
+    if ./zig-out/bin/zeicoin balance "$EXISTING_MINER" > /dev/null 2>&1; then
+        MINER_NAME="$EXISTING_MINER"
+        echo "✅ Using existing wallet: $MINER_NAME"
+    else
+        echo "⚠️  Saved wallet '$EXISTING_MINER' not found, creating new one..."
+        MINER_NAME=""
+    fi
+else
+    MINER_NAME=""
 fi
 
-# Generate unique miner name with random number
-RANDOM_ID=$(shuf -i 1000000000-9999999999 -n 1)
-MINER_NAME="miner-$RANDOM_ID"
-
-# Create unique miner wallet
-echo "Creating '$MINER_NAME' wallet for mining..."
-./zig-out/bin/zeicoin wallet create "$MINER_NAME"
-echo "✅ $MINER_NAME wallet created!"
-
-# Save miner name for easy reference
-echo "$MINER_NAME" > .miner_name
-echo "📝 Miner name saved to .miner_name file"
+# Create new wallet if needed
+if [ -z "$MINER_NAME" ]; then
+    # Generate unique miner name with random number
+    RANDOM_ID=$(shuf -i 1000000000-9999999999 -n 1)
+    MINER_NAME="miner-$RANDOM_ID"
+    
+    echo "Creating new wallet '$MINER_NAME' for mining..."
+    if ./zig-out/bin/zeicoin wallet create "$MINER_NAME"; then
+        echo "✅ $MINER_NAME wallet created!"
+        # Save miner name for easy reference
+        echo "$MINER_NAME" > .miner_name
+        echo "📝 Miner name saved to .miner_name file"
+    else
+        echo "❌ Failed to create wallet. Continuing with existing wallets..."
+        # Try to find any existing wallet
+        if [ -f ".miner_name" ]; then
+            MINER_NAME=$(cat .miner_name)
+            echo "📝 Using previously saved miner: $MINER_NAME"
+        else
+            MINER_NAME="alice"  # Fallback to genesis wallet
+            echo "📝 Using fallback wallet: $MINER_NAME"
+        fi
+    fi
+fi
 
 # Configure firewall for ZeiCoin ports
 echo "🔥 Configuring firewall..."

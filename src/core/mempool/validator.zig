@@ -199,10 +199,22 @@ pub const TransactionValidator = struct {
     /// Validate transaction nonce
     pub fn validateNonce(self: *Self, tx: Transaction) !bool {
         const sender_account = try self.chain_state.getAccount(tx.sender);
+        const expected_nonce = sender_account.nextNonce();
         
-        if (tx.nonce != sender_account.nextNonce()) {
-            print("❌ Invalid nonce: expected {}, got {}\\n", .{
-                sender_account.nextNonce(), tx.nonce
+        // Allow nonce to be equal or higher than expected (for queuing future transactions)
+        // But don't allow nonces that are too far in the future (prevent spam)
+        const max_future_nonce = expected_nonce + 100; // Allow up to 100 transactions ahead
+        
+        if (tx.nonce < expected_nonce) {
+            print("❌ Invalid nonce: too low, expected >= {}, got {}\\n", .{
+                expected_nonce, tx.nonce
+            });
+            return false;
+        }
+        
+        if (tx.nonce > max_future_nonce) {
+            print("❌ Invalid nonce: too high, expected <= {}, got {}\\n", .{
+                max_future_nonce, tx.nonce
             });
             return false;
         }

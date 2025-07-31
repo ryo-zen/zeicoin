@@ -35,8 +35,10 @@ pub const NetworkManager = struct {
     bootstrap_nodes: []command_line.BootstrapNode,
     owns_bootstrap_nodes: bool,
     last_reconnect_attempt: i64,
+    active_connections: std.atomic.Value(u32),
     
     const Self = @This();
+    const MAX_ACTIVE_CONNECTIONS = 100;
     
     pub fn init(
         allocator: std.mem.Allocator,
@@ -53,6 +55,7 @@ pub const NetworkManager = struct {
             .bootstrap_nodes = &[_]command_line.BootstrapNode{},
             .owns_bootstrap_nodes = false,
             .last_reconnect_attempt = 0,
+            .active_connections = std.atomic.Value(u32).init(0),
         };
     }
     
@@ -101,6 +104,12 @@ pub const NetworkManager = struct {
     
     /// Connect to a peer
     pub fn connectToPeer(self: *Self, address: net.Address) !void {
+        // Check if we have too many active connections
+        const current_connections = self.active_connections.load(.acquire);
+        if (current_connections >= MAX_ACTIVE_CONNECTIONS) {
+            return error.TooManyConnections;
+        }
+        
         // Prevent self-connections by checking if target IP is our public IP
         if (ip_detection.isSelfConnection(self.allocator, address)) {
             std.log.warn("🚫 Self-connection prevented: skipping connection to own public IP {}", .{address});
@@ -110,6 +119,9 @@ pub const NetworkManager = struct {
         std.log.info("Attempting to connect to peer at {}", .{address});
         const peer = try self.peer_manager.addPeer(address);
         std.log.info("Added peer {} to peer manager", .{peer.id});
+        
+        // Increment active connections counter
+        _ = self.active_connections.fetchAdd(1, .acq_rel);
         
         // Spawn connection thread
         const thread = try std.Thread.spawn(.{}, runPeerConnection, .{
@@ -121,6 +133,7 @@ pub const NetworkManager = struct {
     
     /// Run peer connection in thread
     fn runPeerConnection(self: *Self, peer: *Peer) void {
+        defer _ = self.active_connections.fetchSub(1, .acq_rel);
         std.log.info("Connection thread started for peer {} at {}", .{ peer.id, peer.address });
         
         // Give the network time to fully initialize
@@ -143,7 +156,12 @@ pub const NetworkManager = struct {
             }
             
             // Only log and remove if still running
-            std.log.err("TCP connection failed to {}: {}", .{ peer.address, err });
+            // ConnectionRefused is expected for bootstrap nodes that are down - not a critical error
+            if (err == error.ConnectionRefused) {
+                std.log.warn("Bootstrap node {} unavailable (ConnectionRefused) - this is normal if the node is offline", .{peer.address});
+            } else {
+                std.log.warn("TCP connection failed to {}: {} - continuing operation", .{ peer.address, err });
+            }
             self.peer_manager.removePeer(peer.id);
             return;
         };
@@ -378,7 +396,23 @@ pub const NetworkManager = struct {
                     };
                     
                     self.connectToPeer(address) catch |err| {
-                        std.log.warn("Auto-reconnect failed to {any} - {}", .{ address, err });
+                        // Log specific error types for better debugging
+                        switch (err) {
+                            error.TooManyConnections => {
+                                std.log.warn("Too many active connections ({}), skipping bootstrap node", .{self.active_connections.load(.acquire)});
+                                break;
+                            },
+                            else => {
+                                // Log the error with details
+                                std.log.warn("Auto-reconnect failed to {any} - {}", .{ address, err });
+                                // If we see file descriptor errors in the log, stop trying
+                                if (std.mem.indexOf(u8, @errorName(err), "ProcessFdQuotaExceeded") != null or
+                                    std.mem.indexOf(u8, @errorName(err), "SystemFdQuotaExceeded") != null) {
+                                    std.log.err("File descriptor limit reached - cannot create new connections. Consider increasing ulimit -n", .{});
+                                    break;
+                                }
+                            },
+                        }
                     };
                 }
             }
