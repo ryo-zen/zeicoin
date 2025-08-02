@@ -32,9 +32,8 @@ test "async connection initialization with context support" {
     defer server.deinit();
     
     const client_stream = try std.net.tcpConnectToAddress(server.listen_address);
-    defer client_stream.close();
     
-    // Create context-aware connection
+    // Create context-aware connection (takes ownership of stream)
     var connection = try tcp_context.AsyncTcpConnection.init(allocator, client_stream, true);
     defer connection.deinit();
     
@@ -70,7 +69,6 @@ test "async read with user context" {
     
     // Connect client
     const client_stream = try std.net.tcpConnectToAddress(server.listen_address);
-    defer client_stream.close();
     
     accept_thread.join();
     if (accept_ctx.client_stream) |stream| {
@@ -131,7 +129,6 @@ test "async write with user context" {
     defer server.deinit();
     
     const client_stream = try std.net.tcpConnectToAddress(server.listen_address);
-    defer client_stream.close();
     
     var connection = try tcp_context.AsyncTcpConnection.init(allocator, client_stream, true);
     defer connection.deinit();
@@ -205,7 +202,6 @@ test "operation state management" {
     defer server.deinit();
     
     const client_stream = try std.net.tcpConnectToAddress(server.listen_address);
-    defer client_stream.close();
     
     var connection = try tcp_context.AsyncTcpConnection.init(allocator, client_stream, true);
     defer connection.deinit();

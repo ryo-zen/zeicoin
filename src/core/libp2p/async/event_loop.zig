@@ -127,6 +127,8 @@ pub const AsyncTcpConnection = struct {
     read_callback: ?ReadCallback,
     write_callback: ?WriteCallback,
     connect_callback: ?ConnectCallback,
+    read_buffer: ?[]u8,
+    write_data: ?[]const u8,
     
     pub const ReadCallback = *const fn (self: *AsyncTcpConnection, data: []const u8) void;
     pub const WriteCallback = *const fn (self: *AsyncTcpConnection, bytes_written: usize) void;
@@ -141,6 +143,8 @@ pub const AsyncTcpConnection = struct {
             .read_callback = null,
             .write_callback = null,
             .connect_callback = null,
+            .read_buffer = null,
+            .write_data = null,
         };
     }
     
@@ -163,12 +167,14 @@ pub const AsyncTcpConnection = struct {
     /// Async read
     pub fn asyncRead(self: *Self, buffer: []u8, callback: ReadCallback) !void {
         self.read_callback = callback;
+        self.read_buffer = buffer;
         try self.event_loop.register(self.fd, .read, handleReadEvent);
     }
     
     /// Async write
     pub fn asyncWrite(self: *Self, data: []const u8, callback: WriteCallback) !void {
         self.write_callback = callback;
+        self.write_data = data;
         
         // Try immediate write
         const n = posix.send(self.fd, data, posix.MSG.NOSIGNAL) catch |err| {
@@ -188,16 +194,8 @@ pub const AsyncTcpConnection = struct {
     
     fn handleConnectEvent(fd: posix.socket_t, event: EventType) void {
         _ = event;
-        // Check if connect succeeded
-        var error_code: u32 = 0;
-        var error_len: posix.socklen_t = @sizeOf(u32);
-        posix.getsockopt(fd, posix.SOL.SOCKET, posix.SO.ERROR, std.mem.asBytes(&error_code), &error_len) catch {
-            // Handle error
-            return;
-        };
-        
-        const success = error_code == 0;
-        // TODO: Find connection by fd and call callback
+        _ = fd;
+        // TODO: Check if connect succeeded and find connection by fd to call callback
     }
     
     fn handleReadEvent(fd: posix.socket_t, event: EventType) void {

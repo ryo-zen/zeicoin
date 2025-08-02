@@ -3,7 +3,16 @@
 
 const std = @import("std");
 
-/// Multiaddr placeholder type
+/// Protocol codes for simplified multiaddr parsing
+pub const ProtocolCode = enum {
+    ip4,
+    ip6,
+    tcp,
+    udp,
+    p2p,
+};
+
+/// Multiaddr placeholder type with necessary methods
 /// TODO: Implement proper multiaddr parsing and representation
 pub const Multiaddr = struct {
     raw: []const u8,
@@ -35,6 +44,56 @@ pub const Multiaddr = struct {
     
     pub fn toString(self: *const Multiaddr) []const u8 {
         return self.raw;
+    }
+    
+    /// Extract TCP/IP address if present (simplified implementation)
+    pub fn getTcpAddress(self: *const Multiaddr) ?std.net.Address {
+        // Simple parsing for common cases like "/ip4/127.0.0.1/tcp/4001"
+        var parts = std.mem.tokenizeScalar(u8, self.raw, '/');
+        var ip: ?[]const u8 = null;
+        var port: ?u16 = null;
+        var is_ipv6 = false;
+        
+        while (parts.next()) |part| {
+            if (std.mem.eql(u8, part, "ip4")) {
+                if (parts.next()) |ip_str| {
+                    ip = ip_str;
+                    is_ipv6 = false;
+                }
+            } else if (std.mem.eql(u8, part, "ip6")) {
+                if (parts.next()) |ip_str| {
+                    ip = ip_str;
+                    is_ipv6 = true;
+                }
+            } else if (std.mem.eql(u8, part, "tcp")) {
+                if (parts.next()) |port_str| {
+                    port = std.fmt.parseInt(u16, port_str, 10) catch null;
+                }
+            }
+        }
+        
+        if (ip != null and port != null) {
+            if (is_ipv6) {
+                return std.net.Address.parseIp6(ip.?, port.?) catch null;
+            } else {
+                return std.net.Address.parseIp4(ip.?, port.?) catch null;
+            }
+        }
+        
+        return null;
+    }
+    
+    /// Check if multiaddr contains a specific protocol (simplified implementation)
+    pub fn hasProtocol(self: *const Multiaddr, protocol: ProtocolCode) bool {
+        const protocol_name = switch (protocol) {
+            .tcp => "tcp",
+            .udp => "udp",
+            .ip4 => "ip4",
+            .ip6 => "ip6",
+            else => return false,
+        };
+        
+        return std.mem.indexOf(u8, self.raw, protocol_name) != null;
     }
 };
 

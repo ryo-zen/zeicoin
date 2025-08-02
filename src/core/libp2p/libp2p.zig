@@ -8,6 +8,7 @@ const std = @import("std");
 pub const multiaddr = @import("multiaddr/multiaddr.zig");
 pub const tcp = @import("transport/tcp.zig");
 pub const peer_id = @import("peer/peer_id.zig");
+const libp2p_internal = @import("libp2p_internal.zig");
 // TODO: Implement protocol negotiation
 // pub const protocol = @import("protocol/multistream.zig");
 
@@ -94,11 +95,15 @@ pub const Host = struct {
         var ma = try Multiaddr.create(self.allocator, addr);
         errdefer ma.deinit();
         
-        const listener = try self.transport.listen(&ma);
-        // Store the actual listening address from listener
-        try self.listeners.append(listener.multiaddr);
+        // Convert to internal Multiaddr type for transport layer
+        var internal_ma = try libp2p_internal.Multiaddr.create(self.allocator, addr);
+        defer internal_ma.deinit();
         
-        std.log.info("Listening on {s}", .{listener.multiaddr.getStringAddress()});
+        _ = try self.transport.listen(&internal_ma);
+        // Store the actual listening address
+        try self.listeners.append(ma);
+        
+        std.log.info("Listening on {s}", .{ma.getStringAddress()});
     }
     
     /// Connect to a peer
@@ -106,7 +111,11 @@ pub const Host = struct {
         var ma = try Multiaddr.create(self.allocator, addr);
         defer ma.deinit();
         
-        const tcp_conn = try self.transport.dial(&ma);
+        // Convert to internal Multiaddr type for transport layer
+        var internal_ma = try libp2p_internal.Multiaddr.create(self.allocator, addr);
+        defer internal_ma.deinit();
+        
+        const tcp_conn = try self.transport.dial(&internal_ma);
         
         const conn = try self.allocator.create(Connection);
         conn.* = Connection.init(self.allocator, tcp_conn);
