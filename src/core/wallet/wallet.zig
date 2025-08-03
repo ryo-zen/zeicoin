@@ -3,7 +3,6 @@
 const std = @import("std");
 const types = @import("../types/types.zig");
 const key = @import("../crypto/key.zig");
-const util = @import("../util/util.zig");
 
 /// 💰 Zeicoin wallet errors - simple and clear
 pub const WalletError = error{
