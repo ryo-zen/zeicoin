@@ -53,9 +53,11 @@ pub const types = @import("core/types/types.zig");
 pub const key = @import("core/crypto/key.zig");
 pub const bech32 = @import("core/crypto/bech32.zig");
 pub const randomx = @import("core/crypto/randomx.zig");
+pub const bip39 = @import("core/crypto/bip39.zig");
 
 // Wallet components
 pub const wallet = @import("core/wallet/wallet.zig");
+pub const hd_wallet = @import("core/wallet/hd_wallet.zig");
 
 // Utility components
 pub const util = @import("core/util/util.zig");
