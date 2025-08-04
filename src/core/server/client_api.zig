@@ -87,7 +87,11 @@ pub const ClientApiServer = struct {
             const message = buffer[0..bytes_read];
             
             // Parse command
-            if (std.mem.startsWith(u8, message, "BLOCKCHAIN_STATUS")) {
+            if (std.mem.startsWith(u8, message, "BLOCKCHAIN_STATUS_ENHANCED")) {
+                self.handleEnhancedStatus(connection) catch |err| {
+                    std.log.err("Failed to send enhanced status: {}", .{err});
+                };
+            } else if (std.mem.startsWith(u8, message, "BLOCKCHAIN_STATUS")) {
                 self.handleStatus(connection) catch |err| {
                     std.log.err("Failed to send status: {}", .{err});
                 };
@@ -144,6 +148,48 @@ pub const ClientApiServer = struct {
             self.allocator,
             "HEIGHT={} PENDING={}\n",
             .{height, pending_count}
+        );
+        defer self.allocator.free(response);
+        
+        _ = try connection.stream.write(response);
+    }
+    
+    fn handleEnhancedStatus(self: *Self, connection: net.Server.Connection) !void {
+        const height = try self.blockchain.getHeight();
+        const pending_count = self.blockchain.mempool_manager.getTransactionCount();
+        
+        // Get peer count from network manager
+        var connected_peers: usize = 0;
+        if (self.blockchain.network_coordinator.getNetworkManager()) |network_manager| {
+            const peer_stats = network_manager.getPeerStats();
+            connected_peers = peer_stats.connected;
+        }
+        
+        // Check if mining is active AND there are transactions to mine
+        const mining_manager_active = if (self.blockchain.mining_manager) |_|
+            self.blockchain.mining_state.active.load(.acquire)
+        else
+            false;
+        const has_transactions = pending_count > 0;
+        const is_mining = mining_manager_active and has_transactions;
+        
+        // Calculate hash rate (simplified - you may want to implement proper tracking)
+        var hash_rate: f64 = 0.0;
+        if (is_mining) {
+            // For now, use a placeholder hash rate calculation
+            // In a real implementation, you'd track actual hash attempts over time
+            hash_rate = if (self.blockchain.mining_manager) |manager| blk: {
+                // This is a simplified approach - you might want to add actual hash rate tracking
+                _ = manager;
+                break :blk 150.5; // Placeholder hash rate
+            } else 0.0;
+        }
+        
+        // Format: "STATUS:height:peers:mempool:mining:hashrate"
+        const response = try std.fmt.allocPrint(
+            self.allocator,
+            "STATUS:{}:{}:{}:{}:{d:.1}\n",
+            .{height, connected_peers, pending_count, is_mining, hash_rate}
         );
         defer self.allocator.free(response);
         

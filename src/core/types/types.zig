@@ -521,7 +521,7 @@ pub const DifficultyTarget = struct {
         return switch (network) {
             .testnet => DifficultyTarget{
                 .base_bytes = 1,
-                .threshold = 0xFF000000, // Very easy for fast testing (was 0xF0000000)
+                .threshold = 0x80000000, // Medium difficulty for realistic testing (~30-60s blocks)
             },
             .mainnet => DifficultyTarget{
                 .base_bytes = 2,

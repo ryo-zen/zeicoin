@@ -11,6 +11,7 @@ const types = zeicoin.types;
 const wallet = zeicoin.wallet;
 const db = zeicoin.db;
 const util = zeicoin.util;
+const clispinners = @import("../core/util/clispinners.zig");
 
 const CLIError = error{
     InvalidCommand,
@@ -624,7 +625,19 @@ fn handleSendCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 }
 
 fn handleStatusCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
-    _ = args;
+    // Check for --watch flag
+    var watch_mode = false;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--watch") or std.mem.eql(u8, arg, "-w")) {
+            watch_mode = true;
+            break;
+        }
+    }
+
+    if (watch_mode) {
+        try handleWatchStatus(allocator);
+        return;
+    }
 
     print("📊 ZeiCoin Network Status:\n", .{});
 
@@ -1236,6 +1249,7 @@ fn printHelp() void {
     print("  zeicoin send <amount> <recipient> Send ZEI to address or wallet\n", .{});
     print("NETWORK COMMANDS:\n", .{});
     print("  zeicoin status                   Show network status\n", .{});
+    print("  zeicoin status --watch           Monitor mining status with live spinner\n", .{});
     print("  zeicoin sync                     Trigger manual blockchain sync\n", .{});
     print("  zeicoin block <height>           Inspect block at specific height\n", .{});
     print("  zeicoin address [wallet]         Show wallet address\n\n", .{});
@@ -1249,4 +1263,186 @@ fn printHelp() void {
     print("ENVIRONMENT:\n", .{});
     print("  ZEICOIN_SERVER=ip               Set server IP (default: 127.0.0.1)\n\n", .{});
     print("💡 Default wallet is 'default' if no name specified\n", .{});
+}
+
+// Shared state for watch mode
+const WatchState = struct {
+    running: std.atomic.Value(bool),
+    server_ip: []const u8,
+    status_text: [1024]u8,
+    status_len: std.atomic.Value(usize),
+    is_mining: std.atomic.Value(bool),
+    block_height: std.atomic.Value(u64),
+    hash_rate: std.atomic.Value(f64),
+    
+    fn init(server_ip: []const u8) WatchState {
+        return WatchState{
+            .running = std.atomic.Value(bool).init(true),
+            .server_ip = server_ip,
+            .status_text = std.mem.zeroes([1024]u8),
+            .status_len = std.atomic.Value(usize).init(0),
+            .is_mining = std.atomic.Value(bool).init(false),
+            .block_height = std.atomic.Value(u64).init(0),
+            .hash_rate = std.atomic.Value(f64).init(0.0),
+        };
+    }
+};
+
+fn handleWatchStatus(allocator: std.mem.Allocator) !void {
+    // Get server IP
+    const server_ip = try getServerIP(allocator);
+    defer allocator.free(server_ip);
+    
+    var watch_state = WatchState.init(server_ip);
+    
+    // Signal handling will be done through the polling loop
+    // Simplified approach without signal handlers for now
+    
+    print("📊 ZeiCoin Network Status (Watch Mode)\n", .{});
+    print("🌐 Server: {s}:10802\n", .{server_ip});
+    print("💡 Press Ctrl+C to exit\n\n", .{});
+    
+    // Start status polling thread
+    const status_thread = try Thread.spawn(.{}, statusPollingWorker, .{ allocator, &watch_state });
+    defer status_thread.join();
+    
+    // Start spinner thread
+    const spinner_thread = try Thread.spawn(.{}, spinnerWorker, .{&watch_state});
+    defer spinner_thread.join();
+    
+    // Main thread waits for interrupt - simplified approach
+    // User can press Ctrl+C to exit (handled by terminal)
+    var counter: u32 = 0;
+    while (watch_state.running.load(.acquire)) {
+        std.time.sleep(500 * std.time.ns_per_ms); // Check every 500ms
+        counter += 1;
+        
+        // For demo purposes, run for a reasonable time or until stopped
+        if (counter > 600) { // Stop after 5 minutes automatically
+            break;
+        }
+    }
+    
+    // Clean shutdown
+    watch_state.running.store(false, .release);
+    clispinners.Terminal.clearLine();
+    clispinners.Terminal.showCursor();
+    print("\n✅ Stopped monitoring\n", .{});
+}
+
+fn statusPollingWorker(allocator: std.mem.Allocator, state: *WatchState) !void {
+    while (state.running.load(.acquire)) {
+        // Poll server status
+        pollServerStatus(allocator, state) catch |err| {
+            // Continue on error, just log it
+            std.log.warn("Failed to poll server status: {}", .{err});
+        };
+        
+        // Adaptive polling: faster when mining, slower when idle
+        const is_mining = state.is_mining.load(.acquire);
+        const poll_interval: u32 = if (is_mining) 500 else 2000; // 0.5s when mining, 2s when idle
+        const sleep_iterations: u32 = poll_interval / 100;
+        
+        for (0..sleep_iterations) |_| {
+            if (!state.running.load(.acquire)) break;
+            std.time.sleep(100 * std.time.ns_per_ms);
+        }
+    }
+}
+
+fn spinnerWorker(state: *WatchState) !void {
+    const stdout = std.io.getStdOut().writer();
+    var current_frame: usize = 0;
+    var last_mining_state: bool = false;
+    
+    while (state.running.load(.acquire)) {
+        const is_mining = state.is_mining.load(.acquire);
+        const block_height = state.block_height.load(.acquire);
+        const hash_rate = state.hash_rate.load(.acquire);
+        
+        // Reset animation when mining state changes
+        if (is_mining != last_mining_state) {
+            current_frame = 0; // Reset animation
+            last_mining_state = is_mining;
+        }
+        
+        // Clear both lines
+        clispinners.Terminal.clearLine();
+        try stdout.print("\x1b[1B", .{}); // Move down 1 line
+        clispinners.Terminal.clearLine();
+        try stdout.print("\x1b[1A", .{}); // Move back up
+        
+        if (is_mining) {
+            // Show blockchain animation
+            const frame = clispinners.blockchain.frames[current_frame];
+            try stdout.print("{s}\nMining... Block: {} | Hash Rate: {d:.1} H/s", 
+                .{ frame, block_height, hash_rate });
+            
+            // Update frame for next iteration
+            current_frame = (current_frame + 1) % clispinners.blockchain.frames.len;
+        } else {
+            // Show inactive status with reset animation
+            try stdout.print("⏸️ Mining inactive\nWaiting for transactions... Block: {} | Hash Rate: {d:.1} H/s", 
+                .{ block_height, hash_rate });
+            current_frame = 0; // Keep at start when inactive
+        }
+        
+        // Move cursor back to start of first line
+        try stdout.print("\x1b[1A\r", .{});
+        
+        std.time.sleep(120 * std.time.ns_per_ms); // Update every 120ms (blockchain spinner interval)
+    }
+    
+    // Clean up display
+    clispinners.Terminal.clearLine();
+    try stdout.print("\x1b[1B", .{}); // Move down 1 line  
+    clispinners.Terminal.clearLine();
+    clispinners.Terminal.showCursor();
+}
+
+fn pollServerStatus(allocator: std.mem.Allocator, state: *WatchState) !void {
+    _ = allocator;
+    const address = net.Address.parseIp4(state.server_ip, 10802) catch return;
+    
+    const connection = connectWithTimeout(address) catch return;
+    defer connection.close();
+    
+    // Send enhanced status request
+    try connection.writeAll("BLOCKCHAIN_STATUS_ENHANCED\n");
+    
+    // Read response
+    var buffer: [2048]u8 = undefined;
+    const bytes_read = readWithTimeout(connection, &buffer) catch return;
+    const response = buffer[0..bytes_read];
+    
+    // Parse enhanced response format: 
+    // "STATUS:height:peers:mempool:mining:hashrate"
+    if (std.mem.startsWith(u8, response, "STATUS:")) {
+        var parts = std.mem.splitScalar(u8, response[7..], ':');
+        
+        if (parts.next()) |height_str| {
+            const height = std.fmt.parseInt(u64, std.mem.trim(u8, height_str, " \n\r\t"), 10) catch 0;
+            state.block_height.store(height, .release);
+        }
+        
+        // Skip peers and mempool for now
+        _ = parts.next(); // peers
+        _ = parts.next(); // mempool
+        
+        if (parts.next()) |mining_str| {
+            const is_mining = std.mem.eql(u8, std.mem.trim(u8, mining_str, " \n\r\t"), "true");
+            state.is_mining.store(is_mining, .release);
+        }
+        
+        if (parts.next()) |hashrate_str| {
+            const hash_rate = std.fmt.parseFloat(f64, std.mem.trim(u8, hashrate_str, " \n\r\t")) catch 0.0;
+            state.hash_rate.store(hash_rate, .release);
+        }
+    }
+    
+    // Store full response for debugging
+    const response_len = @min(response.len, state.status_text.len - 1);
+    @memcpy(state.status_text[0..response_len], response[0..response_len]);
+    state.status_text[response_len] = 0;
+    state.status_len.store(response_len, .release);
 }

@@ -37,7 +37,7 @@ pub const SpinnerRenderer = struct {
     timer: std.time.Timer,
     message: []const u8,
     is_running: bool,
-    
+
     pub fn init(spinner: Spinner, message: []const u8) !SpinnerRenderer {
         return SpinnerRenderer{
             .spinner = spinner,
@@ -47,29 +47,29 @@ pub const SpinnerRenderer = struct {
             .is_running = false,
         };
     }
-    
+
     pub fn start(self: *SpinnerRenderer) !void {
         self.is_running = true;
         Terminal.hideCursor();
         try self.render();
     }
-    
+
     pub fn stop(self: *SpinnerRenderer) void {
         self.is_running = false;
         Terminal.clearLine();
         Terminal.showCursor();
     }
-    
+
     pub fn stopWithMessage(self: *SpinnerRenderer, message: []const u8) void {
         self.is_running = false;
         Terminal.clearLine();
         std.io.getStdOut().writer().print("{s}\n", .{message}) catch {};
         Terminal.showCursor();
     }
-    
+
     pub fn update(self: *SpinnerRenderer) !void {
         if (!self.is_running) return;
-        
+
         const elapsed = self.timer.read() / std.time.ns_per_ms;
         if (elapsed >= self.spinner.interval) {
             self.current_frame = (self.current_frame + 1) % self.spinner.frames.len;
@@ -77,7 +77,7 @@ pub const SpinnerRenderer = struct {
             try self.render();
         }
     }
-    
+
     fn render(self: *SpinnerRenderer) !void {
         const stdout = std.io.getStdOut().writer();
         Terminal.carriageReturn();
@@ -239,19 +239,14 @@ pub const hearts = Spinner{
 pub const blockchain = Spinner{
     .name = "blockchain",
     .interval = 120,
-    .frames = &[_][]const u8{ 
-        "[#]", 
-        "[#]-", 
-        "[#]-[#]", 
-        "[#]-[#]-", 
-        "[#]-[#]-[#]", 
-        "-[#]-[#]-[#]", 
-        "--[#]-[#]-[#]", 
-        "---[#]-[#]-[#]", 
-        "----[#]-[#]-[#]", 
-        "-----[#]-[#]", 
-        "------[#]", 
-        "-------", 
+    .frames = &[_][]const u8{
+        "    ",
+        "[💯]",
+        "[💯]-",
+        "[💯]-[💯]",
+        "[💯]-[💯]-",
+        "[💯]-[💯]-[💯]",
+        "[💯]-[💯]-[💯]-[💯]",
     },
 };
 
@@ -264,28 +259,19 @@ pub const mining = Spinner{
 pub const coin = Spinner{
     .name = "coin",
     .interval = 80,
-    .frames = &[_][]const u8{ 
-        "🪙 ", 
-        " 🪙", 
-        "  🪙", 
-        " 🪙 ", 
-        "🪙  ", 
-        "🪙 ", 
-        "💰", 
-        "🪙 " 
-    },
+    .frames = &[_][]const u8{ "🪙 ", " 🪙", "  🪙", " 🪙 ", "🪙  ", "🪙 ", "💰", "🪙 " },
 };
 
 pub const network = Spinner{
     .name = "network",
     .interval = 100,
-    .frames = &[_][]const u8{ 
-        "📡    ", 
-        "📡 •  ", 
-        "📡 •• ", 
-        "📡 •••", 
-        "📡 •• ", 
-        "📡 •  ", 
+    .frames = &[_][]const u8{
+        "📡    ",
+        "📡 •  ",
+        "📡 •• ",
+        "📡 •••",
+        "📡 •• ",
+        "📡 •  ",
     },
 };
 
@@ -298,56 +284,19 @@ pub const lock = Spinner{
 pub const binary = Spinner{
     .name = "binary",
     .interval = 80,
-    .frames = &[_][]const u8{ 
-        "0000", 
-        "0001", 
-        "0010", 
-        "0100", 
-        "1000", 
-        "1001", 
-        "1010", 
-        "1100", 
-        "1111", 
-        "0111", 
-        "0011", 
-        "0001" 
-    },
+    .frames = &[_][]const u8{ "0000", "0001", "0010", "0100", "1000", "1001", "1010", "1100", "1111", "0111", "0011", "0001" },
 };
 
 pub const matrix = Spinner{
     .name = "matrix",
     .interval = 100,
-    .frames = &[_][]const u8{ 
-        "╔══╗", 
-        "║10║", 
-        "║01║", 
-        "╚══╝", 
-        "╔══╗", 
-        "║01║", 
-        "║10║", 
-        "╚══╝" 
-    },
+    .frames = &[_][]const u8{ "╔══╗", "║10║", "║01║", "╚══╝", "╔══╗", "║01║", "║10║", "╚══╝" },
 };
 
 pub const blocks = Spinner{
     .name = "blocks",
     .interval = 120,
-    .frames = &[_][]const u8{ 
-        "▁", 
-        "▂", 
-        "▃", 
-        "▄", 
-        "▅", 
-        "▆", 
-        "▇", 
-        "█", 
-        "▇", 
-        "▆", 
-        "▅", 
-        "▄", 
-        "▃", 
-        "▂" 
-    },
+    .frames = &[_][]const u8{ "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█", "▇", "▆", "▅", "▄", "▃", "▂" },
 };
 
 pub const lightning = Spinner{
@@ -359,96 +308,37 @@ pub const lightning = Spinner{
 pub const zen = Spinner{
     .name = "zen",
     .interval = 200,
-    .frames = &[_][]const u8{ 
-        "☯️ ", 
-        " ☯️", 
-        "  ☯️", 
-        " ☯️ ", 
-        "☯️  ", 
-        "☯️ ", 
-        "☮️ ", 
-        "☯️ " 
-    },
+    .frames = &[_][]const u8{ "☯️ ", " ☯️", "  ☯️", " ☯️ ", "☯️  ", "☯️ ", "☮️ ", "☯️ " },
 };
 
 pub const hexagon = Spinner{
     .name = "hexagon",
     .interval = 100,
-    .frames = &[_][]const u8{ 
-        "⬡", 
-        "⬢", 
-        "⬡", 
-        "⬢", 
-        "⬡", 
-        "⬢" 
-    },
+    .frames = &[_][]const u8{ "⬡", "⬢", "⬡", "⬢", "⬡", "⬢" },
 };
 
 pub const pulse = Spinner{
     .name = "pulse",
     .interval = 100,
-    .frames = &[_][]const u8{ 
-        "·", 
-        "•", 
-        "●", 
-        "●", 
-        "•", 
-        "·", 
-        " ", 
-        "·" 
-    },
+    .frames = &[_][]const u8{ "·", "•", "●", "●", "•", "·", " ", "·" },
 };
 
 pub const wave = Spinner{
     .name = "wave",
     .interval = 100,
-    .frames = &[_][]const u8{ 
-        "▁▂▃", 
-        "▂▃▄", 
-        "▃▄▅", 
-        "▄▅▆", 
-        "▅▆▇", 
-        "▆▇█", 
-        "▇█▇", 
-        "█▇▆", 
-        "▇▆▅", 
-        "▆▅▄", 
-        "▅▄▃", 
-        "▄▃▂", 
-        "▃▂▁" 
-    },
+    .frames = &[_][]const u8{ "▁▂▃", "▂▃▄", "▃▄▅", "▄▅▆", "▅▆▇", "▆▇█", "▇█▇", "█▇▆", "▇▆▅", "▆▅▄", "▅▄▃", "▄▃▂", "▃▂▁" },
 };
 
 pub const rocket = Spinner{
     .name = "rocket",
     .interval = 120,
-    .frames = &[_][]const u8{ 
-        "🚀     ", 
-        " 🚀    ", 
-        "  🚀   ", 
-        "   🚀  ", 
-        "    🚀 ", 
-        "     🚀", 
-        "    🚀🔥", 
-        "   🚀🔥 ", 
-        "  🚀🔥  ", 
-        " 🚀🔥   ", 
-        "🚀🔥    " 
-    },
+    .frames = &[_][]const u8{ "🚀     ", " 🚀    ", "  🚀   ", "   🚀  ", "    🚀 ", "     🚀", "    🚀🔥", "   🚀🔥 ", "  🚀🔥  ", " 🚀🔥   ", "🚀🔥    " },
 };
 
 pub const dna = Spinner{
     .name = "dna",
     .interval = 100,
-    .frames = &[_][]const u8{ 
-        "🧬", 
-        "🔬", 
-        "🧪", 
-        "⚗️", 
-        "🧬", 
-        "🔭", 
-        "🧬" 
-    },
+    .frames = &[_][]const u8{ "🧬", "🔬", "🧪", "⚗️", "🧬", "🔭", "🧬" },
 };
 
 // All available spinners
@@ -516,14 +406,14 @@ pub fn getRandomSpinner() Spinner {
 pub fn example() !void {
     var renderer = try SpinnerRenderer.init(dots, "Loading...");
     try renderer.start();
-    
+
     // Simulate work
     var i: u32 = 0;
     while (i < 50) : (i += 1) {
         try renderer.update();
         std.time.sleep(100 * std.time.ns_per_ms);
     }
-    
+
     renderer.stopWithMessage("✅ Done!");
 }
 
