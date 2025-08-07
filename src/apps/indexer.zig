@@ -216,16 +216,19 @@ fn indexBlock(pool: *Pool, allocator: std.mem.Allocator, blockchain_path: []cons
         }
     }
 
-    // Insert block
+    // Create timestamp string for PostgreSQL
+    const timestamp_str = try std.fmt.allocPrint(allocator, "{}", .{block.header.timestamp});
+    defer allocator.free(timestamp_str);
+
+    // Insert block using standard PostgreSQL approach (TimescaleDB best practice)
     _ = try pool.exec(
-        \\INSERT INTO blocks (height, hash, previous_hash, timestamp, difficulty, nonce, tx_count, total_fees, size)
-        \\VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        \\ON CONFLICT (height) DO NOTHING
+        \\INSERT INTO blocks (timestamp, height, hash, previous_hash, difficulty, nonce, tx_count, total_fees, size)
+        \\VALUES (to_timestamp($1), $2, $3, $4, $5, $6, $7, $8, $9)
     , .{
+        timestamp_str,
         height,
         &hash_hex,
         &prev_hash_hex,
-        block.header.timestamp,
         block.header.difficulty,
         block.header.nonce,
         block.transactions.len,
@@ -274,12 +277,16 @@ fn indexTransaction(
     @memcpy(recipient_str[0..recipient_bech32.len], recipient_bech32);
     recipient_str[recipient_bech32.len] = 0;
 
-    // Insert transaction
+    // Create timestamp string for transaction
+    const tx_timestamp_str = try std.fmt.allocPrint(allocator, "{}", .{tx.timestamp});
+    defer allocator.free(tx_timestamp_str);
+
+    // Insert transaction (TimescaleDB hypertable)
     _ = try pool.exec(
-        \\INSERT INTO transactions (hash, block_height, block_hash, position, sender, recipient, amount, fee, nonce, timestamp)
-        \\VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-        \\ON CONFLICT (hash) DO NOTHING
+        \\INSERT INTO transactions (block_timestamp, hash, block_height, block_hash, position, sender, recipient, amount, fee, nonce)
+        \\VALUES (to_timestamp($1), $2, $3, $4, $5, $6, $7, $8, $9, $10)
     , .{
+        tx_timestamp_str,
         &tx_hash_hex,
         block_height,
         block_hash,
@@ -289,46 +296,29 @@ fn indexTransaction(
         tx.amount,
         tx.fee,
         tx.nonce,
-        tx.timestamp,
     });
 
-    // Update account balances
+    // Update account balances using TimescaleDB function  
     if (!tx.sender.isZero()) {
         // Deduct from sender
         _ = try pool.exec(
-            \\INSERT INTO accounts (address, balance, nonce, last_active_block, tx_count, total_sent)
-            \\VALUES ($1, $2, $3, $4, 1, $5)
-            \\ON CONFLICT (address) DO UPDATE SET
-            \\  balance = accounts.balance - $6,
-            \\  nonce = GREATEST(accounts.nonce, $3),
-            \\  last_active_block = $4,
-            \\  tx_count = accounts.tx_count + 1,
-            \\  total_sent = accounts.total_sent + $5,
-            \\  updated_at = CURRENT_TIMESTAMP
+            \\SELECT update_account_balance_simple($1, $2, $3, to_timestamp($4), true)
         , .{
             std.mem.sliceTo(&sender_str, 0),
             @as(i64, 0) - @as(i64, @intCast(tx.amount + tx.fee)),
-            tx.nonce + 1,
             block_height,
-            tx.amount + tx.fee,
-            tx.amount + tx.fee,
+            tx_timestamp_str,
         });
     }
 
     // Add to recipient
     _ = try pool.exec(
-        \\INSERT INTO accounts (address, balance, last_active_block, tx_count, total_received)
-        \\VALUES ($1, $2, $3, 1, $2)
-        \\ON CONFLICT (address) DO UPDATE SET
-        \\  balance = accounts.balance + $2,
-        \\  last_active_block = $3,
-        \\  tx_count = accounts.tx_count + 1,
-        \\  total_received = accounts.total_received + $2,
-        \\  updated_at = CURRENT_TIMESTAMP
+        \\SELECT update_account_balance_simple($1, $2, $3, to_timestamp($4), false)
     , .{
         std.mem.sliceTo(&recipient_str, 0),
-        tx.amount,
+        @as(i64, @intCast(tx.amount)),
         block_height,
+        tx_timestamp_str,
     });
 }
 
