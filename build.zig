@@ -9,6 +9,10 @@ const external_dependencies = [_]build_helpers.Dependency{
         .name = "pg",
         .module_name = "pg",
     },
+    .{
+        .name = "zap",
+        .module_name = "zap",
+    },
 };
 
 pub fn build(b: *std.Build) !void {
@@ -157,6 +161,36 @@ pub fn build(b: *std.Build) !void {
         run_step.dependOn(&run_cmd.step);
     }
 
+    // **************************************************************
+    // *              ANALYTICS REST API AS AN EXECUTABLE          *
+    // **************************************************************
+    {
+        const exe = b.addExecutable(.{
+            .name = "analytics_api",
+            .root_source_file = b.path("src/apps/analytics_rest_api.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        // Add dependency modules to the executable.
+        for (deps) |mod| exe.root_module.addImport(
+            mod.name,
+            mod.module,
+        );
+        exe.root_module.addImport("zeicoin", lib.root_module);
+        exe.linkLibC();
+
+        b.installArtifact(exe);
+
+        const run_cmd = b.addRunArtifact(exe);
+        run_cmd.step.dependOn(b.getInstallStep());
+
+        if (b.args) |args| {
+            run_cmd.addArgs(args);
+        }
+
+        const run_step = b.step("run-analytics", "Run the analytics REST API");
+        run_step.dependOn(&run_cmd.step);
+    }
 
     // **************************************************************
     // *              CHECK FOR FAST FEEDBACK LOOP                  *
