@@ -628,8 +628,8 @@ pub const BlockSyncProtocol = struct {
             // Basic transaction structure validation only
             if (!tx.isValid()) {
                 print("❌ Transaction {} structure validation failed\n", .{i});
-                const sender_bytes = tx.sender.toLegacyBytes();
-                const recipient_bytes = tx.recipient.toLegacyBytes();
+                const sender_bytes = tx.sender.toBytes();
+                const recipient_bytes = tx.recipient.toBytes();
                 print("   Sender: {s}\n", .{std.fmt.fmtSliceHexLower(&sender_bytes)});
                 print("   Recipient: {s}\n", .{std.fmt.fmtSliceHexLower(&recipient_bytes)});
                 print("   Amount: {}\n", .{tx.amount});

@@ -289,9 +289,8 @@ fn handleWalletCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
 fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const wallet_name = if (args.len > 0) args[0] else "default";
-    const use_hd = args.len > 1 and std.mem.eql(u8, args[1], "--hd");
 
-    print("💳 Creating new ZeiCoin wallet: {s}\n", .{wallet_name});
+    print("💳 Creating new ZeiCoin HD wallet: {s}\n", .{wallet_name});
 
     // Initialize database with network-specific directory
     const data_dir = switch (types.CURRENT_NETWORK) {
@@ -348,42 +347,30 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         
         print("🆔 Address: {s}\n", .{bech32_addr});
         print("💡 Genesis accounts (alice, bob, charlie, david, eve) have pre-funded balances\n", .{});
-    } else if (use_hd) {
-        // Create HD wallet
-        var hd_zen_wallet = hd_wallet.HDWallet.init(allocator);
-        defer hd_zen_wallet.deinit();
+    } else {
+        // Create HD wallet (all wallets are now HD)
+        var zen_wallet = wallet.Wallet.init(allocator);
+        defer zen_wallet.deinit();
         
-        // Generate 24-word mnemonic
-        const mnemonic = try hd_zen_wallet.generateNew(.twentyfour);
+        // Generate 12-word mnemonic
+        const mnemonic = try zen_wallet.createNew(bip39.WordCount.twelve);
         defer allocator.free(mnemonic);
         
         // Save HD wallet
-        try hd_zen_wallet.saveToFile(wallet_path, password);
+        try zen_wallet.saveToFile(wallet_path, password);
         
         // Get first address
-        const address = try hd_zen_wallet.getAddress(0);
+        const address = zen_wallet.getAddress() orelse return error.WalletCreationFailed;
         
-        print("✅ HD Wallet '{s}' created successfully!\n", .{wallet_name});
         print("\n", .{});
         print("🔐 MNEMONIC PHRASE (Write this down!):\n", .{});
         print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n", .{});
-        
-        // Display mnemonic in 4 rows of 6 words each
-        var words = std.mem.tokenizeScalar(u8, mnemonic, ' ');
-        var word_count: u32 = 0;
-        while (words.next()) |word| {
-            print("{d:>2}. {s:<12}", .{ word_count + 1, word });
-            word_count += 1;
-            if (word_count % 6 == 0) {
-                print("\n", .{});
-            }
-        }
-        
+        print("{s}\n", .{mnemonic});
         print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n", .{});
-        print("\n", .{});
         print("⚠️  IMPORTANT: Save this mnemonic phrase securely!\n", .{});
-        print("    This is the ONLY way to recover your wallet.\n", .{});
+        print("    This is the ONLY way to recover your HD wallet.\n", .{});
         print("\n", .{});
+        print("✅ HD Wallet '{s}' created successfully!\n", .{wallet_name});
         
         // Show first address
         const bech32_addr = address.toBech32(allocator, types.CURRENT_NETWORK) catch {
@@ -392,31 +379,9 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         };
         defer allocator.free(bech32_addr);
         
-        print("🆔 Address #0: {s}\n", .{bech32_addr});
-        print("💡 Use 'zeicoin wallet derive {s}' to generate more addresses\n", .{wallet_name});
-    } else {
-        // Create standard wallet
-        var zen_wallet = wallet.Wallet.init(allocator);
-        defer zen_wallet.deinit();
-        
-        try zen_wallet.createNew();
-        try zen_wallet.saveToFile(wallet_path, password);
-        
-        const address = zen_wallet.getAddress() orelse return error.WalletCreationFailed;
-        print("✅ Wallet '{s}' created successfully!\n", .{wallet_name});
-        
-        // Show bech32 address
-        const bech32_addr = address.toBech32(allocator, types.CURRENT_NETWORK) catch {
-            // Show error if bech32 encoding fails
-            print("🆔 Address: <encoding error>\n", .{});
-            print("💡 Genesis accounts (alice, bob, charlie, david, eve) have pre-funded balances\n", .{});
-            return;
-        };
-        defer allocator.free(bech32_addr);
-        
-        print("🆔 Address: {s}\n", .{bech32_addr});
+        print("🆔 Address (index 0): {s}\n", .{bech32_addr});
         print("💡 Genesis accounts (alice, bob, charlie, david, eve) have pre-funded balances\n", .{});
-        print("💡 Use 'zeicoin wallet create {s} --hd' to create an HD wallet\n", .{wallet_name});
+        print("💡 Use 'zeicoin address {s} --index N' to show address at specific index\n", .{wallet_name});
     }
 }
 
@@ -942,6 +907,16 @@ fn handleStatusCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
 fn handleAddressCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const wallet_name = if (args.len > 0) args[0] else "default";
+    
+    // Parse --index flag
+    var index: u32 = 0;
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "--index")) {
+        index = std.fmt.parseInt(u32, args[2], 10) catch {
+            print("❌ Invalid index: {s}\n", .{args[2]});
+            print("Usage: zeicoin address [wallet] [--index N]\n", .{});
+            return;
+        };
+    }
 
     // Load wallet
     const zen_wallet = loadWalletForOperation(allocator, wallet_name) catch |err| {
@@ -958,9 +933,16 @@ fn handleAddressCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         allocator.destroy(zen_wallet);
     }
 
-    const address = zen_wallet.getAddress() orelse return error.WalletNotLoaded;
+    // Get address at specific index
+    const address = if (index == 0) 
+        zen_wallet.getAddress() orelse return error.WalletNotLoaded
+    else
+        zen_wallet.getAddressAtIndex(index) catch |err| {
+            print("❌ Failed to derive address at index {}: {}\n", .{ index, err });
+            return;
+        };
 
-    print("🆔 Wallet '{s}' address:\n", .{wallet_name});
+    print("🆔 Wallet '{s}' address (index {}): \n", .{ wallet_name, index });
     
     // Show bech32 address as primary format
     const bech32_addr = address.toBech32(allocator, types.CURRENT_NETWORK) catch |err| blk: {
@@ -1492,8 +1474,7 @@ fn printHelp() void {
     printZeiBanner();
 
     print("WALLET COMMANDS:\n", .{});
-    print("  zeicoin wallet create [name]           Create new wallet\n", .{});
-    print("  zeicoin wallet create [name] --hd      Create HD wallet with mnemonic\n", .{});
+    print("  zeicoin wallet create [name]           Create new HD wallet with mnemonic\n", .{});
     print("  zeicoin wallet load [name]             Load existing wallet\n", .{});
     print("  zeicoin wallet list                    List all wallets\n", .{});
     print("  zeicoin wallet restore <name> <words>  Restore HD wallet from mnemonic\n", .{});
@@ -1507,10 +1488,9 @@ fn printHelp() void {
     print("  zeicoin status --watch           Monitor mining status with live spinner\n", .{});
     print("  zeicoin sync                     Trigger manual blockchain sync\n", .{});
     print("  zeicoin block <height>           Inspect block at specific height\n", .{});
-    print("  zeicoin address [wallet]         Show wallet address\n\n", .{});
+    print("  zeicoin address [wallet] [--index N]  Show wallet address at index N\n\n", .{});
     print("EXAMPLES:\n", .{});
-    print("  zeicoin wallet create alice            # Create wallet named 'alice'\n", .{});
-    print("  zeicoin wallet create myhd --hd        # Create HD wallet with mnemonic\n", .{});
+    print("  zeicoin wallet create alice            # Create HD wallet named 'alice'\n", .{});
     print("  zeicoin wallet restore myhd word1...   # Restore from 24-word mnemonic\n", .{});
     print("  zeicoin wallet derive myhd             # Get next HD address\n", .{});
     print("  zeicoin balance alice                  # Check alice's balance (pre-funded)\n", .{});

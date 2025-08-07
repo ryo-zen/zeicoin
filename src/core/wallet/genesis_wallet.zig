@@ -29,14 +29,13 @@ pub fn createGenesisKeyPair(seed: []const u8) !key.KeyPair {
     };
 }
 
-/// Get key pair for a named test account
+/// Get key pair for a named test account (deprecated - use HD wallets instead)
 pub fn getTestAccountKeyPair(name: []const u8) !?key.KeyPair {
-    for (genesis.TESTNET_DISTRIBUTION) |account| {
-        if (std.mem.eql(u8, account.name, name)) {
-            return try createGenesisKeyPair(account.seed);
-        }
-    }
-    return null;
+    // Since we're using HD wallets now, this function is deprecated
+    // But we keep it for backward compatibility in tests
+    const seed = try std.fmt.allocPrint(std.heap.page_allocator, "GENESIS_{s}", .{name});
+    defer std.heap.page_allocator.free(seed);
+    return try createGenesisKeyPair(seed);
 }
 
 /// Verify that a key pair matches the expected genesis address
@@ -45,6 +44,81 @@ pub fn verifyGenesisKeyPair(name: []const u8, keypair: key.KeyPair) !bool {
     const actual_addr = types.Address.fromPublicKey(keypair.public_key);
     
     return std.mem.eql(u8, &expected_addr.hash, &actual_addr.hash);
+}
+
+/// Generate deterministic mnemonic for genesis account from config file
+pub fn getGenesisAccountMnemonic(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
+    // Read from keys.config file
+    const file = std.fs.cwd().openFile("keys.config", .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            std.log.warn("keys.config not found, using fallback mnemonics (INSECURE!)", .{});
+            return getFallbackMnemonic(name);
+        },
+        else => return err,
+    };
+    defer file.close();
+    
+    const content = try file.readToEndAlloc(allocator, 4096);
+    defer allocator.free(content);
+    
+    // Parse config file line by line
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        
+        // Skip empty lines and comments
+        if (trimmed.len == 0 or trimmed[0] == '#') continue;
+        
+        // Parse "name=mnemonic" format
+        if (std.mem.indexOf(u8, trimmed, "=")) |eq_pos| {
+            const config_key = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
+            const value = std.mem.trim(u8, trimmed[eq_pos + 1..], " \t");
+            
+            if (std.mem.eql(u8, config_key, name)) {
+                return try allocator.dupe(u8, value); // Return allocated copy
+            }
+        }
+    }
+    
+    return error.UnknownGenesisAccount;
+}
+
+/// Generate deterministic mnemonic from genesis seed that produces compatible addresses
+fn generateGenesisHDMnemonic(allocator: std.mem.Allocator, seed: []const u8) ![]u8 {
+    const bip39 = @import("../crypto/bip39.zig");
+    
+    // Create deterministic entropy from the seed
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(seed);
+    hasher.update("_ZEICOIN_HD_GENESIS"); // Different suffix for HD wallets
+    var full_hash: [32]u8 = undefined;
+    hasher.final(&full_hash);
+    
+    // Use first 16 bytes as entropy for 12-word mnemonic
+    const entropy = full_hash[0..16];
+    
+    // Generate mnemonic from entropy
+    return try bip39.entropyToMnemonic(allocator, entropy);
+}
+
+/// Fallback mnemonics when config file is not available (for development)
+fn getFallbackMnemonic(name: []const u8) ![]const u8 {
+    
+    // For now, use the static mnemonics, but in the future we should generate
+    // deterministic ones from the genesis seeds
+    if (std.mem.eql(u8, name, "alice")) {
+        return "perfect perfect perfect perfect perfect perfect perfect perfect perfect perfect perfect about";
+    } else if (std.mem.eql(u8, name, "bob")) {
+        return "perfect perfect perfect perfect perfect perfect perfect perfect perfect perfect perfect abandon";
+    } else if (std.mem.eql(u8, name, "charlie")) {
+        return "perfect perfect perfect perfect perfect perfect perfect perfect perfect perfect perfect across";
+    } else if (std.mem.eql(u8, name, "david")) {
+        return "perfect perfect perfect perfect perfect perfect perfect perfect perfect perfect perfect act";
+    } else if (std.mem.eql(u8, name, "eve")) {
+        return "perfect perfect perfect perfect perfect perfect perfect perfect perfect perfect perfect add";
+    } else {
+        return error.UnknownGenesisAccount;
+    }
 }
 
 test "Genesis key pair generation" {

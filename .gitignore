@@ -8,6 +8,9 @@ zeicoin_data/
 zeicoin_data_testnet/
 zeicoin_data_mainnet/
 
+# Security - Genesis account mnemonics
+keys.config
+
 # Claude
 .CLAUDE.md
 CLAUDE.md

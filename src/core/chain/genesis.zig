@@ -130,25 +130,25 @@ pub fn validateGenesis(block: types.Block) bool {
     return true;
 }
 
-/// TestNet pre-funded accounts for testing
+/// TestNet pre-funded accounts for testing (HD Wallet addresses)
 pub const TESTNET_DISTRIBUTION = [_]struct {
     name: []const u8,
-    seed: []const u8,
+    address_hex: []const u8, // Bech32 address from HD wallet
     amount: u64,
 }{
-    .{ .name = "alice", .seed = "TESTNET_ALICE_SEED", .amount = 1000 * types.ZEI_COIN },
-    .{ .name = "bob", .seed = "TESTNET_BOB_SEED", .amount = 1000 * types.ZEI_COIN },
-    .{ .name = "charlie", .seed = "TESTNET_CHARLIE_SEED", .amount = 1000 * types.ZEI_COIN },
-    .{ .name = "david", .seed = "TESTNET_DAVID_SEED", .amount = 1000 * types.ZEI_COIN },
-    .{ .name = "eve", .seed = "TESTNET_EVE_SEED", .amount = 1000 * types.ZEI_COIN },
+    .{ .name = "alice", .address_hex = "tzei1qrgpp0exza5wrr7mmrymj6954scpy46q3cqrec23", .amount = 1000 * types.ZEI_COIN },
+    .{ .name = "bob", .address_hex = "tzei1qqt0pwgs3t4gy8k2yq7le5v7fgmfh8sh2uxt4he8", .amount = 1000 * types.ZEI_COIN },
+    .{ .name = "charlie", .address_hex = "tzei1qqauxjgpvyz37j9xuyszcdpq76pdcltrevcz77zx", .amount = 1000 * types.ZEI_COIN },
+    .{ .name = "david", .address_hex = "tzei1qp00w948dy8pj7t3kpf9r9cawu9p3m9u5gcc5p7n", .amount = 1000 * types.ZEI_COIN },
+    .{ .name = "eve", .address_hex = "tzei1qr8t3tturaa4k4qy425phsad4sc2ehgq2qdl7arj", .amount = 1000 * types.ZEI_COIN },
 };
 
-/// Get deterministic address for a test account
+/// Get deterministic address for a test account  
 pub fn getTestAccountAddress(name: []const u8) ?types.Address {
     for (TESTNET_DISTRIBUTION) |account| {
         if (std.mem.eql(u8, account.name, name)) {
-            const public_key = createGenesisPublicKey(account.seed);
-            return types.Address.fromPublicKey(public_key);
+            // Parse the bech32 address
+            return types.Address.fromString(std.heap.page_allocator, account.address_hex) catch null;
         }
     }
     return null;
@@ -208,8 +208,8 @@ pub fn createGenesis(allocator: std.mem.Allocator) !types.Block {
     // Add TestNet distribution transactions
     if (types.CURRENT_NETWORK == .testnet) {
         for (TESTNET_DISTRIBUTION, 0..) |account, i| {
-            const account_pubkey = createGenesisPublicKey(account.seed);
-            const account_address = types.Address.fromPublicKey(account_pubkey);
+            // Parse the bech32 address from the account
+            const account_address = types.Address.fromString(std.heap.page_allocator, account.address_hex) catch unreachable;
             
             transactions[i + 1] = types.Transaction{
                 .version = 0,

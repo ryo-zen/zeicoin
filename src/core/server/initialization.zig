@@ -241,7 +241,7 @@ fn initializeMiningSystem(blockchain: *zen.ZeiCoin, miner_wallet_name: []const u
     
     wallet_instance = wallet_obj;
     
-    if (wallet_instance.?.address) |addr| {
+    if (wallet_instance.?.getAddress()) |addr| {
         mining_address = addr;
         std.log.info("✅ Mining enabled for wallet: {s}", .{wallet_name});
         std.log.info("⛏️  Mining address: {s}", .{std.fmt.fmtSliceHexLower(std.mem.asBytes(&addr))});
@@ -257,30 +257,29 @@ fn initializeMiningSystem(blockchain: *zen.ZeiCoin, miner_wallet_name: []const u
     // Start mining
     if (wallet_instance) |*w| {
         // Get keypair from wallet for mining
-        if (w.private_key) |private_key| {
-            const keypair = key.KeyPair.fromPrivateKey(private_key);
-            
-            // Initialize mining manager if needed
-            if (blockchain.mining_manager == null) {
-                const mining_context = miner_mod.MiningContext{
-                    .allocator = allocator,
-                    .database = blockchain.database,
-                    .mempool_manager = blockchain.mempool_manager,
-                    .mining_state = &blockchain.mining_state,
-                    .network = blockchain.network_coordinator.getNetworkManager(),
-                    .fork_manager = &blockchain.fork_manager,
-                    .blockchain = blockchain,
-                };
-                blockchain.mining_manager = try allocator.create(miner_mod.MiningManager);
-                blockchain.mining_manager.?.* = miner_mod.MiningManager.init(mining_context, mining_address);
-            }
-            
-            // Store keypair for deferred mining start
-            blockchain.mining_keypair = keypair;
-            std.log.info("⛏️  Mining keypair stored for deferred start", .{});
-        } else {
-            return error.WalletKeyPairNotFound;
+        const keypair = w.getKeyPair() catch {
+            std.log.err("❌ Failed to get keypair from wallet for mining", .{});
+            return error.WalletKeyPairError;
+        };
+        
+        // Initialize mining manager if needed
+        if (blockchain.mining_manager == null) {
+            const mining_context = miner_mod.MiningContext{
+                .allocator = allocator,
+                .database = blockchain.database,
+                .mempool_manager = blockchain.mempool_manager,
+                .mining_state = &blockchain.mining_state,
+                .network = blockchain.network_coordinator.getNetworkManager(),
+                .fork_manager = &blockchain.fork_manager,
+                .blockchain = blockchain,
+            };
+            blockchain.mining_manager = try allocator.create(miner_mod.MiningManager);
+            blockchain.mining_manager.?.* = miner_mod.MiningManager.init(mining_context, mining_address);
         }
+        
+        // Store keypair for deferred mining start
+        blockchain.mining_keypair = keypair;
+        std.log.info("⛏️  Mining keypair stored for deferred start", .{});
     } else {
         return error.WalletNotFound;
     }
