@@ -167,7 +167,7 @@ pub fn build(b: *std.Build) !void {
     {
         const exe = b.addExecutable(.{
             .name = "analytics_api",
-            .root_source_file = b.path("src/apps/analytics_rest_api.zig"),
+            .root_source_file = b.path("src/apps/rest.zig"),
             .target = target,
             .optimize = optimize,
         });

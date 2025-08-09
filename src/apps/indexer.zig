@@ -15,10 +15,70 @@ pub const PgConfig = struct {
     port: u16 = 5432,
     database: []const u8 = "zeicoin_testnet",
     user: []const u8 = "zeicoin",
-    password: []const u8 = "zeicoin123",
+    password: []const u8 = "******",
     pool_size: u32 = 5,
     batch_size: u32 = 10,
 };
+
+/// Database configuration from JSON
+const DbConfigJson = struct {
+    postgres: struct {
+        host: []const u8,
+        port: u16,
+        user: []const u8,
+        password: []const u8,
+        databases: struct {
+            testnet: []const u8,
+            mainnet: []const u8,
+        },
+        pool_size: u32,
+        timeout: u32,
+    },
+    analytics_api: struct {
+        port: u16,
+        host: []const u8,
+    },
+};
+
+/// Load database configuration from file
+fn loadDatabaseConfig(allocator: std.mem.Allocator) !PgConfig {
+    const config_path = "config/database.json";
+    const file = std.fs.cwd().openFile(config_path, .{}) catch |err| {
+        std.log.warn("Could not open config file {s}: {}, using defaults", .{ config_path, err });
+        return PgConfig{};
+    };
+    defer file.close();
+
+    const contents = try file.readToEndAlloc(allocator, 1024 * 1024);
+    defer allocator.free(contents);
+
+    const parsed = try std.json.parseFromSlice(DbConfigJson, allocator, contents, .{});
+    defer parsed.deinit();
+
+    const database = if (types.CURRENT_NETWORK == .testnet)
+        parsed.value.postgres.databases.testnet
+    else
+        parsed.value.postgres.databases.mainnet;
+
+    // Resolve password from environment variable if it's a template
+    const password = if (std.mem.eql(u8, parsed.value.postgres.password, "${ZEICOIN_DB_PASSWORD}"))
+        std.process.getEnvVarOwned(allocator, "ZEICOIN_DB_PASSWORD") catch |err| {
+            std.log.err("ZEICOIN_DB_PASSWORD environment variable not set: {}", .{err});
+            return err;
+        }
+    else
+        try allocator.dupe(u8, parsed.value.postgres.password);
+
+    return PgConfig{
+        .host = try allocator.dupe(u8, parsed.value.postgres.host),
+        .port = parsed.value.postgres.port,
+        .database = try allocator.dupe(u8, database),
+        .user = try allocator.dupe(u8, parsed.value.postgres.user),
+        .password = password,
+        .pool_size = @intCast(parsed.value.postgres.pool_size),
+        .batch_size = 10,
+    };
+}
 
 /// Simple blockchain height reader
 pub const Indexer = struct {
@@ -74,26 +134,24 @@ pub fn main() !void {
         .mainnet => "zeicoin_data_mainnet",
     };
 
-    // Dynamic database name based on network
-    const database_name = switch (types.CURRENT_NETWORK) {
-        .testnet => "zeicoin_testnet",
-        .mainnet => "zeicoin_mainnet",
-    };
-
     std.log.info("🚀 Starting ZeiCoin PostgreSQL Indexer", .{});
     std.log.info("📁 Blockchain path: {s}", .{blockchain_path});
     std.log.info("🌐 Network: {s}", .{@tagName(types.CURRENT_NETWORK)});
-    std.log.info("🗄️ Database: {s}", .{database_name});
 
-    // Create indexer configuration
-    const config = PgConfig{
-        .database = database_name,
-        // Use defaults for other fields
-    };
+    // Load configuration from file
+    const config = try loadDatabaseConfig(allocator);
+    defer {
+        allocator.free(config.host);
+        allocator.free(config.database);
+        allocator.free(config.user);
+        allocator.free(config.password);
+    }
+
+    std.log.info("🗄️ Database: {s}@{s}:{d}/{s}", .{ config.user, config.host, config.port, config.database });
 
     // Create connection pool using config
     var pool = try pg.Pool.init(allocator, .{
-        .size = config.pool_size,
+        .size = @intCast(config.pool_size),
         .connect = .{
             .port = config.port,
             .host = config.host,
@@ -298,7 +356,7 @@ fn indexTransaction(
         tx.nonce,
     });
 
-    // Update account balances using TimescaleDB function  
+    // Update account balances using TimescaleDB function
     if (!tx.sender.isZero()) {
         // Deduct from sender
         _ = try pool.exec(
