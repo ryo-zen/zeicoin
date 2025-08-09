@@ -107,8 +107,15 @@ pub const MempoolManager = struct {
         const amount_zei = @as(f64, @floatFromInt(transaction.amount)) / @as(f64, @floatFromInt(types.ZEI_COIN));
         const fee_zei = @as(f64, @floatFromInt(transaction.fee)) / @as(f64, @floatFromInt(types.ZEI_COIN));
         
-        print("🔄 [TX LIFECYCLE] Received transaction {s} from {x} → {x}: {d:.8} ZEI (fee: {d:.8}, nonce: {})\n", .{
-            std.fmt.fmtSliceHexLower(tx_hash[0..8]), transaction.sender.hash, transaction.recipient.hash, amount_zei, fee_zei, transaction.nonce
+        // Convert addresses to bech32 for display
+        const sender_bech32 = transaction.sender.toBech32(self.allocator, types.CURRENT_NETWORK) catch "invalid";
+        defer if (!std.mem.eql(u8, sender_bech32, "invalid")) self.allocator.free(sender_bech32);
+        
+        const recipient_bech32 = transaction.recipient.toBech32(self.allocator, types.CURRENT_NETWORK) catch "invalid";
+        defer if (!std.mem.eql(u8, recipient_bech32, "invalid")) self.allocator.free(recipient_bech32);
+        
+        print("🔄 [TX LIFECYCLE] Received transaction {s} from {s} → {s}: {d:.8} ZEI (fee: {d:.8}, nonce: {})\n", .{
+            std.fmt.fmtSliceHexLower(tx_hash[0..8]), sender_bech32, recipient_bech32, amount_zei, fee_zei, transaction.nonce
         });
         
         const result = try self.network_handler.processLocalTransaction(transaction);

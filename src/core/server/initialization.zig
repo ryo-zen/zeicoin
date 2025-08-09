@@ -10,6 +10,7 @@ const wallet = @import("../wallet/wallet.zig");
 const key = @import("../crypto/key.zig");
 const command_line = @import("command_line.zig");
 const types = @import("../types/types.zig");
+const bech32 = @import("../crypto/bech32.zig");
 
 /// Thread function to accept incoming connections
 fn acceptConnectionsThread(network_manager: *network.NetworkManager) void {
@@ -244,7 +245,9 @@ fn initializeMiningSystem(blockchain: *zen.ZeiCoin, miner_wallet_name: []const u
     if (wallet_instance.?.getAddress()) |addr| {
         mining_address = addr;
         std.log.info("✅ Mining enabled for wallet: {s}", .{wallet_name});
-        std.log.info("⛏️  Mining address: {s}", .{std.fmt.fmtSliceHexLower(std.mem.asBytes(&addr))});
+        const addr_str = bech32.encodeAddress(allocator, addr, types.CURRENT_NETWORK) catch "<invalid>";
+        defer if (!std.mem.eql(u8, addr_str, "<invalid>")) allocator.free(addr_str);
+        std.log.info("⛏️  Mining address: {s}", .{addr_str});
     } else {
         std.log.err("❌ Wallet '{s}' has no address!", .{wallet_name});
         return error.WalletHasNoAddress;
@@ -284,8 +287,8 @@ fn initializeMiningSystem(blockchain: *zen.ZeiCoin, miner_wallet_name: []const u
         return error.WalletNotFound;
     }
     
-    const address_str = try std.fmt.allocPrint(allocator, "{}", .{mining_address});
-    defer allocator.free(address_str);
+    const address_str = bech32.encodeAddress(allocator, mining_address, types.CURRENT_NETWORK) catch "<invalid>";
+    defer if (!std.mem.eql(u8, address_str, "<invalid>")) allocator.free(address_str);
     
     std.log.info("⛏️  Mining enabled to address: {s}", .{address_str});
 }

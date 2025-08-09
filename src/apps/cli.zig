@@ -327,7 +327,16 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         defer zen_wallet.deinit();
         
         zen_wallet.importGenesisAccount(wallet_name) catch |err| {
-            print("❌ Failed to import genesis account '{s}': {}\n", .{ wallet_name, err });
+            switch (err) {
+                error.KeysConfigNotFound => {
+                    print("❌ config/keys.config file not found\n", .{});
+                    print("💡 To import genesis accounts, create a config/keys.config file with:\n", .{});
+                    print("   {s}=your mnemonic phrase here\n", .{wallet_name});
+                },
+                else => {
+                    print("❌ Failed to import genesis account '{s}': {}\n", .{ wallet_name, err });
+                },
+            }
             std.process.exit(1);
         };
         print("🔑 Importing pre-funded genesis account '{s}'...\n", .{wallet_name});

@@ -20,6 +20,21 @@ pub const PeerState = enum {
     syncing,
     disconnecting,
     disconnected,
+    
+    /// Format peer state for cleaner logging
+    pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = fmt;
+        _ = options;
+        const state_str = switch (self) {
+            .connecting => "connecting",
+            .handshaking => "handshaking", 
+            .connected => "connected",
+            .syncing => "syncing",
+            .disconnecting => "disconnecting",
+            .disconnected => "disconnected",
+        };
+        try writer.writeAll(state_str);
+    }
 };
 
 /// Individual peer connection

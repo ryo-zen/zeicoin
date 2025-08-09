@@ -16,7 +16,7 @@ DROP DATABASE IF EXISTS $DB_NAME;
 DROP USER IF EXISTS zeicoin;
 
 -- Create user with simple password
-CREATE USER zeicoin WITH PASSWORD 'zeicoin123';
+CREATE USER zeicoin WITH PASSWORD '******';
 
 -- Create database
 CREATE DATABASE $DB_NAME OWNER zeicoin;
@@ -27,13 +27,13 @@ EOF
 
 echo "Loading schema..."
 # Load schema
-PGPASSWORD=zeicoin123 psql -h localhost -U zeicoin -d $DB_NAME < ../sql/schema.sql
+PGPASSWORD=****** psql -h localhost -U zeicoin -d $DB_NAME < ../sql/schema.sql
 
 echo "PostgreSQL setup complete!"
 echo "Database: $DB_NAME"
 echo "User: zeicoin"
-echo "Password: zeicoin123"
+echo "Password: ******"
 echo ""
 echo "Usage:"
 echo "  Start indexer: ./zig-out/bin/zeicoin_indexer"
-echo "  Query database: PGPASSWORD=zeicoin123 psql -h localhost -U zeicoin -d $DB_NAME"
+echo "  Query database: PGPASSWORD=****** psql -h localhost -U zeicoin -d $DB_NAME"

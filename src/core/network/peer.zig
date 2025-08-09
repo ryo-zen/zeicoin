@@ -184,7 +184,18 @@ pub const NetworkManager = struct {
                 return;
             }
             
-            std.log.err("Peer {} connection error: {}", .{ peer, err });
+            // Format friendly error message
+            const error_msg = switch (err) {
+                error.ConnectionResetByPeer => "connection reset by peer",
+                error.ConnectionRefused => "connection refused",
+                error.ConnectionTimedOut => "connection timed out",
+                error.NetworkUnreachable => "network unreachable",
+                error.HostUnreachable => "host unreachable",
+                error.BrokenPipe => "connection broken",
+                error.EndOfStream => "connection closed",
+                else => @errorName(err),
+            };
+            std.log.err("🔌 [NETWORK] {} disconnected ({s})", .{ peer, error_msg });
         };
         
         // Final check before peer removal

@@ -48,11 +48,10 @@ pub fn verifyGenesisKeyPair(name: []const u8, keypair: key.KeyPair) !bool {
 
 /// Generate deterministic mnemonic for genesis account from config file
 pub fn getGenesisAccountMnemonic(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
-    // Read from keys.config file
-    const file = std.fs.cwd().openFile("keys.config", .{}) catch |err| switch (err) {
+    // Read from keys.config file - fail gracefully if not found
+    const file = std.fs.cwd().openFile("config/keys.config", .{}) catch |err| switch (err) {
         error.FileNotFound => {
-            std.log.warn("keys.config not found, using fallback mnemonics (INSECURE!)", .{});
-            return getFallbackMnemonic(name);
+            return error.KeysConfigNotFound;
         },
         else => return err,
     };
@@ -101,25 +100,6 @@ fn generateGenesisHDMnemonic(allocator: std.mem.Allocator, seed: []const u8) ![]
     return try bip39.entropyToMnemonic(allocator, entropy);
 }
 
-/// Fallback mnemonics when config file is not available (for development)
-fn getFallbackMnemonic(name: []const u8) ![]const u8 {
-    
-    // For now, use the static mnemonics, but in the future we should generate
-    // deterministic ones from the genesis seeds
-    if (std.mem.eql(u8, name, "alice")) {
-        return "perfect perfect perfect perfect perfect perfect perfect perfect perfect perfect perfect about";
-    } else if (std.mem.eql(u8, name, "bob")) {
-        return "perfect perfect perfect perfect perfect perfect perfect perfect perfect perfect perfect abandon";
-    } else if (std.mem.eql(u8, name, "charlie")) {
-        return "perfect perfect perfect perfect perfect perfect perfect perfect perfect perfect perfect across";
-    } else if (std.mem.eql(u8, name, "david")) {
-        return "perfect perfect perfect perfect perfect perfect perfect perfect perfect perfect perfect act";
-    } else if (std.mem.eql(u8, name, "eve")) {
-        return "perfect perfect perfect perfect perfect perfect perfect perfect perfect perfect perfect add";
-    } else {
-        return error.UnknownGenesisAccount;
-    }
-}
 
 test "Genesis key pair generation" {
     // Test alice key pair

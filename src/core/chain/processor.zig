@@ -10,6 +10,7 @@ const genesis = @import("genesis.zig");
 const ChainState = @import("state.zig").ChainState;
 const ForkManager = @import("../fork/main.zig").ForkManager;
 const ChainValidator = @import("../validation/validator.zig").ChainValidator;
+const bech32 = @import("../crypto/bech32.zig");
 
 pub const ChainProcessor = struct {
     allocator: std.mem.Allocator,
@@ -172,7 +173,11 @@ pub const ChainProcessor = struct {
             // Log transaction processing
             const tx_hash = tx.hash();
             const amount_zei = @as(f64, @floatFromInt(tx.amount)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-            print("📦 [BLOCK PROCESS] Processing transaction {}/{}: {s} ({d:.8} ZEI from {x} to {x})\n", .{ i + 1, transactions.len, std.fmt.fmtSliceHexLower(tx_hash[0..8]), amount_zei, tx.sender.hash, tx.recipient.hash });
+            const sender_addr = bech32.encodeAddress(self.allocator, tx.sender, types.CURRENT_NETWORK) catch "<invalid>";
+            defer if (!std.mem.eql(u8, sender_addr, "<invalid>")) self.allocator.free(sender_addr);
+            const recipient_addr = bech32.encodeAddress(self.allocator, tx.recipient, types.CURRENT_NETWORK) catch "<invalid>";
+            defer if (!std.mem.eql(u8, recipient_addr, "<invalid>")) self.allocator.free(recipient_addr);
+            print("📦 [BLOCK PROCESS] Processing transaction {}/{}: {s} ({d:.8} ZEI from {s} to {s})\n", .{ i + 1, transactions.len, std.fmt.fmtSliceHexLower(tx_hash[0..8]), amount_zei, sender_addr, recipient_addr });
 
             // SAFETY: Validate transaction structure before processing
             if (!tx.isValid()) {

@@ -7,8 +7,15 @@ const types = @import("../types/types.zig");
 const util = @import("../util/util.zig");
 const db = @import("../storage/db.zig");
 const block_index = @import("block_index.zig");
+const bech32 = @import("../crypto/bech32.zig");
 
 const print = std.debug.print;
+
+// Helper function to format address as bech32 string for logging
+fn formatAddress(allocator: std.mem.Allocator, address: Address) []const u8 {
+    return bech32.encodeAddress(allocator, address, types.CURRENT_NETWORK) catch "<invalid>";
+}
+
 
 // Type aliases for clarity
 const Transaction = types.Transaction;
@@ -32,6 +39,11 @@ pub const ChainState = struct {
     allocator: std.mem.Allocator,
 
     const Self = @This();
+
+    /// Helper method to format address for logging in ChainState context
+    fn formatAddressForLogging(self: *const Self, address: Address) []const u8 {
+        return formatAddress(self.allocator, address);
+    }
 
     /// Initialize ChainState with database and allocator
     pub fn init(allocator: std.mem.Allocator, database: *db.Database) Self {
@@ -104,7 +116,9 @@ pub const ChainState = struct {
         // Try to load from database
         if (self.database.getAccount(address)) |account| {
             const balance_zei = @as(f64, @floatFromInt(account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-            print("🔍 [ACCOUNT LOAD] Found existing account {x}: balance={d:.8} ZEI, nonce={}\n", .{ address.hash, balance_zei, account.nonce });
+            const addr_str = self.formatAddressForLogging(address);
+            defer self.allocator.free(addr_str);
+            print("🔍 [ACCOUNT LOAD] Found existing account {s}: balance={d:.8} ZEI, nonce={}\n", .{ addr_str, balance_zei, account.nonce });
             return account;
         } else |err| switch (err) {
             db.DatabaseError.NotFound => {
@@ -115,7 +129,9 @@ pub const ChainState = struct {
                     .nonce = 0,
                 };
                 const balance_zei = @as(f64, @floatFromInt(new_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-                print("🔍 [ACCOUNT LOAD] Created new account {x}: balance={d:.8} ZEI, nonce={}\n", .{ address.hash, balance_zei, new_account.nonce });
+                const addr_str = self.formatAddressForLogging(address);
+                defer self.allocator.free(addr_str);
+                print("🔍 [ACCOUNT LOAD] Created new account {s}: balance={d:.8} ZEI, nonce={}\n", .{ addr_str, balance_zei, new_account.nonce });
                 // Save to database immediately
                 try self.database.saveAccount(address, new_account);
                 return new_account;
@@ -147,8 +163,12 @@ pub const ChainState = struct {
 
         print("🔍 [TX VALIDATION] =============================================\n", .{});
         print("🔍 [TX VALIDATION] Processing transaction:\n", .{});
-        print("🔍 [TX VALIDATION]   Sender: {x}\n", .{tx.sender.hash});
-        print("🔍 [TX VALIDATION]   Recipient: {x}\n", .{tx.recipient.hash});
+        const sender_addr = self.formatAddressForLogging(tx.sender);
+        defer self.allocator.free(sender_addr);
+        const recipient_addr = self.formatAddressForLogging(tx.recipient);
+        defer self.allocator.free(recipient_addr);
+        print("🔍 [TX VALIDATION]   Sender: {s}\n", .{sender_addr});
+        print("🔍 [TX VALIDATION]   Recipient: {s}\n", .{recipient_addr});
         print("🔍 [TX VALIDATION]   Amount: {} ZEI\n", .{tx.amount});
         print("🔍 [TX VALIDATION]   Fee: {} ZEI\n", .{tx.fee});
         print("🔍 [TX VALIDATION]   Nonce: {}\n", .{tx.nonce});
@@ -159,7 +179,9 @@ pub const ChainState = struct {
         print("🔍 [TX VALIDATION] Loading recipient account...\n", .{});
         var recipient_account = try self.getAccount(tx.recipient);
 
-        print("🔍 [TX VALIDATION] Processing transaction from sender: {x}\n", .{tx.sender.hash});
+        const sender_addr_2 = self.formatAddressForLogging(tx.sender);
+        defer self.allocator.free(sender_addr_2);
+        print("🔍 [TX VALIDATION] Processing transaction from sender: {s}\n", .{sender_addr_2});
         const sender_balance_zei = @as(f64, @floatFromInt(sender_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
         const recipient_balance_zei = @as(f64, @floatFromInt(recipient_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
         const amount_zei = @as(f64, @floatFromInt(tx.amount)) / @as(f64, @floatFromInt(types.ZEI_COIN));
@@ -216,8 +238,12 @@ pub const ChainState = struct {
         const change_zei = @as(f64, @floatFromInt(tx.amount)) / @as(f64, @floatFromInt(types.ZEI_COIN));
         const update_fee_zei = @as(f64, @floatFromInt(tx.fee)) / @as(f64, @floatFromInt(types.ZEI_COIN));
 
-        print("💰 [ACCOUNT UPDATE] SENDER {x}: {d:.8} → {d:.8} ZEI (−{d:.8}, nonce: {}→{})\n", .{ tx.sender.hash, sender_old_zei, sender_new_zei, change_zei + update_fee_zei, sender_old_nonce, sender_account.nonce });
-        print("💰 [ACCOUNT UPDATE] RECIPIENT {x}: {d:.8} → {d:.8} ZEI (+{d:.8})\n", .{ tx.recipient.hash, recipient_old_zei, recipient_new_zei, change_zei });
+        const sender_addr_update = self.formatAddressForLogging(tx.sender);
+        defer self.allocator.free(sender_addr_update);
+        const recipient_addr_update = self.formatAddressForLogging(tx.recipient);
+        defer self.allocator.free(recipient_addr_update);
+        print("💰 [ACCOUNT UPDATE] SENDER {s}: {d:.8} → {d:.8} ZEI (−{d:.8}, nonce: {}→{})\n", .{ sender_addr_update, sender_old_zei, sender_new_zei, change_zei + update_fee_zei, sender_old_nonce, sender_account.nonce });
+        print("💰 [ACCOUNT UPDATE] RECIPIENT {s}: {d:.8} → {d:.8} ZEI (+{d:.8})\n", .{ recipient_addr_update, recipient_old_zei, recipient_new_zei, change_zei });
 
         // Save updated accounts to database
         try self.database.saveAccount(tx.sender, sender_account);
@@ -235,7 +261,9 @@ pub const ChainState = struct {
         }
 
         print("🔍 [COINBASE TX] =============================================\n", .{});
-        print("🔍 [COINBASE TX] Processing coinbase transaction to miner: {x}\n", .{miner_address.hash});
+        const miner_addr = self.formatAddressForLogging(miner_address);
+        defer self.allocator.free(miner_addr);
+        print("🔍 [COINBASE TX] Processing coinbase transaction to miner: {s}\n", .{miner_addr});
         print("🔍 [COINBASE TX] Coinbase amount: {} ZEI, height: {}\n", .{ coinbase_tx.amount, current_height });
 
         // Get or create miner account
@@ -266,10 +294,12 @@ pub const ChainState = struct {
 
         // Log coinbase reward account change
         const reward_zei = @as(f64, @floatFromInt(coinbase_tx.amount)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+        const miner_addr_update = self.formatAddressForLogging(miner_address);
+        defer self.allocator.free(miner_addr_update);
         if (current_height == 0) {
-            print("💰 [COINBASE UPDATE] MINER {x}: {d:.8} → {d:.8} ZEI (+{d:.8} mature reward)\n", .{ miner_address.hash, balance_before, balance_after, reward_zei });
+            print("💰 [COINBASE UPDATE] MINER {s}: {d:.8} → {d:.8} ZEI (+{d:.8} mature reward)\n", .{ miner_addr_update, balance_before, balance_after, reward_zei });
         } else {
-            print("💰 [COINBASE UPDATE] MINER {x}: immature {d:.8} → {d:.8} ZEI (+{d:.8} immature reward)\n", .{ miner_address.hash, immature_before, immature_after, reward_zei });
+            print("💰 [COINBASE UPDATE] MINER {s}: immature {d:.8} → {d:.8} ZEI (+{d:.8} immature reward)\n", .{ miner_addr_update, immature_before, immature_after, reward_zei });
         }
 
         // Save miner account
