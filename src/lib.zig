@@ -62,6 +62,8 @@ pub const hd_wallet = @import("core/wallet/hd_wallet.zig");
 // Utility components
 pub const util = @import("core/util/util.zig");
 pub const clispinners = @import("core/util/clispinners.zig");
+pub const password = @import("core/util/password.zig");
+pub const dotenv = @import("core/util/dotenv.zig");
 
 // Applications are separate executables and should not be part of the library API
 

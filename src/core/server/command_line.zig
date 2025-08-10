@@ -66,7 +66,7 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Config {
             } else {
                 std.debug.print("❌ Error: --mine requires a wallet name\n", .{});
                 std.debug.print("💡 Usage: zen_server --mine <wallet_name>\n", .{});
-                std.debug.print("💡 Example: zen_server --mine Alice\n", .{});
+                std.debug.print("💡 Example: zen_server --mine miner\n", .{});
                 return error.MissingMinerWallet;
             }
         } else if (std.mem.eql(u8, args[i], "--no-client-api")) {
@@ -127,12 +127,17 @@ fn printHelp() void {
         \\  --help, -h              Show this help message
         \\
         \\Environment variables:
+        \\  ZEICOIN_P2P_PORT        P2P listen port (default: 10801)
+        \\  ZEICOIN_BIND_IP         Bind IP address (default: 127.0.0.1)
         \\  ZEICOIN_BOOTSTRAP       Comma-separated list of bootstrap nodes
+        \\  ZEICOIN_MINE_ENABLED    Enable mining (true/false)
+        \\  ZEICOIN_MINER_WALLET    Wallet name for mining rewards
+        \\  ZEICOIN_CLIENT_API_ENABLED  Enable client API (true/false, default: true)
         \\
         \\Examples:
-        \\  zen_server --port 10801 --mine
+        \\  zen_server --port 10801
         \\  zen_server --bootstrap 192.168.1.10:10801,192.168.1.11:10801
-        \\  zen_server --mine alice
+        \\  zen_server --mine miner
         \\
     , .{});
 }

@@ -29,6 +29,14 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     
+    // Load .env file if present (before processing arguments)
+    // Use page allocator for dotenv since putenv requires persistent memory
+    @import("../util/dotenv.zig").loadForNetwork(std.heap.page_allocator) catch |err| {
+        // Don't fail if .env loading fails, just warn
+        if (err != error.FileNotFound) {
+            std.debug.print("⚠️  Warning: Failed to load .env file: {}\n", .{err});
+        }
+    };
     
     // Parse command line
     var config = command_line.parseArgs(allocator) catch |err| switch (err) {

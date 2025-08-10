@@ -7,6 +7,7 @@ const network = @import("../network/peer.zig");
 const sync = @import("../sync/manager.zig");
 const miner_mod = @import("../miner/main.zig");
 const wallet = @import("../wallet/wallet.zig");
+const password_util = @import("../util/password.zig");
 const key = @import("../crypto/key.zig");
 const command_line = @import("command_line.zig");
 const types = @import("../types/types.zig");
@@ -228,7 +229,21 @@ fn initializeMiningSystem(blockchain: *zen.ZeiCoin, miner_wallet_name: []const u
     
     std.log.info("Loading mining wallet from: {s}", .{wallet_path});
     
-    wallet_obj.loadFromFile(wallet_path, "zen") catch |err| {
+    // Get password for mining wallet
+    const password = password_util.getPasswordForWallet(allocator, wallet_name, false) catch |pwd_err| {
+        std.log.err("❌ Failed to get password for mining wallet '{s}'", .{wallet_name});
+        std.log.err("❌ Error: {}", .{pwd_err});
+        std.log.err("", .{});
+        std.log.err("💡 To fix this issue:", .{});
+        std.log.err("   - Set ZEICOIN_WALLET_PASSWORD in your .env file", .{});
+        std.log.err("   - Or set ZEICOIN_TEST_MODE=1 for development", .{});
+        std.log.err("   - Or enter the password interactively (if running in terminal)", .{});
+        return error.PasswordRequired;
+    };
+    defer allocator.free(password);
+    defer password_util.clearPassword(password);
+    
+    wallet_obj.loadFromFile(wallet_path, password) catch |err| {
         std.log.err("❌ Failed to load mining wallet '{s}' from path: {s}", .{wallet_name, wallet_path});
         std.log.err("❌ Error: {}", .{err});
         std.log.err("", .{});

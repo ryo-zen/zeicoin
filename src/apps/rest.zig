@@ -14,80 +14,88 @@ var global_app: ?*AppContext = null;
 
 /// Analytics API configuration
 pub const ApiConfig = struct {
-    port: u16 = 8080,
-    host: []const u8 = "0.0.0.0",
+    port: u16,
+    host: []const u8,
 
     // PostgreSQL connection
-    pg_host: []const u8 = "127.0.0.1",
-    pg_port: u16 = 5432,
+    pg_host: []const u8,
+    pg_port: u16,
     pg_database: []const u8,
-    pg_user: []const u8 = "zeicoin",
-    pg_password: []const u8 = "******",
-    pool_size: u16 = 10,
+    pg_user: []const u8,
+    pg_password: []const u8,  // Required - no default
+    pool_size: u16,
+    timeout: u32,
 };
 
-/// Database configuration from JSON
-const DbConfigJson = struct {
-    postgres: struct {
-        host: []const u8,
-        port: u16,
-        user: []const u8,
-        password: []const u8,
-        databases: struct {
-            testnet: []const u8,
-            mainnet: []const u8,
-        },
-        pool_size: u16,
-        timeout: u32,
-    },
-    analytics_api: struct {
-        port: u16,
-        host: []const u8,
-    },
-};
-
-/// Load configuration from file
-fn loadConfigFromFile(allocator: std.mem.Allocator) !ApiConfig {
-    const config_path = "config/database.json";
-    const file = std.fs.cwd().openFile(config_path, .{}) catch |err| {
-        std.log.warn("Could not open config file {s}: {}, using defaults", .{ config_path, err });
-        // Return default config
-        const database = if (types.CURRENT_NETWORK == .testnet) "zeicoin_testnet" else "zeicoin_mainnet";
-        return ApiConfig{ .pg_database = database };
+/// Load configuration from environment variables (required)
+fn loadConfig(allocator: std.mem.Allocator) !ApiConfig {
+    // API settings
+    const api_host = std.process.getEnvVarOwned(allocator, "ZEICOIN_API_HOST") catch 
+        try allocator.dupe(u8, "127.0.0.1");
+    errdefer allocator.free(api_host);
+    
+    const api_port_str = std.process.getEnvVarOwned(allocator, "ZEICOIN_API_PORT") catch null;
+    const api_port = if (api_port_str) |p| blk: {
+        defer allocator.free(p);
+        break :blk std.fmt.parseInt(u16, p, 10) catch 8080;
+    } else 8080;
+    
+    // Database settings
+    const database = if (std.process.getEnvVarOwned(allocator, "ZEICOIN_DB_NAME")) |db_name| 
+        db_name
+    else |_| blk: {
+        const network_db = if (types.CURRENT_NETWORK == .testnet) "zeicoin_testnet" else "zeicoin_mainnet";
+        break :blk try allocator.dupe(u8, network_db);
     };
-    defer file.close();
-
-    const contents = try file.readToEndAlloc(allocator, 1024 * 1024);
-    defer allocator.free(contents);
-
-    const parsed = try std.json.parseFromSlice(DbConfigJson, allocator, contents, .{});
-    defer parsed.deinit();
-
-    const database = if (types.CURRENT_NETWORK == .testnet)
-        parsed.value.postgres.databases.testnet
-    else
-        parsed.value.postgres.databases.mainnet;
-
-    // Resolve password from environment variable if it's a template
-    const password = if (std.mem.eql(u8, parsed.value.postgres.password, "${ZEICOIN_DB_PASSWORD}"))
-        std.process.getEnvVarOwned(allocator, "ZEICOIN_DB_PASSWORD") catch |err| {
-            std.log.err("ZEICOIN_DB_PASSWORD environment variable not set: {}", .{err});
-            return err;
-        }
-    else
-        try allocator.dupe(u8, parsed.value.postgres.password);
-
+    errdefer allocator.free(database);
+    
+    const pg_host = std.process.getEnvVarOwned(allocator, "ZEICOIN_DB_HOST") catch 
+        try allocator.dupe(u8, "127.0.0.1");
+    errdefer allocator.free(pg_host);
+    
+    const pg_port_str = std.process.getEnvVarOwned(allocator, "ZEICOIN_DB_PORT") catch null;
+    const pg_port = if (pg_port_str) |p| blk: {
+        defer allocator.free(p);
+        break :blk std.fmt.parseInt(u16, p, 10) catch 5432;
+    } else 5432;
+    
+    const pg_user = std.process.getEnvVarOwned(allocator, "ZEICOIN_DB_USER") catch 
+        try allocator.dupe(u8, "zeicoin");
+    errdefer allocator.free(pg_user);
+    
+    const pg_password = std.process.getEnvVarOwned(allocator, "ZEICOIN_DB_PASSWORD") catch |err| {
+        std.log.err("❌ ZEICOIN_DB_PASSWORD environment variable is required", .{});
+        std.log.err("   Set it in your .env file or export it:", .{});
+        std.log.err("   export ZEICOIN_DB_PASSWORD=your_password_here", .{});
+        return err;
+    };
+    errdefer allocator.free(pg_password);
+    
+    const pool_size_str = std.process.getEnvVarOwned(allocator, "ZEICOIN_DB_POOL_SIZE") catch null;
+    const pool_size = if (pool_size_str) |p| blk: {
+        defer allocator.free(p);
+        break :blk std.fmt.parseInt(u16, p, 10) catch 10;
+    } else 10;
+    
+    const timeout_str = std.process.getEnvVarOwned(allocator, "ZEICOIN_DB_TIMEOUT") catch null;
+    const timeout = if (timeout_str) |t| blk: {
+        defer allocator.free(t);
+        break :blk std.fmt.parseInt(u32, t, 10) catch 10000;
+    } else 10000;
+    
     return ApiConfig{
-        .port = parsed.value.analytics_api.port,
-        .host = try allocator.dupe(u8, parsed.value.analytics_api.host),
-        .pg_host = try allocator.dupe(u8, parsed.value.postgres.host),
-        .pg_port = parsed.value.postgres.port,
-        .pg_database = try allocator.dupe(u8, database),
-        .pg_user = try allocator.dupe(u8, parsed.value.postgres.user),
-        .pg_password = password,
-        .pool_size = parsed.value.postgres.pool_size,
+        .host = api_host,
+        .port = api_port,
+        .pg_host = pg_host,
+        .pg_port = pg_port,
+        .pg_database = database,
+        .pg_user = pg_user,
+        .pg_password = pg_password,
+        .pool_size = pool_size,
+        .timeout = timeout,
     };
 }
+
 
 /// Application context with database pool
 pub const AppContext = struct {
@@ -113,7 +121,7 @@ pub fn initApp(allocator: std.mem.Allocator, config: ApiConfig) !*AppContext {
             .username = config.pg_user,
             .database = config.pg_database,
             .password = config.pg_password,
-            .timeout = 10_000,
+            .timeout = config.timeout,
         },
     });
 
@@ -347,8 +355,15 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Load configuration from file
-    const config = try loadConfigFromFile(allocator);
+    // Load .env files first
+    zeicoin.dotenv.loadForNetwork(std.heap.page_allocator) catch |err| {
+        if (err != error.FileNotFound) {
+            std.log.warn("Failed to load .env file: {}", .{err});
+        }
+    };
+    
+    // Load configuration from environment variables (required)
+    const config = try loadConfig(allocator);
     defer {
         allocator.free(config.host);
         allocator.free(config.pg_host);

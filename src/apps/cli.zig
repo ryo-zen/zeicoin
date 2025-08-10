@@ -12,6 +12,7 @@ const wallet = zeicoin.wallet;
 const db = zeicoin.db;
 const util = zeicoin.util;
 const clispinners = @import("../core/util/clispinners.zig");
+const password_util = zeicoin.password;
 // HD wallet is not exposed through zeicoin module yet, so we need direct imports
 const bip39 = zeicoin.bip39;
 const hd_wallet = zeicoin.hd_wallet;
@@ -236,6 +237,14 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    // Load .env file if present (before processing arguments)
+    zeicoin.dotenv.loadForNetwork(allocator) catch |err| {
+        // Don't fail if .env loading fails, just warn
+        if (err != error.FileNotFound) {
+            print("⚠️  Warning: Failed to load .env file: {}\n", .{err});
+        }
+    };
+
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
@@ -309,7 +318,11 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     // Get wallet path
     const wallet_path = try database.getWalletPath(wallet_name);
     defer allocator.free(wallet_path);
-    const password = "zen"; // Simple password for demo - could be made configurable
+
+    // Get password for wallet (will use test mode if enabled)
+    const password = try password_util.getPasswordForWallet(allocator, wallet_name, true);
+    defer allocator.free(password);
+    defer password_util.clearPassword(password);
 
     // Check if this is a genesis account name (TestNet only)
     const genesis_names = [_][]const u8{ "alice", "bob", "charlie", "david", "eve" };
@@ -373,9 +386,9 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
         print("\n", .{});
         print("🔐 MNEMONIC PHRASE (Write this down!):\n", .{});
-        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n", .{});
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n", .{});
         print("{s}\n", .{mnemonic});
-        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n", .{});
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n", .{});
         print("⚠️  IMPORTANT: Save this mnemonic phrase securely!\n", .{});
         print("    This is the ONLY way to recover your HD wallet.\n", .{});
         print("\n", .{});
@@ -420,7 +433,9 @@ fn loadWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const wallet_path = try database.getWalletPath(wallet_name);
     defer allocator.free(wallet_path);
 
-    const password = if (std.mem.eql(u8, wallet_name, "default_miner")) "zen_miner" else "zen";
+    const password = try password_util.getPasswordForWallet(allocator, wallet_name, false);
+    defer allocator.free(password);
+    defer password_util.clearPassword(password);
     try zen_wallet.loadFromFile(wallet_path, password);
 
     const address = zen_wallet.getAddress() orelse return error.WalletLoadFailed;
@@ -523,7 +538,9 @@ fn restoreWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     // Save wallet
     const wallet_path = try database.getWalletPath(wallet_name);
     defer allocator.free(wallet_path);
-    const password = "zen";
+    const password = try password_util.getPasswordForWallet(allocator, wallet_name, true);
+    defer allocator.free(password);
+    defer password_util.clearPassword(password);
 
     try hd_zen_wallet.saveToFile(wallet_path, password);
 
@@ -586,7 +603,9 @@ fn deriveAddress(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     var hd_zen_wallet = hd_wallet.HDWallet.init(allocator);
     defer hd_zen_wallet.deinit();
 
-    const password = "zen";
+    const password = try password_util.getPasswordForWallet(allocator, wallet_name, false);
+    defer allocator.free(password);
+    defer password_util.clearPassword(password);
     try hd_zen_wallet.loadFromFile(wallet_path, password);
 
     if (index) |idx| {
@@ -1159,8 +1178,13 @@ fn loadWalletForOperation(allocator: std.mem.Allocator, wallet_name: []const u8)
     const wallet_path = try database.getWalletPath(wallet_name);
     defer allocator.free(wallet_path);
 
-    // Use appropriate password based on wallet name
-    const password = if (std.mem.eql(u8, wallet_name, "server_miner") or std.mem.eql(u8, wallet_name, "default_miner")) "zen_miner" else "zen";
+    // Get password for wallet
+    const password = password_util.getPasswordForWallet(allocator, wallet_name, false) catch |err| {
+        print("❌ Failed to get password for wallet '{s}': {}\n", .{ wallet_name, err });
+        return error.WalletNotFound;
+    };
+    defer allocator.free(password);
+    defer password_util.clearPassword(password);
     zen_wallet.loadFromFile(wallet_path, password) catch |err| {
         print("❌ Failed to load wallet '{s}': {}\n", .{ wallet_name, err });
         return error.WalletNotFound;

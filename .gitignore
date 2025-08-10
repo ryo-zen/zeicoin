@@ -78,3 +78,7 @@ todo.md
 TODO.md
 .env.example
 /deprecated
+.env.local
+.env.mainnet
+.gitignore
+.env.testnet
