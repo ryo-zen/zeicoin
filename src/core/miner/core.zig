@@ -10,7 +10,6 @@ const util = @import("../util/util.zig");
 const serialize = @import("../storage/serialize.zig");
 const key = @import("../crypto/key.zig");
 const MiningContext = @import("context.zig").MiningContext;
-const sha256_algo = @import("algorithms/sha256.zig");
 const randomx_algo = @import("algorithms/randomx.zig");
 
 // Type aliases for clarity
@@ -219,13 +218,10 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
     }
 }
 
-/// Zen Proof-of-Work: Now with RandomX ASIC resistance
+/// Zen Proof-of-Work: Always uses RandomX for ASIC resistance and security
+/// Network difficulty is controlled by target thresholds, not algorithm choice
 pub fn zenProofOfWork(ctx: MiningContext, block: *Block) bool {
-    if (@import("builtin").mode == .Debug) {
-        // Use fast SHA256 mining for tests
-        return sha256_algo.zenProofOfWorkSHA256(ctx, block);
-    } else {
-        // Use RandomX for production
-        return randomx_algo.zenProofOfWorkRandomX(ctx, block);
-    }
+    // Always use RandomX for consistent security model
+    // TestNet uses easier difficulty targets (not different algorithms)
+    return randomx_algo.zenProofOfWorkRandomX(ctx, block);
 }

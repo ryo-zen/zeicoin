@@ -1,5 +1,6 @@
 // validation.zig - Mining Validation Logic
 // Handles proof-of-work validation for mined blocks
+// Security: Always uses RandomX for consistent validation across all networks
 
 const std = @import("std");
 const print = std.debug.print;
@@ -8,48 +9,71 @@ const types = @import("../types/types.zig");
 const randomx = @import("../crypto/randomx.zig");
 const MiningContext = @import("context.zig").MiningContext;
 
-// Global mutex to prevent concurrent RandomX validation (prevents OOM)
+// Global mutex to prevent concurrent RandomX validation
+// This prevents OOM errors when multiple validations run simultaneously
 var randomx_validation_mutex = std.Thread.Mutex{};
 
 /// Validate block proof-of-work using RandomX
+/// This function is critical for network security - always uses RandomX regardless of build mode
 pub fn validateBlockPoW(ctx: MiningContext, block: types.Block) !bool {
-    // Serialize RandomX validation to prevent concurrent subprocess OOM
+    // Performance: Serialize validation to prevent concurrent RandomX instances (OOM protection)
     randomx_validation_mutex.lock();
     defer randomx_validation_mutex.unlock();
-    // Initialize RandomX context for validation
+    
+    // Early exit: Check if block claims correct difficulty before expensive RandomX validation
+    const difficulty_target = block.header.getDifficultyTarget();
+    if (difficulty_target.base_bytes == 0 or difficulty_target.base_bytes > 32) {
+        print("❌ Invalid difficulty target: {} bytes\n", .{difficulty_target.base_bytes});
+        return false;
+    }
+    
+    // Initialize RandomX with network-specific parameters
     const network_name = switch (types.CURRENT_NETWORK) {
         .testnet => "TestNet",
         .mainnet => "MainNet",
     };
     const chain_key = randomx.createRandomXKey(network_name);
 
-    // Convert binary key to hex string for RandomX helper
+    // Performance: Stack-allocated hex conversion
     var hex_key: [64]u8 = undefined;
     for (chain_key, 0..) |byte, i| {
         _ = std.fmt.bufPrint(hex_key[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch unreachable;
     }
 
+    // Use appropriate RandomX mode based on network configuration
     const mode: randomx.RandomXMode = if (types.ZenMining.RANDOMX_MODE) .fast else .light;
-    var rx_ctx = randomx.RandomXContext.init(ctx.allocator, &hex_key, mode) catch {
-        print("❌ Failed to initialize RandomX for validation\n", .{});
+    
+    // Initialize RandomX context with proper error handling
+    var rx_ctx = randomx.RandomXContext.init(ctx.allocator, &hex_key, mode) catch |err| {
+        print("❌ RandomX initialization failed: {}\n", .{err});
         return false;
     };
     defer rx_ctx.deinit();
 
-    // Serialize block header for RandomX input
+    // Serialize block header efficiently
     var buffer: [256]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buffer);
-    try block.header.serialize(stream.writer());
+    block.header.serialize(stream.writer()) catch |err| {
+        print("❌ Block header serialization failed: {}\n", .{err});
+        return false;
+    };
     const header_data = stream.getWritten();
 
-    // Calculate RandomX hash with proper difficulty
+    // Calculate RandomX hash with network-appropriate difficulty
     var hash: [32]u8 = undefined;
-    const difficulty_target = block.header.getDifficultyTarget();
-    rx_ctx.hashWithDifficulty(header_data, &hash, difficulty_target.base_bytes) catch {
-        print("❌ RandomX hash calculation failed during validation\n", .{});
+    rx_ctx.hashWithDifficulty(header_data, &hash, difficulty_target.base_bytes) catch |err| {
+        print("❌ RandomX hash calculation failed: {}\n", .{err});
         return false;
     };
 
-    // Check if hash meets difficulty target
-    return randomx.hashMeetsDifficultyTarget(hash, difficulty_target);
+    // Verify hash meets the required difficulty target
+    const valid = randomx.hashMeetsDifficultyTarget(hash, difficulty_target);
+    
+    // Optional: Log validation result for debugging
+    if (!valid) {
+        const hash_hex = std.fmt.fmtSliceHexLower(&hash);
+        print("⚠️ Block hash {} does not meet difficulty target {}\n", .{ hash_hex, difficulty_target.toU64() });
+    }
+    
+    return valid;
 }

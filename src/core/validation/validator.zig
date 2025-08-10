@@ -57,14 +57,6 @@ pub const ChainValidator = struct {
         return std.mem.eql(u8, &block.header.merkle_root, &calculated_merkle);
     }
     
-    pub fn validateProofOfWork(self: *Self, header: BlockHeader, expected_difficulty: u64) !bool {
-        _ = self;
-        const miner_validation = @import("../miner/validation.zig");
-        
-        if (@import("builtin").mode == .Debug) {
-            return miner_validation.validateBlockHashSHA256(header, expected_difficulty);
-        } else {
-            return miner_validation.validateBlockHashRandomX(header, expected_difficulty);
-        }
-    }
+    // validateProofOfWork removed - use chain validator's validateBlockPoW instead
+    // This ensures consistent RandomX validation across all code paths
 };

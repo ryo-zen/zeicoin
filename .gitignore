@@ -76,3 +76,5 @@ docker-compose.consensus-test.yml
 docker-compose.consensus-debug.yml
 todo.md
 TODO.md
+.env.example
+/deprecated

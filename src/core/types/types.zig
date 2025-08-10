@@ -26,7 +26,7 @@ pub const TIMING = struct {
 // Progress reporting constants
 pub const PROGRESS = struct {
     pub const RANDOMX_REPORT_INTERVAL: u32 = 10_000;
-    pub const SHA256_REPORT_INTERVAL: u32 = 100_000;
+    // SHA256_REPORT_INTERVAL removed - SHA256 mining no longer supported
     pub const DECIMAL_PRECISION_MULTIPLIER: u64 = 100_000;
 };
 
@@ -1001,15 +1001,11 @@ pub const NetworkConfig = struct {
         const initial_difficulty = ZenMining.initialDifficultyTarget();
         std.debug.print("🌐 Network: {s}\n", .{networkName()});
         std.debug.print("⚡ Difficulty: {}-byte range (dynamic)\n", .{initial_difficulty.base_bytes});
-        // Show actual mining algorithm based on build mode
-        if (@import("builtin").mode == .Debug) {
-            std.debug.print("🧠 Mining Mode: SHA256 (Debug - Fast blocks)\n", .{});
-        } else {
-            std.debug.print("🧠 Mining Mode: RandomX {s}\n", .{if (config.randomx_mode) "Fast (2GB)" else "Light (256MB)"});
-        }
-        std.debug.print("⏰ Block Time: {}s\n", .{config.target_block_time});
+        // Always use RandomX for consistent security
+        std.debug.print("🧠 Mining Algorithm: RandomX {s}\n", .{if (config.randomx_mode) "Fast (2GB RAM)" else "Light (256MB RAM)"});
+        std.debug.print("⏰ Target Block Time: {}s\n", .{config.target_block_time});
         std.debug.print("💰 Block Reward: {d:.8} ZEI\n", .{@as(f64, @floatFromInt(config.block_reward)) / @as(f64, @floatFromInt(ZEI_COIN))});
-        std.debug.print("💸 Min Fee: {d:.8} ZEI\n", .{@as(f64, @floatFromInt(config.min_fee)) / @as(f64, @floatFromInt(ZEI_COIN))});
+        std.debug.print("💸 Minimum Fee: {d:.8} ZEI\n", .{@as(f64, @floatFromInt(config.min_fee)) / @as(f64, @floatFromInt(ZEI_COIN))});
     }
 };
 

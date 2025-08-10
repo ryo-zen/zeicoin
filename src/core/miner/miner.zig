@@ -10,7 +10,7 @@ pub const zenMineBlock = @import("core.zig").zenMineBlock;
 pub const zenProofOfWork = @import("core.zig").zenProofOfWork;
 
 // Re-export algorithm-specific functions
-pub const zenProofOfWorkSHA256 = @import("algorithms/sha256.zig").zenProofOfWorkSHA256;
+// SHA256 removed for security - only RandomX is used for all networks
 pub const zenProofOfWorkRandomX = @import("algorithms/randomx.zig").zenProofOfWorkRandomX;
 
 // Re-export validation functions

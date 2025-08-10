@@ -545,34 +545,19 @@ pub const BlockSyncProtocol = struct {
 
         print("🔍 validateSyncBlock: Checking proof-of-work for height {}\n", .{expected_height});
 
-        // Check proof-of-work with dynamic difficulty
-        if (@import("builtin").mode == .Debug) {
-            // In test mode, use dynamic difficulty with SHA256 for speed
-            const difficulty_target = block.header.getDifficultyTarget();
-            const block_hash = block.header.hash();
-            print("   Difficulty target: {}\n", .{difficulty_target.toU64()});
-            print("   Block hash: {s}\n", .{std.fmt.fmtSliceHexLower(&block_hash)});
-
-            if (!difficulty_target.meetsDifficulty(block_hash)) {
-                print("❌ Proof-of-work validation failed for height {}\n", .{expected_height});
-                print("   Difficulty target does not meet required threshold\n", .{});
-                return false;
-            }
-        } else {
-            // In production, use full RandomX validation with dynamic difficulty
-            const mining_context = miner_mod.MiningContext{
-                .allocator = self.context.allocator,
-                .database = self.context.database,
-                .mempool_manager = undefined, // Not needed for validation
-                .mining_state = undefined, // Not needed for validation
-                .network = self.context.network,
-                .fork_manager = self.context.fork_manager,
-                .blockchain = undefined, // Not needed for validation
-            };
-            if (!try miner_mod.validateBlockPoW(mining_context, block)) {
-                print("❌ RandomX proof-of-work validation failed for height {}\n", .{expected_height});
-                return false;
-            }
+        // Always use RandomX validation for consistent security
+        const mining_context = miner_mod.MiningContext{
+            .allocator = self.context.allocator,
+            .database = self.context.database,
+            .mempool_manager = undefined, // Not needed for validation
+            .mining_state = undefined, // Not needed for validation
+            .network = self.context.network,
+            .fork_manager = self.context.fork_manager,
+            .blockchain = undefined, // Not needed for validation
+        };
+        if (!try miner_mod.validateBlockPoW(mining_context, block)) {
+            print("❌ RandomX proof-of-work validation failed for height {}\n", .{expected_height});
+            return false;
         }
         print("✅ Proof-of-work validation passed for height {}\n", .{expected_height});
 

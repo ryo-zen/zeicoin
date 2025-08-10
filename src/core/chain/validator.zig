@@ -258,28 +258,19 @@ pub const ChainValidator = struct {
             return false;
         }
 
-        // Check proof-of-work with dynamic difficulty
-        if (@import("builtin").mode == .Debug) {
-            // In test mode, use dynamic difficulty with SHA256 for speed
-            if (!required_difficulty.meetsDifficulty(block.header.hash())) {
-                print("❌ Proof-of-work validation failed\n", .{});
-                return false;
-            }
-        } else {
-            // In production, use full RandomX validation with dynamic difficulty
-            const mining_context = miner_mod.MiningContext{
-                .allocator = self.allocator,
-                .database = self.chain_state.database,
-                .mempool_manager = undefined, // Not needed for validation
-                .mining_state = undefined, // Not needed for validation
-                .network = null,
-                .fork_manager = self.fork_manager orelse undefined,
-                .blockchain = undefined, // Not needed for validation
-            };
-            if (!try miner_mod.validateBlockPoW(mining_context, block)) {
-                print("❌ RandomX proof-of-work validation failed\n", .{});
-                return false;
-            }
+        // Always use RandomX validation for consistent security
+        const mining_context = miner_mod.MiningContext{
+            .allocator = self.allocator,
+            .database = self.chain_state.database,
+            .mempool_manager = undefined, // Not needed for validation
+            .mining_state = undefined, // Not needed for validation
+            .network = null,
+            .fork_manager = self.fork_manager orelse undefined,
+            .blockchain = undefined, // Not needed for validation
+        };
+        if (!try miner_mod.validateBlockPoW(mining_context, block)) {
+            print("❌ RandomX proof-of-work validation failed\n", .{});
+            return false;
         }
 
         // Validate all transactions in block
@@ -387,33 +378,19 @@ pub const ChainValidator = struct {
             return false;
         }
 
-        // Check proof-of-work with dynamic difficulty
-        if (@import("builtin").mode == .Debug) {
-            // In test mode, use dynamic difficulty with SHA256 for speed
-            const genesis_block_hash = block.header.hash();
-            print("   Required difficulty target: {}\n", .{required_difficulty.toU64()});
-            // print("   Block hash: {s}\n", .{std.fmt.fmtSliceHexLower(&block_hash)});
-
-            if (!required_difficulty.meetsDifficulty(genesis_block_hash)) {
-                print("❌ Proof-of-work validation failed for height {}\n", .{expected_height});
-                print("   Difficulty target does not meet required threshold\n", .{});
-                return false;
-            }
-        } else {
-            // In production, use full RandomX validation with dynamic difficulty
-            const mining_context = miner_mod.MiningContext{
-                .allocator = self.allocator,
-                .database = self.chain_state.database,
-                .mempool_manager = undefined, // Not needed for validation
-                .mining_state = undefined, // Not needed for validation
-                .network = null,
-                .fork_manager = self.fork_manager orelse undefined,
-                .blockchain = undefined, // Not needed for validation
-            };
-            if (!try miner_mod.validateBlockPoW(mining_context, block.*)) {
-                print("❌ RandomX proof-of-work validation failed for height {}\n", .{expected_height});
-                return false;
-            }
+        // Always use RandomX validation for consistent security
+        const mining_context = miner_mod.MiningContext{
+            .allocator = self.allocator,
+            .database = self.chain_state.database,
+            .mempool_manager = undefined, // Not needed for validation
+            .mining_state = undefined, // Not needed for validation
+            .network = null,
+            .fork_manager = self.fork_manager orelse undefined,
+            .blockchain = undefined, // Not needed for validation
+        };
+        if (!try miner_mod.validateBlockPoW(mining_context, block.*)) {
+            print("❌ RandomX proof-of-work validation failed for height {}\n", .{expected_height});
+            return false;
         }
         print("✅ Proof-of-work validation passed for height {}\n", .{expected_height});
 
@@ -536,17 +513,10 @@ pub const ChainValidator = struct {
             return false;
         }
 
-        // Check proof-of-work
-        if (@import("builtin").mode == .Debug) {
-            if (!required_difficulty.meetsDifficulty(block.header.hash())) {
-                print("❌ Reorg block proof-of-work validation failed\n", .{});
-                return false;
-            }
-        } else {
-            if (!try self.validateBlockPoW(block)) {
-                print("❌ Reorg block RandomX validation failed\n", .{});
-                return false;
-            }
+        // Always use RandomX validation for consistent security
+        if (!try self.validateBlockPoW(block)) {
+            print("❌ Reorg block RandomX validation failed\n", .{});
+            return false;
         }
 
         // Validate transaction structure and signatures only

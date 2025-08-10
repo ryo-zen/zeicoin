@@ -76,7 +76,7 @@ fn getServerIP(allocator: std.mem.Allocator) ![]const u8 {
         return error.NoServerFound;
     };
     defer types.freeBootstrapNodes(allocator, bootstrap_nodes);
-    
+
     print("🔍 Testing bootstrap nodes for health...\n", .{});
     for (bootstrap_nodes) |bootstrap_addr| {
         // Parse IP from "ip:port" format
@@ -92,7 +92,7 @@ fn getServerIP(allocator: std.mem.Allocator) ![]const u8 {
             }
         }
     }
-    
+
     print("⚠️  No healthy bootstrap nodes found\n", .{});
 
     // 4. Final fallback to localhost
@@ -320,12 +320,12 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
             break;
         }
     }
-    
+
     if (is_genesis and types.CURRENT_NETWORK == .testnet) {
         // Import genesis account instead of creating new
         var zen_wallet = wallet.Wallet.init(allocator);
         defer zen_wallet.deinit();
-        
+
         zen_wallet.importGenesisAccount(wallet_name) catch |err| {
             switch (err) {
                 error.KeysConfigNotFound => {
@@ -340,11 +340,11 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
             std.process.exit(1);
         };
         print("🔑 Importing pre-funded genesis account '{s}'...\n", .{wallet_name});
-        
+
         try zen_wallet.saveToFile(wallet_path, password);
         const address = zen_wallet.getAddress() orelse return error.WalletCreationFailed;
         print("✅ Wallet '{s}' created successfully!\n", .{wallet_name});
-        
+
         // Show bech32 address
         const bech32_addr = address.toBech32(allocator, types.CURRENT_NETWORK) catch {
             // Show error if bech32 encoding fails
@@ -353,24 +353,24 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
             return;
         };
         defer allocator.free(bech32_addr);
-        
+
         print("🆔 Address: {s}\n", .{bech32_addr});
         print("💡 Genesis accounts (alice, bob, charlie, david, eve) have pre-funded balances\n", .{});
     } else {
         // Create HD wallet (all wallets are now HD)
         var zen_wallet = wallet.Wallet.init(allocator);
         defer zen_wallet.deinit();
-        
+
         // Generate 12-word mnemonic
         const mnemonic = try zen_wallet.createNew(bip39.WordCount.twelve);
         defer allocator.free(mnemonic);
-        
+
         // Save HD wallet
         try zen_wallet.saveToFile(wallet_path, password);
-        
+
         // Get first address
         const address = zen_wallet.getAddress() orelse return error.WalletCreationFailed;
-        
+
         print("\n", .{});
         print("🔐 MNEMONIC PHRASE (Write this down!):\n", .{});
         print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n", .{});
@@ -380,14 +380,14 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         print("    This is the ONLY way to recover your HD wallet.\n", .{});
         print("\n", .{});
         print("✅ HD Wallet '{s}' created successfully!\n", .{wallet_name});
-        
+
         // Show first address
         const bech32_addr = address.toBech32(allocator, types.CURRENT_NETWORK) catch {
             print("🆔 Address: <encoding error>\n", .{});
             return;
         };
         defer allocator.free(bech32_addr);
-        
+
         print("🆔 Address (index 0): {s}\n", .{bech32_addr});
         print("💡 Genesis accounts (alice, bob, charlie, david, eve) have pre-funded balances\n", .{});
         print("💡 Use 'zeicoin address {s} --index N' to show address at specific index\n", .{wallet_name});
@@ -425,14 +425,14 @@ fn loadWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
     const address = zen_wallet.getAddress() orelse return error.WalletLoadFailed;
     print("✅ Wallet '{s}' loaded successfully!\n", .{wallet_name});
-    
+
     // Show bech32 address
     const bech32_addr = address.toBech32(allocator, types.CURRENT_NETWORK) catch |err| blk: {
         print("⚠️  Could not encode bech32 address: {}\n", .{err});
         break :blk null;
     };
     defer if (bech32_addr) |addr| allocator.free(addr);
-    
+
     if (bech32_addr) |addr| {
         print("🆔 Address: {s}\n", .{addr});
     }
@@ -481,22 +481,22 @@ fn restoreWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         print("Usage: zeicoin wallet restore <name> <mnemonic phrase...>\n", .{});
         return;
     }
-    
+
     const wallet_name = args[0];
-    
+
     // Join the remaining args as the mnemonic
     var mnemonic_parts = std.ArrayList(u8).init(allocator);
     defer mnemonic_parts.deinit();
-    
+
     for (args[1..], 0..) |word, i| {
         if (i > 0) try mnemonic_parts.append(' ');
         try mnemonic_parts.appendSlice(word);
     }
-    
+
     const mnemonic = mnemonic_parts.items;
-    
+
     print("🔐 Restoring HD wallet '{s}' from mnemonic...\n", .{wallet_name});
-    
+
     // Initialize database
     const data_dir = switch (types.CURRENT_NETWORK) {
         .testnet => "zeicoin_data_testnet",
@@ -504,41 +504,41 @@ fn restoreWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     };
     var database = try db.Database.init(allocator, data_dir);
     defer database.deinit();
-    
+
     // Check if wallet already exists
     if (database.walletExists(wallet_name)) {
         print("❌ Wallet '{s}' already exists\n", .{wallet_name});
         std.process.exit(1);
     }
-    
+
     // Create HD wallet from mnemonic
     var hd_zen_wallet = hd_wallet.HDWallet.init(allocator);
     defer hd_zen_wallet.deinit();
-    
+
     hd_zen_wallet.fromMnemonic(mnemonic, null) catch |err| {
         print("❌ Invalid mnemonic phrase: {}\n", .{err});
         std.process.exit(1);
     };
-    
+
     // Save wallet
     const wallet_path = try database.getWalletPath(wallet_name);
     defer allocator.free(wallet_path);
     const password = "zen";
-    
+
     try hd_zen_wallet.saveToFile(wallet_path, password);
-    
+
     // Get first address
     const address = try hd_zen_wallet.getAddress(0);
-    
+
     print("✅ HD Wallet '{s}' restored successfully!\n", .{wallet_name});
-    
+
     // Show first address
     const bech32_addr = address.toBech32(allocator, types.CURRENT_NETWORK) catch {
         print("🆔 Address: <encoding error>\n", .{});
         return;
     };
     defer allocator.free(bech32_addr);
-    
+
     print("🆔 Address #0: {s}\n", .{bech32_addr});
     print("💡 Use 'zeicoin wallet derive {s}' to generate more addresses\n", .{wallet_name});
 }
@@ -549,15 +549,16 @@ fn deriveAddress(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         print("Usage: zeicoin wallet derive <wallet_name> [index]\n", .{});
         return;
     }
-    
+
     const wallet_name = args[0];
-    const index = if (args.len > 1) 
+    const index = if (args.len > 1)
         std.fmt.parseInt(u32, args[1], 10) catch {
             print("❌ Invalid index: {s}\n", .{args[1]});
             return;
         }
-    else null;
-    
+    else
+        null;
+
     // Initialize database
     const data_dir = switch (types.CURRENT_NETWORK) {
         .testnet => "zeicoin_data_testnet",
@@ -565,29 +566,29 @@ fn deriveAddress(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     };
     var database = try db.Database.init(allocator, data_dir);
     defer database.deinit();
-    
+
     if (!database.walletExists(wallet_name)) {
         print("❌ Wallet '{s}' not found\n", .{wallet_name});
         std.process.exit(1);
     }
-    
+
     // Check if it's an HD wallet
     const wallet_path = try database.getWalletPath(wallet_name);
     defer allocator.free(wallet_path);
-    
+
     if (!hd_wallet.HDWallet.isHDWallet(wallet_path)) {
         print("❌ Wallet '{s}' is not an HD wallet\n", .{wallet_name});
         print("💡 Only HD wallets support address derivation\n", .{});
         std.process.exit(1);
     }
-    
+
     // Load HD wallet
     var hd_zen_wallet = hd_wallet.HDWallet.init(allocator);
     defer hd_zen_wallet.deinit();
-    
+
     const password = "zen";
     try hd_zen_wallet.loadFromFile(wallet_path, password);
-    
+
     if (index) |idx| {
         // Derive specific address
         const address = try hd_zen_wallet.getAddress(idx);
@@ -596,22 +597,22 @@ fn deriveAddress(allocator: std.mem.Allocator, args: [][:0]u8) !void {
             return;
         };
         defer allocator.free(bech32_addr);
-        
+
         print("🆔 Address #{}: {s}\n", .{ idx, bech32_addr });
     } else {
         // Get next address
         const address = try hd_zen_wallet.getNextAddress();
         const new_index = hd_zen_wallet.highest_index;
-        
+
         const bech32_addr = address.toBech32(allocator, types.CURRENT_NETWORK) catch {
             print("🆔 Address #{}: <encoding error>\n", .{new_index});
             return;
         };
         defer allocator.free(bech32_addr);
-        
+
         print("✅ New address derived!\n", .{});
         print("🆔 Address #{}: {s}\n", .{ new_index, bech32_addr });
-        
+
         // Save updated wallet with new highest index
         try hd_zen_wallet.saveToFile(wallet_path, password);
     }
@@ -623,9 +624,9 @@ fn importGenesisWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         print("Usage: zeicoin wallet import <alice|bob|charlie|david|eve>\n", .{});
         return;
     }
-    
+
     const wallet_name = args[0];
-    
+
     // Check if it's a valid genesis account
     const genesis_names = [_][]const u8{ "alice", "bob", "charlie", "david", "eve" };
     var is_genesis = false;
@@ -635,18 +636,18 @@ fn importGenesisWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
             break;
         }
     }
-    
+
     if (!is_genesis) {
         print("❌ '{s}' is not a valid genesis account name\n", .{wallet_name});
         print("💡 Valid genesis accounts: alice, bob, charlie, david, eve\n", .{});
         std.process.exit(1);
     }
-    
+
     if (types.CURRENT_NETWORK != .testnet) {
         print("❌ Genesis accounts are only available on TestNet\n", .{});
         std.process.exit(1);
     }
-    
+
     // Create wallet with genesis name
     try createWallet(allocator, args);
 }
@@ -686,10 +687,10 @@ fn handleBalanceCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     // Format balances properly for display
     const mature_display = util.formatZEI(allocator, balance_info.mature) catch "? ZEI";
     defer if (!std.mem.eql(u8, mature_display, "? ZEI")) allocator.free(mature_display);
-    
+
     const immature_display = util.formatZEI(allocator, balance_info.immature) catch "? ZEI";
     defer if (!std.mem.eql(u8, immature_display, "? ZEI")) allocator.free(immature_display);
-    
+
     const total_display = util.formatZEI(allocator, balance_info.mature + balance_info.immature) catch "? ZEI";
     defer if (!std.mem.eql(u8, total_display, "? ZEI")) allocator.free(total_display);
 
@@ -699,7 +700,7 @@ fn handleBalanceCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         print("   ⏳ Immature (not spendable): {s}\n", .{immature_display});
         print("   📊 Total balance: {s}\n", .{total_display});
     }
-    
+
     // Show bech32 address (truncated for display)
     const bech32_addr = address.toBech32(allocator, types.CURRENT_NETWORK) catch {
         // Show error if bech32 encoding fails
@@ -707,10 +708,10 @@ fn handleBalanceCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         return;
     };
     defer allocator.free(bech32_addr);
-    
+
     // Show first and last parts of bech32 address
     if (bech32_addr.len > 20) {
-        print("🆔 Address: {s}...{s}\n", .{bech32_addr[0..16], bech32_addr[bech32_addr.len-4..]});
+        print("🆔 Address: {s}...{s}\n", .{ bech32_addr[0..16], bech32_addr[bech32_addr.len - 4 ..] });
     } else {
         print("🆔 Address: {s}\n", .{bech32_addr});
     }
@@ -750,7 +751,7 @@ fn handleSendCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
             print("💡 Address format is invalid or has wrong checksum\n", .{});
             std.process.exit(1);
         }
-        
+
         // If not a bech32 format, try to resolve as wallet name
         const recipient_wallet = loadWalletForOperation(allocator, recipient_hex) catch {
             print("❌ Invalid recipient: '{s}'\n", .{recipient_hex});
@@ -763,12 +764,12 @@ fn handleSendCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
             recipient_wallet.deinit();
             allocator.destroy(recipient_wallet);
         }
-        
+
         const addr = recipient_wallet.getAddress() orelse {
             print("❌ Could not get address from wallet '{s}'\n", .{recipient_hex});
             return;
         };
-        
+
         print("💡 Resolved wallet '{s}' to address\n", .{recipient_hex});
         break :blk addr;
     };
@@ -794,34 +795,36 @@ fn handleSendCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     // Format amount for display
     const amount_display = util.formatZEI(allocator, amount) catch "? ZEI";
     defer if (!std.mem.eql(u8, amount_display, "? ZEI")) allocator.free(amount_display);
-    
+
     print("💸 Sending {s} from wallet '{s}'...\n", .{ amount_display, wallet_name });
-    
+
     // Format addresses for display
     const sender_bech32 = sender_address.toBech32(allocator, types.CURRENT_NETWORK) catch null;
     defer if (sender_bech32) |addr| allocator.free(addr);
-    
+
     const recipient_bech32 = recipient_address.toBech32(allocator, types.CURRENT_NETWORK) catch null;
     defer if (recipient_bech32) |addr| allocator.free(addr);
-    
+
     // Display addresses (prefer bech32, fallback to hex)
     if (sender_bech32) |addr| {
         // Show shortened bech32 (first 16 + last 4 chars)
-        const short_addr = if (addr.len > 20) 
-            try std.fmt.allocPrint(allocator, "{s}...{s}", .{addr[0..16], addr[addr.len-4..]})
-        else addr;
+        const short_addr = if (addr.len > 20)
+            try std.fmt.allocPrint(allocator, "{s}...{s}", .{ addr[0..16], addr[addr.len - 4 ..] })
+        else
+            addr;
         defer if (addr.len > 20) allocator.free(short_addr);
         print("🆔 From: {s}\n", .{short_addr});
     } else {
         const sender_bytes = sender_address.toBytes();
         print("🆔 From: {s}\n", .{std.fmt.fmtSliceHexLower(sender_bytes[0..16])});
     }
-    
+
     if (recipient_bech32) |addr| {
         // Show shortened bech32 (first 16 + last 4 chars)
-        const short_addr = if (addr.len > 20) 
-            try std.fmt.allocPrint(allocator, "{s}...{s}", .{addr[0..16], addr[addr.len-4..]})
-        else addr;
+        const short_addr = if (addr.len > 20)
+            try std.fmt.allocPrint(allocator, "{s}...{s}", .{ addr[0..16], addr[addr.len - 4 ..] })
+        else
+            addr;
         defer if (addr.len > 20) allocator.free(short_addr);
         print("🎯 To: {s}\n", .{short_addr});
     } else {
@@ -869,7 +872,7 @@ fn handleStatusCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     // Connect to server
     const server_ip = try getServerIP(allocator);
     defer allocator.free(server_ip);
-    
+
     print("🌐 Server: {s}:10802\n", .{server_ip});
 
     const address = net.Address.parseIp4(server_ip, 10802) catch {
@@ -916,7 +919,7 @@ fn handleStatusCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
 fn handleAddressCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const wallet_name = if (args.len > 0) args[0] else "default";
-    
+
     // Parse --index flag
     var index: u32 = 0;
     if (args.len >= 3 and std.mem.eql(u8, args[1], "--index")) {
@@ -943,7 +946,7 @@ fn handleAddressCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     }
 
     // Get address at specific index
-    const address = if (index == 0) 
+    const address = if (index == 0)
         zen_wallet.getAddress() orelse return error.WalletNotLoaded
     else
         zen_wallet.getAddressAtIndex(index) catch |err| {
@@ -952,14 +955,14 @@ fn handleAddressCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         };
 
     print("🆔 Wallet '{s}' address (index {}): \n", .{ wallet_name, index });
-    
+
     // Show bech32 address as primary format
     const bech32_addr = address.toBech32(allocator, types.CURRENT_NETWORK) catch |err| blk: {
         print("⚠️  Could not encode bech32 address: {}\n", .{err});
         break :blk null;
     };
     defer if (bech32_addr) |addr| allocator.free(addr);
-    
+
     if (bech32_addr) |addr| {
         print("   📬 {s}\n", .{addr});
     }
@@ -1091,37 +1094,36 @@ fn handleBlockCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     }
 }
 
-
 // Helper functions
 
 // Parse ZEI amount supporting decimals up to 8 places
 fn parseZeiAmount(amount_str: []const u8) !u64 {
     if (amount_str.len == 0) return error.InvalidAmount;
-    
+
     // Check for decimal point
     if (std.mem.indexOfScalar(u8, amount_str, '.')) |decimal_pos| {
         // Has decimal point
         const integer_part = amount_str[0..decimal_pos];
-        const fractional_part = amount_str[decimal_pos + 1..];
-        
+        const fractional_part = amount_str[decimal_pos + 1 ..];
+
         // Check decimal places limit (8 max)
         if (fractional_part.len > 8) return error.InvalidAmount;
-        
+
         // Parse integer part
         const integer_zei = if (integer_part.len == 0) 0 else std.fmt.parseInt(u64, integer_part, 10) catch return error.InvalidAmount;
-        
+
         // Parse fractional part and pad to 8 decimal places
         var fractional_str: [8]u8 = "00000000".*;
         if (fractional_part.len > 0) {
             @memcpy(fractional_str[0..fractional_part.len], fractional_part);
         }
-        
+
         const fractional_units = std.fmt.parseInt(u64, &fractional_str, 10) catch return error.InvalidAmount;
-        
+
         // Convert to base units
         const integer_units = std.math.mul(u64, integer_zei, types.ZEI_COIN) catch return error.InvalidAmount;
         const total_units = std.math.add(u64, integer_units, fractional_units) catch return error.InvalidAmount;
-        
+
         return total_units;
     } else {
         // No decimal point - integer ZEI
@@ -1160,7 +1162,7 @@ fn loadWalletForOperation(allocator: std.mem.Allocator, wallet_name: []const u8)
     // Use appropriate password based on wallet name
     const password = if (std.mem.eql(u8, wallet_name, "server_miner") or std.mem.eql(u8, wallet_name, "default_miner")) "zen_miner" else "zen";
     zen_wallet.loadFromFile(wallet_path, password) catch |err| {
-        print("❌ Failed to load wallet '{s}': {}\n", .{wallet_name, err});
+        print("❌ Failed to load wallet '{s}': {}\n", .{ wallet_name, err });
         return error.WalletNotFound;
     };
 
@@ -1198,7 +1200,7 @@ fn getBalanceFromServer(allocator: std.mem.Allocator, address: types.Address) !B
     // Send balance request with bech32 address
     const bech32_addr = try address.toBech32(allocator, types.CURRENT_NETWORK);
     defer allocator.free(bech32_addr);
-    
+
     const balance_request = try std.fmt.allocPrint(allocator, "CHECK_BALANCE:{s}", .{bech32_addr});
     defer allocator.free(balance_request);
 
@@ -1223,12 +1225,12 @@ fn getBalanceFromServer(allocator: std.mem.Allocator, address: types.Address) !B
     // Parse BALANCE:mature,immature response
     if (std.mem.startsWith(u8, response, "BALANCE:")) {
         const balance_str = response[8..];
-        
+
         // Split by comma to get mature and immature
         var parts = std.mem.splitScalar(u8, balance_str, ',');
         const mature_str = std.mem.trim(u8, parts.next() orelse "0", " \n\r\t");
         const immature_str = std.mem.trim(u8, parts.next() orelse "0", " \n\r\t");
-        
+
         return BalanceInfo{
             .mature = std.fmt.parseInt(u64, mature_str, 10) catch 0,
             .immature = std.fmt.parseInt(u64, immature_str, 10) catch 0,
@@ -1264,7 +1266,7 @@ fn getNonceFromServer(allocator: std.mem.Allocator, address: types.Address) !u64
     // Send nonce request using bech32 format
     const bech32_addr = try address.toBech32(allocator, types.CURRENT_NETWORK);
     defer allocator.free(bech32_addr);
-    
+
     const nonce_request = try std.fmt.allocPrint(allocator, "GET_NONCE:{s}", .{bech32_addr});
     defer allocator.free(nonce_request);
 
@@ -1320,7 +1322,7 @@ fn sendTransaction(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
     // Get current nonce from server using the same connection
     const sender_bech32_for_nonce = try sender_address.toBech32(allocator, types.CURRENT_NETWORK);
     defer allocator.free(sender_bech32_for_nonce);
-    
+
     const nonce_request = try std.fmt.allocPrint(allocator, "GET_NONCE:{s}", .{sender_bech32_for_nonce});
     defer allocator.free(nonce_request);
 
@@ -1350,7 +1352,7 @@ fn sendTransaction(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
 
     // Get current blockchain height from server for expiry calculation
     try connection.writeAll("GET_HEIGHT\n");
-    
+
     // Read height response with timeout
     var height_buffer: [1024]u8 = undefined;
     const height_bytes_read = readWithTimeout(connection, &height_buffer) catch |err| {
@@ -1366,13 +1368,13 @@ fn sendTransaction(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
         }
     };
     const height_response = height_buffer[0..height_bytes_read];
-    
+
     // Parse HEIGHT:value response
     const current_height = if (std.mem.startsWith(u8, height_response, "HEIGHT:"))
         std.fmt.parseInt(u64, height_response[7..], 10) catch 0
     else
         0;
-    
+
     // Create transaction with expiry height (24 hours from now)
     const fee = types.ZenFees.STANDARD_FEE;
     const expiry_window = types.TransactionExpiry.getExpiryWindow();
@@ -1403,10 +1405,10 @@ fn sendTransaction(allocator: std.mem.Allocator, zen_wallet: *wallet.Wallet, sen
     // Convert addresses to bech32 for sending
     const sender_bech32 = try sender_address.toBech32(allocator, types.CURRENT_NETWORK);
     defer allocator.free(sender_bech32);
-    
+
     const recipient_bech32 = try recipient_address.toBech32(allocator, types.CURRENT_NETWORK);
     defer allocator.free(recipient_bech32);
-    
+
     // Send transaction to server with bech32 addresses
     const tx_message = try std.fmt.allocPrint(allocator, "CLIENT_TRANSACTION:{s}:{s}:{}:{}:{}:{}:{}:{s}:{s}", .{
         sender_bech32,
@@ -1483,32 +1485,32 @@ fn printHelp() void {
     printZeiBanner();
 
     print("WALLET COMMANDS:\n", .{});
-    print("  zeicoin wallet create [name]           Create new HD wallet with mnemonic\n", .{});
-    print("  zeicoin wallet load [name]             Load existing wallet\n", .{});
-    print("  zeicoin wallet list                    List all wallets\n", .{});
-    print("  zeicoin wallet restore <name> <words>  Restore HD wallet from mnemonic\n", .{});
-    print("  zeicoin wallet derive <name> [index]   Derive new HD wallet address\n", .{});
-    print("  zeicoin wallet import <genesis>        Import genesis account (testnet)\n\n", .{});
+    print("  zeicoin wallet create [name]           # Create new HD wallet with mnemonic\n", .{});
+    print("  zeicoin wallet load [name]             # Load existing wallet\n", .{});
+    print("  zeicoin wallet list                    # List all wallets\n", .{});
+    print("  zeicoin wallet restore <name> <words>  # Restore HD wallet from mnemonic\n", .{});
+    print("  zeicoin wallet derive <name> [index]   # Derive new HD wallet address\n", .{});
+    print("  zeicoin wallet import <genesis>        # Import genesis account (testnet)\n\n", .{});
     print("TRANSACTION COMMANDS:\n", .{});
-    print("  zeicoin balance [wallet]         Check wallet balance\n", .{});
-    print("  zeicoin send <amount> <recipient> Send ZEI to address or wallet\n", .{});
+    print("  zeicoin balance [wallet]               # Check wallet balance\n", .{});
+    print("  zeicoin send <amount> <recipient>      # Send ZEI to address or wallet\n\n", .{});
     print("NETWORK COMMANDS:\n", .{});
-    print("  zeicoin status                   Show network status\n", .{});
-    print("  zeicoin status --watch           Monitor mining status with live spinner\n", .{});
-    print("  zeicoin sync                     Trigger manual blockchain sync\n", .{});
-    print("  zeicoin block <height>           Inspect block at specific height\n", .{});
-    print("  zeicoin address [wallet] [--index N]  Show wallet address at index N\n\n", .{});
+    print("  zeicoin status                         # Show network status\n", .{});
+    print("  zeicoin status --watch                 # Monitor mining status with live spinner\n", .{});
+    print("  zeicoin sync                           # Trigger manual blockchain sync\n", .{});
+    print("  zeicoin block <height>                 # Inspect block at specific height\n", .{});
+    print("  zeicoin address [wallet] [--index N]   # Show wallet address at index N\n\n", .{});
     print("EXAMPLES:\n", .{});
     print("  zeicoin wallet create alice            # Create HD wallet named 'alice'\n", .{});
     print("  zeicoin wallet restore myhd word1...   # Restore from 24-word mnemonic\n", .{});
     print("  zeicoin wallet derive myhd             # Get next HD address\n", .{});
     print("  zeicoin balance alice                  # Check alice's balance (pre-funded)\n", .{});
-    print("  zeicoin send 50 tzei1qr2q...          # Send 50 ZEI to address\n", .{});
+    print("  zeicoin send 50 tzei1qr2q...           # Send 50 ZEI to address\n", .{});
     print("  zeicoin send 50 bob                    # Send 50 ZEI to wallet 'bob'\n", .{});
     print("  zeicoin status                         # Check network status\n", .{});
     print("  zeicoin block 6                        # Inspect block at height 6\n\n", .{});
     print("ENVIRONMENT:\n", .{});
-    print("  ZEICOIN_SERVER=ip                      Set server IP (default: 127.0.0.1)\n\n", .{});
+    print("  ZEICOIN_SERVER=ip                      # Set server IP (default: 127.0.0.1)\n\n", .{});
     print("💡 Default wallet is 'default' if no name specified\n", .{});
     print("💡 Genesis accounts (alice, bob, charlie, david, eve) have pre-funded balances on testnet\n", .{});
 }
@@ -1522,7 +1524,7 @@ const WatchState = struct {
     is_mining: std.atomic.Value(bool),
     block_height: std.atomic.Value(u64),
     hash_rate: std.atomic.Value(f64),
-    
+
     fn init(server_ip: []const u8) WatchState {
         return WatchState{
             .running = std.atomic.Value(bool).init(true),
@@ -1540,37 +1542,37 @@ fn handleWatchStatus(allocator: std.mem.Allocator) !void {
     // Get server IP
     const server_ip = try getServerIP(allocator);
     defer allocator.free(server_ip);
-    
+
     var watch_state = WatchState.init(server_ip);
-    
+
     // Signal handling will be done through the polling loop
     // Simplified approach without signal handlers for now
-    
+
     print("📊 ZeiCoin Network Status (Watch Mode)\n", .{});
     print("🌐 Server: {s}:10802\n", .{server_ip});
     print("💡 Press Ctrl+C to exit\n\n", .{});
-    
+
     // Start status polling thread
     const status_thread = try Thread.spawn(.{}, statusPollingWorker, .{ allocator, &watch_state });
     defer status_thread.join();
-    
+
     // Start spinner thread
     const spinner_thread = try Thread.spawn(.{}, spinnerWorker, .{&watch_state});
     defer spinner_thread.join();
-    
+
     // Main thread waits for interrupt - simplified approach
     // User can press Ctrl+C to exit (handled by terminal)
     var counter: u32 = 0;
     while (watch_state.running.load(.acquire)) {
         std.time.sleep(500 * std.time.ns_per_ms); // Check every 500ms
         counter += 1;
-        
+
         // For demo purposes, run for a reasonable time or until stopped
         if (counter > 600) { // Stop after 5 minutes automatically
             break;
         }
     }
-    
+
     // Clean shutdown
     watch_state.running.store(false, .release);
     clispinners.Terminal.clearLine();
@@ -1585,12 +1587,12 @@ fn statusPollingWorker(allocator: std.mem.Allocator, state: *WatchState) !void {
             // Continue on error, just log it
             std.log.warn("Failed to poll server status: {}", .{err});
         };
-        
+
         // Adaptive polling: faster when mining, slower when idle
         const is_mining = state.is_mining.load(.acquire);
         const poll_interval: u32 = if (is_mining) 500 else 2000; // 0.5s when mining, 2s when idle
         const sleep_iterations: u32 = poll_interval / 100;
-        
+
         for (0..sleep_iterations) |_| {
             if (!state.running.load(.acquire)) break;
             std.time.sleep(100 * std.time.ns_per_ms);
@@ -1602,48 +1604,46 @@ fn spinnerWorker(state: *WatchState) !void {
     const stdout = std.io.getStdOut().writer();
     var current_frame: usize = 0;
     var last_mining_state: bool = false;
-    
+
     while (state.running.load(.acquire)) {
         const is_mining = state.is_mining.load(.acquire);
         const block_height = state.block_height.load(.acquire);
         const hash_rate = state.hash_rate.load(.acquire);
-        
+
         // Reset animation when mining state changes
         if (is_mining != last_mining_state) {
             current_frame = 0; // Reset animation
             last_mining_state = is_mining;
         }
-        
+
         // Clear both lines
         clispinners.Terminal.clearLine();
         try stdout.print("\x1b[1B", .{}); // Move down 1 line
         clispinners.Terminal.clearLine();
         try stdout.print("\x1b[1A", .{}); // Move back up
-        
+
         if (is_mining) {
             // Show blockchain animation
             const frame = clispinners.blockchain.frames[current_frame];
-            try stdout.print("{s}\nMining... Block: {} | Hash Rate: {d:.1} H/s", 
-                .{ frame, block_height, hash_rate });
-            
+            try stdout.print("{s}\nMining... Block: {} | Hash Rate: {d:.1} H/s", .{ frame, block_height, hash_rate });
+
             // Update frame for next iteration
             current_frame = (current_frame + 1) % clispinners.blockchain.frames.len;
         } else {
             // Show inactive status with reset animation
-            try stdout.print("⏸️ Mining inactive\nWaiting for transactions... Block: {} | Hash Rate: {d:.1} H/s", 
-                .{ block_height, hash_rate });
+            try stdout.print("⏸️ Mining inactive\nWaiting for transactions... Block: {} | Hash Rate: {d:.1} H/s", .{ block_height, hash_rate });
             current_frame = 0; // Keep at start when inactive
         }
-        
+
         // Move cursor back to start of first line
         try stdout.print("\x1b[1A\r", .{});
-        
+
         std.time.sleep(120 * std.time.ns_per_ms); // Update every 120ms (blockchain spinner interval)
     }
-    
+
     // Clean up display
     clispinners.Terminal.clearLine();
-    try stdout.print("\x1b[1B", .{}); // Move down 1 line  
+    try stdout.print("\x1b[1B", .{}); // Move down 1 line
     clispinners.Terminal.clearLine();
     clispinners.Terminal.showCursor();
 }
@@ -1651,43 +1651,43 @@ fn spinnerWorker(state: *WatchState) !void {
 fn pollServerStatus(allocator: std.mem.Allocator, state: *WatchState) !void {
     _ = allocator;
     const address = net.Address.parseIp4(state.server_ip, 10802) catch return;
-    
+
     const connection = connectWithTimeout(address) catch return;
     defer connection.close();
-    
+
     // Send enhanced status request
     try connection.writeAll("BLOCKCHAIN_STATUS_ENHANCED\n");
-    
+
     // Read response
     var buffer: [2048]u8 = undefined;
     const bytes_read = readWithTimeout(connection, &buffer) catch return;
     const response = buffer[0..bytes_read];
-    
-    // Parse enhanced response format: 
+
+    // Parse enhanced response format:
     // "STATUS:height:peers:mempool:mining:hashrate"
     if (std.mem.startsWith(u8, response, "STATUS:")) {
         var parts = std.mem.splitScalar(u8, response[7..], ':');
-        
+
         if (parts.next()) |height_str| {
             const height = std.fmt.parseInt(u64, std.mem.trim(u8, height_str, " \n\r\t"), 10) catch 0;
             state.block_height.store(height, .release);
         }
-        
+
         // Skip peers and mempool for now
         _ = parts.next(); // peers
         _ = parts.next(); // mempool
-        
+
         if (parts.next()) |mining_str| {
             const is_mining = std.mem.eql(u8, std.mem.trim(u8, mining_str, " \n\r\t"), "true");
             state.is_mining.store(is_mining, .release);
         }
-        
+
         if (parts.next()) |hashrate_str| {
             const hash_rate = std.fmt.parseFloat(f64, std.mem.trim(u8, hashrate_str, " \n\r\t")) catch 0.0;
             state.hash_rate.store(hash_rate, .release);
         }
     }
-    
+
     // Store full response for debugging
     const response_len = @min(response.len, state.status_text.len - 1);
     @memcpy(state.status_text[0..response_len], response[0..response_len]);
