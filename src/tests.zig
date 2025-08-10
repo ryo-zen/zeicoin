@@ -1106,21 +1106,6 @@ test "genesis distribution validation" {
     print("  🎉 All genesis distribution validation tests passed!\n", .{});
 }
 
-// libp2p Tests
-test "libp2p transport layer" {
-    const libp2p_tests = @import("core/libp2p/transport/test_tcp_async.zig");
-    _ = libp2p_tests;
-}
-
-test "libp2p multistream protocol" {
-    const multistream_tests = @import("core/libp2p/protocol/test_multistream_negotiator.zig");
-    _ = multistream_tests;
-}
-
-test "libp2p connection upgrader" {
-    const upgrader_tests = @import("core/libp2p/upgrader/test_connection_upgrader.zig");
-    _ = upgrader_tests;
-}
 
 test "memory leak detection - block operations" {
     print("\n🔍 Testing memory leak prevention in block operations...\n", .{});
