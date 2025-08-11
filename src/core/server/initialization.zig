@@ -288,7 +288,6 @@ fn initializeMiningSystem(blockchain: *zen.ZeiCoin, miner_wallet_name: []const u
                 .mempool_manager = blockchain.mempool_manager,
                 .mining_state = &blockchain.mining_state,
                 .network = blockchain.network_coordinator.getNetworkManager(),
-                .fork_manager = &blockchain.fork_manager,
                 .blockchain = blockchain,
             };
             blockchain.mining_manager = try allocator.create(miner_mod.MiningManager);

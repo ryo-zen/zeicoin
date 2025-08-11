@@ -141,7 +141,7 @@ pub const ZeiCoin = struct {
             return error.DatabaseCorrupted;
         }
 
-        instance_ptr.chain_processor = ChainProcessor.init(allocator, instance_ptr.database, &instance_ptr.chain_state, &instance_ptr.fork_manager, &instance_ptr.chain_validator, null);
+        instance_ptr.chain_processor = ChainProcessor.init(allocator, instance_ptr.database, &instance_ptr.chain_state, &instance_ptr.chain_validator, null);
         components_initialized = 4;
 
         if (!database.validate()) {

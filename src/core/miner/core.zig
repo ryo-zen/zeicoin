@@ -199,9 +199,8 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
 
         print("⛏️  ZEN BLOCK #{} MINED! ({} txs, {} ZEI reward, {}s)\n", .{ block_height, new_block.txCount(), types.ZenMining.BLOCK_REWARD / types.ZEI_COIN, mining_time });
 
-        // Update fork manager with the new best chain
-        const new_cumulative_work = ctx.blockchain.getTotalWork() catch 0;
-        ctx.fork_manager.updateBestChain(&new_block, block_height, new_cumulative_work);
+        // Chain state updates handled by modern reorganization system
+        // Fork manager updateBestChain call removed - handled internally
 
         // Broadcast the newly mined block to network peers (zen propagation)
         try ctx.blockchain.broadcastNewBlock(new_block);

@@ -76,7 +76,7 @@ pub const BlockSyncContext = struct {
     allocator: std.mem.Allocator,
     database: *@import("../../storage/db.zig").Database,
     network: ?*@import("../../network/peer.zig").NetworkManager,
-    fork_manager: *@import("../../fork/main.zig").ForkManager,
+    // fork_manager removed - using modern reorganization system
     
     // Chain operations
     getHeight: *const fn (ctx: *const BlockSyncContext) anyerror!u32,
@@ -552,7 +552,7 @@ pub const BlockSyncProtocol = struct {
             .mempool_manager = undefined, // Not needed for validation
             .mining_state = undefined, // Not needed for validation
             .network = self.context.network,
-            .fork_manager = self.context.fork_manager,
+            // fork_manager removed
             .blockchain = undefined, // Not needed for validation
         };
         if (!try miner_mod.validateBlockPoW(mining_context, block)) {

@@ -4,7 +4,7 @@
 // Core blockchain components
 pub const blockchain = @import("core/node.zig");
 pub const genesis = @import("core/chain/genesis.zig");
-pub const forkmanager = @import("core/fork/main.zig");
+pub const reorganization = @import("core/chain/reorganization/manager.zig");
 pub const miner = @import("core/miner/main.zig");
 
 // Chain management components

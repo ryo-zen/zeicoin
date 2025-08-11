@@ -27,8 +27,7 @@ const Hash = types.Hash;
 pub const ChainValidator = struct {
     chain_state: *ChainState,
     allocator: std.mem.Allocator,
-    // Additional dependencies for comprehensive validation
-    fork_manager: ?*@import("../fork/manager.zig").ForkManager,
+    // Fork manager removed - using modern reorganization system
 
     const Self = @This();
 
@@ -37,20 +36,18 @@ pub const ChainValidator = struct {
         return .{
             .chain_state = chain_state,
             .allocator = allocator,
-            .fork_manager = null,
         };
     }
 
-    /// Initialize ChainValidator with all dependencies
+    /// Initialize ChainValidator with all dependencies (deprecated)
     pub fn initWithDependencies(
         allocator: std.mem.Allocator,
         chain_state: *ChainState,
-        fork_manager: ?*@import("../fork/manager.zig").ForkManager,
+        _: anytype, // fork_manager parameter removed
     ) Self {
         return .{
             .chain_state = chain_state,
             .allocator = allocator,
-            .fork_manager = fork_manager,
         };
     }
 
@@ -265,7 +262,7 @@ pub const ChainValidator = struct {
             .mempool_manager = undefined, // Not needed for validation
             .mining_state = undefined, // Not needed for validation
             .network = null,
-            .fork_manager = self.fork_manager orelse undefined,
+            // fork_manager removed
             .blockchain = undefined, // Not needed for validation
         };
         if (!try miner_mod.validateBlockPoW(mining_context, block)) {
@@ -385,7 +382,7 @@ pub const ChainValidator = struct {
             .mempool_manager = undefined, // Not needed for validation
             .mining_state = undefined, // Not needed for validation
             .network = null,
-            .fork_manager = self.fork_manager orelse undefined,
+            // fork_manager removed
             .blockchain = undefined, // Not needed for validation
         };
         if (!try miner_mod.validateBlockPoW(mining_context, block.*)) {
@@ -546,7 +543,7 @@ pub const ChainValidator = struct {
             .mempool_manager = undefined, // Not needed for validation
             .mining_state = undefined, // Not needed for validation
             .network = null, // Not needed for validation
-            .fork_manager = undefined, // Not needed for validation
+            // fork_manager removed - not needed for validation
             .blockchain = undefined, // Not needed for validation
         };
         return miner_mod.validateBlockPoW(mining_context, block);

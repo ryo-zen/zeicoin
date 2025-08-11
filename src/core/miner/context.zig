@@ -12,7 +12,7 @@ pub const MiningContext = struct {
     mempool_manager: *@import("../mempool/manager.zig").MempoolManager,
     mining_state: *types.MiningState,
     network: ?*@import("../network/peer.zig").NetworkManager,
-    fork_manager: *@import("../fork/main.zig").ForkManager,
+    // fork_manager removed - using modern reorganization system
     
     // Reference to the blockchain for method calls
     blockchain: *@import("../node.zig").ZeiCoin,

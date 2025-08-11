@@ -8,7 +8,7 @@ const db = @import("../storage/db.zig");
 const util = @import("../util/util.zig");
 const genesis = @import("genesis.zig");
 const ChainState = @import("state.zig").ChainState;
-const ForkManager = @import("../fork/main.zig").ForkManager;
+// ForkManager removed - using modern reorganization system
 const ChainValidator = @import("../validation/validator.zig").ChainValidator;
 const bech32 = @import("../crypto/bech32.zig");
 
@@ -16,7 +16,7 @@ pub const ChainProcessor = struct {
     allocator: std.mem.Allocator,
     database: *db.Database,
     chain_state: *ChainState,
-    fork_manager: *ForkManager,
+    // fork_manager removed - using modern reorganization system
     chain_validator: *ChainValidator,
     mempool_manager: ?*@import("../mempool/manager.zig").MempoolManager,
     // Reference to parent for network broadcasting
@@ -26,7 +26,6 @@ pub const ChainProcessor = struct {
         allocator: std.mem.Allocator,
         database: *db.Database,
         chain_state: *ChainState,
-        fork_manager: *ForkManager,
         chain_validator: *ChainValidator,
         mempool_manager: ?*@import("../mempool/manager.zig").MempoolManager,
     ) ChainProcessor {
@@ -34,7 +33,6 @@ pub const ChainProcessor = struct {
             .allocator = allocator,
             .database = database,
             .chain_state = chain_state,
-            .fork_manager = fork_manager,
             .chain_validator = chain_validator,
             .mempool_manager = mempool_manager,
         };
@@ -87,9 +85,8 @@ pub const ChainProcessor = struct {
         // Remove processed transactions from mempool
         self.cleanMempool(block);
 
-        // Update fork manager with the new best chain
-        const new_cumulative_work = self.estimateCumulativeWork(height) catch 0;
-        self.fork_manager.updateBestChain(&block, height, new_cumulative_work);
+        // Chain state tracking moved to modern reorganization system
+        // Fork manager updateBestChain call removed - handled by ChainState
 
         print("✅ Block #{} added to chain ({} txs)\n", .{ height, block.txCount() });
     }
