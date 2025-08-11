@@ -4,6 +4,19 @@
 const std = @import("std");
 const types = @import("../../types/types.zig");
 
+/// Work type for chain work comparison
+pub const ChainWork = struct {
+    value: u256,
+    
+    pub fn lessThan(self: ChainWork, other: ChainWork) bool {
+        return self.value < other.value;
+    }
+    
+    pub fn lessThanOrEqual(self: ChainWork, other: ChainWork) bool {
+        return self.value <= other.value;
+    }
+};
+
 /// Reorganization safety checker
 pub const ReorgSafety = struct {
     // Safety configuration
@@ -66,6 +79,27 @@ pub const ReorgSafety = struct {
         try self.checkResourceLimits(depth);
         
         std.debug.print("✅ Safety validation passed\n", .{});
+    }
+    
+    /// Validate reorganization work requirements (from atomic_reorg)
+    /// Returns true if new chain has more work and reorg should proceed
+    pub fn validateWorkRequirements(self: *Self, current_work: ChainWork, new_work: ChainWork, current_tip_hash: types.Hash, new_tip_hash: types.Hash) bool {
+        _ = self;
+        
+        // Must have more work to justify reorganization
+        if (new_work.lessThanOrEqual(current_work)) {
+            std.debug.print("⚠️ [REORG] New chain has insufficient work: {} <= {}\n", .{ new_work.value, current_work.value });
+            return false;
+        }
+        
+        // Check if already on the same chain
+        if (std.mem.eql(u8, &current_tip_hash, &new_tip_hash)) {
+            std.debug.print("ℹ️ [REORG] Already on best chain\n", .{});
+            return false;
+        }
+        
+        std.debug.print("✅ [REORG] Work validation passed: new_work={} > current_work={}\n", .{ new_work.value, current_work.value });
+        return true;
     }
     
     /// Check if reorganization depth is within limits

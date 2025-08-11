@@ -594,14 +594,11 @@ pub const DifficultyTarget = struct {
     /// ZeiCoin implementation - CRITICAL CONSENSUS CODE
     /// Work = 2^256 / target for Nakamoto Consensus
     pub fn toWork(self: DifficultyTarget) ChainWork {
-        // Import the work calculation
-        const consensus = @import("../consensus/work.zig");
-
         // Convert ZeiCoin difficulty format to 256-bit target
-        const target = consensus.zeiCoinToTarget(self.base_bytes, self.threshold);
+        const target = zeiCoinToTarget(self.base_bytes, self.threshold);
 
         // Use industry-standard work calculation (zero tolerance for error)
-        return consensus.calculateWork(target);
+        return calculateWork(target);
     }
 };
 
@@ -832,6 +829,91 @@ pub const GenesisConfig = struct {
 };
 
 /// Chain work - cumulative proof of work (u256 for maximum precision)
+// =============================================================================
+// PROOF OF WORK CALCULATIONS
+// =============================================================================
+
+/// Convert ZeiCoin difficulty format to 256-bit target
+/// ZeiCoin uses: base_bytes (leading zeros) + threshold (next 4 bytes)
+/// Output: full 256-bit target value for work calculation
+///
+/// ZeiCoin format: [base_bytes zeros][threshold 4 bytes][remaining 0xFF bytes]
+/// More leading zeros = smaller target = higher difficulty = more work
+fn zeiCoinToTarget(base_bytes: u8, threshold: u32) u256 {
+    // Validate inputs to prevent overflow
+    if (base_bytes >= 31) { // Leave room for threshold bytes
+        // Too many leading zero bytes - return minimum target (maximum difficulty)
+        return 1;
+    }
+
+    if (threshold == 0) {
+        // Zero threshold - return minimum target (maximum difficulty)
+        return 1;
+    }
+
+    // Build target step by step: [zeros][threshold][fill]
+    var target: u256 = 0;
+
+    // Position threshold after the leading zero bytes
+    // Each base_byte represents 8 bits of leading zeros
+    const threshold_position = @as(u16, base_bytes) * 8;
+
+    if (threshold_position + 32 <= 256) { // Ensure we don't overflow
+        // Place threshold at the correct bit position
+        const shift_amount: u16 = 256 - threshold_position - 32;
+        target = @as(u256, threshold) << @intCast(shift_amount);
+
+        // Fill the remaining lower bits with 0xFF pattern (except the threshold area)
+        if (threshold_position + 32 < 256) {
+            const fill_bits: u16 = 256 - threshold_position - 32;
+            if (fill_bits <= 64) { // Safety limit for shift operations
+                const fill_mask = (@as(u256, 1) << @intCast(fill_bits)) - 1;
+                target = target | fill_mask;
+            } else {
+                // For large fills, set maximum possible value in lower bits
+                target = target | 0xFFFFFFFFFFFFFFFF; // Fill lower 64 bits
+            }
+        }
+    } else {
+        // Fallback: if positioning would overflow, just use threshold value
+        target = threshold;
+    }
+
+    // Ensure target is never zero (would cause division by zero)
+    if (target == 0) {
+        return 1;
+    }
+
+    return target;
+}
+
+/// ZeiCoin work calculation with zero tolerance for error
+/// Formula: work = ~target / (target + 1) + 1
+/// Industry-standard proof-of-work calculation for Nakamoto consensus
+fn calculateWork(target: u256) u256 {
+    // Handle edge case: target = 0 would cause division by zero
+    if (target == 0) {
+        return 0; // Invalid targets return zero work
+    }
+
+    // Handle edge case: target = MAX_TARGET would cause overflow in target + 1
+    const MAX_TARGET = std.math.maxInt(u256);
+    if (target == MAX_TARGET) {
+        return 1; // Minimum work for maximum target
+    }
+
+    // Industry-standard algorithm for proof-of-work:
+    // We need to compute 2**256 / (target+1), but we can't represent 2**256
+    // as it's too large for a u256. However, as 2**256 is at least as large
+    // as target+1, it is equal to ((2**256 - target - 1) / (target+1)) + 1,
+    // or ~target / (target+1) + 1.
+
+    const inverted_target = ~target; // Bitwise NOT of target
+    const denominator = target + 1;
+
+    return (inverted_target / denominator) + 1;
+}
+
 /// This is critical consensus code for ZeiCoin's highest cumulative work rule
 pub const ChainWork = u256;
 

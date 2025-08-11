@@ -188,6 +188,12 @@ pub const TxReplayEngine = struct {
         self.dependency_graph.deinit();
     }
     
+    /// Check if transaction is a coinbase transaction (from atomic_reorg)
+    fn isCoinbaseTransaction(tx: Transaction) bool {
+        // ZeiCoin coinbase detection: sender is zero address
+        return std.mem.eql(u8, &tx.sender, &std.mem.zeroes(types.Address));
+    }
+    
     /// Main transaction replay function
     pub fn replayTransactions(
         self: *Self,
@@ -203,8 +209,20 @@ pub const TxReplayEngine = struct {
             .failed = std.ArrayList(FailedTx).init(self.allocator),
         };
         
+        // Filter out coinbase transactions (they become invalid when disconnected)
+        var valid_txs = std.ArrayList(Transaction).init(self.allocator);
+        defer valid_txs.deinit();
+        
+        for (orphaned_txs) |tx| {
+            if (isCoinbaseTransaction(tx)) {
+                std.debug.print("⚠️ Skipping coinbase transaction in replay\n", .{});
+                continue;
+            }
+            try valid_txs.append(tx);
+        }
+        
         // Sort transactions by dependency order
-        const sorted_txs = try self.dependency_graph.topologicalSort(orphaned_txs);
+        const sorted_txs = try self.dependency_graph.topologicalSort(valid_txs.items);
         defer sorted_txs.deinit();
         
         // Replay each transaction in order
