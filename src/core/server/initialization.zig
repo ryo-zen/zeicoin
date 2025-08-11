@@ -180,8 +180,29 @@ pub fn initializeNode(allocator: std.mem.Allocator, config: command_line.Config)
     // Initialize mining if enabled - but delay actual mining start until after sync
     if (config.enable_mining) {
         // miner_wallet is guaranteed to be non-null when enable_mining is true
-        try initializeMiningSystem(blockchain, config.miner_wallet.?);
-        std.log.info("⛏️  Mining system initialized - will start mining after initial sync", .{});
+        if (initializeMiningSystem(blockchain, config.miner_wallet.?)) {
+            std.log.info("⛏️  Mining system initialized - will start mining after initial sync", .{});
+        } else |err| {
+            // Handle mining initialization errors gracefully without exposing internals
+            switch (err) {
+                error.WalletFileNotFound => {
+                    std.log.err("❌ Mining wallet '{s}' not found", .{config.miner_wallet.?});
+                    std.log.err("💡 Create wallet: ZEICOIN_SERVER=127.0.0.1 ./zig-out/bin/zeicoin wallet create {s}", .{config.miner_wallet.?});
+                },
+                error.PasswordRequired => {
+                    std.log.err("❌ Password required for mining wallet '{s}'", .{config.miner_wallet.?});
+                    std.log.err("💡 Set ZEICOIN_WALLET_PASSWORD or enable ZEICOIN_TEST_MODE=1", .{});
+                },
+                error.WalletHasNoAddress => {
+                    std.log.err("❌ Mining wallet '{s}' has no address", .{config.miner_wallet.?});
+                },
+                else => {
+                    std.log.err("❌ Mining initialization failed: {}", .{err});
+                },
+            }
+            std.log.err("🔄 Starting server without mining - you can enable mining later", .{});
+            // Continue without mining instead of crashing
+        }
     }
     
     return NodeComponents{
@@ -231,6 +252,7 @@ fn initializeMiningSystem(blockchain: *zen.ZeiCoin, miner_wallet_name: []const u
     
     // Get password for mining wallet
     const password = password_util.getPasswordForWallet(allocator, wallet_name, false) catch |pwd_err| {
+        wallet_obj.deinit(); // Clean up wallet on password error
         std.log.err("❌ Failed to get password for mining wallet '{s}'", .{wallet_name});
         std.log.err("❌ Error: {}", .{pwd_err});
         std.log.err("", .{});
@@ -244,6 +266,7 @@ fn initializeMiningSystem(blockchain: *zen.ZeiCoin, miner_wallet_name: []const u
     defer password_util.clearPassword(password);
     
     wallet_obj.loadFromFile(wallet_path, password) catch |err| {
+        wallet_obj.deinit(); // Clean up wallet on load error
         std.log.err("❌ Failed to load mining wallet '{s}' from path: {s}", .{wallet_name, wallet_path});
         std.log.err("❌ Error: {}", .{err});
         std.log.err("", .{});
@@ -264,6 +287,7 @@ fn initializeMiningSystem(blockchain: *zen.ZeiCoin, miner_wallet_name: []const u
         defer if (!std.mem.eql(u8, addr_str, "<invalid>")) allocator.free(addr_str);
         std.log.info("⛏️  Mining address: {s}", .{addr_str});
     } else {
+        wallet_obj.deinit(); // Clean up wallet on address error
         std.log.err("❌ Wallet '{s}' has no address!", .{wallet_name});
         return error.WalletHasNoAddress;
     }

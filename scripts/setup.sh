@@ -141,6 +141,24 @@ if [ -z "$MINER_NAME" ]; then
     fi
 fi
 
+# Setup .env configuration
+echo "⚙️  Configuring environment..."
+if [ ! -f ".env" ]; then
+    if [ -f ".env.testnet" ]; then
+        echo "📋 Copying .env.testnet to .env for server configuration..."
+        cp .env.testnet .env
+        echo "✅ Environment configuration ready!"
+    elif [ -f ".env.example" ]; then
+        echo "📋 Copying .env.example to .env..."
+        cp .env.example .env
+        echo "⚠️  Please edit .env with your specific configuration"
+    else
+        echo "⚠️  No .env.testnet or .env.example found - manual configuration needed"
+    fi
+else
+    echo "✅ .env file already exists"
+fi
+
 # Configure firewall for ZeiCoin ports
 echo "🔥 Configuring firewall..."
 if command -v ufw &> /dev/null; then
@@ -202,6 +220,8 @@ Group=root
 WorkingDirectory=$CURRENT_DIR
 Environment="ZEICOIN_SERVER=127.0.0.1"
 Environment="ZEICOIN_BIND_IP=0.0.0.0"
+Environment="ZEICOIN_MINE_ENABLED=true"
+Environment="ZEICOIN_MINER_WALLET=$MINER_NAME"
 ExecStart=$CURRENT_DIR/zig-out/bin/zen_server --mine $MINER_NAME
 Restart=on-failure
 RestartSec=10

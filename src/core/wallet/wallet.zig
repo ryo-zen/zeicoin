@@ -157,6 +157,7 @@ pub const Wallet = struct {
         self.master_key = hd.HDKey.fromSeed(seed);
     }
 
+
     /// Import a genesis test account (TestNet only)
     pub fn importGenesisAccount(self: *Wallet, name: []const u8) !void {
         if (types.CURRENT_NETWORK != .testnet) {
@@ -168,7 +169,7 @@ pub const Wallet = struct {
         const genesis_mnemonic = try genesis_wallet.getGenesisAccountMnemonic(self.allocator, name);
         defer self.allocator.free(genesis_mnemonic);
         
-        // Load from mnemonic
+        // Load from mnemonic (now with proper BIP39 validation)
         try self.fromMnemonic(genesis_mnemonic, null);
     }
 
@@ -216,7 +217,7 @@ pub const Wallet = struct {
             else => return err,
         };
 
-        // Restore wallet from mnemonic
+        // Restore wallet from mnemonic (now with proper BIP39 validation for all)
         try self.fromMnemonic(mnemonic, null);
         self.allocator.free(mnemonic); // fromMnemonic makes its own copy
 
