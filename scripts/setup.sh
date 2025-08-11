@@ -123,11 +123,12 @@ if [ -z "$MINER_NAME" ]; then
     MINER_NAME="miner-$RANDOM_ID"
     
     echo "Creating new wallet '$MINER_NAME' for mining..."
-    if ./zig-out/bin/zeicoin wallet create "$MINER_NAME"; then
+    if ZEICOIN_TEST_MODE=1 ./zig-out/bin/zeicoin wallet create "$MINER_NAME"; then
         echo "✅ $MINER_NAME wallet created!"
         # Save miner name for easy reference
         echo "$MINER_NAME" > .miner_name
         echo "📝 Miner name saved to .miner_name file"
+        echo "💡 TestNet wallet created without encryption for easier development"
     else
         echo "❌ Failed to create wallet. Continuing with existing wallets..."
         # Try to find any existing wallet
@@ -143,20 +144,28 @@ fi
 
 # Setup .env configuration
 echo "⚙️  Configuring environment..."
-if [ ! -f ".env" ]; then
-    if [ -f ".env.testnet" ]; then
-        echo "📋 Copying .env.testnet to .env for server configuration..."
-        cp .env.testnet .env
-        echo "✅ Environment configuration ready!"
-    elif [ -f ".env.example" ]; then
-        echo "📋 Copying .env.example to .env..."
-        cp .env.example .env
-        echo "⚠️  Please edit .env with your specific configuration"
-    else
-        echo "⚠️  No .env.testnet or .env.example found - manual configuration needed"
-    fi
+if [ -f ".env.testnet" ]; then
+    echo "📋 Copying .env.testnet to .env for server configuration..."
+    cp .env.testnet .env
+    echo "✅ Environment configuration ready!"
+elif [ -f ".env.example" ]; then
+    echo "📋 Copying .env.example to .env..."
+    cp .env.example .env
+    echo "⚠️  Please edit .env with your specific configuration"
 else
-    echo "✅ .env file already exists"
+    echo "⚠️  No .env.testnet or .env.example found - manual configuration needed"
+fi
+
+# Ensure test mode is enabled in .env for systemd service
+if [ -f ".env" ] && [ -n "$MINER_NAME" ]; then
+    echo "🔧 Ensuring test mode is enabled in .env for systemd service..."
+    # Make sure ZEICOIN_TEST_MODE=1 is set (should already be there from .env.testnet)
+    if ! grep -q "ZEICOIN_TEST_MODE=1" .env; then
+        echo "" >> .env
+        echo "# Test mode for systemd service (no password required)" >> .env
+        echo "ZEICOIN_TEST_MODE=1" >> .env
+    fi
+    echo "✅ Test mode configured for systemd service"
 fi
 
 # Configure firewall for ZeiCoin ports
@@ -218,6 +227,7 @@ Type=simple
 User=root
 Group=root
 WorkingDirectory=$CURRENT_DIR
+EnvironmentFile=$CURRENT_DIR/.env
 Environment="ZEICOIN_SERVER=127.0.0.1"
 Environment="ZEICOIN_BIND_IP=0.0.0.0"
 Environment="ZEICOIN_MINE_ENABLED=true"
