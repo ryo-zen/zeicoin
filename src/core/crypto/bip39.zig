@@ -63,27 +63,46 @@ pub fn entropyToMnemonic(allocator: std.mem.Allocator, entropy: []const u8) ![]u
     const checksum_byte = blake3_out[0];
     const checksum_bits: u8 = @intCast(entropy.len / 4);
     
-    // Combine entropy + checksum
-    var bits = std.ArrayList(u8).init(allocator);
-    defer bits.deinit();
+    // Create combined entropy + checksum bytes
+    const total_bits = entropy.len * 8 + checksum_bits;
+    const total_bytes = (total_bits + 7) / 8; // Round up
     
-    // Add entropy bits
-    for (entropy) |byte| {
-        try bits.append(byte);
+    var combined = try allocator.alloc(u8, total_bytes);
+    defer allocator.free(combined);
+    @memset(combined, 0);
+    
+    // Copy entropy bytes
+    @memcpy(combined[0..entropy.len], entropy);
+    
+    // Add checksum bits to the end
+    const checksum_shift: u3 = @intCast(8 - checksum_bits);
+    const checksum_masked = checksum_byte >> checksum_shift;
+    
+    // Place checksum bits after entropy
+    const entropy_bits = entropy.len * 8;
+    var checksum_bit_count: u8 = 0;
+    while (checksum_bit_count < checksum_bits) : (checksum_bit_count += 1) {
+        const bit_pos: u3 = @intCast(checksum_bits - 1 - checksum_bit_count);
+        const bit = (checksum_masked >> bit_pos) & 1;
+        
+        const total_bit_index = entropy_bits + checksum_bit_count;
+        const byte_index = total_bit_index / 8;
+        const bit_offset: u3 = @intCast(7 - (total_bit_index % 8));
+        
+        if (bit == 1) {
+            combined[byte_index] |= (@as(u8, 1) << bit_offset);
+        }
     }
     
-    // Add checksum bits (only the required number of bits)
-    try bits.append(checksum_byte >> @as(u3, @intCast(8 - checksum_bits)));
-    
     // Convert to word indices
-    const word_count = (entropy.len * 8 + checksum_bits) / 11;
+    const word_count = total_bits / 11;
     var words = std.ArrayList([]const u8).init(allocator);
     defer words.deinit();
     
     var bit_index: usize = 0;
     var i: usize = 0;
     while (i < word_count) : (i += 1) {
-        const word_index = extractBits(bits.items, bit_index, 11);
+        const word_index = extractBits(combined, bit_index, 11);
         try words.append(WORDLIST[word_index]);
         bit_index += 11;
     }
@@ -175,36 +194,112 @@ pub fn mnemonicToSeed(mnemonic: []const u8, passphrase: ?[]const u8) [64]u8 {
     return seed;
 }
 
-/// Validate a mnemonic phrase
-pub fn validateMnemonic(mnemonic: []const u8) !void {
+/// Convert mnemonic back to entropy (needed for checksum validation)
+pub fn mnemonicToEntropy(allocator: std.mem.Allocator, mnemonic: []const u8) ![]u8 {
     var words_iter = std.mem.tokenizeScalar(u8, mnemonic, ' ');
-    var word_count: usize = 0;
+    var words = std.ArrayList([]const u8).init(allocator);
+    defer words.deinit();
     
-    // Count and validate each word
+    // Split into words
     while (words_iter.next()) |word| {
-        var found = false;
-        for (WORDLIST) |valid_word| {
+        try words.append(word);
+    }
+    
+    const word_count = words.items.len;
+    if (word_count < 12 or word_count > 24 or word_count % 3 != 0) {
+        return MnemonicError.InvalidWordCount;
+    }
+    
+    // Convert words to indices
+    var indices = std.ArrayList(u16).init(allocator);
+    defer indices.deinit();
+    
+    for (words.items) |word| {
+        var found_index: ?u16 = null;
+        for (WORDLIST, 0..) |valid_word, idx| {
             if (std.mem.eql(u8, word, valid_word)) {
-                found = true;
+                found_index = @intCast(idx);
                 break;
             }
         }
-        if (!found) return MnemonicError.WordNotInList;
-        word_count += 1;
+        if (found_index == null) return MnemonicError.WordNotInList;
+        try indices.append(found_index.?);
     }
     
-    // Validate word count
-    const valid_counts = [_]usize{12, 15, 18, 21, 24};
-    var valid_count = false;
-    for (valid_counts) |count| {
-        if (word_count == count) {
-            valid_count = true;
-            break;
+    // Pack indices into bits
+    const total_bits = word_count * 11;
+    const checksum_bits = word_count / 3;
+    const entropy_bits = total_bits - checksum_bits;
+    const entropy_bytes = entropy_bits / 8;
+    
+    var bit_string = std.ArrayList(u8).init(allocator);
+    defer bit_string.deinit();
+    
+    // Convert indices to bit string
+    for (indices.items) |index| {
+        const bits: u16 = index;
+        var bit_count: u8 = 11;
+        while (bit_count > 0) : (bit_count -= 1) {
+            const shift_amount: u4 = @intCast(bit_count - 1);
+            const bit = (bits >> shift_amount) & 1;
+            try bit_string.append(@intCast(bit));
         }
     }
-    if (!valid_count) return MnemonicError.InvalidWordCount;
     
-    // TODO: Validate checksum once we have mnemonic to entropy conversion
+    // Extract entropy bytes
+    var entropy = try allocator.alloc(u8, entropy_bytes);
+    var byte_index: usize = 0;
+    var bit_index: usize = 0;
+    
+    while (byte_index < entropy_bytes) : (byte_index += 1) {
+        var byte_val: u8 = 0;
+        var i: u8 = 0;
+        while (i < 8) : (i += 1) {
+            if (bit_index < bit_string.items.len) {
+                byte_val = (byte_val << 1) | bit_string.items[bit_index];
+                bit_index += 1;
+            }
+        }
+        entropy[byte_index] = byte_val;
+    }
+    
+    // Extract checksum bits
+    var checksum_val: u8 = 0;
+    var i: u8 = 0;
+    while (i < checksum_bits) : (i += 1) {
+        if (bit_index < bit_string.items.len) {
+            checksum_val = (checksum_val << 1) | bit_string.items[bit_index];
+            bit_index += 1;
+        }
+    }
+    
+    // Validate checksum using BLAKE3
+    var blake3_out: [32]u8 = undefined;
+    std.crypto.hash.Blake3.hash(entropy, &blake3_out, .{});
+    const expected_checksum = blake3_out[0] >> @as(u3, @intCast(8 - checksum_bits));
+    
+    if (checksum_val != expected_checksum) {
+        allocator.free(entropy);
+        return MnemonicError.InvalidChecksum;
+    }
+    
+    return entropy;
+}
+
+/// Validate a mnemonic phrase
+pub fn validateMnemonic(mnemonic: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    
+    // Use mnemonicToEntropy for validation (includes checksum validation)
+    const entropy = mnemonicToEntropy(allocator, mnemonic) catch |err| switch (err) {
+        MnemonicError.InvalidWordCount => return MnemonicError.InvalidWordCount,
+        MnemonicError.WordNotInList => return MnemonicError.WordNotInList,
+        MnemonicError.InvalidChecksum => return MnemonicError.InvalidChecksum,
+        else => return err,
+    };
+    _ = entropy; // entropy automatically freed by arena
 }
 
 // Tests
@@ -221,12 +316,12 @@ test "entropy to mnemonic - all zeros" {
     defer arena.deinit();
     const allocator = arena.allocator();
     
-    // All zeros entropy should produce "abandon" repeated
+    // All zeros entropy with BLAKE3 checksum
     const entropy = [_]u8{0x00} ** 16;
     const mnemonic = try entropyToMnemonic(allocator, &entropy);
     
-    // Should be 12 "abandon" words
-    try testing.expectEqualStrings("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon", mnemonic);
+    // ZeiCoin uses BLAKE3, so checksum differs from standard BIP39
+    try testing.expectEqualStrings("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon achieve", mnemonic);
 }
 
 test "entropy to mnemonic - all ones" {
@@ -234,12 +329,12 @@ test "entropy to mnemonic - all ones" {
     defer arena.deinit();
     const allocator = arena.allocator();
     
-    // All ones entropy
+    // All ones entropy with BLAKE3 checksum
     const entropy = [_]u8{0xFF} ** 16;
     const mnemonic = try entropyToMnemonic(allocator, &entropy);
     
-    // Should end with "zoo" words
-    try testing.expectEqualStrings("zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrap", mnemonic);
+    // ZeiCoin uses BLAKE3, so checksum differs from standard BIP39
+    try testing.expectEqualStrings("zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zebra", mnemonic);
 }
 
 test "mnemonic to seed - deterministic" {
@@ -283,4 +378,83 @@ test "word count calculations" {
     
     try testing.expectEqual(@as(u8, 4), WordCount.twelve.checksumBits());
     try testing.expectEqual(@as(u8, 8), WordCount.twentyfour.checksumBits());
+}
+
+test "mnemonic to entropy roundtrip" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    
+    // Test with known entropy
+    const original_entropy = [_]u8{ 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80 };
+    
+    // Convert to mnemonic
+    const mnemonic = try entropyToMnemonic(allocator, &original_entropy);
+    
+    // Convert back to entropy
+    const recovered_entropy = try mnemonicToEntropy(allocator, mnemonic);
+    
+    // Should match original
+    try testing.expectEqualSlices(u8, &original_entropy, recovered_entropy);
+}
+
+test "validate mnemonic - valid checksum" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    
+    // Generate valid mnemonic
+    const entropy = [_]u8{0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0};
+    const mnemonic = try entropyToMnemonic(allocator, &entropy);
+    
+    // Should validate successfully
+    try validateMnemonic(mnemonic);
+}
+
+test "validate mnemonic - invalid checksum" {
+    // Manually construct mnemonic with wrong checksum
+    const invalid_mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon";
+    
+    // Should fail checksum validation
+    try testing.expectError(MnemonicError.InvalidChecksum, validateMnemonic(invalid_mnemonic));
+}
+
+test "validate mnemonic - word not in list" {
+    const invalid_mnemonic = "abandon abandon abandon notaword abandon abandon abandon abandon abandon abandon abandon abandon";
+    
+    try testing.expectError(MnemonicError.WordNotInList, validateMnemonic(invalid_mnemonic));
+}
+
+test "validate mnemonic - invalid word count" {
+    const invalid_mnemonic = "abandon abandon abandon abandon abandon";
+    
+    try testing.expectError(MnemonicError.InvalidWordCount, validateMnemonic(invalid_mnemonic));
+}
+
+test "mnemonic to entropy - different word counts" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    
+    const test_cases = [_]struct { bytes: usize, words: usize }{
+        .{ .bytes = 16, .words = 12 },
+        .{ .bytes = 20, .words = 15 },
+        .{ .bytes = 24, .words = 18 },
+        .{ .bytes = 28, .words = 21 },
+        .{ .bytes = 32, .words = 24 },
+    };
+    
+    for (test_cases) |case| {
+        const entropy = try allocator.alloc(u8, case.bytes);
+        defer allocator.free(entropy);
+        @memset(entropy, 0x42);
+        
+        const mnemonic = try entropyToMnemonic(allocator, entropy);
+        const recovered = try mnemonicToEntropy(allocator, mnemonic);
+        
+        try testing.expectEqual(case.bytes, recovered.len);
+        try testing.expectEqualSlices(u8, entropy, recovered);
+        
+        allocator.free(recovered);
+    }
 }

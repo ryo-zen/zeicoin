@@ -231,9 +231,6 @@ pub const BlockProcessor = struct {
             return block_work;
         }
 
-        // TODO: Integrate with consensus ChainManager
-        // For now, just return this block's work as a transitional measure
-        // The full consensus system will be integrated in the next phase
         return block_work;
     }
 
