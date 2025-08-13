@@ -296,28 +296,44 @@ fn handleWalletCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     }
 }
 
+// Helper function to get wallet path without opening database
+fn getWalletPath(allocator: std.mem.Allocator, wallet_name: []const u8) ![]u8 {
+    const data_dir = switch (types.CURRENT_NETWORK) {
+        .testnet => "zeicoin_data_testnet",
+        .mainnet => "zeicoin_data_mainnet",
+    };
+    return std.fmt.allocPrint(allocator, "{s}/wallets/{s}.wallet", .{ data_dir, wallet_name });
+}
+
+// Helper function to check if wallet exists without opening database
+fn walletExists(wallet_path: []const u8) bool {
+    std.fs.cwd().access(wallet_path, .{}) catch return false;
+    return true;
+}
+
 fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const wallet_name = if (args.len > 0) args[0] else "default";
 
     print("💳 Creating new ZeiCoin HD wallet: {s}\n", .{wallet_name});
 
-    // Initialize database with network-specific directory
+    // Get wallet path
+    const wallet_path = try getWalletPath(allocator, wallet_name);
+    defer allocator.free(wallet_path);
+    
+    // Check if wallet already exists
+    if (walletExists(wallet_path)) {
+        print("❌ Wallet '{s}' already exists\n", .{wallet_name});
+        std.process.exit(1);
+    }
+    
+    // Create wallets directory if it doesn't exist
     const data_dir = switch (types.CURRENT_NETWORK) {
         .testnet => "zeicoin_data_testnet",
         .mainnet => "zeicoin_data_mainnet",
     };
-    var database = try db.Database.init(allocator, data_dir);
-    defer database.deinit();
-
-    // Check if wallet already exists
-    if (database.walletExists(wallet_name)) {
-        print("❌ Wallet '{s}' already exists\n", .{wallet_name});
-        std.process.exit(1);
-    }
-
-    // Get wallet path
-    const wallet_path = try database.getWalletPath(wallet_name);
-    defer allocator.free(wallet_path);
+    const wallets_dir = try std.fmt.allocPrint(allocator, "{s}/wallets", .{data_dir});
+    defer allocator.free(wallets_dir);
+    std.fs.cwd().makePath(wallets_dir) catch {};
 
     // Get password for wallet (will use test mode if enabled)
     const password = try password_util.getPasswordForWallet(allocator, wallet_name, true);
@@ -412,15 +428,12 @@ fn loadWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
     print("🔓 Loading ZeiCoin wallet: {s}\n", .{wallet_name});
 
-    // Initialize database with network-specific directory
-    const data_dir = switch (types.CURRENT_NETWORK) {
-        .testnet => "zeicoin_data_testnet",
-        .mainnet => "zeicoin_data_mainnet",
-    };
-    var database = try db.Database.init(allocator, data_dir);
-    defer database.deinit();
-
-    if (!database.walletExists(wallet_name)) {
+    // Get wallet path
+    const wallet_path = try getWalletPath(allocator, wallet_name);
+    defer allocator.free(wallet_path);
+    
+    // Check if wallet exists
+    if (!walletExists(wallet_path)) {
         print("❌ Wallet '{s}' not found\n", .{wallet_name});
         print("💡 Use 'zeicoin wallet create {s}' to create it\n", .{wallet_name});
         std.process.exit(1);
@@ -429,9 +442,6 @@ fn loadWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     // Load wallet
     var zen_wallet = wallet.Wallet.init(allocator);
     defer zen_wallet.deinit();
-
-    const wallet_path = try database.getWalletPath(wallet_name);
-    defer allocator.free(wallet_path);
 
     const password = try password_util.getPasswordForWallet(allocator, wallet_name, false);
     defer allocator.free(password);
@@ -512,19 +522,23 @@ fn restoreWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
     print("🔐 Restoring HD wallet '{s}' from mnemonic...\n", .{wallet_name});
 
-    // Initialize database
+    // Get wallet path and check if exists
+    const wallet_path = try getWalletPath(allocator, wallet_name);
+    defer allocator.free(wallet_path);
+    
+    if (walletExists(wallet_path)) {
+        print("❌ Wallet '{s}' already exists\n", .{wallet_name});
+        std.process.exit(1);
+    }
+    
+    // Create wallets directory if it doesn't exist
     const data_dir = switch (types.CURRENT_NETWORK) {
         .testnet => "zeicoin_data_testnet",
         .mainnet => "zeicoin_data_mainnet",
     };
-    var database = try db.Database.init(allocator, data_dir);
-    defer database.deinit();
-
-    // Check if wallet already exists
-    if (database.walletExists(wallet_name)) {
-        print("❌ Wallet '{s}' already exists\n", .{wallet_name});
-        std.process.exit(1);
-    }
+    const wallets_dir = try std.fmt.allocPrint(allocator, "{s}/wallets", .{data_dir});
+    defer allocator.free(wallets_dir);
+    std.fs.cwd().makePath(wallets_dir) catch {};
 
     // Create HD wallet from mnemonic
     var hd_zen_wallet = hd_wallet.HDWallet.init(allocator);
@@ -534,10 +548,6 @@ fn restoreWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         print("❌ Invalid mnemonic phrase: {}\n", .{err});
         std.process.exit(1);
     };
-
-    // Save wallet
-    const wallet_path = try database.getWalletPath(wallet_name);
-    defer allocator.free(wallet_path);
     const password = try password_util.getPasswordForWallet(allocator, wallet_name, true);
     defer allocator.free(password);
     defer password_util.clearPassword(password);
@@ -576,22 +586,14 @@ fn deriveAddress(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     else
         null;
 
-    // Initialize database
-    const data_dir = switch (types.CURRENT_NETWORK) {
-        .testnet => "zeicoin_data_testnet",
-        .mainnet => "zeicoin_data_mainnet",
-    };
-    var database = try db.Database.init(allocator, data_dir);
-    defer database.deinit();
-
-    if (!database.walletExists(wallet_name)) {
+    // Get wallet path and check if exists
+    const wallet_path = try getWalletPath(allocator, wallet_name);
+    defer allocator.free(wallet_path);
+    
+    if (!walletExists(wallet_path)) {
         print("❌ Wallet '{s}' not found\n", .{wallet_name});
         std.process.exit(1);
     }
-
-    // Check if it's an HD wallet
-    const wallet_path = try database.getWalletPath(wallet_name);
-    defer allocator.free(wallet_path);
 
     if (!hd_wallet.HDWallet.isHDWallet(wallet_path)) {
         print("❌ Wallet '{s}' is not an HD wallet\n", .{wallet_name});
@@ -1152,19 +1154,22 @@ fn parseZeiAmount(amount_str: []const u8) !u64 {
 }
 
 fn loadWalletForOperation(allocator: std.mem.Allocator, wallet_name: []const u8) !*wallet.Wallet {
-    // Initialize database with network-specific directory
+    // Get wallet path directly without opening database
     const data_dir = switch (types.CURRENT_NETWORK) {
         .testnet => "zeicoin_data_testnet",
         .mainnet => "zeicoin_data_mainnet",
     };
-    var database = try db.Database.init(allocator, data_dir);
-    defer database.deinit();
-
-    if (!database.walletExists(wallet_name)) {
+    
+    // Check wallet directly in filesystem
+    const wallet_path = try std.fmt.allocPrint(allocator, "{s}/wallets/{s}.wallet", .{ data_dir, wallet_name });
+    defer allocator.free(wallet_path);
+    
+    // Check if wallet file exists
+    std.fs.cwd().access(wallet_path, .{}) catch {
         print("❌ Wallet '{s}' not found\n", .{wallet_name});
         print("💡 Use 'zeicoin wallet create {s}' to create it\n", .{wallet_name});
         return error.WalletNotFound;
-    }
+    };
 
     // Create wallet
     const zen_wallet = try allocator.create(wallet.Wallet);
@@ -1174,10 +1179,6 @@ fn loadWalletForOperation(allocator: std.mem.Allocator, wallet_name: []const u8)
         allocator.destroy(zen_wallet);
     }
 
-    // Load wallet
-    const wallet_path = try database.getWalletPath(wallet_name);
-    defer allocator.free(wallet_path);
-
     // Get password for wallet
     const password = password_util.getPasswordForWallet(allocator, wallet_name, false) catch |err| {
         print("❌ Failed to get password for wallet '{s}': {}\n", .{ wallet_name, err });
@@ -1185,7 +1186,12 @@ fn loadWalletForOperation(allocator: std.mem.Allocator, wallet_name: []const u8)
     };
     defer allocator.free(password);
     defer password_util.clearPassword(password);
-    zen_wallet.loadFromFile(wallet_path, password) catch |err| {
+    
+    // Load wallet using a fresh copy of the path
+    const wallet_path_for_load = try allocator.dupe(u8, wallet_path);
+    defer allocator.free(wallet_path_for_load);
+    
+    zen_wallet.loadFromFile(wallet_path_for_load, password) catch |err| {
         print("❌ Failed to load wallet '{s}': {}\n", .{ wallet_name, err });
         return error.WalletNotFound;
     };

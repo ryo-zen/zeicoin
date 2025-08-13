@@ -37,6 +37,65 @@ if ! command -v zig &> /dev/null; then
     missing_deps="$missing_deps zig"
 fi
 
+# Check for RocksDB
+echo "🔍 Checking for RocksDB..."
+rocksdb_found=false
+if pkg-config --exists rocksdb 2>/dev/null; then
+    rocksdb_found=true
+elif [ -f "/usr/lib/librocksdb.so" ] || [ -f "/usr/local/lib/librocksdb.so" ] || [ -f "/usr/lib/librocksdb.a" ]; then
+    rocksdb_found=true
+fi
+
+if [ "$rocksdb_found" = false ]; then
+    echo "📦 RocksDB not found. Installing RocksDB..."
+    
+    # Detect OS and install RocksDB
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$ID
+        VER=$VERSION_ID
+    fi
+    
+    if [[ "$OS" == "ubuntu" ]] || [[ "$OS" == "debian" ]]; then
+        echo "🔧 Installing RocksDB on Ubuntu/Debian..."
+        sudo apt update
+        sudo apt install -y librocksdb-dev
+    elif [[ "$OS" == "fedora" ]] || [[ "$OS" == "centos" ]] || [[ "$OS" == "rhel" ]]; then
+        echo "🔧 Installing RocksDB on Fedora/CentOS/RHEL..."
+        sudo dnf install -y rocksdb-devel || sudo yum install -y rocksdb-devel
+    elif [[ "$OS" == "arch" ]] || [[ "$OS" == "manjaro" ]]; then
+        echo "🔧 Installing RocksDB on Arch Linux..."
+        sudo pacman -S --noconfirm rocksdb
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+        echo "🔧 Installing RocksDB on macOS..."
+        if command -v brew &> /dev/null; then
+            brew install rocksdb
+        else
+            echo "❌ Homebrew not found. Please install Homebrew first:"
+            echo "  /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+            exit 1
+        fi
+    else
+        echo "⚠️  Unknown OS. Please install RocksDB manually:"
+        echo "  Ubuntu/Debian: sudo apt install librocksdb-dev"
+        echo "  Fedora/CentOS: sudo dnf install rocksdb-devel"
+        echo "  Arch Linux: sudo pacman -S rocksdb"
+        echo "  macOS: brew install rocksdb"
+        echo "  Or build from source: https://github.com/facebook/rocksdb"
+        exit 1
+    fi
+    
+    # Verify installation
+    if pkg-config --exists rocksdb 2>/dev/null || [ -f "/usr/lib/librocksdb.so" ] || [ -f "/usr/local/lib/librocksdb.so" ]; then
+        echo "✅ RocksDB installed successfully!"
+    else
+        echo "❌ RocksDB installation failed. Please install manually."
+        exit 1
+    fi
+else
+    echo "✅ RocksDB already installed!"
+fi
+
 if [ -n "$missing_deps" ]; then
     echo "❌ Missing dependencies:$missing_deps"
     echo ""
@@ -44,8 +103,8 @@ if [ -n "$missing_deps" ]; then
     echo "  ./scripts/install_dependencies.sh"
     echo ""
     echo "Or install manually:"
-    echo "  Ubuntu/Debian: sudo apt update && sudo apt install build-essential cmake git"
-    echo "  CentOS/RHEL: sudo yum groupinstall 'Development Tools' && sudo yum install cmake git"
+    echo "  Ubuntu/Debian: sudo apt update && sudo apt install build-essential cmake git librocksdb-dev"
+    echo "  CentOS/RHEL: sudo yum groupinstall 'Development Tools' && sudo yum install cmake git rocksdb-devel"
     echo "  For Zig: Download from https://ziglang.org/download/"
     exit 1
 fi

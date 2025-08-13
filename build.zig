@@ -63,6 +63,8 @@ pub fn build(b: *std.Build) !void {
         mod.module,
     );
     lib.linkLibC();
+    // Link RocksDB
+    lib.linkSystemLibrary("rocksdb");
     // This declares intent for the library to be installed into the standard
     // location when the user invokes the "install" step (the default step when
     // running `zig build`).
@@ -85,6 +87,8 @@ pub fn build(b: *std.Build) !void {
         );
         exe.root_module.addImport("zeicoin", lib.root_module);
         exe.linkLibC();
+        // Link RocksDB
+        exe.linkSystemLibrary("rocksdb");
 
         b.installArtifact(exe);
 
@@ -116,6 +120,8 @@ pub fn build(b: *std.Build) !void {
         );
         exe.root_module.addImport("zeicoin", lib.root_module);
         exe.linkLibC();
+        // Link RocksDB
+        exe.linkSystemLibrary("rocksdb");
 
         b.installArtifact(exe);
 
@@ -147,6 +153,8 @@ pub fn build(b: *std.Build) !void {
         );
         exe.root_module.addImport("zeicoin", lib.root_module);
         exe.linkLibC();
+        // Link RocksDB
+        exe.linkSystemLibrary("rocksdb");
 
         b.installArtifact(exe);
 
@@ -178,6 +186,8 @@ pub fn build(b: *std.Build) !void {
         );
         exe.root_module.addImport("zeicoin", lib.root_module);
         exe.linkLibC();
+        // Link RocksDB
+        exe.linkSystemLibrary("rocksdb");
 
         b.installArtifact(exe);
 

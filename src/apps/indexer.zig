@@ -111,28 +111,12 @@ pub const Indexer = struct {
         _ = self; // Nothing to clean up
     }
 
-    /// Get the current blockchain height by counting block files
+    /// Get the current blockchain height from database
     pub fn getBlockchainHeight(self: *Indexer) !u32 {
-        const blocks_path = try std.fmt.allocPrint(self.allocator, "{s}/blocks", .{self.blockchain_path});
-        defer self.allocator.free(blocks_path);
-
-        var dir = try std.fs.cwd().openDir(blocks_path, .{ .iterate = true });
-        defer dir.close();
-
-        var max_height: u32 = 0;
-        var iter = dir.iterate();
-        while (try iter.next()) |entry| {
-            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".block")) {
-                // Parse height from filename (e.g., "000042.block" -> 42)
-                const height_str = entry.name[0..6];
-                const height = try std.fmt.parseInt(u32, height_str, 10);
-                if (height > max_height) {
-                    max_height = height;
-                }
-            }
-        }
-
-        return max_height;
+        var database = try db.Database.init(self.allocator, self.blockchain_path);
+        defer database.deinit();
+        
+        return try database.getHeight();
     }
 };
 
@@ -253,24 +237,12 @@ fn updateLastIndexedHeight(pool: *Pool, height: u32) !void {
 }
 
 fn indexBlock(pool: *Pool, allocator: std.mem.Allocator, blockchain_path: []const u8, height: u32) !void {
-    // Load block from disk
-    const block_path = try std.fmt.allocPrint(allocator, "{s}/blocks/{d:0>6}.block", .{
-        blockchain_path,
-        height,
-    });
-    defer allocator.free(block_path);
-
-    // Read block file directly
-    const file = try std.fs.cwd().openFile(block_path, .{});
-    defer file.close();
-
-    const contents = try file.readToEndAlloc(allocator, 16 * 1024 * 1024); // 16MB max
-    defer allocator.free(contents);
-
-    var fbs = std.io.fixedBufferStream(contents);
-    const reader = fbs.reader();
-
-    var block = try serialize.deserialize(reader, types.Block, allocator);
+    // Initialize database to read block
+    var database = try db.Database.init(allocator, blockchain_path);
+    defer database.deinit();
+    
+    // Load block from database
+    var block = try database.getBlock(height);
     defer block.deinit(allocator);
 
     // Begin transaction

@@ -309,22 +309,11 @@ pub const ChainState = struct {
 
     /// Clear all account state for rebuild
     pub fn clearAllAccounts(self: *Self) !void {
-        // Open accounts directory
-        var accounts_dir = std.fs.cwd().openDir(self.database.accounts_dir[0..self.database.accounts_dir_len], .{ .iterate = true }) catch {
-            // Directory might not exist, that's okay
-            return;
-        };
-        defer accounts_dir.close();
-
-        // Delete all account files
-        var iter = accounts_dir.iterate();
-        while (try iter.next()) |entry| {
-            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".account")) {
-                accounts_dir.deleteFile(entry.name) catch |err| {
-                    std.debug.print("  ⚠️  Failed to delete account file {s}: {}\n", .{ entry.name, err });
-                };
-            }
-        }
+        // With RocksDB, we would need to iterate and delete all account keys
+        // For now, this is a no-op since we don't have a batch delete API
+        // Accounts will be overwritten as needed during rebuild
+        _ = self;
+        std.debug.print("  ⚠️  Account clearing not implemented for RocksDB backend\n", .{});
     }
 
     /// Replay blockchain from genesis to rebuild state

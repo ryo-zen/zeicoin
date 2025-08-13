@@ -61,11 +61,6 @@ pub const ZeiCoin = struct {
         database.* = try db.Database.init(allocator, data_dir);
         errdefer database.deinit();
 
-        if (!database.validate()) {
-            print("❌ Database validation failed during initialization\n", .{});
-            return error.DatabaseCorrupted;
-        }
-
         const instance_ptr = try allocator.create(ZeiCoin);
         errdefer allocator.destroy(instance_ptr);
 
@@ -113,64 +108,29 @@ pub const ZeiCoin = struct {
         instance_ptr.message_handler = message_handler.NetworkMessageHandler.init(allocator, instance_ptr);
         components_initialized = 1;
 
-        if (!database.validate()) {
-            print("❌ Database corrupted after message_handler init\n", .{});
-            return error.DatabaseCorrupted;
-        }
-
         instance_ptr.network_coordinator = NetworkCoordinator.init(allocator, instance_ptr.message_handler);
-
-        if (!database.validate()) {
-            print("❌ Database corrupted after network_coordinator init\n", .{});
-            return error.DatabaseCorrupted;
-        }
 
         instance_ptr.chain_validator = validator_mod.ChainValidator.init(allocator, instance_ptr);
         components_initialized = 2;
 
-        if (!database.validate()) {
-            print("❌ Database corrupted after chain_validator init\n", .{});
-            return error.DatabaseCorrupted;
-        }
-
         instance_ptr.chain_query = ChainQuery.init(allocator, instance_ptr.database, &instance_ptr.chain_state);
         components_initialized = 3;
 
-        if (!database.validate()) {
-            print("❌ Database corrupted after chain_query init\n", .{});
-            return error.DatabaseCorrupted;
-        }
 
         instance_ptr.chain_processor = ChainProcessor.init(allocator, instance_ptr.database, &instance_ptr.chain_state, &instance_ptr.chain_validator, null);
         components_initialized = 4;
 
-        if (!database.validate()) {
-            print("❌ Database corrupted after chain_processor init\n", .{});
-            return error.DatabaseCorrupted;
-        }
 
         instance_ptr.difficulty_calculator = DifficultyCalculator.init(allocator, instance_ptr.database);
         components_initialized = 5;
 
-        if (!database.validate()) {
-            print("❌ Database corrupted after difficulty_calculator init\n", .{});
-            return error.DatabaseCorrupted;
-        }
 
         instance_ptr.status_reporter = StatusReporter.init(allocator, instance_ptr.database, &instance_ptr.network_coordinator);
         components_initialized = 6;
 
-        if (!database.validate()) {
-            print("❌ Database corrupted after status_reporter init\n", .{});
-            return error.DatabaseCorrupted;
-        }
 
         components_initialized = 7;
 
-        if (!database.validate()) {
-            print("❌ Database corrupted after blockchain_manager init\n", .{});
-            return error.DatabaseCorrupted;
-        }
 
         instance_ptr.mempool_manager = try MempoolManager.init(allocator, &instance_ptr.chain_state);
         components_initialized = 8;
@@ -181,10 +141,6 @@ pub const ZeiCoin = struct {
         // Wire up network coordinator for sync triggers
         instance_ptr.mempool_manager.network_handler.setNetworkCoordinator(&instance_ptr.network_coordinator);
 
-        if (!database.validate()) {
-            print("❌ Database corrupted after mempool_manager init\n", .{});
-            return error.DatabaseCorrupted;
-        }
 
         // Check if genesis block already exists in database
         const genesis_exists = blk: {
@@ -205,10 +161,6 @@ pub const ZeiCoin = struct {
             print("📊 Existing blockchain found with {} blocks\n", .{height});
         }
 
-        if (!database.validate()) {
-            print("❌ Database corrupted after full initialization\n", .{});
-            return error.DatabaseCorrupted;
-        }
 
         print("✅ ZeiCoin initialization completed successfully\n", .{});
 
@@ -228,9 +180,6 @@ pub const ZeiCoin = struct {
     pub fn deinit(self: *ZeiCoin) void {
         print("🧹 Starting ZeiCoin cleanup...\n", .{});
 
-        if (!self.database.validate()) {
-            print("⚠️ Database corruption detected during cleanup!\n", .{});
-        }
 
         if (self.mining_manager) |manager| {
             manager.stopMining();
@@ -294,12 +243,6 @@ pub const ZeiCoin = struct {
     }
 
     pub fn getAccount(self: *ZeiCoin, address: Address) !Account {
-        if (!self.database.validate()) {
-            print("❌ Database corruption detected in ZeiCoin.getAccount()!\n", .{});
-            print("  ZeiCoin ptr: {*}\n", .{self});
-            print("  Database ptr: {*}\n", .{self.database});
-            return error.DatabaseCorrupted;
-        }
 
         return try self.chain_query.getAccount(address);
     }

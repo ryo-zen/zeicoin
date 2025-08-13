@@ -123,6 +123,42 @@ if [ ! -f "$SYMLINK" ] || [ "$(zig version 2>/dev/null)" != "$ZIG_VERSION" ]; th
     cd - > /dev/null
 fi
 
+# Install RocksDB
+echo "🗄️  Installing RocksDB database..."
+case $OS in
+    ubuntu|debian)
+        sudo apt install -y librocksdb-dev
+        ;;
+    centos|rhel)
+        if command -v dnf &> /dev/null; then
+            sudo dnf install -y rocksdb-devel
+        else
+            # For older CentOS/RHEL, might need EPEL
+            sudo yum install -y epel-release
+            sudo yum install -y rocksdb-devel
+        fi
+        ;;
+    fedora)
+        sudo dnf install -y rocksdb-devel
+        ;;
+    arch)
+        sudo pacman -S --noconfirm rocksdb
+        ;;
+    *)
+        echo "⚠️  Please install RocksDB manually for your OS"
+        echo "   Ubuntu/Debian: sudo apt install librocksdb-dev"
+        echo "   Fedora/CentOS: sudo dnf install rocksdb-devel"
+        echo "   Arch Linux: sudo pacman -S rocksdb"
+        ;;
+esac
+
+# Verify RocksDB installation
+if pkg-config --exists rocksdb 2>/dev/null || [ -f "/usr/lib/librocksdb.so" ] || [ -f "/usr/local/lib/librocksdb.so" ]; then
+    echo "✅ RocksDB installed successfully!"
+else
+    echo "⚠️  RocksDB installation verification failed, but continuing..."
+fi
+
 # Install optional but useful tools for server management
 echo "🔧 Installing additional server tools..."
 case $OS in

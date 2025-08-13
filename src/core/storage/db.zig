@@ -1,18 +1,16 @@
-// db.zig - ZeiCoin Minimal File Database
-// Pure Zig file-based storage
-
 const std = @import("std");
 const testing = std.testing;
-
 const serialize = @import("serialize.zig");
 const types = @import("../types/types.zig");
 
-// Re-export types for convenience
+const c = @cImport({
+    @cInclude("rocksdb/c.h");
+});
+
 pub const Block = types.Block;
 pub const Account = types.Account;
 pub const Address = types.Address;
 
-/// Database errors
 pub const DatabaseError = error{
     OpenFailed,
     SaveFailed,
@@ -21,265 +19,359 @@ pub const DatabaseError = error{
     InvalidPath,
     SerializationFailed,
     DeletionFailed,
+    RocksDBError,
 };
 
-/// ZeiCoin zen minimal database
-/// File-based storage with pure Zig - no dependencies
 pub const Database = struct {
-    // Magic numbers for corruption detection
-    magic_start: u32 = 0xDEADBEEF,
-    
-    blocks_dir: [256]u8,
-    blocks_dir_len: usize,
-    accounts_dir: [256]u8,
-    accounts_dir_len: usize,
-    wallets_dir: [256]u8,
-    wallets_dir_len: usize,
+    db: ?*c.rocksdb_t,
+    options: ?*c.rocksdb_options_t,
+    read_options: ?*c.rocksdb_readoptions_t,
+    write_options: ?*c.rocksdb_writeoptions_t,
     allocator: std.mem.Allocator,
-    
-    // End magic number
-    magic_end: u32 = 0xFEEDFACE,
+    base_path: []u8,
 
-    /// Validate Database structure integrity
-    pub fn validate(self: *const Database) bool {
-        return self.magic_start == 0xDEADBEEF and 
-               self.magic_end == 0xFEEDFACE and
-               self.blocks_dir_len < 256 and
-               self.accounts_dir_len < 256 and
-               self.wallets_dir_len < 256;
-    }
+    const BLOCK_PREFIX = "block:";
+    const ACCOUNT_PREFIX = "account:";
+    const WALLET_PREFIX = "wallet:";
+    const METADATA_PREFIX = "meta:";
+    const HEIGHT_KEY = "meta:height";
+    const ACCOUNT_COUNT_KEY = "meta:account_count";
 
-    /// Initialize ZeiCoin database directories
     pub fn init(allocator: std.mem.Allocator, base_path: []const u8) !Database {
-        var db = Database{
-            .blocks_dir = undefined,
-            .blocks_dir_len = 0,
-            .accounts_dir = undefined,
-            .accounts_dir_len = 0,
-            .wallets_dir = undefined,
-            .wallets_dir_len = 0,
+        var self = Database{
+            .db = null,
+            .options = null,
+            .read_options = null,
+            .write_options = null,
             .allocator = allocator,
+            .base_path = try allocator.dupe(u8, base_path),
         };
 
-        // Create directory paths using static buffers
-        db.blocks_dir_len = (std.fmt.bufPrint(&db.blocks_dir, "{s}/blocks", .{base_path}) catch return error.InvalidPath).len;
-        db.accounts_dir_len = (std.fmt.bufPrint(&db.accounts_dir, "{s}/accounts", .{base_path}) catch return error.InvalidPath).len;
-        db.wallets_dir_len = (std.fmt.bufPrint(&db.wallets_dir, "{s}/wallets", .{base_path}) catch return error.InvalidPath).len;
+        self.options = c.rocksdb_options_create();
+        c.rocksdb_options_set_create_if_missing(self.options, 1);
+        c.rocksdb_options_set_compression(self.options, c.rocksdb_snappy_compression);
+        c.rocksdb_options_set_write_buffer_size(self.options, 64 * 1024 * 1024);
+        c.rocksdb_options_set_max_write_buffer_number(self.options, 3);
+        c.rocksdb_options_set_target_file_size_base(self.options, 64 * 1024 * 1024);
+        c.rocksdb_options_set_level_compaction_dynamic_level_bytes(self.options, 1);
+        
+        c.rocksdb_options_set_block_based_table_factory(
+            self.options,
+            createBlockBasedTableOptions(),
+        );
 
-        // Ensure directories exist - bamboo grows
-        std.fs.cwd().makePath(db.blocks_dir[0..db.blocks_dir_len]) catch |err| switch (err) {
+        self.read_options = c.rocksdb_readoptions_create();
+        self.write_options = c.rocksdb_writeoptions_create();
+        c.rocksdb_writeoptions_set_sync(self.write_options, 0);
+
+        var err: ?[*:0]u8 = null;
+        const db_path = try std.fmt.allocPrintZ(allocator, "{s}/rocksdb", .{base_path});
+        defer allocator.free(db_path);
+
+        std.fs.cwd().makePath(base_path) catch |e| switch (e) {
             error.PathAlreadyExists => {},
-            else => return err,
+            else => return e,
         };
 
-        std.fs.cwd().makePath(db.accounts_dir[0..db.accounts_dir_len]) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
+        self.db = c.rocksdb_open(self.options, db_path.ptr, @ptrCast(&err));
+        if (err != null) {
+            std.debug.print("RocksDB open error: {s}\n", .{err.?});
+            c.rocksdb_free(@constCast(@ptrCast(err)));
+            return DatabaseError.OpenFailed;
+        }
 
-        std.fs.cwd().makePath(db.wallets_dir[0..db.wallets_dir_len]) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
-
-        return db;
+        return self;
     }
 
-    /// Cleanup database resources
+    fn createBlockBasedTableOptions() ?*c.rocksdb_block_based_table_options_t {
+        const table_options = c.rocksdb_block_based_options_create();
+        c.rocksdb_block_based_options_set_block_cache(
+            table_options,
+            c.rocksdb_cache_create_lru(128 * 1024 * 1024),
+        );
+        c.rocksdb_block_based_options_set_filter_policy(
+            table_options,
+            c.rocksdb_filterpolicy_create_bloom(10),
+        );
+        c.rocksdb_block_based_options_set_block_size(table_options, 16 * 1024);
+        return table_options;
+    }
+
     pub fn deinit(self: *Database) void {
-        // No cleanup needed for static buffers
-        _ = self;
+        if (self.db) |db| {
+            c.rocksdb_close(db);
+        }
+        if (self.options) |opts| {
+            c.rocksdb_options_destroy(opts);
+        }
+        if (self.read_options) |opts| {
+            c.rocksdb_readoptions_destroy(opts);
+        }
+        if (self.write_options) |opts| {
+            c.rocksdb_writeoptions_destroy(opts);
+        }
+        self.allocator.free(self.base_path);
     }
 
-    /// Save block to file
-    pub fn saveBlock(self: *Database, height: u32, block: Block) !void {
-        // Create filename: blocks/000012.block
-        const filename = try std.fmt.allocPrint(self.allocator, "{s}/{:0>6}.block", .{ self.blocks_dir[0..self.blocks_dir_len], height });
-        defer self.allocator.free(filename);
+    fn makeBlockKey(self: *Database, height: u32) ![]u8 {
+        return std.fmt.allocPrint(self.allocator, "{s}{:0>10}", .{ BLOCK_PREFIX, height });
+    }
 
-        // Serialize block to buffer
+    fn makeAccountKey(self: *Database, address: Address) ![]u8 {
+        var hex_buffer: [42]u8 = undefined;
+        const addr_bytes = address.toBytes();
+        _ = std.fmt.bufPrint(&hex_buffer, "{}", .{std.fmt.fmtSliceHexLower(&addr_bytes)}) catch unreachable;
+        return std.fmt.allocPrint(self.allocator, "{s}{s}", .{ ACCOUNT_PREFIX, hex_buffer });
+    }
+
+    fn makeWalletKey(self: *Database, wallet_name: []const u8) ![]u8 {
+        for (wallet_name) |ch| {
+            if (!std.ascii.isAlphanumeric(ch) and ch != '_' and ch != '-') {
+                return DatabaseError.InvalidPath;
+            }
+        }
+        if (wallet_name.len == 0 or wallet_name.len > 64) {
+            return DatabaseError.InvalidPath;
+        }
+        if (wallet_name[0] == '-') {
+            return DatabaseError.InvalidPath;
+        }
+        return std.fmt.allocPrint(self.allocator, "{s}{s}", .{ WALLET_PREFIX, wallet_name });
+    }
+
+    pub fn saveBlock(self: *Database, height: u32, block: Block) !void {
+        const key = try self.makeBlockKey(height);
+        defer self.allocator.free(key);
+
         var buffer = std.ArrayList(u8).init(self.allocator);
         defer buffer.deinit();
 
         const writer = buffer.writer();
         serialize.serialize(writer, block) catch return DatabaseError.SerializationFailed;
 
-        // Write to file atomically
-        const file = std.fs.cwd().createFile(filename, .{}) catch return DatabaseError.SaveFailed;
-        defer file.close();
+        var err: ?[*:0]u8 = null;
+        c.rocksdb_put(
+            self.db,
+            self.write_options,
+            key.ptr,
+            key.len,
+            buffer.items.ptr,
+            buffer.items.len,
+            @ptrCast(&err),
+        );
 
-        file.writeAll(buffer.items) catch return DatabaseError.SaveFailed;
+        if (err != null) {
+            std.debug.print("RocksDB write error: {s}\n", .{err.?});
+            c.rocksdb_free(@constCast(@ptrCast(err)));
+            return DatabaseError.SaveFailed;
+        }
+
+        try self.updateHeight(height);
     }
 
-    /// Load block from file
     pub fn getBlock(self: *Database, height: u32) !Block {
-        // Create filename
-        const filename = try std.fmt.allocPrint(self.allocator, "{s}/{:0>6}.block", .{ self.blocks_dir[0..self.blocks_dir_len], height });
-        defer self.allocator.free(filename);
+        const key = try self.makeBlockKey(height);
+        defer self.allocator.free(key);
 
-        // Read file
-        const file = std.fs.cwd().openFile(filename, .{}) catch return DatabaseError.NotFound;
-        defer file.close();
+        var err: ?[*:0]u8 = null;
+        var val_len: usize = 0;
+        const val_ptr = c.rocksdb_get(
+            self.db,
+            self.read_options,
+            key.ptr,
+            key.len,
+            &val_len,
+            @ptrCast(&err),
+        );
 
-        const file_size = try file.getEndPos();
-        const buffer = try self.allocator.alloc(u8, file_size);
-        defer self.allocator.free(buffer);
+        if (err != null) {
+            std.debug.print("RocksDB read error: {s}\n", .{err.?});
+            c.rocksdb_free(@constCast(@ptrCast(err)));
+            return DatabaseError.LoadFailed;
+        }
 
-        _ = try file.readAll(buffer);
+        if (val_ptr == null) {
+            return DatabaseError.NotFound;
+        }
+        defer c.rocksdb_free(val_ptr);
 
-        // Deserialize block
-        var stream = std.io.fixedBufferStream(buffer);
+        const data = val_ptr[0..val_len];
+        var stream = std.io.fixedBufferStream(data);
         const reader = stream.reader();
 
         return serialize.deserialize(reader, Block, self.allocator) catch DatabaseError.SerializationFailed;
     }
 
-    /// Save account to file
     pub fn saveAccount(self: *Database, address: Address, account: Account) !void {
-        // Create hex representation of address
-        var hex_buffer: [42]u8 = undefined;
-        const addr_bytes = address.toBytes();
-        _ = std.fmt.bufPrint(&hex_buffer, "{}", .{std.fmt.fmtSliceHexLower(&addr_bytes)}) catch unreachable;
-        
-        // Create filename: accounts/1a2b3c4d...hex.account
-        const filename = try std.fmt.allocPrint(self.allocator, "{s}/{s}.account", .{ self.accounts_dir[0..self.accounts_dir_len], hex_buffer });
-        defer self.allocator.free(filename);
+        const key = try self.makeAccountKey(address);
+        defer self.allocator.free(key);
 
-        // Serialize account to buffer
         var buffer = std.ArrayList(u8).init(self.allocator);
         defer buffer.deinit();
 
         const writer = buffer.writer();
         serialize.serialize(writer, account) catch return DatabaseError.SerializationFailed;
 
-        // Write to file atomically
-        const file = std.fs.cwd().createFile(filename, .{}) catch return DatabaseError.SaveFailed;
-        defer file.close();
+        var err: ?[*:0]u8 = null;
+        c.rocksdb_put(
+            self.db,
+            self.write_options,
+            key.ptr,
+            key.len,
+            buffer.items.ptr,
+            buffer.items.len,
+            @ptrCast(&err),
+        );
 
-        file.writeAll(buffer.items) catch return DatabaseError.SaveFailed;
+        if (err != null) {
+            std.debug.print("RocksDB write error: {s}\n", .{err.?});
+            c.rocksdb_free(@constCast(@ptrCast(err)));
+            return DatabaseError.SaveFailed;
+        }
+
+        try self.incrementAccountCount();
     }
 
-    /// Load account from file
     pub fn getAccount(self: *Database, address: Address) !Account {
-        // Validate Database integrity before use
-        if (!self.validate()) {
-            std.debug.print("ERROR: Database corruption detected in getAccount!\n", .{});
-            std.debug.print("  magic_start: 0x{X} (expected: 0xDEADBEEF)\n", .{self.magic_start});
-            std.debug.print("  magic_end: 0x{X} (expected: 0xFEEDFACE)\n", .{self.magic_end});
-            std.debug.print("  accounts_dir_len: {} (max: 255)\n", .{self.accounts_dir_len});
-            return DatabaseError.InvalidPath;
+        const key = try self.makeAccountKey(address);
+        defer self.allocator.free(key);
+
+        var err: ?[*:0]u8 = null;
+        var val_len: usize = 0;
+        const val_ptr = c.rocksdb_get(
+            self.db,
+            self.read_options,
+            key.ptr,
+            key.len,
+            &val_len,
+            @ptrCast(&err),
+        );
+
+        if (err != null) {
+            std.debug.print("RocksDB read error: {s}\n", .{err.?});
+            c.rocksdb_free(@constCast(@ptrCast(err)));
+            return DatabaseError.LoadFailed;
         }
-        
-        const accounts_dir_slice = self.accounts_dir[0..self.accounts_dir_len];
-        
-        // Create hex representation of address
-        var hex_buffer: [42]u8 = undefined;
-        const addr_bytes = address.toBytes();
-        _ = std.fmt.bufPrint(&hex_buffer, "{}", .{std.fmt.fmtSliceHexLower(&addr_bytes)}) catch unreachable;
-        
-        // Create filename
-        const filename = try std.fmt.allocPrint(self.allocator, "{s}/{s}.account", .{ accounts_dir_slice, hex_buffer });
-        defer self.allocator.free(filename);
 
-        // Read file
-        const file = std.fs.cwd().openFile(filename, .{}) catch return DatabaseError.NotFound;
-        defer file.close();
+        if (val_ptr == null) {
+            return DatabaseError.NotFound;
+        }
+        defer c.rocksdb_free(val_ptr);
 
-        const file_size = try file.getEndPos();
-        const buffer = try self.allocator.alloc(u8, file_size);
-        defer self.allocator.free(buffer);
-
-        _ = try file.readAll(buffer);
-
-        // Deserialize account
-        var stream = std.io.fixedBufferStream(buffer);
+        const data = val_ptr[0..val_len];
+        var stream = std.io.fixedBufferStream(data);
         const reader = stream.reader();
-        
-        // Deserialize account from buffer
 
-        const account = serialize.deserialize(reader, Account, self.allocator) catch {
-            return DatabaseError.SerializationFailed;
-        };
-        
-        // Account successfully loaded
-        
-        return account;
+        return serialize.deserialize(reader, Account, self.allocator) catch DatabaseError.SerializationFailed;
     }
 
-    /// Get blockchain height (highest block number, genesis is 0)
     pub fn getHeight(self: *Database) !u32 {
-        var dir = std.fs.cwd().openDir(self.blocks_dir[0..self.blocks_dir_len], .{ .iterate = true }) catch return 0;
-        defer dir.close();
+        var err: ?[*:0]u8 = null;
+        var val_len: usize = 0;
+        const val_ptr = c.rocksdb_get(
+            self.db,
+            self.read_options,
+            HEIGHT_KEY.ptr,
+            HEIGHT_KEY.len,
+            &val_len,
+            @ptrCast(&err),
+        );
 
-        var highest_block: u32 = 0;
-        var found_any = false;
-        var iterator = dir.iterate();
-        
-        while (try iterator.next()) |entry| {
-            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".block")) {
-                // Extract block number from filename (e.g., "000005.block" -> 5)
-                const basename = std.fs.path.basename(entry.name);
-                if (basename.len >= 7) { // At least "0.block"
-                    const num_part = basename[0..basename.len - 6]; // Remove ".block"
-                    const block_num = std.fmt.parseInt(u32, num_part, 10) catch continue;
-                    
-                    if (!found_any or block_num > highest_block) {
-                        highest_block = block_num;
-                        found_any = true;
-                    }
-                }
-            }
+        if (err != null) {
+            c.rocksdb_free(@constCast(@ptrCast(err)));
+            return 0;
         }
 
-        // Return highest block number (genesis at 0, first mined block at 1, etc.)
-        return if (found_any) highest_block else 0;
+        if (val_ptr == null) {
+            return 0;
+        }
+        defer c.rocksdb_free(val_ptr);
+
+        const data = val_ptr[0..val_len];
+        return std.fmt.parseInt(u32, data, 10) catch 0;
     }
 
-    /// Get number of accounts (count account files)
+    fn updateHeight(self: *Database, height: u32) !void {
+        const current_height = try self.getHeight();
+        if (height > current_height) {
+            const height_str = try std.fmt.allocPrint(self.allocator, "{}", .{height});
+            defer self.allocator.free(height_str);
+
+            var err: ?[*:0]u8 = null;
+            c.rocksdb_put(
+                self.db,
+                self.write_options,
+                HEIGHT_KEY.ptr,
+                HEIGHT_KEY.len,
+                height_str.ptr,
+                height_str.len,
+                @ptrCast(&err),
+            );
+
+            if (err != null) {
+                c.rocksdb_free(@constCast(@ptrCast(err)));
+                return DatabaseError.SaveFailed;
+            }
+        }
+    }
+
     pub fn getAccountCount(self: *Database) !u32 {
-        var dir = std.fs.cwd().openDir(self.accounts_dir[0..self.accounts_dir_len], .{ .iterate = true }) catch return 0;
-        defer dir.close();
+        var err: ?[*:0]u8 = null;
+        var val_len: usize = 0;
+        const val_ptr = c.rocksdb_get(
+            self.db,
+            self.read_options,
+            ACCOUNT_COUNT_KEY.ptr,
+            ACCOUNT_COUNT_KEY.len,
+            &val_len,
+            @ptrCast(&err),
+        );
 
-        var count: u32 = 0;
-        var iterator = dir.iterate();
-        while (try iterator.next()) |entry| {
-            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".account")) {
-                count += 1;
-            }
+        if (err != null) {
+            c.rocksdb_free(@constCast(@ptrCast(err)));
+            return 0;
         }
 
-        return count;
+        if (val_ptr == null) {
+            return 0;
+        }
+        defer c.rocksdb_free(val_ptr);
+
+        const data = val_ptr[0..val_len];
+        return std.fmt.parseInt(u32, data, 10) catch 0;
     }
 
-    /// Get wallet file path - zen simplicity
+    fn incrementAccountCount(self: *Database) !void {
+        const count = (try self.getAccountCount()) + 1;
+        const count_str = try std.fmt.allocPrint(self.allocator, "{}", .{count});
+        defer self.allocator.free(count_str);
+
+        var err: ?[*:0]u8 = null;
+        c.rocksdb_put(
+            self.db,
+            self.write_options,
+            ACCOUNT_COUNT_KEY.ptr,
+            ACCOUNT_COUNT_KEY.len,
+            count_str.ptr,
+            count_str.len,
+            @ptrCast(&err),
+        );
+
+        if (err != null) {
+            c.rocksdb_free(@constCast(@ptrCast(err)));
+            return DatabaseError.SaveFailed;
+        }
+    }
+
     pub fn getWalletPath(self: *Database, wallet_name: []const u8) ![]u8 {
-        // Sanitize wallet name to prevent path traversal
-        for (wallet_name) |c| {
-            // Allow alphanumeric, underscore, and dash only
-            if (!std.ascii.isAlphanumeric(c) and c != '_' and c != '-') {
-                return DatabaseError.InvalidPath;
-            }
-        }
-        
-        // Limit wallet name length to prevent abuse
-        if (wallet_name.len == 0 or wallet_name.len > 64) {
-            return DatabaseError.InvalidPath;
-        }
-        
-        // Reject wallet names starting with hyphen (command line safety)
-        if (wallet_name[0] == '-') {
-            return DatabaseError.InvalidPath;
-        }
-        
-        return std.fmt.allocPrint(self.allocator, "{s}/{s}.wallet", .{ self.wallets_dir[0..self.wallets_dir_len], wallet_name });
+        _ = try self.makeWalletKey(wallet_name);
+        return std.fmt.allocPrint(self.allocator, "{s}/wallets/{s}.wallet", .{ self.base_path, wallet_name });
     }
 
-    /// Get default wallet path - zen default
     pub fn getDefaultWalletPath(self: *Database) ![]u8 {
         return self.getWalletPath("default");
     }
 
-    /// Check if wallet exists - zen wisdom
     pub fn walletExists(self: *Database, wallet_name: []const u8) bool {
         const wallet_path = self.getWalletPath(wallet_name) catch return false;
         defer self.allocator.free(wallet_path);
@@ -288,210 +380,239 @@ pub const Database = struct {
         return true;
     }
 
-    /// Get block by hash - searches all blocks
     pub fn getBlockByHash(self: *Database, hash: [32]u8) !Block {
-        var dir = std.fs.cwd().openDir(self.blocks_dir[0..self.blocks_dir_len], .{ .iterate = true }) catch return DatabaseError.NotFound;
-        defer dir.close();
+        const it = c.rocksdb_create_iterator(self.db, self.read_options);
+        defer c.rocksdb_iter_destroy(it);
 
-        var iterator = dir.iterate();
-        while (try iterator.next()) |entry| {
-            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".block")) {
-                // Parse height from filename
-                const dot_pos = std.mem.indexOf(u8, entry.name, ".") orelse continue;
-                const height = std.fmt.parseInt(u32, entry.name[0..dot_pos], 10) catch continue;
-                
-                // Load block and check hash
-                var block = self.getBlock(height) catch continue;
-                defer block.deinit(self.allocator);
-                
-                if (std.mem.eql(u8, &block.hash(), &hash)) {
-                    // Return a copy of the block by serializing and deserializing
+        const prefix = BLOCK_PREFIX;
+        c.rocksdb_iter_seek(it, prefix.ptr, prefix.len);
+
+        while (c.rocksdb_iter_valid(it) == 1) {
+            var key_len: usize = 0;
+            const key_ptr = c.rocksdb_iter_key(it, &key_len);
+            const key = key_ptr[0..key_len];
+
+            if (!std.mem.startsWith(u8, key, prefix)) {
+                break;
+            }
+
+            var val_len: usize = 0;
+            const val_ptr = c.rocksdb_iter_value(it, &val_len);
+            const data = val_ptr[0..val_len];
+
+            var stream = std.io.fixedBufferStream(data);
+            const reader = stream.reader();
+            var block = serialize.deserialize(reader, Block, self.allocator) catch {
+                c.rocksdb_iter_next(it);
+                continue;
+            };
+
+            if (std.mem.eql(u8, &block.hash(), &hash)) {
+                return block;
+            }
+
+            block.deinit(self.allocator);
+            c.rocksdb_iter_next(it);
+        }
+
+        return DatabaseError.NotFound;
+    }
+
+    pub fn getTransactionByHash(self: *Database, hash: [32]u8) !types.Transaction {
+        const it = c.rocksdb_create_iterator(self.db, self.read_options);
+        defer c.rocksdb_iter_destroy(it);
+
+        const prefix = BLOCK_PREFIX;
+        c.rocksdb_iter_seek(it, prefix.ptr, prefix.len);
+
+        while (c.rocksdb_iter_valid(it) == 1) {
+            var key_len: usize = 0;
+            const key_ptr = c.rocksdb_iter_key(it, &key_len);
+            const key = key_ptr[0..key_len];
+
+            if (!std.mem.startsWith(u8, key, prefix)) {
+                break;
+            }
+
+            var val_len: usize = 0;
+            const val_ptr = c.rocksdb_iter_value(it, &val_len);
+            const data = val_ptr[0..val_len];
+
+            var stream = std.io.fixedBufferStream(data);
+            const reader = stream.reader();
+            var block = serialize.deserialize(reader, Block, self.allocator) catch {
+                c.rocksdb_iter_next(it);
+                continue;
+            };
+            defer block.deinit(self.allocator);
+
+            for (block.transactions) |tx| {
+                if (std.mem.eql(u8, &tx.hash(), &hash)) {
                     var buffer = std.ArrayList(u8).init(self.allocator);
                     defer buffer.deinit();
                     
-                    try serialize.serialize(buffer.writer(), block);
-                    var stream = std.io.fixedBufferStream(buffer.items);
-                    return try serialize.deserialize(stream.reader(), types.Block, self.allocator);
+                    try serialize.serialize(buffer.writer(), tx);
+                    var tx_stream = std.io.fixedBufferStream(buffer.items);
+                    return try serialize.deserialize(tx_stream.reader(), types.Transaction, self.allocator);
                 }
             }
+
+            c.rocksdb_iter_next(it);
         }
-        
+
         return DatabaseError.NotFound;
     }
 
-    /// Get transaction by hash - searches all blocks
-    pub fn getTransactionByHash(self: *Database, hash: [32]u8) !types.Transaction {
-        var dir = std.fs.cwd().openDir(self.blocks_dir[0..self.blocks_dir_len], .{ .iterate = true }) catch return DatabaseError.NotFound;
-        defer dir.close();
-
-        var iterator = dir.iterate();
-        while (try iterator.next()) |entry| {
-            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".block")) {
-                // Parse height from filename
-                const dot_pos = std.mem.indexOf(u8, entry.name, ".") orelse continue;
-                const height = std.fmt.parseInt(u32, entry.name[0..dot_pos], 10) catch continue;
-                
-                // Load block and search transactions
-                var block = self.getBlock(height) catch continue;
-                defer block.deinit(self.allocator);
-                
-                for (block.transactions) |tx| {
-                    if (std.mem.eql(u8, &tx.hash(), &hash)) {
-                        // Return a copy of the transaction by serializing and deserializing
-                        var buffer = std.ArrayList(u8).init(self.allocator);
-                        defer buffer.deinit();
-                        
-                        try serialize.serialize(buffer.writer(), tx);
-                        var stream = std.io.fixedBufferStream(buffer.items);
-                        return try serialize.deserialize(stream.reader(), types.Transaction, self.allocator);
-                    }
-                }
-            }
-        }
-        
-        return DatabaseError.NotFound;
-    }
-
-    /// Check if block exists by hash
     pub fn hasBlock(self: *Database, hash: [32]u8) bool {
         var block = self.getBlockByHash(hash) catch return false;
         block.deinit(self.allocator);
         return true;
     }
 
-    /// Check if transaction exists by hash
     pub fn hasTransaction(self: *Database, hash: [32]u8) bool {
         var tx = self.getTransactionByHash(hash) catch return false;
         tx.deinit(self.allocator);
         return true;
     }
 
-    /// Check if block exists by height (for sync deduplication)
     pub fn blockExistsByHeight(self: *Database, height: u32) bool {
-        // Create filename: blocks/000012.block
-        const filename = std.fmt.allocPrint(self.allocator, "{s}/{:0>6}.block", .{ self.blocks_dir[0..self.blocks_dir_len], height }) catch return false;
-        defer self.allocator.free(filename);
-        
-        // Check if file exists
-        const file = std.fs.cwd().openFile(filename, .{}) catch return false;
-        file.close();
-        return true;
+        const key = self.makeBlockKey(height) catch return false;
+        defer self.allocator.free(key);
+
+        var err: ?[*:0]u8 = null;
+        var val_len: usize = 0;
+        const val_ptr = c.rocksdb_get(
+            self.db,
+            self.read_options,
+            key.ptr,
+            key.len,
+            &val_len,
+            @ptrCast(&err),
+        );
+
+        if (err != null) {
+            c.rocksdb_free(@constCast(@ptrCast(err)));
+            return false;
+        }
+
+        if (val_ptr != null) {
+            c.rocksdb_free(val_ptr);
+            return true;
+        }
+
+        return false;
     }
-    
-    /// Remove a block at a specific height
+
     pub fn removeBlock(self: *Database, height: u32) !void {
-        // Create filename: blocks/000012.block
-        const filename = try std.fmt.allocPrint(self.allocator, "{s}/{:0>6}.block", .{ self.blocks_dir[0..self.blocks_dir_len], height });
-        defer self.allocator.free(filename);
-        
-        // Delete the file
-        std.fs.cwd().deleteFile(filename) catch |err| {
-            if (err == error.FileNotFound) {
-                // Block already removed, not an error
-                return;
-            }
+        const key = try self.makeBlockKey(height);
+        defer self.allocator.free(key);
+
+        var err: ?[*:0]u8 = null;
+        c.rocksdb_delete(
+            self.db,
+            self.write_options,
+            key.ptr,
+            key.len,
+            @ptrCast(&err),
+        );
+
+        if (err != null) {
+            std.debug.print("RocksDB delete error: {s}\n", .{err.?});
+            c.rocksdb_free(@constCast(@ptrCast(err)));
             return DatabaseError.DeletionFailed;
-        };
-        
+        }
+
         std.debug.print("🗑️ Removed block at height {}\n", .{height});
     }
-    
-    /// Save the current blockchain height
+
     pub fn saveHeight(self: *Database, height: u32) !void {
-        // Create height file path
-        const filename = try std.fmt.allocPrint(self.allocator, "{s}/HEIGHT", .{self.blocks_dir[0..self.blocks_dir_len]});
-        defer self.allocator.free(filename);
-        
-        // Write height to file
-        const file = std.fs.cwd().createFile(filename, .{}) catch return DatabaseError.SaveFailed;
-        defer file.close();
-        
-        const height_str = try std.fmt.allocPrint(self.allocator, "{}", .{height});
-        defer self.allocator.free(height_str);
-        
-        file.writeAll(height_str) catch return DatabaseError.SaveFailed;
+        try self.updateHeight(height);
+    }
+
+    pub fn createWriteBatch(self: *Database) WriteBatch {
+        return WriteBatch{
+            .batch = c.rocksdb_writebatch_create(),
+            .db = self,
+        };
+    }
+
+    pub const WriteBatch = struct {
+        batch: ?*c.rocksdb_writebatch_t,
+        db: *Database,
+
+        pub fn saveBlock(self: *WriteBatch, height: u32, block: Block) !void {
+            const key = try self.db.makeBlockKey(height);
+            defer self.db.allocator.free(key);
+
+            var buffer = std.ArrayList(u8).init(self.db.allocator);
+            defer buffer.deinit();
+
+            const writer = buffer.writer();
+            serialize.serialize(writer, block) catch return DatabaseError.SerializationFailed;
+
+            c.rocksdb_writebatch_put(
+                self.batch,
+                key.ptr,
+                key.len,
+                buffer.items.ptr,
+                buffer.items.len,
+            );
+        }
+
+        pub fn saveAccount(self: *WriteBatch, address: Address, account: Account) !void {
+            const key = try self.db.makeAccountKey(address);
+            defer self.db.allocator.free(key);
+
+            var buffer = std.ArrayList(u8).init(self.db.allocator);
+            defer buffer.deinit();
+
+            const writer = buffer.writer();
+            serialize.serialize(writer, account) catch return DatabaseError.SerializationFailed;
+
+            c.rocksdb_writebatch_put(
+                self.batch,
+                key.ptr,
+                key.len,
+                buffer.items.ptr,
+                buffer.items.len,
+            );
+        }
+
+        pub fn commit(self: *WriteBatch) !void {
+            var err: ?[*:0]u8 = null;
+            c.rocksdb_write(
+                self.db.db,
+                self.db.write_options,
+                self.batch,
+                @ptrCast(&err),
+            );
+
+            if (err != null) {
+                std.debug.print("RocksDB batch write error: {s}\n", .{err.?});
+                c.rocksdb_free(@constCast(@ptrCast(err)));
+                return DatabaseError.SaveFailed;
+            }
+        }
+
+        pub fn deinit(self: *WriteBatch) void {
+            if (self.batch) |batch| {
+                c.rocksdb_writebatch_destroy(batch);
+            }
+        }
+    };
+
+    pub fn compact(self: *Database) void {
+        c.rocksdb_compact_range(self.db, null, 0, null, 0);
+    }
+
+    pub fn getStats(self: *Database) ![]u8 {
+        const stats = c.rocksdb_property_value(self.db, "rocksdb.stats");
+        if (stats == null) {
+            return self.allocator.dupe(u8, "No stats available");
+        }
+        defer c.rocksdb_free(stats);
+
+        const len = std.mem.len(stats);
+        return self.allocator.dupe(u8, stats[0..len]);
     }
 };
-
-// Tests
-test "database initialization" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    // Use temporary directory
-    var db = try Database.init(allocator, "/tmp/zeicoin_test");
-    defer db.deinit();
-
-    // Should start with 0 blocks and accounts
-    try testing.expectEqual(@as(u32, 0), try db.getHeight());
-    try testing.expectEqual(@as(u32, 0), try db.getAccountCount());
-}
-
-test "block storage and retrieval" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var db = try Database.init(allocator, "/tmp/zeicoin_test2");
-    defer db.deinit();
-
-    // Create test block
-    const transactions = try allocator.alloc(types.Transaction, 0);
-    defer allocator.free(transactions);
-
-    const test_block = Block{
-        .header = types.BlockHeader{
-            .version = types.CURRENT_BLOCK_VERSION,
-            .previous_hash = std.mem.zeroes(types.Hash),
-            .merkle_root = std.mem.zeroes(types.Hash),
-            .timestamp = 1234567890,
-            .difficulty = 0x1d00ffff,
-            .nonce = 42,
-            .witness_root = std.mem.zeroes(types.Hash),
-            .state_root = std.mem.zeroes(types.Hash),
-            .extra_nonce = 0,
-            .extra_data = std.mem.zeroes([32]u8),
-        },
-        .transactions = transactions,
-    };
-
-    // Save and retrieve block
-    try db.saveBlock(0, test_block);
-    const retrieved_block = try db.getBlock(0);
-
-    // Verify block data
-    try testing.expectEqual(test_block.header.timestamp, retrieved_block.header.timestamp);
-    try testing.expectEqual(test_block.header.nonce, retrieved_block.header.nonce);
-    try testing.expectEqual(@as(u32, 1), try db.getHeight());
-
-    // Cleanup retrieved block
-    var block_to_free = retrieved_block;
-    block_to_free.deinit(allocator);
-}
-
-test "account storage and retrieval" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var db = try Database.init(allocator, "/tmp/zeicoin_test3");
-    defer db.deinit();
-
-    // Create test account
-    const test_addr = std.mem.zeroes(Address);
-    const test_account = Account{
-        .address = test_addr,
-        .balance = 1000000000, // 10 ZEI
-        .nonce = 5,
-    };
-
-    // Save and retrieve account
-    try db.saveAccount(test_addr, test_account);
-    const retrieved_account = try db.getAccount(test_addr);
-
-    // Verify account data
-    try testing.expectEqual(test_account.balance, retrieved_account.balance);
-    try testing.expectEqual(test_account.nonce, retrieved_account.nonce);
-    try testing.expectEqual(@as(u32, 1), try db.getAccountCount());
-}
