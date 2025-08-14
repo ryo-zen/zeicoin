@@ -164,9 +164,8 @@ pub const Wallet = struct {
             return error.GenesisAccountsTestNetOnly;
         }
         
-        const genesis_wallet = @import("genesis_wallet.zig");
         // Get genesis mnemonic for the account name
-        const genesis_mnemonic = try genesis_wallet.getGenesisAccountMnemonic(self.allocator, name);
+        const genesis_mnemonic = try getGenesisAccountMnemonic(self.allocator, name);
         defer self.allocator.free(genesis_mnemonic);
         
         // Load from mnemonic (now with proper BIP39 validation)
@@ -239,9 +238,9 @@ pub const Wallet = struct {
         return keypair.signTransaction(tx_hash.*);
     }
 
-    /// Get wallet address at current index
-    pub fn getAddress(self: *Wallet) ?types.Address {
-        return self.getAddressAtIndex(self.current_index) catch null;
+    /// Get wallet address at specific index (primary function)
+    pub fn getAddress(self: *Wallet, index: u32) !types.Address {
+        return self.getAddressAtIndex(index);
     }
     
     /// Get address at specific HD index
@@ -275,9 +274,9 @@ pub const Wallet = struct {
         return self.master_key != null;
     }
     
-    /// Get key pair for signing at current index
-    pub fn getKeyPair(self: *Wallet) !key.KeyPair {
-        return self.getKeyPairAtIndex(self.current_index);
+    /// Get key pair for signing at specific index (primary function)
+    pub fn getKeyPair(self: *Wallet, index: u32) !key.KeyPair {
+        return self.getKeyPairAtIndex(index);
     }
 
     /// Get key pair at specific HD index
@@ -292,19 +291,19 @@ pub const Wallet = struct {
 
     /// Get ZeiCoin KeyPair for compatibility (current index)
     pub fn getZeiCoinKeyPair(self: *Wallet) ?key.KeyPair {
-        return self.getKeyPair() catch null;
+        return self.getKeyPair(self.current_index) catch null;
     }
 
     /// Get address as hex string for display
-    pub fn getAddressHex(self: *Wallet, allocator: std.mem.Allocator) !?[]u8 {
-        const address = self.getAddress() orelse return null;
+    pub fn getAddressHex(self: *Wallet, allocator: std.mem.Allocator) ![]u8 {
+        const address = try self.getAddress(0);
         const addr_bytes = address.toBytes();
         return try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.fmtSliceHexLower(&addr_bytes)});
     }
 
     /// Get short address for UI display (first 16 chars)
     pub fn getShortAddressHex(self: *Wallet) ?[16]u8 {
-        const address = self.getAddress() orelse return null;
+        const address = self.getAddress(0) catch return null;
         
         var short_addr: [16]u8 = undefined;
         const addr_bytes = address.toBytes();
@@ -344,4 +343,40 @@ pub const Wallet = struct {
         return version == 3;
     }
 };
+
+/// Get genesis account mnemonic from keys.config file
+fn getGenesisAccountMnemonic(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
+    // Read from keys.config file - fail gracefully if not found
+    const file = std.fs.cwd().openFile("config/keys.config", .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            return error.KeysConfigNotFound;
+        },
+        else => return err,
+    };
+    defer file.close();
+    
+    const content = try file.readToEndAlloc(allocator, 4096);
+    defer allocator.free(content);
+    
+    // Parse config file line by line
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        
+        // Skip empty lines and comments
+        if (trimmed.len == 0 or trimmed[0] == '#') continue;
+        
+        // Parse "name=mnemonic" format
+        if (std.mem.indexOf(u8, trimmed, "=")) |eq_pos| {
+            const config_key = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
+            const value = std.mem.trim(u8, trimmed[eq_pos + 1..], " \t");
+            
+            if (std.mem.eql(u8, config_key, name)) {
+                return try allocator.dupe(u8, value); // Return allocated copy
+            }
+        }
+    }
+    
+    return error.UnknownGenesisAccount;
+}
 

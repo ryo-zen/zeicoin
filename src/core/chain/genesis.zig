@@ -12,7 +12,7 @@ pub const GenesisBlocks = struct {
     /// Created: 2024-01-01 00:00:00 UTC
     /// Purpose: Development, testing, and experimentation
     pub const TESTNET = struct {
-        pub const HASH: [32]u8 = [_]u8{ 0x70, 0x7e, 0x62, 0xc6, 0xd8, 0xad, 0x69, 0xdb, 0x9a, 0x05, 0x27, 0xcb, 0xa0, 0xa5, 0xb3, 0xcb, 0xa0, 0x55, 0xec, 0xd0, 0x76, 0xd8, 0x72, 0x25, 0x6b, 0xda, 0x10, 0x30, 0x01, 0xce, 0x24, 0xac };
+        pub const HASH: [32]u8 = [_]u8{ 0x31, 0x97, 0x17, 0x63, 0xbf, 0x37, 0xfb, 0xb6, 0xfb, 0x25, 0xef, 0x03, 0xca, 0x42, 0xde, 0xc0, 0x8d, 0x98, 0x9e, 0x43, 0xa1, 0x87, 0x22, 0xd4, 0xb2, 0xc2, 0x5e, 0x98, 0xf6, 0x92, 0xd7, 0x62 };
 
         pub const MESSAGE = "ZeiCoin TestNet Genesis - A minimal digital currency written in ⚡Zig";
         pub const TIMESTAMP: u64 = 1704067200; // 2024-01-01 00:00:00 UTC
@@ -27,7 +27,7 @@ pub const GenesisBlocks = struct {
             const header = types.BlockHeader{
                 .version = types.CURRENT_BLOCK_VERSION,
                 .previous_hash = std.mem.zeroes([32]u8), // No previous block
-                .merkle_root = [_]u8{0x4a, 0x5e, 0x1e, 0x4b, 0xaa, 0xb8, 0x9f, 0x3a, 0x32, 0x51, 0x8a, 0x88, 0xc3, 0x1b, 0xc8, 0x7f, 0x61, 0x8f, 0x76, 0x67, 0x3e, 0x2c, 0xc7, 0x7a, 0xb2, 0x12, 0x7b, 0x7a, 0xfd, 0xed, 0xa3, 0x3b}, // Pre-calculated merkle root
+                .merkle_root = [_]u8{ 0x4a, 0x5e, 0x1e, 0x4b, 0xaa, 0xb8, 0x9f, 0x3a, 0x32, 0x51, 0x8a, 0x88, 0xc3, 0x1b, 0xc8, 0x7f, 0x61, 0x8f, 0x76, 0x67, 0x3e, 0x2c, 0xc7, 0x7a, 0xb2, 0x12, 0x7b, 0x7a, 0xfd, 0xed, 0xa3, 0x3b }, // Pre-calculated merkle root
                 .timestamp = TIMESTAMP,
                 .difficulty = types.ZenMining.initialDifficultyTarget().toU64(),
                 .nonce = @truncate(NONCE),
@@ -64,7 +64,7 @@ pub const GenesisBlocks = struct {
             const header = types.BlockHeader{
                 .version = types.CURRENT_BLOCK_VERSION,
                 .previous_hash = std.mem.zeroes([32]u8),
-                .merkle_root = [_]u8{0x4a, 0x5e, 0x1e, 0x4b, 0xaa, 0xb8, 0x9f, 0x3a, 0x32, 0x51, 0x8a, 0x88, 0xc3, 0x1b, 0xc8, 0x7f, 0x61, 0x8f, 0x76, 0x67, 0x3e, 0x2c, 0xc7, 0x7a, 0xb2, 0x12, 0x7b, 0x7a, 0xfd, 0xed, 0xa3, 0x3b}, // Pre-calculated merkle root
+                .merkle_root = [_]u8{ 0x4a, 0x5e, 0x1e, 0x4b, 0xaa, 0xb8, 0x9f, 0x3a, 0x32, 0x51, 0x8a, 0x88, 0xc3, 0x1b, 0xc8, 0x7f, 0x61, 0x8f, 0x76, 0x67, 0x3e, 0x2c, 0xc7, 0x7a, 0xb2, 0x12, 0x7b, 0x7a, 0xfd, 0xed, 0xa3, 0x3b }, // Pre-calculated merkle root
                 .timestamp = TIMESTAMP,
                 .difficulty = types.ZenMining.initialDifficultyTarget().toU64(),
                 .nonce = @truncate(NONCE),
@@ -90,11 +90,11 @@ pub fn createGenesisPublicKey(seed: []const u8) [32]u8 {
     hasher.update("_ZEICOIN_GENESIS_KEY");
     var seed_bytes: [32]u8 = undefined;
     hasher.final(&seed_bytes);
-    
+
     // Create proper Ed25519 keypair from seed
     const Ed25519 = std.crypto.sign.Ed25519;
     const keypair = Ed25519.KeyPair.generateDeterministic(seed_bytes) catch unreachable;
-    
+
     return keypair.public_key.bytes;
 }
 
@@ -143,7 +143,7 @@ pub const TESTNET_DISTRIBUTION = [_]struct {
     .{ .name = "eve", .address_hex = "tzei1qpdg0wzte5966248hcekh298sz526pzjw5r8wxlf", .amount = 1000 * types.ZEI_COIN },
 };
 
-/// Get deterministic address for a test account  
+/// Get deterministic address for a test account
 pub fn getTestAccountAddress(name: []const u8) ?types.Address {
     for (TESTNET_DISTRIBUTION) |account| {
         if (std.mem.eql(u8, account.name, name)) {
@@ -157,36 +157,36 @@ pub fn getTestAccountAddress(name: []const u8) ?types.Address {
 /// Create genesis block with proper memory management
 pub fn createGenesis(allocator: std.mem.Allocator) !types.Block {
     const canonical = getCanonicalGenesis();
-    
+
     // Determine which network we're on
     const network_seed = switch (types.CURRENT_NETWORK) {
         .testnet => "TESTNET_GENESIS",
         .mainnet => "MAINNET_GENESIS",
     };
-    
+
     const miner_reward = switch (types.CURRENT_NETWORK) {
         .testnet => GenesisBlocks.TESTNET.MINER_REWARD,
         .mainnet => GenesisBlocks.MAINNET.MINER_REWARD,
     };
-    
+
     const timestamp = switch (types.CURRENT_NETWORK) {
         .testnet => GenesisBlocks.TESTNET.TIMESTAMP,
         .mainnet => GenesisBlocks.MAINNET.TIMESTAMP,
     };
-    
+
     // Create genesis public key from network identifier
     const genesis_public_key = createGenesisPublicKey(network_seed);
     const genesis_address = types.Address.fromPublicKey(genesis_public_key);
-    
+
     // Calculate number of transactions
     const tx_count = switch (types.CURRENT_NETWORK) {
         .testnet => 1 + TESTNET_DISTRIBUTION.len, // Coinbase + distributions
         .mainnet => 1, // Just coinbase for now
     };
-    
+
     // Allocate memory for transactions array
     const transactions = try allocator.alloc(types.Transaction, tx_count);
-    
+
     // Create coinbase transaction
     transactions[0] = types.Transaction{
         .version = 0,
@@ -204,13 +204,13 @@ pub fn createGenesis(allocator: std.mem.Allocator) !types.Block {
         .witness_data = &[_]u8{},
         .extra_data = &[_]u8{},
     };
-    
+
     // Add TestNet distribution transactions
     if (types.CURRENT_NETWORK == .testnet) {
         for (TESTNET_DISTRIBUTION, 0..) |account, i| {
             // Parse the bech32 address from the account
             const account_address = types.Address.fromString(std.heap.page_allocator, account.address_hex) catch unreachable;
-            
+
             transactions[i + 1] = types.Transaction{
                 .version = 0,
                 .flags = .{},
@@ -219,7 +219,7 @@ pub fn createGenesis(allocator: std.mem.Allocator) !types.Block {
                 .recipient = account_address,
                 .amount = account.amount,
                 .fee = 0,
-                .nonce = @intCast(i),
+                .nonce = 0,
                 .timestamp = timestamp,
                 .expiry_height = std.math.maxInt(u64),
                 .signature = std.mem.zeroes(types.Signature),
@@ -252,10 +252,15 @@ test "Genesis block validation" {
     const allocator = std.testing.allocator;
     var created_genesis = try createGenesis(allocator);
     defer created_genesis.deinit(allocator);
-    
-    // Should have 1 transaction (coinbase)
-    try std.testing.expect(created_genesis.transactions.len == 1);
-    try std.testing.expect(created_genesis.transactions[0].isCoinbase());
+
+    // TestNet should have 6 transactions (1 coinbase + 5 distributions)
+    const expected_tx_count = if (types.CURRENT_NETWORK == .testnet) 6 else 1;
+    try std.testing.expect(created_genesis.transactions.len == expected_tx_count);
+
+    // All transactions should be coinbase (genesis funding)
+    for (created_genesis.transactions) |tx| {
+        try std.testing.expect(tx.isCoinbase());
+    }
 
     std.debug.print("\n✅ Genesis block validation tests passed\n", .{});
 }

@@ -280,17 +280,17 @@ fn initializeMiningSystem(blockchain: *zen.ZeiCoin, miner_wallet_name: []const u
     
     wallet_instance = wallet_obj;
     
-    if (wallet_instance.?.getAddress()) |addr| {
-        mining_address = addr;
-        std.log.info("✅ Mining enabled for wallet: {s}", .{wallet_name});
-        const addr_str = bech32.encodeAddress(allocator, addr, types.CURRENT_NETWORK) catch "<invalid>";
-        defer if (!std.mem.eql(u8, addr_str, "<invalid>")) allocator.free(addr_str);
-        std.log.info("⛏️  Mining address: {s}", .{addr_str});
-    } else {
+    const addr = wallet_instance.?.getAddress(0) catch {
         wallet_obj.deinit(); // Clean up wallet on address error
         std.log.err("❌ Wallet '{s}' has no address!", .{wallet_name});
         return error.WalletHasNoAddress;
-    }
+    };
+    
+    mining_address = addr;
+    std.log.info("✅ Mining enabled for wallet: {s}", .{wallet_name});
+    const addr_str = bech32.encodeAddress(allocator, addr, types.CURRENT_NETWORK) catch "<invalid>";
+    defer if (!std.mem.eql(u8, addr_str, "<invalid>")) allocator.free(addr_str);
+    std.log.info("⛏️  Mining address: {s}", .{addr_str});
     
     if (wallet_instance) |*w| {
         defer w.deinit();
@@ -299,7 +299,7 @@ fn initializeMiningSystem(blockchain: *zen.ZeiCoin, miner_wallet_name: []const u
     // Start mining
     if (wallet_instance) |*w| {
         // Get keypair from wallet for mining
-        const keypair = w.getKeyPair() catch {
+        const keypair = w.getKeyPair(0) catch {
             std.log.err("❌ Failed to get keypair from wallet for mining", .{});
             return error.WalletKeyPairError;
         };
