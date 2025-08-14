@@ -220,6 +220,7 @@ const Command = enum {
     address,
     sync,
     block,
+    history,
     help,
 };
 
@@ -269,6 +270,7 @@ pub fn main() !void {
         .address => try handleAddressCommand(allocator, args[2..]),
         .sync => try handleSyncCommand(allocator, args[2..]),
         .block => try handleBlockCommand(allocator, args[2..]),
+        .history => try handleHistoryCommand(allocator, args[2..]),
         .help => printHelp(),
     }
 }
@@ -1115,6 +1117,164 @@ fn handleBlockCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     }
 }
 
+fn handleHistoryCommand(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+    const wallet_name = if (args.len > 0) args[0] else "default";
+    
+    // Load wallet
+    const zen_wallet = loadWalletForOperation(allocator, wallet_name) catch |err| {
+        switch (err) {
+            error.WalletNotFound => {
+                // Error message already printed in loadWalletForOperation
+                std.process.exit(1);
+            },
+            else => return err,
+        }
+    };
+    defer {
+        zen_wallet.deinit();
+        allocator.destroy(zen_wallet);
+    }
+    
+    const address = zen_wallet.getAddress() orelse return error.WalletNotLoaded;
+    
+    // Connect to server
+    const server_ip = try getServerIP(allocator);
+    defer allocator.free(server_ip);
+    
+    const server_address = net.Address.parseIp4(server_ip, 10802) catch {
+        print("❌ Invalid server address\n", .{});
+        return;
+    };
+    
+    const connection = connectWithTimeout(server_address) catch |err| {
+        switch (err) {
+            error.ConnectionTimeout => {
+                print("❌ Connection timeout to ZeiCoin server at {s}:10802 (5s)\n", .{server_ip});
+                return;
+            },
+            else => {
+                print("❌ Cannot connect to ZeiCoin server at {s}:10802\n", .{server_ip});
+                print("💡 Make sure the server is running\n", .{});
+                return;
+            },
+        }
+    };
+    defer connection.close();
+    
+    // Send history request with bech32 address
+    const bech32_addr = try address.toBech32(allocator, types.CURRENT_NETWORK);
+    defer allocator.free(bech32_addr);
+    
+    const history_request = try std.fmt.allocPrint(allocator, "GET_HISTORY:{s}", .{bech32_addr});
+    defer allocator.free(history_request);
+    
+    try connection.writeAll(history_request);
+    
+    // Read response with larger buffer for history
+    var buffer: [65536]u8 = undefined;
+    const bytes_read = readWithTimeout(connection, &buffer) catch |err| {
+        switch (err) {
+            error.ReadTimeout => {
+                print("❌ History query timeout (5s)\n", .{});
+                return;
+            },
+            else => {
+                print("❌ Failed to read history response\n", .{});
+                return;
+            },
+        }
+    };
+    const response = buffer[0..bytes_read];
+    
+    if (std.mem.startsWith(u8, response, "ERROR:")) {
+        print("❌ {s}\n", .{response[7..]});
+        return;
+    }
+    
+    // Parse HISTORY:count\n format
+    if (!std.mem.startsWith(u8, response, "HISTORY:")) {
+        print("❌ Invalid server response\n", .{});
+        return;
+    }
+    
+    // Find the newline after count
+    const first_newline = std.mem.indexOfScalar(u8, response[8..], '\n') orelse {
+        print("❌ Invalid history response format\n", .{});
+        return;
+    };
+    
+    const count_str = response[8..8 + first_newline];
+    const tx_count = std.fmt.parseInt(usize, count_str, 10) catch {
+        print("❌ Invalid transaction count\n", .{});
+        return;
+    };
+    
+    print("📜 Transaction History for '{s}':\n", .{wallet_name});
+    print("💼 Address: {s}\n", .{bech32_addr});
+    print("📊 Total transactions: {}\n\n", .{tx_count});
+    
+    if (tx_count == 0) {
+        print("💡 No transactions found for this wallet\n", .{});
+        return;
+    }
+    
+    // Parse each transaction line
+    var lines = std.mem.splitScalar(u8, response[8 + first_newline + 1..], '\n');
+    var tx_num: usize = 1;
+    
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        
+        // Parse: height|hash|type|amount|fee|timestamp|confirmations|counterparty
+        var parts = std.mem.splitScalar(u8, line, '|');
+        
+        const height_str = parts.next() orelse continue;
+        const hash_str = parts.next() orelse continue;
+        const type_str = parts.next() orelse continue;
+        const amount_str = parts.next() orelse continue;
+        const fee_str = parts.next() orelse continue;
+        const timestamp_str = parts.next() orelse continue;
+        const confirmations_str = parts.next() orelse continue;
+        const counterparty_str = parts.next() orelse continue;
+        
+        const height = std.fmt.parseInt(u64, height_str, 10) catch continue;
+        const amount = std.fmt.parseInt(u64, amount_str, 10) catch continue;
+        const fee = std.fmt.parseInt(u64, fee_str, 10) catch continue;
+        const timestamp = std.fmt.parseInt(u64, timestamp_str, 10) catch continue;
+        const confirmations = std.fmt.parseInt(u64, confirmations_str, 10) catch continue;
+        
+        // Format amount for display
+        const amount_display = util.formatZEI(allocator, amount) catch "? ZEI";
+        defer if (!std.mem.eql(u8, amount_display, "? ZEI")) allocator.free(amount_display);
+        
+        const fee_display = util.formatZEI(allocator, fee) catch "? ZEI";
+        defer if (!std.mem.eql(u8, fee_display, "? ZEI")) allocator.free(fee_display);
+        
+        // Format time
+        const time_str = util.formatTime(timestamp);
+        
+        // Display transaction
+        print("─────────────────────────────────────────────────────────────\n", .{});
+        print("#{} ", .{tx_num});
+        
+        if (std.mem.eql(u8, type_str, "SENT")) {
+            print("📤 SENT {s} to {s}\n", .{amount_display, counterparty_str});
+        } else if (std.mem.eql(u8, type_str, "RECEIVED")) {
+            print("📥 RECEIVED {s} from {s}\n", .{amount_display, counterparty_str});
+        } else if (std.mem.eql(u8, type_str, "COINBASE")) {
+            print("⛏️  MINED {s} (coinbase reward)\n", .{amount_display});
+        }
+        
+        print("   🔗 Block: {} | ✅ Confirmations: {}\n", .{height, confirmations});
+        print("   💰 Fee: {s} | ⏰ Time: {s}\n", .{fee_display, time_str});
+        print("   🆔 Hash: {s}\n", .{hash_str});
+        
+        tx_num += 1;
+    }
+    
+    print("─────────────────────────────────────────────────────────────\n", .{});
+}
+
 // Helper functions
 
 // Parse ZEI amount supporting decimals up to 8 places
@@ -1523,7 +1683,8 @@ fn printHelp() void {
     print("  zeicoin wallet import <genesis>        # Import genesis account (testnet)\n\n", .{});
     print("TRANSACTION COMMANDS:\n", .{});
     print("  zeicoin balance [wallet]               # Check wallet balance\n", .{});
-    print("  zeicoin send <amount> <recipient>      # Send ZEI to address or wallet\n\n", .{});
+    print("  zeicoin send <amount> <recipient>      # Send ZEI to address or wallet\n", .{});
+    print("  zeicoin history [wallet]               # Show transaction history\n\n", .{});
     print("NETWORK COMMANDS:\n", .{});
     print("  zeicoin status                         # Show network status\n", .{});
     print("  zeicoin status --watch                 # Monitor mining status with live spinner\n", .{});

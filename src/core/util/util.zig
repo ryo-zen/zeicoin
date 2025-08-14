@@ -24,6 +24,35 @@ pub fn getTime() i64 {
     return std.time.timestamp();
 }
 
+/// Format Unix timestamp to human-readable string
+pub fn formatTime(timestamp: u64) [19]u8 {
+    const seconds = timestamp;
+    
+    var buf: [19]u8 = undefined;
+    const fmt = "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}";
+    
+    // Convert to epoch seconds struct
+    const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(seconds) };
+    const day_seconds = epoch.getDaySeconds();
+    const year_day = epoch.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    
+    const hours = day_seconds.getHoursIntoDay();
+    const minutes = day_seconds.getMinutesIntoHour();
+    const seconds_in_minute = day_seconds.getSecondsIntoMinute();
+    
+    _ = std.fmt.bufPrint(&buf, fmt, .{
+        year_day.year,
+        month_day.month.numeric(),
+        month_day.day_index + 1,
+        hours,
+        minutes,
+        seconds_in_minute,
+    }) catch return "0000-00-00 00:00:00".*;
+    
+    return buf;
+}
+
 /// Double SHA256 hash
 pub fn hash256(data: []const u8) [32]u8 {
     var hasher1 = std.crypto.hash.sha2.Sha256.init(.{});

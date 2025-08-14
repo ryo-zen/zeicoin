@@ -135,6 +135,10 @@ pub const ClientApiServer = struct {
                 self.handleGetBlock(connection, message) catch |err| {
                     std.log.err("Failed to get block: {}", .{err});
                 };
+            } else if (std.mem.startsWith(u8, message, "GET_HISTORY:")) {
+                self.handleGetHistory(connection, message) catch |err| {
+                    std.log.err("Failed to get transaction history: {}", .{err});
+                };
             } else {
                 _ = connection.stream.write("ERROR: Unknown command\n") catch {};
             }
@@ -691,6 +695,105 @@ pub const ClientApiServer = struct {
         std.log.info("Processed client transaction {} from client", .{
             std.fmt.fmtSliceHexLower(&tx_hash)
         });
+    }
+    
+    fn handleGetHistory(self: *Self, connection: net.Server.Connection, message: []const u8) !void {
+        const address_str = std.mem.trim(u8, message[12..], " \n\r"); // "GET_HISTORY:" is 12 chars
+        
+        const address = types.Address.fromString(self.allocator, address_str) catch {
+            _ = try connection.stream.write("ERROR: Invalid address format\n");
+            return;
+        };
+        
+        // Get blockchain height
+        const chain_height = try self.blockchain.getHeight();
+        
+        // Create temporary list to store transactions
+        var transactions = std.ArrayList(struct {
+            height: u64,
+            hash: [32]u8,
+            tx_type: []const u8,
+            amount: u64,
+            fee: u64,
+            timestamp: u64,
+            confirmations: u64,
+            counterparty: types.Address,
+        }).init(self.allocator);
+        defer transactions.deinit();
+        
+        // Scan through all blocks for transactions involving this address
+        var height: u64 = 1;
+        while (height <= chain_height) : (height += 1) {
+            const block = self.blockchain.database.getBlock(@intCast(height)) catch {
+                continue;
+            };
+            
+            // Check each transaction in the block
+            for (block.transactions) |tx| {
+                var involves_address = false;
+                var tx_type: []const u8 = undefined;
+                var counterparty: types.Address = undefined;
+                
+                // Check if this is a coinbase transaction
+                if (tx.sender.equals(types.Address.zero())) {
+                    if (tx.recipient.equals(address)) {
+                        involves_address = true;
+                        tx_type = "COINBASE";
+                        counterparty = types.Address.zero();
+                    }
+                } else if (tx.sender.equals(address)) {
+                    involves_address = true;
+                    tx_type = "SENT";
+                    counterparty = tx.recipient;
+                } else if (tx.recipient.equals(address)) {
+                    involves_address = true;
+                    tx_type = "RECEIVED";
+                    counterparty = tx.sender;
+                }
+                
+                if (involves_address) {
+                    const tx_hash = tx.hash();
+                    try transactions.append(.{
+                        .height = height,
+                        .hash = tx_hash,
+                        .tx_type = tx_type,
+                        .amount = tx.amount,
+                        .fee = tx.fee,
+                        .timestamp = tx.timestamp,
+                        .confirmations = chain_height - height + 1,
+                        .counterparty = counterparty,
+                    });
+                }
+            }
+        }
+        
+        // Format response
+        var response = std.ArrayList(u8).init(self.allocator);
+        defer response.deinit();
+        
+        try response.appendSlice("HISTORY:");
+        try response.writer().print("{}", .{transactions.items.len});
+        try response.appendSlice("\n");
+        
+        // Add each transaction
+        for (transactions.items) |tx_info| {
+            const counterparty_bech32 = try tx_info.counterparty.toBech32(self.allocator, types.CURRENT_NETWORK);
+            defer self.allocator.free(counterparty_bech32);
+            
+            // Format: height|hash|type|amount|fee|timestamp|confirmations|counterparty
+            try response.writer().print("{}|{}|{s}|{}|{}|{}|{}|{s}\n", .{
+                tx_info.height,
+                std.fmt.fmtSliceHexLower(&tx_info.hash),
+                tx_info.tx_type,
+                tx_info.amount,
+                tx_info.fee,
+                tx_info.timestamp,
+                tx_info.confirmations,
+                counterparty_bech32,
+            });
+        }
+        
+        _ = try connection.stream.write(response.items);
     }
     
 };
