@@ -269,7 +269,7 @@ fn deriveAddress(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     if (args.len < 1) {
         print("❌ Wallet name required\n", .{});
         print("Usage: zeicoin wallet derive <wallet_name> [index]\n", .{});
-        return;
+        return CLIError.InvalidArguments;
     }
     
     const wallet_name = args[0];
@@ -504,7 +504,7 @@ pub fn handleAddress(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     std.fs.cwd().access(wallet_path, .{}) catch {
         print("❌ Wallet '{s}' not found\n", .{wallet_name});
         print("💡 Create it with: zeicoin wallet create {s}\n", .{wallet_name});
-        return;
+        return CLIError.WalletError;
     };
     
     // Load HD wallet

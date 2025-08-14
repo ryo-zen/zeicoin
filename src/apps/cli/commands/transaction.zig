@@ -74,7 +74,7 @@ pub fn handleBalance(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         switch (err) {
             CLIError.WalletNotFound => {
                 // Error message already printed in loadHDWalletForOperation
-                std.process.exit(1);
+                return CLIError.TransactionFailed;
             },
             else => return err,
         }
@@ -117,7 +117,7 @@ pub fn handleSend(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         print("💡 Recipient can be a bech32 address or wallet name\n", .{});
         print("💡 Example: zeicoin send 10 tzei1qr2qge3sdeq... alice\n", .{});
         print("💡 Example: zeicoin send 10 bob alice\n", .{});
-        return;
+        return CLIError.TransactionFailed;
     }
 
     const amount_str = args[0];
@@ -128,13 +128,13 @@ pub fn handleSend(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const amount = display.parseZeiAmount(amount_str) catch {
         print("❌ Invalid amount: {s}\n", .{amount_str});
         print("💡 Amount must be a positive number (supports up to 8 decimal places)\n", .{});
-        std.process.exit(1);
+        return CLIError.TransactionFailed;
     };
 
-    // Validate amount is not zero
+    // Validate amount is not zero or negative
     if (amount == 0) {
         print("❌ Invalid amount: cannot send zero ZEI\n", .{});
-        std.process.exit(1);
+        return CLIError.TransactionFailed;
     }
 
     // Try to parse recipient as bech32 address first, then as wallet name
@@ -143,7 +143,7 @@ pub fn handleSend(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         if (std.mem.startsWith(u8, recipient_hex, "tzei1") or std.mem.startsWith(u8, recipient_hex, "mzei1")) {
             print("❌ Invalid bech32 address: '{s}'\n", .{recipient_hex});
             print("💡 Address format is invalid or has wrong checksum\n", .{});
-            std.process.exit(1);
+            return CLIError.TransactionFailed;
         }
 
         // If not a bech32 format, try to resolve as wallet name
@@ -152,7 +152,7 @@ pub fn handleSend(allocator: std.mem.Allocator, args: [][:0]u8) !void {
             print("💡 Recipient must be a valid bech32 address or wallet name\n", .{});
             print("💡 Example: zeicoin send 10 tzei1qr2q... alice\n", .{});
             print("💡 Example: zeicoin send 10 bob alice\n", .{});
-            std.process.exit(1);
+            return CLIError.TransactionFailed;
         };
         defer {
             recipient_wallet.deinit();
@@ -252,7 +252,7 @@ pub fn handleHistory(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         switch (err) {
             CLIError.WalletNotFound => {
                 // Error message already printed in loadHDWalletForOperation
-                std.process.exit(1);
+                return CLIError.TransactionFailed;
             },
             else => return err,
         }
