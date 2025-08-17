@@ -26,6 +26,8 @@ const Command = enum {
     sync,
     block,
     history,
+    seed,
+    mnemonic,
     help,
 };
 
@@ -68,6 +70,7 @@ pub fn main() !void {
         .sync => try network_commands.handleSync(allocator, args[2..]),
         .block => try network_commands.handleBlock(allocator, args[2..]),
         .history => try transaction_commands.handleHistory(allocator, args[2..]),
+        .seed, .mnemonic => try wallet_commands.handleSeed(allocator, args[2..]),
         .help => display.printHelp(),
     }
 }

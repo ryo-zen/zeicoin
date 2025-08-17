@@ -1,11 +1,12 @@
-// wallet.zig - ZeiCoin HD-Only Wallet
-// Hierarchical Deterministic wallet implementation
+// wallet.zig - ZeiCoin HD-Only Wallet with Modern Security
+// Hierarchical Deterministic wallet implementation with ChaCha20-Poly1305 AEAD
 
 const std = @import("std");
 const types = @import("../types/types.zig");
 const key = @import("../crypto/key.zig");
 const bip39 = @import("../crypto/bip39.zig");
 const hd = @import("../crypto/hd.zig");
+const ChaCha20Poly1305 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
 
 /// 💰 ZeiCoin wallet errors
 pub const WalletError = error{
@@ -17,81 +18,163 @@ pub const WalletError = error{
     DecryptionFailed,
     InvalidMnemonic,
     DerivationFailed,
+    UnsupportedVersion,
 };
 
-/// HD Wallet file format (version 3)
+/// Modern wallet file format with AEAD encryption
 pub const WalletFile = struct {
-    version: u32 = 3, // Version 3 = HD wallet
-    encrypted_mnemonic: [512]u8, // Encrypted mnemonic phrase
-    salt: [16]u8,
-    checksum: [32]u8,
-    highest_index: u32 = 0, // Highest derived address index
-    account: u32 = 0, // Account number (default 0)
-
-    /// Create wallet file from mnemonic
-    pub fn fromMnemonic(mnemonic: []const u8, password: []const u8) !WalletFile {
-        // Generate salt
-        var salt: [16]u8 = undefined;
-        std.crypto.random.bytes(&salt);
+    /// File format version
+    pub const VERSION: u32 = 4; // Version 4 = ChaCha20-Poly1305 + Argon2
+    pub const MAGIC: [4]u8 = .{ 'Z', 'E', 'I', 0x04 };
+    
+    /// Argon2 parameters - balanced for security and speed
+    pub const KDF_PARAMS = std.crypto.pwhash.argon2.Params{
+        .t = 3,           // iterations
+        .m = 64 * 1024,   // 64 MB memory
+        .p = 1,           // parallelism
+    };
+    
+    // File structure (compact, fixed size)
+    magic: [4]u8 = MAGIC,
+    version: u32 = VERSION,
+    salt: [32]u8,
+    nonce: [ChaCha20Poly1305.nonce_length]u8,
+    encrypted_data: [512]u8, // Encrypted mnemonic + padding
+    auth_tag: [ChaCha20Poly1305.tag_length]u8,
+    data_len: u16, // Actual length of encrypted data
+    
+    /// Create a new secure wallet file
+    pub fn create(mnemonic: []const u8, password: []const u8) !WalletFile {
+        if (mnemonic.len > 500) return WalletError.InvalidMnemonic;
         
-        // Encrypt mnemonic
-        var encrypted: [512]u8 = [_]u8{0} ** 512;
-        const mnemonic_bytes = mnemonic;
-        if (mnemonic_bytes.len > 500) return WalletError.InvalidWalletFile;
-        
-        // Use PBKDF2 + XOR encryption for mnemonic
-        var key_bytes: [32]u8 = undefined;
-        try std.crypto.pwhash.pbkdf2(&key_bytes, password, &salt, 100_000, std.crypto.auth.hmac.sha2.HmacSha256);
-        
-        for (mnemonic_bytes, 0..) |byte, i| {
-            encrypted[i] = byte ^ key_bytes[i % 32];
-        }
-        encrypted[511] = @intCast(mnemonic_bytes.len); // Store length
-        
-        // Calculate checksum
-        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-        hasher.update(&encrypted);
-        hasher.update(&salt);
-        const checksum = hasher.finalResult();
-        
-        return WalletFile{
-            .encrypted_mnemonic = encrypted,
-            .salt = salt,
-            .checksum = checksum,
+        // Validate mnemonic before encrypting
+        bip39.validateMnemonic(mnemonic) catch {
+            return WalletError.InvalidMnemonic;
         };
+        
+        var wallet = WalletFile{
+            .encrypted_data = [_]u8{0} ** 512,
+            .data_len = @intCast(mnemonic.len),
+            .salt = undefined,
+            .nonce = undefined,
+            .auth_tag = undefined,
+        };
+        
+        // Generate random salt and nonce
+        std.crypto.random.bytes(&wallet.salt);
+        std.crypto.random.bytes(&wallet.nonce);
+        
+        // Derive key using Argon2id
+        var encryption_key: [ChaCha20Poly1305.key_length]u8 = undefined;
+        try std.crypto.pwhash.argon2.kdf(
+            std.heap.page_allocator,
+            &encryption_key,
+            password,
+            &wallet.salt,
+            KDF_PARAMS,
+            .argon2id
+        );
+        defer std.crypto.utils.secureZero(u8, &encryption_key);
+        
+        // Create associated data (binds version and salt to ciphertext)
+        var ad: [40]u8 = undefined;
+        @memcpy(ad[0..4], &wallet.magic);
+        std.mem.writeInt(u32, ad[4..8], wallet.version, .little);
+        @memcpy(ad[8..40], &wallet.salt);
+        
+        // Encrypt mnemonic with ChaCha20-Poly1305
+        ChaCha20Poly1305.encrypt(
+            wallet.encrypted_data[0..mnemonic.len],
+            &wallet.auth_tag,
+            mnemonic,
+            &ad,
+            wallet.nonce,
+            encryption_key
+        );
+        
+        return wallet;
     }
-
-    /// Decrypt mnemonic from wallet file
-    pub fn decryptMnemonic(self: *const WalletFile, password: []const u8, allocator: std.mem.Allocator) ![]u8 {
-        // Verify checksum first
-        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-        hasher.update(&self.encrypted_mnemonic);
-        hasher.update(&self.salt);
-        const computed_checksum = hasher.finalResult();
-
-        if (!std.mem.eql(u8, &computed_checksum, &self.checksum)) {
-            return WalletError.CorruptedWallet;
+    
+    /// Decrypt the wallet file
+    pub fn decrypt(self: *const WalletFile, password: []const u8, allocator: std.mem.Allocator) ![]u8 {
+        // Verify magic and version
+        if (!std.mem.eql(u8, &self.magic, &MAGIC)) {
+            return WalletError.InvalidWalletFile;
         }
-
-        // Decrypt mnemonic
-        var key_bytes: [32]u8 = undefined;
-        std.crypto.pwhash.pbkdf2(&key_bytes, password, &self.salt, 100_000, std.crypto.auth.hmac.sha2.HmacSha256) catch {
-            return WalletError.InvalidPassword;
-        };
-        
-        var decrypted: [512]u8 = undefined;
-        for (self.encrypted_mnemonic, 0..) |byte, i| {
-            decrypted[i] = byte ^ key_bytes[i % 32];
+        if (self.version != VERSION) {
+            return WalletError.UnsupportedVersion;
         }
         
-        // Get length from last byte
-        const mnemonic_len = self.encrypted_mnemonic[511];
-        if (mnemonic_len == 0 or mnemonic_len > 500) {
+        // Validate data length
+        if (self.data_len == 0 or self.data_len > 500) {
             return WalletError.InvalidWalletFile;
         }
         
-        // Return copy of mnemonic
-        return try allocator.dupe(u8, decrypted[0..mnemonic_len]);
+        // Derive key from password
+        var encryption_key: [ChaCha20Poly1305.key_length]u8 = undefined;
+        std.crypto.pwhash.argon2.kdf(
+            std.heap.page_allocator,
+            &encryption_key,
+            password,
+            &self.salt,
+            KDF_PARAMS,
+            .argon2id
+        ) catch {
+            return WalletError.InvalidPassword;
+        };
+        defer std.crypto.utils.secureZero(u8, &encryption_key);
+        
+        // Recreate associated data
+        var ad: [40]u8 = undefined;
+        @memcpy(ad[0..4], &self.magic);
+        std.mem.writeInt(u32, ad[4..8], self.version, .little);
+        @memcpy(ad[8..40], &self.salt);
+        
+        // Decrypt mnemonic
+        const plaintext = try allocator.alloc(u8, self.data_len);
+        
+        ChaCha20Poly1305.decrypt(
+            plaintext,
+            self.encrypted_data[0..self.data_len],
+            self.auth_tag,
+            &ad,
+            self.nonce,
+            encryption_key
+        ) catch {
+            allocator.free(plaintext);
+            // Authentication failed = wrong password or corrupted file
+            return WalletError.InvalidPassword;
+        };
+        
+        // Validate decrypted mnemonic (belt-and-suspenders)
+        bip39.validateMnemonic(plaintext) catch {
+            allocator.free(plaintext);
+            return WalletError.InvalidPassword;
+        };
+        
+        return plaintext;
+    }
+    
+    /// Save to file
+    pub fn save(self: *const WalletFile, path: []const u8) !void {
+        const file = try std.fs.cwd().createFile(path, .{});
+        defer file.close();
+        try file.writeAll(std.mem.asBytes(self));
+    }
+    
+    /// Load from file
+    pub fn load(path: []const u8) !WalletFile {
+        const file = try std.fs.cwd().openFile(path, .{});
+        defer file.close();
+        
+        var wallet: WalletFile = undefined;
+        const bytes_read = try file.readAll(std.mem.asBytes(&wallet));
+        
+        if (bytes_read != @sizeOf(WalletFile)) {
+            return WalletError.InvalidWalletFile;
+        }
+        
+        return wallet;
     }
 };
 
@@ -176,53 +259,38 @@ pub const Wallet = struct {
     pub fn saveToFile(self: *Wallet, file_path: []const u8, password: []const u8) !void {
         if (self.mnemonic == null) return WalletError.NoWalletLoaded;
         
-        const wallet_file = try WalletFile.fromMnemonic(self.mnemonic.?, password);
+        // Create secure wallet file
+        const wallet_file = try WalletFile.create(self.mnemonic.?, password);
         
-        // Update state in file
-        var updated_file = wallet_file;
-        updated_file.highest_index = self.highest_index;
-        updated_file.account = self.current_account;
+        // Note: highest_index and account are stored separately in the Wallet struct
+        // They are not part of the encrypted data for security
         
-        // Write to file
-        const file = try std.fs.cwd().createFile(file_path, .{});
-        defer file.close();
-        try file.writeAll(std.mem.asBytes(&updated_file));
+        // Save to file
+        try wallet_file.save(file_path);
     }
 
     /// Load wallet from encrypted file
     pub fn loadFromFile(self: *Wallet, file_path: []const u8, password: []const u8) !void {
-        // Read file
-        const file = std.fs.cwd().openFile(file_path, .{}) catch |err| switch (err) {
-            error.FileNotFound => return WalletError.WalletFileNotFound,
+        // Load wallet file
+        const wallet_file = WalletFile.load(file_path) catch |err| switch (err) {
+            WalletError.InvalidWalletFile => return WalletError.WalletFileNotFound,
             else => return err,
         };
-        defer file.close();
-
-        var wallet_file: WalletFile = undefined;
-        const bytes_read = try file.readAll(std.mem.asBytes(&wallet_file));
-        if (bytes_read != @sizeOf(WalletFile)) {
-            return WalletError.InvalidWalletFile;
-        }
-
-        // Verify version
-        if (wallet_file.version != 3) {
-            return WalletError.InvalidWalletFile;
-        }
 
         // Decrypt mnemonic
-        const mnemonic = wallet_file.decryptMnemonic(password, self.allocator) catch |err| switch (err) {
+        const mnemonic = wallet_file.decrypt(password, self.allocator) catch |err| switch (err) {
             WalletError.InvalidPassword => return WalletError.InvalidPassword,
             WalletError.CorruptedWallet => return WalletError.CorruptedWallet,
+            WalletError.UnsupportedVersion => return WalletError.UnsupportedVersion,
             else => return err,
         };
 
-        // Restore wallet from mnemonic (now with proper BIP39 validation for all)
+        // Restore wallet from mnemonic
         try self.fromMnemonic(mnemonic, null);
         self.allocator.free(mnemonic); // fromMnemonic makes its own copy
 
-        // Restore state
-        self.highest_index = wallet_file.highest_index;
-        self.current_account = wallet_file.account;
+        // Note: highest_index and current_account default to 0
+        // They are managed separately from the encrypted file
     }
 
     /// Sign a transaction using current address index

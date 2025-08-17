@@ -19,11 +19,8 @@ const WalletSubcommand = enum {
     import, // For genesis accounts
 };
 
-const CLIError = error{
-    InvalidArguments,
-    WalletError,
-    DatabaseError,
-};
+// Note: We avoid returning errors to prevent stack traces
+// All error handling is done via print statements and early returns
 
 /// Handle wallet command with subcommands
 pub fn handleWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
@@ -37,7 +34,7 @@ pub fn handleWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const subcommand = std.meta.stringToEnum(WalletSubcommand, subcommand_str) orelse {
         print("❌ Unknown wallet subcommand: {s}\n", .{subcommand_str});
         print("💡 Available subcommands: create, list, restore, derive, import\n", .{});
-        return CLIError.InvalidArguments;
+        return;
     };
 
     switch (subcommand) {
@@ -64,7 +61,7 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         error.PathAlreadyExists => {}, // This is fine
         else => {
             print("❌ Failed to create data directory: {}\n", .{err});
-            return CLIError.WalletError;
+            return;
         },
     };
 
@@ -76,7 +73,7 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         error.PathAlreadyExists => {}, // This is fine
         else => {
             print("❌ Failed to create wallets directory: {}\n", .{err});
-            return CLIError.WalletError;
+            return;
         },
     };
 
@@ -89,7 +86,7 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         else => {
             print("❌ Wallet '{s}' already exists\n", .{wallet_name});
             print("💡 Use a different name or 'zeicoin wallet load {s}'\n", .{wallet_name});
-            return CLIError.WalletError;
+            return;
         },
     };
 
@@ -200,7 +197,7 @@ fn restoreWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     bip39.validateMnemonic(mnemonic) catch {
         print("❌ Invalid mnemonic phrase\n", .{});
         print("💡 Please check your mnemonic and try again\n", .{});
-        return CLIError.WalletError;
+        return;
     };
     
     // Get data directory path
@@ -232,7 +229,7 @@ fn restoreWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         else => {
             print("❌ Wallet '{s}' already exists\n", .{wallet_name});
             print("💡 Use a different name or remove the existing wallet\n", .{});
-            return CLIError.WalletError;
+            return;
         },
     };
     
@@ -269,7 +266,7 @@ fn deriveAddress(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     if (args.len < 1) {
         print("❌ Wallet name required\n", .{});
         print("Usage: zeicoin wallet derive <wallet_name> [index]\n", .{});
-        return CLIError.InvalidArguments;
+        return;
     }
     
     const wallet_name = args[0];
@@ -278,7 +275,7 @@ fn deriveAddress(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     if (args.len > 1) {
         index = std.fmt.parseInt(u32, args[1], 10) catch {
             print("❌ Invalid index: {s}\n", .{args[1]});
-            return CLIError.InvalidArguments;
+            return;
         };
     }
     
@@ -295,14 +292,14 @@ fn deriveAddress(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     std.fs.cwd().access(wallet_path, .{}) catch {
         print("❌ Wallet '{s}' not found\n", .{wallet_name});
         print("💡 Create it with: zeicoin wallet create {s}\n", .{wallet_name});
-        return CLIError.WalletError;
+        return;
     };
     
     // Check if this is an HD wallet
     if (!std.mem.endsWith(u8, wallet_path, ".wallet")) {
         print("❌ '{s}' is not an HD wallet\n", .{wallet_name});
         print("💡 Only HD wallets support address derivation\n", .{});
-        return CLIError.WalletError;
+        return;
     }
     
     // Load HD wallet
@@ -366,12 +363,12 @@ fn importGenesisWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     if (!is_genesis) {
         print("❌ '{s}' is not a valid genesis account name\n", .{wallet_name});
         print("💡 Valid genesis accounts: alice, bob, charlie, david, eve\n", .{});
-        return CLIError.InvalidArguments;
+        return;
     }
 
     if (types.CURRENT_NETWORK != .testnet) {
         print("❌ Genesis accounts are only available on TestNet\n", .{});
-        return CLIError.WalletError;
+        return;
     }
 
     // Read genesis mnemonic from keys.config
@@ -379,13 +376,13 @@ fn importGenesisWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const config_file = std.fs.cwd().openFile(config_path, .{}) catch |err| {
         print("❌ Cannot open genesis keys config: {}\n", .{err});
         print("💡 Make sure config/keys.config exists\n", .{});
-        return CLIError.WalletError;
+        return;
     };
     defer config_file.close();
 
     const config_content = config_file.readToEndAlloc(allocator, 4096) catch |err| {
         print("❌ Cannot read genesis keys config: {}\n", .{err});
-        return CLIError.WalletError;
+        return;
     };
     defer allocator.free(config_content);
 
@@ -409,7 +406,7 @@ fn importGenesisWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
     if (genesis_mnemonic == null) {
         print("❌ Genesis mnemonic for '{s}' not found in config\n", .{wallet_name});
-        return CLIError.WalletError;
+        return;
     }
 
     // Get data directory path
@@ -504,7 +501,7 @@ pub fn handleAddress(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     std.fs.cwd().access(wallet_path, .{}) catch {
         print("❌ Wallet '{s}' not found\n", .{wallet_name});
         print("💡 Create it with: zeicoin wallet create {s}\n", .{wallet_name});
-        return CLIError.WalletError;
+        return;
     };
     
     // Load HD wallet
@@ -537,4 +534,71 @@ pub fn handleAddress(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         
         print("🆔 Address: {s}\n", .{bech32_addr});
     }
+}
+
+/// Handle seed/mnemonic command - display wallet's recovery phrase
+pub fn handleSeed(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+    if (args.len < 1) {
+        print("❌ Wallet name required\n", .{});
+        print("Usage: zeicoin seed <wallet_name>\n", .{});
+        return;
+    }
+    
+    const wallet_name = args[0];
+    
+    // Get wallet path
+    const data_dir = switch (types.CURRENT_NETWORK) {
+        .testnet => "zeicoin_data_testnet",
+        .mainnet => "zeicoin_data_mainnet",
+    };
+    
+    const wallet_path = try std.fmt.allocPrint(allocator, "{s}/wallets/{s}.wallet", .{ data_dir, wallet_name });
+    defer allocator.free(wallet_path);
+    
+    // Check if wallet exists
+    const file = std.fs.cwd().openFile(wallet_path, .{}) catch {
+        print("❌ Wallet '{s}' not found\n", .{wallet_name});
+        print("💡 Create it with: zeicoin wallet create {s}\n", .{wallet_name});
+        return;
+    };
+    defer file.close();
+    
+    // Load wallet file
+    const wallet_file = wallet.WalletFile.load(wallet_path) catch {
+        print("❌ Invalid or corrupted wallet file\n", .{});
+        return;
+    };
+    
+    // Show security warning
+    print("\n⚠️  WARNING: You are about to display your wallet's recovery seed phrase!\n", .{});
+    print("⚠️  Anyone with these words can access your funds!\n", .{});
+    print("⚠️  Make sure no one is watching your screen!\n\n", .{});
+    
+    // Get password to decrypt mnemonic
+    const password = try password_util.getPasswordForWallet(allocator, wallet_name, false);
+    defer allocator.free(password);
+    defer password_util.clearPassword(password);
+    
+    
+    // Decrypt mnemonic
+    const mnemonic = wallet_file.decrypt(password, allocator) catch {
+        print("❌ Invalid password or corrupted wallet\n", .{});
+        return;
+    };
+    defer allocator.free(mnemonic);
+    defer std.crypto.utils.secureZero(u8, mnemonic);
+    
+    // Display mnemonic
+    print("🔑 Recovery Seed Phrase (12 words):\n", .{});
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n", .{});
+    print("{s}\n", .{mnemonic});
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n", .{});
+    
+    // Final security reminder
+    print("⚠️  IMPORTANT SECURITY REMINDERS:\n", .{});
+    print("   • Write these words down on paper and store in a secure location\n", .{});
+    print("   • Never share these words with anyone\n", .{});
+    print("   • Never store these words digitally (email, photos, cloud storage)\n", .{});
+    print("   • These words can restore your wallet on any device\n", .{});
+    print("   • If you lose these words, your funds cannot be recovered\n", .{});
 }

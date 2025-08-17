@@ -34,7 +34,9 @@ pub fn printHelp() void {
     print("  zeicoin wallet list                    # List all wallets\n", .{});
     print("  zeicoin wallet restore <name> <words>  # Restore HD wallet from mnemonic\n", .{});
     print("  zeicoin wallet derive <name> [index]   # Derive new HD wallet address\n", .{});
-    print("  zeicoin wallet import <genesis>        # Import genesis account (testnet)\n\n", .{});
+    print("  zeicoin wallet import <genesis>        # Import genesis account (testnet)\n", .{});
+    print("  zeicoin seed <wallet>                  # Display wallet's recovery seed phrase\n", .{});
+    print("  zeicoin mnemonic <wallet>              # Display wallet's recovery seed phrase\n\n", .{});
     print("TRANSACTION COMMANDS:\n", .{});
     print("  zeicoin balance [wallet]               # Check wallet balance\n", .{});
     print("  zeicoin send <amount> <recipient>      # Send ZEI to address or wallet\n", .{});
