@@ -99,7 +99,10 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     defer allocator.free(mnemonic);
 
     // Get password for wallet
-    const password = try password_util.getPasswordForWallet(allocator, wallet_name, true);
+    const password = password_util.getPasswordForWallet(allocator, wallet_name, true) catch {
+        print("❌ Password setup failed\n", .{});
+        return;
+    };
     defer allocator.free(password);
     defer password_util.clearPassword(password);
 
