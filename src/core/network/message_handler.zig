@@ -80,6 +80,31 @@ pub const NetworkMessageHandler = struct {
         print("✅ Transaction processed successfully\n", .{});
     }
     
+    /// Handle request for block hash at specific height
+    pub fn handleGetBlockHash(self: *Self, height: u32) !?types.Hash {
+        // Query blockchain for block at height
+        const chain = self.blockchain.chain_manager;
+        
+        // Check if we have the block at this height
+        const chain_height = chain.getChainHeight() catch |err| {
+            print("⚠️ Error getting chain height: {}\n", .{err});
+            return null;
+        };
+        
+        if (height > chain_height) {
+            // We don't have this block yet
+            return null;
+        }
+        
+        // Get the block at this height and return its hash
+        const block = chain.getBlockAtHeight(height) catch |err| {
+            print("⚠️ Error getting block at height {}: {}\n", .{ height, err });
+            return null;
+        };
+        
+        return block.hash();
+    }
+    
     /// Broadcast new block to network peers (delegates to blockchain's network coordinator)
     pub fn broadcastNewBlock(self: *Self, block: Block) !void {
         // print("🔧 [BROADCAST] Attempting to broadcast block...\n", .{});

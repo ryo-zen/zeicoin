@@ -55,12 +55,16 @@ pub const MessageType = enum(u8) {
 
     // Error handling (disabled for ZSP-001 simplicity)
     // reject = 15,      // Disabled
+    
+    // Consensus verification messages
+    get_block_hash = 16,
+    block_hash = 17,
 
     _,
 
     pub fn isValid(self: MessageType) bool {
         // ZSP-001: Updated valid range to exclude disabled messages
-        return @intFromEnum(self) <= @intFromEnum(MessageType.peers);
+        return @intFromEnum(self) <= @intFromEnum(MessageType.block_hash);
     }
 };
 

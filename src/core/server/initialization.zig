@@ -75,6 +75,63 @@ fn freeBootstrapNodes(allocator: std.mem.Allocator, nodes: []const command_line.
     allocator.free(nodes);
 }
 
+/// Load consensus configuration from environment variables
+fn loadConsensusConfig() void {
+    // Load consensus mode
+    if (std.process.getEnvVarOwned(std.heap.page_allocator, "ZEICOIN_CONSENSUS_MODE")) |mode_str| {
+        defer std.heap.page_allocator.free(mode_str);
+        
+        if (std.mem.eql(u8, mode_str, "disabled")) {
+            types.CONSENSUS.mode = .disabled;
+        } else if (std.mem.eql(u8, mode_str, "optional")) {
+            types.CONSENSUS.mode = .optional;
+        } else if (std.mem.eql(u8, mode_str, "enforced")) {
+            types.CONSENSUS.mode = .enforced;
+        } else {
+            std.log.warn("Invalid consensus mode: {s}, using default 'optional'", .{mode_str});
+        }
+    } else |_| {}
+    
+    // Load consensus threshold
+    if (std.process.getEnvVarOwned(std.heap.page_allocator, "ZEICOIN_CONSENSUS_THRESHOLD")) |threshold_str| {
+        defer std.heap.page_allocator.free(threshold_str);
+        
+        if (std.fmt.parseFloat(f32, threshold_str)) |threshold| {
+            if (threshold >= 0.0 and threshold <= 1.0) {
+                types.CONSENSUS.threshold = threshold;
+            } else {
+                std.log.warn("Consensus threshold must be between 0.0 and 1.0, using default 0.5", .{});
+            }
+        } else |_| {
+            std.log.warn("Invalid consensus threshold: {s}, using default 0.5", .{threshold_str});
+        }
+    } else |_| {}
+    
+    // Load minimum peer responses
+    if (std.process.getEnvVarOwned(std.heap.page_allocator, "ZEICOIN_CONSENSUS_MIN_PEERS")) |min_str| {
+        defer std.heap.page_allocator.free(min_str);
+        
+        if (std.fmt.parseInt(u32, min_str, 10)) |min_peers| {
+            types.CONSENSUS.min_peer_responses = min_peers;
+        } else |_| {
+            std.log.warn("Invalid minimum peers: {s}, using default 0", .{min_str});
+        }
+    } else |_| {}
+    
+    // Load check during normal operation flag
+    if (std.process.getEnvVarOwned(std.heap.page_allocator, "ZEICOIN_CONSENSUS_CHECK_NORMAL")) |check_str| {
+        defer std.heap.page_allocator.free(check_str);
+        
+        types.CONSENSUS.check_during_normal_operation = std.mem.eql(u8, check_str, "true");
+    } else |_| {}
+    
+    std.log.info("📊 Consensus Configuration:", .{});
+    std.log.info("  Mode: {s}", .{@tagName(types.CONSENSUS.mode)});
+    std.log.info("  Threshold: {d:.0}%", .{types.CONSENSUS.threshold * 100});
+    std.log.info("  Min peer responses: {}", .{types.CONSENSUS.min_peer_responses});
+    std.log.info("  Check during normal: {}", .{types.CONSENSUS.check_during_normal_operation});
+}
+
 
 pub const NodeComponents = struct {
     blockchain: *zen.ZeiCoin,
@@ -113,6 +170,9 @@ pub const NodeComponents = struct {
 
 pub fn initializeNode(allocator: std.mem.Allocator, config: command_line.Config) !NodeComponents {
     std.log.info("Initializing ZeiCoin node", .{});
+    
+    // Load consensus configuration from environment
+    loadConsensusConfig();
     
     // Initialize blockchain
     const blockchain = try zen.ZeiCoin.init(allocator);

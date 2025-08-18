@@ -27,6 +27,10 @@ pub const GetPeersMessage = @import("get_peers.zig").GetPeersMessage;
 pub const PeersMessage = @import("peers.zig").PeersMessage;
 pub const PeerAddress = @import("peers.zig").PeerAddress;
 
+// Consensus verification messages
+pub const GetBlockHashMessage = @import("get_block_hash.zig").GetBlockHashMessage;
+pub const BlockHashMessage = @import("block_hash.zig").BlockHashMessage;
+
 /// Union of all message types (ZSP-001 compliant)
 pub const Message = union(protocol.MessageType) {
     handshake: HandshakeMessage,
@@ -46,6 +50,10 @@ pub const Message = union(protocol.MessageType) {
     // Peer discovery (essential for network)
     get_peers: GetPeersMessage,
     peers: PeersMessage,
+    
+    // Consensus verification
+    get_block_hash: GetBlockHashMessage,
+    block_hash: BlockHashMessage,
     
     // Inventory-based messages disabled for ZSP-001 batch sync
     // announce: AnnounceMessage,
@@ -86,6 +94,10 @@ pub const Message = union(protocol.MessageType) {
             // Peer discovery (essential for network)
             .get_peers => .{ .get_peers = try GetPeersMessage.decode(reader) },
             .peers => .{ .peers = try PeersMessage.decode(allocator, reader) },
+            
+            // Consensus verification
+            .get_block_hash => .{ .get_block_hash = try GetBlockHashMessage.deserialize(reader) },
+            .block_hash => .{ .block_hash = try BlockHashMessage.deserialize(reader) },
             
             // Inventory-based messages disabled for ZSP-001 batch sync
             // .announce => .{ .announce = try AnnounceMessage.decode(allocator, reader) },

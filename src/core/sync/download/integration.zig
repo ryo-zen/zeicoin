@@ -147,6 +147,13 @@ pub const EnhancedSyncManager = struct {
             
             // Validate the block before adding to chain
             if (try self.sync_manager.blockchain.validateSyncBlock(block, next_height)) {
+                // Check consensus with peers if enabled
+                const sync = @import("../manager.zig");
+                if (!try sync.verifyBlockConsensus(self.sync_manager.blockchain, block, next_height)) {
+                    print("❌ Block {} consensus verification failed\n", .{next_height});
+                    continue;
+                }
+                
                 // Add validated block to chain
                 try self.sync_manager.blockchain.chain_processor.addBlockToChain(block, next_height);
                 print("✅ Block {} successfully added to chain\n", .{next_height});

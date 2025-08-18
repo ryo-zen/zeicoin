@@ -151,6 +151,8 @@ pub const PeerConnection = struct {
             .blocks => |blocks| try self.handleBlocks(blocks),
             .get_peers => |get_peers| try self.handleGetPeers(get_peers),
             .peers => |peers| try self.handlePeers(peers),
+            .get_block_hash => |get_block_hash| try self.handleGetBlockHash(get_block_hash),
+            .block_hash => |block_hash| try self.handleBlockHash(block_hash),
             // .not_found => |not_found| try self.handleNotFound(not_found), // ZSP-001: Inventory disabled
             // .reject => |reject| try self.handleReject(reject), // ZSP-001: Error handling disabled
         }
@@ -260,6 +262,18 @@ pub const PeerConnection = struct {
     
     fn handlePeers(self: *Self, peers: messages.PeersMessage) !void {
         try self.message_handler.onPeers(self.peer, peers);
+    }
+    
+    fn handleGetBlockHash(self: *Self, msg: messages.GetBlockHashMessage) !void {
+        _ = self;
+        std.debug.print("🔍 Received get_block_hash request for height {}\n", .{msg.height});
+        // TODO: Implement handler callback
+    }
+    
+    fn handleBlockHash(self: *Self, msg: messages.BlockHashMessage) !void {
+        _ = self;
+        std.debug.print("📊 Received block_hash response for height {}: exists={}\n", .{ msg.height, msg.exists });
+        // TODO: Implement handler callback
     }
     
     // ZSP-001: Inventory disabled - function commented out

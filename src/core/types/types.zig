@@ -46,6 +46,30 @@ pub const SYNC = struct {
     pub const MAX_DOWNLOAD_RETRIES: u8 = 3; // Maximum retry attempts
 };
 
+// Consensus configuration
+pub const ConsensusMode = enum {
+    disabled,     // No consensus checking (single node, testing)
+    optional,     // Check consensus but only warn on failure
+    enforced,     // Require consensus or reject block (production)
+};
+
+pub const CONSENSUS = struct {
+    // Current consensus mode - can be changed via environment variable
+    pub var mode: ConsensusMode = .optional; // Default to optional for gradual rollout
+    
+    // Minimum percentage of peers that must agree (0.5 = 50%, 0.67 = 67%, etc)
+    pub var threshold: f32 = 0.5; // Simple majority by default
+    
+    // Timeout for peer responses in seconds
+    pub const PEER_RESPONSE_TIMEOUT: i64 = 5;
+    
+    // Minimum number of peer responses required (0 = no minimum)
+    pub var min_peer_responses: u32 = 0; // Start with no minimum
+    
+    // Whether to query peers during normal operation or only during sync
+    pub var check_during_normal_operation: bool = false; // Only during sync initially
+};
+
 // Block versioning - for protocol upgrades
 pub const BlockVersion = enum(u32) {
     V0 = 0, // Initial protocol version
