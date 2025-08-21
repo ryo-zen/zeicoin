@@ -17,6 +17,10 @@ pub const GetBlockHashMessage = struct {
         };
     }
 
+    pub fn encode(self: GetBlockHashMessage, writer: anytype) !void {
+        try self.serialize(writer);
+    }
+
     pub fn deinit(self: *GetBlockHashMessage, allocator: std.mem.Allocator) void {
         _ = self;
         _ = allocator;

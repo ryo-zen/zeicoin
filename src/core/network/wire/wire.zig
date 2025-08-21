@@ -183,19 +183,19 @@ pub const WireConnection = struct {
         const msg = try self.reader.readMessage();
         if (msg) |envelope| {
             self.stats.messages_received += 1;
-            std.debug.print("🔧 [WIRE RECV] Message received from wire, type: {}, total received: {}\n", .{envelope.header.message_type, self.stats.messages_received});
+            std.log.debug("Message received from wire, type: {}, total received: {}", .{envelope.header.message_type, self.stats.messages_received});
         }
         return msg;
     }
     
     /// Send a message
     pub fn sendMessage(self: *Self, msg_type: protocol.MessageType, msg: anytype) ![]const u8 {
-        std.debug.print("🔧 [WIRE SEND] Writing message type: {} to wire\n", .{msg_type});
+        std.log.debug("Writing message type: {} to wire", .{msg_type});
         try self.writer.writeMessage(msg_type, msg);
         self.stats.messages_sent += 1;
         self.stats.bytes_sent += self.writer.getData().len;
         const data = self.writer.getData();
-        std.debug.print("🔧 [WIRE SEND] Message written, size: {} bytes, total sent: {}\n", .{data.len, self.stats.messages_sent});
+        std.log.debug("Message written, size: {} bytes, total sent: {}", .{data.len, self.stats.messages_sent});
         return data;
     }
 };

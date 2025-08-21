@@ -36,6 +36,8 @@ pub const ServerHandlers = struct {
             .onGetBlocks = onGetBlocksGlobal,
             .onGetPeers = onGetPeersGlobal,
             .onPeers = onPeersGlobal,
+            .onGetBlockHash = onGetBlockHashGlobal,
+            .onBlockHash = onBlockHashGlobal,
         };
     }
     
@@ -108,6 +110,44 @@ pub const ServerHandlers = struct {
         _ = self;
         // Process received peer list
     }
+
+    fn onGetBlockHash(self: *Self, peer: *network.Peer, msg: network.message_types.GetBlockHashMessage) !void {
+        std.log.info("🔍 [GET_BLOCK_HASH] Request for height {} from {any}", .{ msg.height, peer.address });
+        
+        // Get block hash at requested height using chain_state
+        if (self.blockchain.chain_state.getBlockHash(msg.height)) |hash| {
+            // Send successful response
+            const response = network.message_types.BlockHashMessage{
+                .height = msg.height,
+                .hash = hash,
+                .exists = true,
+            };
+            _ = try peer.sendMessage(.block_hash, response);
+        } else {
+            // Send response indicating block doesn't exist
+            const response = network.message_types.BlockHashMessage{
+                .height = msg.height,
+                .hash = std.mem.zeroes(types.Hash),
+                .exists = false,
+            };
+            _ = try peer.sendMessage(.block_hash, response);
+        }
+    }
+
+    fn onBlockHash(self: *Self, peer: *network.Peer, msg: network.message_types.BlockHashMessage) !void {
+        std.log.info("📥 [BLOCK_HASH] Response for height {} from {any} (exists: {})", .{ msg.height, peer.address, msg.exists });
+        
+        // Block hash responses are typically used during consensus verification
+        // For now, just log the response - future consensus logic can be added here
+        if (msg.exists) {
+            std.log.info("✓ [BLOCK_HASH] Peer {any} has block at height {} with hash {}", .{ peer.address, msg.height, std.fmt.fmtSliceHexUpper(&msg.hash) });
+        } else {
+            std.log.info("✗ [BLOCK_HASH] Peer {any} does not have block at height {}", .{ peer.address, msg.height });
+        }
+        
+        // Future: Store consensus response for verification logic
+        _ = self; // Placeholder for future consensus implementation
+    }
 };
 
 // Global wrapper functions for function pointers
@@ -137,4 +177,12 @@ fn onGetPeersGlobal(peer: *network.Peer, msg: network.message_types.GetPeersMess
 
 fn onPeersGlobal(peer: *network.Peer, msg: network.message_types.PeersMessage) anyerror!void {
     return global_handler.?.onPeers(peer, msg);
+}
+
+fn onGetBlockHashGlobal(peer: *network.Peer, msg: network.message_types.GetBlockHashMessage) anyerror!void {
+    return global_handler.?.onGetBlockHash(peer, msg);
+}
+
+fn onBlockHashGlobal(peer: *network.Peer, msg: network.message_types.BlockHashMessage) anyerror!void {
+    return global_handler.?.onBlockHash(peer, msg);
 }
