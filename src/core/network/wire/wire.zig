@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const protocol = @import("../protocol/protocol.zig");
-const message_mod = @import("../protocol/message.zig");
+const message_envelope = @import("../protocol/message_envelope.zig");
 
 /// Wire protocol reader for parsing incoming messages
 pub const WireReader = struct {
@@ -31,7 +31,7 @@ pub const WireReader = struct {
     }
     
     /// Try to read a complete message
-    pub fn readMessage(self: *Self) !?message_mod.MessageEnvelope {
+    pub fn readMessage(self: *Self) !?message_envelope.MessageEnvelope {
         const available = self.buffer.items.len - self.read_pos;
         
         // Need at least header size
@@ -70,7 +70,7 @@ pub const WireReader = struct {
         }
         
         // Create message envelope
-        const envelope = try message_mod.MessageEnvelope.init(
+        const envelope = try message_envelope.MessageEnvelope.init(
             self.allocator,
             header.message_type,
             payload,
@@ -179,7 +179,7 @@ pub const WireConnection = struct {
     }
     
     /// Try to read next message
-    pub fn readMessage(self: *Self) !?message_mod.MessageEnvelope {
+    pub fn readMessage(self: *Self) !?message_envelope.MessageEnvelope {
         const msg = try self.reader.readMessage();
         if (msg) |envelope| {
             self.stats.messages_received += 1;

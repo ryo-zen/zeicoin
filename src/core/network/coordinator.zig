@@ -4,20 +4,20 @@
 const std = @import("std");
 const print = std.debug.print;
 const net = @import("peer.zig");
-const message_handler = @import("message_handler.zig");
+const message_dispatcher = @import("message_dispatcher.zig");
 
 pub const NetworkCoordinator = struct {
     allocator: std.mem.Allocator,
     network: ?*net.NetworkManager,
-    message_handler: message_handler.NetworkMessageHandler,
+    message_dispatcher: message_dispatcher.MessageDispatcher,
     
     const Self = @This();
     
-    pub fn init(allocator: std.mem.Allocator, handler: message_handler.NetworkMessageHandler) Self {
+    pub fn init(allocator: std.mem.Allocator, dispatcher: message_dispatcher.MessageDispatcher) Self {
         return .{
             .allocator = allocator,
             .network = null,
-            .message_handler = handler,
+            .message_dispatcher = dispatcher,
         };
     }
     

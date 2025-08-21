@@ -137,7 +137,7 @@ pub const NodeComponents = struct {
     blockchain: *zen.ZeiCoin,
     network_manager: *network.NetworkManager,
     sync_manager: *sync.SyncManager,
-    message_handler_impl: *MessageHandlerImpl,
+    server_handlers: *ServerHandlers,
     allocator: std.mem.Allocator,
     
     pub fn deinit(self: *NodeComponents) void {
@@ -159,8 +159,8 @@ pub const NodeComponents = struct {
         self.blockchain.network_coordinator.network = null;
         
         // 5. Clean up message handler
-        @import("message_handlers.zig").clearGlobalHandler();
-        self.allocator.destroy(self.message_handler_impl);
+        @import("server_handlers.zig").clearGlobalHandler();
+        self.allocator.destroy(self.server_handlers);
         
         // 6. Finally blockchain (network_coordinator.deinit won't double-free now)
         self.blockchain.deinit();
@@ -269,22 +269,22 @@ pub fn initializeNode(allocator: std.mem.Allocator, config: command_line.Config)
         .blockchain = blockchain,
         .network_manager = network_manager,
         .sync_manager = sync_manager,
-        .message_handler_impl = handler_result.impl,
+        .server_handlers = handler_result.impl,
         .allocator = allocator,
     };
 }
 
-const MessageHandlerImpl = @import("message_handlers.zig").MessageHandlerImpl;
+const ServerHandlers = @import("server_handlers.zig").ServerHandlers;
 
 const HandlerResult = struct {
-    impl: *MessageHandlerImpl,
+    impl: *ServerHandlers,
     handler: network.MessageHandler,
 };
 
 fn createMessageHandler(allocator: std.mem.Allocator, blockchain: *zen.ZeiCoin) !HandlerResult {
     // Create message handler implementation
-    const handler_impl = try allocator.create(MessageHandlerImpl);
-    handler_impl.* = MessageHandlerImpl.init(blockchain);
+    const handler_impl = try allocator.create(ServerHandlers);
+    handler_impl.* = ServerHandlers.init(blockchain);
     
     return HandlerResult{
         .impl = handler_impl,

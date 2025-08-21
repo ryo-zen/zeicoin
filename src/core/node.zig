@@ -13,7 +13,7 @@ const genesis = @import("chain/genesis.zig");
 const ReorgManager = @import("chain/reorganization/manager.zig").ReorgManager;
 // const headerchain = @import("network/headerchain.zig"); // ZSP-001: Disabled headers-first sync
 const sync_mod = @import("sync/manager.zig");
-const message_handler = @import("network/message_handler.zig");
+const message_dispatcher = @import("network/message_dispatcher.zig");
 const validator_mod = @import("validation/validator.zig");
 const miner_mod = @import("miner/main.zig");
 const MempoolManager = @import("mempool/manager.zig").MempoolManager;
@@ -38,7 +38,7 @@ pub const ZeiCoin = struct {
     reorg_manager: ?*ReorgManager,
     // header_chain: headerchain.HeaderChain, // ZSP-001: Disabled headers-first sync
     sync_manager: ?*sync_mod.SyncManager,
-    message_handler: message_handler.NetworkMessageHandler,
+    message_dispatcher: message_dispatcher.MessageDispatcher,
     chain_validator: validator_mod.ChainValidator,
     chain_query: ChainQuery,
     chain_processor: ChainProcessor,
@@ -80,7 +80,7 @@ pub const ZeiCoin = struct {
             .reorg_manager = reorg_manager,
             // .header_chain = header_chain, // ZSP-001: Disabled headers-first sync
             .sync_manager = null,
-            .message_handler = undefined,
+            .message_dispatcher = undefined,
             .chain_validator = undefined,
             .chain_query = undefined,
             .chain_processor = undefined,
@@ -102,13 +102,13 @@ pub const ZeiCoin = struct {
             if (components_initialized >= 4) instance_ptr.chain_processor.deinit();
             if (components_initialized >= 3) instance_ptr.chain_query.deinit();
             if (components_initialized >= 2) instance_ptr.chain_validator.deinit();
-            if (components_initialized >= 1) instance_ptr.message_handler.deinit();
+            if (components_initialized >= 1) instance_ptr.message_dispatcher.deinit();
         }
 
-        instance_ptr.message_handler = message_handler.NetworkMessageHandler.init(allocator, instance_ptr);
+        instance_ptr.message_dispatcher = message_dispatcher.MessageDispatcher.init(allocator, instance_ptr);
         components_initialized = 1;
 
-        instance_ptr.network_coordinator = NetworkCoordinator.init(allocator, instance_ptr.message_handler);
+        instance_ptr.network_coordinator = NetworkCoordinator.init(allocator, instance_ptr.message_dispatcher);
 
         instance_ptr.chain_validator = validator_mod.ChainValidator.init(allocator, instance_ptr);
         components_initialized = 2;
@@ -194,7 +194,7 @@ pub const ZeiCoin = struct {
         self.chain_query.deinit();
         self.chain_validator.deinit();
         self.network_coordinator.deinit();
-        self.message_handler.deinit();
+        self.message_dispatcher.deinit();
 
         // self.header_chain.deinit(); // ZSP-001: Disabled headers-first sync
         if (self.reorg_manager) |manager| {
@@ -418,17 +418,17 @@ pub const ZeiCoin = struct {
     }
 
     pub fn checkForNewBlocks(self: *ZeiCoin) !void {
-        try self.message_handler.checkForNewBlocks();
+        try self.message_dispatcher.checkForNewBlocks();
     }
 
     pub fn handleIncomingBlock(self: *ZeiCoin, block: Block, peer: ?*net.Peer) !void {
         print("🔧 [NODE] handleIncomingBlock() ENTRY - delegating to message handler\n", .{});
-        try self.message_handler.handleIncomingBlock(block, peer);
+        try self.message_dispatcher.handleIncomingBlock(block, peer);
         print("🔧 [NODE] handleIncomingBlock() completed successfully\n", .{});
     }
 
     pub fn broadcastNewBlock(self: *ZeiCoin, block: Block) !void {
-        try self.message_handler.broadcastNewBlock(block);
+        try self.message_dispatcher.broadcastNewBlock(block);
     }
 
     pub fn getHeadersRange(self: *ZeiCoin, start_height: u32, count: u32) ![]BlockHeader {

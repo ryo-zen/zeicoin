@@ -5,8 +5,8 @@ const std = @import("std");
 const net = std.net;
 const protocol = @import("protocol/protocol.zig");
 const wire = @import("wire/wire.zig");
-const messages = @import("protocol/messages/messages.zig");
-const message_mod = @import("protocol/message.zig");
+const message_types = @import("protocol/messages/message_types.zig");
+const message_envelope = @import("protocol/message_envelope.zig");
 
 const ArrayList = std.ArrayList;
 const Mutex = std.Thread.Mutex;
@@ -128,7 +128,7 @@ pub const Peer = struct {
     }
     
     /// Try to read next message
-    pub fn readMessage(self: *Self) !?message_mod.MessageEnvelope {
+    pub fn readMessage(self: *Self) !?message_envelope.MessageEnvelope {
         const result = try self.connection.readMessage();
         if (result) |_| {
             self.last_recv = std.time.timestamp();
@@ -160,7 +160,7 @@ pub const Peer = struct {
     /// Send request for specific block by hash
     pub fn sendGetBlockByHash(self: *Self, hash: [32]u8) !void {
         const hashes = [_][32]u8{hash};
-        var msg = try messages.GetBlocksMessage.init(self.allocator, &hashes);
+        var msg = try message_types.GetBlocksMessage.init(self.allocator, &hashes);
         defer msg.deinit(self.allocator);
         
         _ = try self.sendMessage(.get_blocks, msg);
@@ -196,7 +196,7 @@ pub const Peer = struct {
         
         // Send as single-item GetBlocksMessage
         var hashes = [_][32]u8{height_hash};
-        var msg = try messages.GetBlocksMessage.init(self.allocator, &hashes);
+        var msg = try message_types.GetBlocksMessage.init(self.allocator, &hashes);
         defer msg.deinit(self.allocator);
         
         // print("🔧 [ZSP-001 PEER] Encoded height {} with magic marker: {X:0>8}\n", .{height, ZSP_001_HEIGHT_MAGIC});
@@ -233,7 +233,7 @@ pub const Peer = struct {
         // });
         
         // Create and send the batch message
-        var msg = try messages.GetBlocksMessage.init(self.allocator, hashes);
+        var msg = try message_types.GetBlocksMessage.init(self.allocator, hashes);
         defer msg.deinit(self.allocator);
         
         // print("📡 [ZSP-001 BATCH] Transmitting batch request\n", .{});
@@ -265,7 +265,7 @@ pub const Peer = struct {
         // Stop hash - zero means "send up to chain tip"
         const stop_hash = [_]u8{0} ** 32;
         
-        var msg = try messages.GetHeadersMessage.init(self.allocator, locator.items, stop_hash);
+        var msg = try message_types.GetHeadersMessage.init(self.allocator, locator.items, stop_hash);
         defer msg.deinit(self.allocator);
         
         _ = try self.sendMessage(.get_headers, msg);

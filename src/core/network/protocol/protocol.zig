@@ -2,8 +2,8 @@
 
 const std = @import("std");
 
-// Protocol version - start fresh at 1
-pub const PROTOCOL_VERSION: u16 = 101; // 1.01 represented as 101
+// Protocol version - increment due to inventory protocol removal
+pub const PROTOCOL_VERSION: u16 = 102; // 1.02 - inventory protocol removed
 
 // Network magic bytes - "ZEIC"
 pub const MAGIC: u32 = 0x5A454943;
@@ -15,7 +15,6 @@ pub const DEFAULT_PORT: u16 = 10801;
 pub const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024; // 16MB
 pub const MAX_HEADERS_PER_MESSAGE: usize = 2000;
 pub const MAX_BLOCKS_PER_MESSAGE: usize = 500;
-pub const MAX_INV_PER_MESSAGE: usize = 50000;
 
 // Connection limits
 pub const MAX_PEERS: usize = 125;
@@ -26,7 +25,7 @@ pub const PING_INTERVAL_SECONDS: u64 = 30;
 // Memory limits per connection
 pub const MAX_MEMORY_PER_CONNECTION: usize = 100 * 1024 * 1024; // 100MB
 
-// Clean message type enum - no string padding needed
+// Clean message type enum - continuous numbering after inventory protocol removal
 pub const MessageType = enum(u8) {
     // Core messages
     handshake = 0,
@@ -34,36 +33,25 @@ pub const MessageType = enum(u8) {
     ping = 2,
     pong = 3,
 
-    // Sync messages (ZSP-001 batch sync only)
-    // get_headers = 4,  // Removed per ZSP-001
-    // headers = 5,      // Removed per ZSP-001
-    get_blocks = 6,
-    blocks = 7,
+    // Batch sync messages
+    get_blocks = 4,
+    blocks = 5,
 
-    // ZSP-001: Inventory messages disabled for batch sync
-    // announce = 8,     // Disabled
-    // request = 9,      // Disabled
-    // not_found = 10,   // Disabled
+    // Transaction/Block transfer
+    transaction = 6,
+    block = 7,
 
-    // Transaction/Block transfer (ZSP-001 core messages)
-    transaction = 11,
-    block = 12,
+    // Peer discovery
+    get_peers = 8,
+    peers = 9,
 
-    // Peer discovery (essential for network)
-    get_peers = 13,
-    peers = 14,
-
-    // Error handling (disabled for ZSP-001 simplicity)
-    // reject = 15,      // Disabled
-    
-    // Consensus verification messages
-    get_block_hash = 16,
-    block_hash = 17,
+    // Consensus verification
+    get_block_hash = 10,
+    block_hash = 11,
 
     _,
 
     pub fn isValid(self: MessageType) bool {
-        // ZSP-001: Updated valid range to exclude disabled messages
         return @intFromEnum(self) <= @intFromEnum(MessageType.block_hash);
     }
 };
@@ -134,29 +122,7 @@ pub const ServiceFlags = struct {
     }
 };
 
-// Inventory types for announcements
-pub const InventoryType = enum(u32) {
-    transaction = 1,
-    block = 2,
-    filtered_block = 3, // For light clients
-    compact_block = 4, // For bandwidth optimization
 
-    pub fn isValid(self: InventoryType) bool {
-        return @intFromEnum(self) >= 1 and @intFromEnum(self) <= 4;
-    }
-};
-
-// Reject codes for error handling
-pub const RejectCode = enum(u8) {
-    malformed = 0x01,
-    invalid = 0x10,
-    obsolete = 0x11,
-    duplicate = 0x12,
-    nonstandard = 0x40,
-    dust = 0x41,
-    insufficient_fee = 0x42,
-    checkpoint = 0x43,
-};
 
 // Clean message header - no legacy padding
 pub const MessageHeader = packed struct {

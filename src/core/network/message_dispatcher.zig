@@ -11,7 +11,7 @@ const BlockProcessor = @import("processors/block_processor.zig").BlockProcessor;
 const Transaction = types.Transaction;
 const Block = types.Block;
 
-pub const NetworkMessageHandler = struct {
+pub const MessageDispatcher = struct {
     allocator: std.mem.Allocator,
     blockchain: *ZeiCoin,
     
@@ -20,7 +20,7 @@ pub const NetworkMessageHandler = struct {
     
     const Self = @This();
     
-    /// Initialize message handler with modular components
+    /// Initialize message dispatcher with modular components
     pub fn init(allocator: std.mem.Allocator, blockchain: *ZeiCoin) Self {
         return .{
             .allocator = allocator,
@@ -29,7 +29,7 @@ pub const NetworkMessageHandler = struct {
         };
     }
     
-    /// Cleanup message handler resources
+    /// Cleanup message dispatcher resources
     pub fn deinit(self: *Self) void {
         _ = self;
         // No resources to cleanup currently

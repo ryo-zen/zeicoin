@@ -127,7 +127,7 @@ pub const ChainProcessor = struct {
         } else current_height;
 
         // During reorganization, use reorganization-specific validation (skips hash chain checks)
-        if (!try self.chain_validator.validateReorgBlock(block, target_height)) {
+        if (!try self.chain_validator.validateReorgBlock(&block, target_height)) {
             return error.BlockValidationFailed;
         }
 

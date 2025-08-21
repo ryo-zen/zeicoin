@@ -1,5 +1,5 @@
-// message.zig - Base message interface and utilities
-// Provides common functionality for all message types
+// message_envelope.zig - Message envelope and transport utilities
+// Provides serialization, pooling, and transport infrastructure for all message types
 
 const std = @import("std");
 const protocol = @import("protocol.zig");

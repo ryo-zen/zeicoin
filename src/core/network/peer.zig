@@ -11,7 +11,7 @@ const print = std.debug.print;
 
 // Re-export the modular components
 pub const protocol = @import("protocol/protocol.zig");
-pub const messages = @import("protocol/messages/messages.zig");
+pub const message_types = @import("protocol/messages/message_types.zig");
 pub const wire = @import("wire/wire.zig");
 pub const PeerManager = @import("peer_manager.zig").PeerManager;
 pub const Peer = @import("peer_manager.zig").Peer;
@@ -310,7 +310,7 @@ pub const NetworkManager = struct {
     /// ZSP-001: Direct block broadcast instead of inventory system
     pub fn broadcastBlock(self: *Self, block: types.Block) !void {
         // ZSP-001: Broadcast block directly instead of using inventory system
-        const block_msg = messages.BlockMessage{ .block = block };
+        const block_msg = message_types.BlockMessage{ .block = block };
         
         // Broadcast to all peers
         self.broadcast(.block, block_msg) catch |err| {
@@ -327,7 +327,7 @@ pub const NetworkManager = struct {
     /// ZSP-001: Direct transaction broadcast instead of inventory system
     pub fn broadcastTransaction(self: *Self, tx: types.Transaction) void {
         // ZSP-001: Broadcast transaction directly instead of using inventory system
-        const tx_msg = messages.TransactionMessage{ .transaction = tx };
+        const tx_msg = message_types.TransactionMessage{ .transaction = tx };
         
         // Broadcast to all peers
         self.broadcast(.transaction, tx_msg) catch |err| {

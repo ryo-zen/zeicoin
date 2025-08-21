@@ -1,5 +1,5 @@
-// messages.zig - Message type registry and union
-// Central place for all protocol messages
+// message_types.zig - Message type registry and union
+// Central place for all protocol message type definitions
 
 const std = @import("std");
 const protocol = @import("../protocol.zig");
@@ -15,12 +15,6 @@ pub const GetBlocksMessage = @import("get_blocks.zig").GetBlocksMessage;
 pub const BlockMessage = @import("block.zig").BlockMessage;
 pub const TransactionMessage = @import("transaction.zig").TransactionMessage;
 
-// ZSP-001: Inventory-based sync messages (disabled in favor of batch sync)
-// pub const AnnounceMessage = @import("announce.zig").AnnounceMessage;
-// pub const InventoryItem = @import("announce.zig").InventoryItem;
-// pub const RequestMessage = @import("request.zig").RequestMessage;
-// pub const NotFoundMessage = @import("not_found.zig").NotFoundMessage;
-// pub const RejectMessage = @import("reject.zig").RejectMessage;
 
 // Peer discovery messages (kept for network functionality)
 pub const GetPeersMessage = @import("get_peers.zig").GetPeersMessage;
@@ -31,7 +25,7 @@ pub const PeerAddress = @import("peers.zig").PeerAddress;
 pub const GetBlockHashMessage = @import("get_block_hash.zig").GetBlockHashMessage;
 pub const BlockHashMessage = @import("block_hash.zig").BlockHashMessage;
 
-/// Union of all message types (ZSP-001 compliant)
+/// Union of all message types - clean batch sync protocol
 pub const Message = union(protocol.MessageType) {
     handshake: HandshakeMessage,
     handshake_ack: void, // Simple ack, no payload
@@ -43,7 +37,7 @@ pub const Message = union(protocol.MessageType) {
     get_blocks: GetBlocksMessage,
     blocks: void, // Uses streaming for large payloads
     
-    // ZSP-001: Core sync messages only
+    // Transaction/Block transfer
     transaction: TransactionMessage,
     block: BlockMessage,
     
@@ -54,12 +48,6 @@ pub const Message = union(protocol.MessageType) {
     // Consensus verification
     get_block_hash: GetBlockHashMessage,
     block_hash: BlockHashMessage,
-    
-    // Inventory-based messages disabled for ZSP-001 batch sync
-    // announce: AnnounceMessage,
-    // request: RequestMessage,
-    // not_found: NotFoundMessage,
-    // reject: RejectMessage,
     
     /// Encode any message type
     pub fn encode(self: Message, writer: anytype) !void {
@@ -87,7 +75,7 @@ pub const Message = union(protocol.MessageType) {
             .get_blocks => .{ .get_blocks = try GetBlocksMessage.decode(allocator, reader) },
             .blocks => .{ .blocks = {} }, // Handled separately
             
-            // ZSP-001: Core sync messages only
+            // Transaction/Block transfer
             .transaction => .{ .transaction = try TransactionMessage.decode(allocator, reader) },
             .block => .{ .block = try BlockMessage.decode(allocator, reader) },
             
@@ -99,11 +87,6 @@ pub const Message = union(protocol.MessageType) {
             .get_block_hash => .{ .get_block_hash = try GetBlockHashMessage.deserialize(reader) },
             .block_hash => .{ .block_hash = try BlockHashMessage.deserialize(reader) },
             
-            // Inventory-based messages disabled for ZSP-001 batch sync
-            // .announce => .{ .announce = try AnnounceMessage.decode(allocator, reader) },
-            // .request => .{ .request = try RequestMessage.decode(allocator, reader) },
-            // .not_found => .{ .not_found = try NotFoundMessage.decode(allocator, reader) },
-            // .reject => .{ .reject = try RejectMessage.decode(allocator, reader) },
             _ => error.UnknownMessageType,
         };
     }

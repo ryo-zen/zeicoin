@@ -4,8 +4,8 @@
 const std = @import("std");
 const net = std.net;
 const protocol = @import("protocol/protocol.zig");
-const messages = @import("protocol/messages/messages.zig");
-const message_mod = @import("protocol/message.zig");
+const message_types = @import("protocol/messages/message_types.zig");
+const message_envelope = @import("protocol/message_envelope.zig");
 const peer_manager = @import("peer_manager.zig");
 const types = @import("../types/types.zig");
 
@@ -105,7 +105,7 @@ pub const PeerConnection = struct {
     /// Send handshake message
     fn sendHandshake(self: *Self) !void {
         const user_agent = "ZeiCoin/1.0.0";
-        var handshake = try messages.HandshakeMessage.init(self.allocator, user_agent);
+        var handshake = try message_types.HandshakeMessage.init(self.allocator, user_agent);
         defer handshake.deinit(self.allocator);
         
         handshake.listen_port = protocol.DEFAULT_PORT;
@@ -118,7 +118,7 @@ pub const PeerConnection = struct {
     
     /// Send ping message
     fn sendPing(self: *Self) !void {
-        const ping = messages.PingMessage.init();
+        const ping = message_types.PingMessage.init();
         self.peer.ping_nonce = ping.nonce;
         self.peer.last_ping = std.time.timestamp();
         
@@ -126,14 +126,14 @@ pub const PeerConnection = struct {
     }
     
     /// Handle incoming message
-    fn handleMessage(self: *Self, envelope: message_mod.MessageEnvelope) !void {
+    fn handleMessage(self: *Self, envelope: message_envelope.MessageEnvelope) !void {
         const msg_type = envelope.header.message_type;
         
         std.log.debug("Received {} from {}", .{ msg_type, self.peer });
         
         // Decode message
         var stream = std.io.fixedBufferStream(envelope.payload);
-        var msg = try messages.Message.decode(msg_type, self.allocator, stream.reader());
+        var msg = try message_types.Message.decode(msg_type, self.allocator, stream.reader());
         defer msg.deinit(self.allocator);
         
         switch (msg) {
@@ -143,8 +143,6 @@ pub const PeerConnection = struct {
             .pong => |pong| try self.handlePong(pong),
             // .get_headers => |get_headers| try self.handleGetHeaders(get_headers), // ZSP-001: Disabled
             // .headers => |headers| try self.handleHeaders(headers), // ZSP-001: Disabled
-            // .announce => |announce| try self.handleAnnounce(announce), // ZSP-001: Inventory disabled
-            // .request => |request| try self.handleRequest(request), // ZSP-001: Inventory disabled
             .block => |block| try self.handleBlock(block),
             .transaction => |transaction| try self.handleTransaction(transaction),
             .get_blocks => |get_blocks| try self.handleGetBlocks(get_blocks),
@@ -153,12 +151,10 @@ pub const PeerConnection = struct {
             .peers => |peers| try self.handlePeers(peers),
             .get_block_hash => |get_block_hash| try self.handleGetBlockHash(get_block_hash),
             .block_hash => |block_hash| try self.handleBlockHash(block_hash),
-            // .not_found => |not_found| try self.handleNotFound(not_found), // ZSP-001: Inventory disabled
-            // .reject => |reject| try self.handleReject(reject), // ZSP-001: Error handling disabled
         }
     }
     
-    fn handleHandshake(self: *Self, handshake: messages.HandshakeMessage) !void {
+    fn handleHandshake(self: *Self, handshake: message_types.HandshakeMessage) !void {
         const our_height = try self.message_handler.getHeight();
         std.log.info("🤝 [HANDSHAKE] Received from peer {} - their height: {}, our height: {}", .{ 
             self.peer.id, handshake.start_height, our_height 
@@ -205,12 +201,12 @@ pub const PeerConnection = struct {
         }
     }
     
-    fn handlePing(self: *Self, ping: messages.PingMessage) !void {
-        const pong = messages.PongMessage.init(ping.nonce);
+    fn handlePing(self: *Self, ping: message_types.PingMessage) !void {
+        const pong = message_types.PongMessage.init(ping.nonce);
         _ = try self.peer.sendMessage(.pong, pong);
     }
     
-    fn handlePong(self: *Self, pong: messages.PongMessage) !void {
+    fn handlePong(self: *Self, pong: message_types.PongMessage) !void {
         if (self.peer.ping_nonce) |nonce| {
             if (pong.nonce == nonce) {
                 const latency = std.time.timestamp() - self.peer.last_ping;
@@ -238,15 +234,15 @@ pub const PeerConnection = struct {
     //     try self.message_handler.onRequest(self.peer, request);
     // }
     
-    fn handleBlock(self: *Self, block: messages.BlockMessage) !void {
+    fn handleBlock(self: *Self, block: message_types.BlockMessage) !void {
         try self.message_handler.onBlock(self.peer, block);
     }
     
-    fn handleTransaction(self: *Self, transaction: messages.TransactionMessage) !void {
+    fn handleTransaction(self: *Self, transaction: message_types.TransactionMessage) !void {
         try self.message_handler.onTransaction(self.peer, transaction);
     }
     
-    fn handleGetBlocks(self: *Self, get_blocks: messages.GetBlocksMessage) !void {
+    fn handleGetBlocks(self: *Self, get_blocks: message_types.GetBlocksMessage) !void {
         try self.message_handler.onGetBlocks(self.peer, get_blocks);
     }
     
@@ -256,21 +252,21 @@ pub const PeerConnection = struct {
         std.log.debug("Received blocks message from {}", .{self.peer});
     }
     
-    fn handleGetPeers(self: *Self, get_peers: messages.GetPeersMessage) !void {
+    fn handleGetPeers(self: *Self, get_peers: message_types.GetPeersMessage) !void {
         try self.message_handler.onGetPeers(self.peer, get_peers);
     }
     
-    fn handlePeers(self: *Self, peers: messages.PeersMessage) !void {
+    fn handlePeers(self: *Self, peers: message_types.PeersMessage) !void {
         try self.message_handler.onPeers(self.peer, peers);
     }
     
-    fn handleGetBlockHash(self: *Self, msg: messages.GetBlockHashMessage) !void {
+    fn handleGetBlockHash(self: *Self, msg: message_types.GetBlockHashMessage) !void {
         _ = self;
         std.debug.print("🔍 Received get_block_hash request for height {}\n", .{msg.height});
         // TODO: Implement handler callback
     }
     
-    fn handleBlockHash(self: *Self, msg: messages.BlockHashMessage) !void {
+    fn handleBlockHash(self: *Self, msg: message_types.BlockHashMessage) !void {
         _ = self;
         std.debug.print("📊 Received block_hash response for height {}: exists={}\n", .{ msg.height, msg.exists });
         // TODO: Implement handler callback
@@ -310,19 +306,19 @@ pub const MessageHandler = struct {
     // onRequest: *const fn (peer: *Peer, msg: messages.RequestMessage) anyerror!void,
     
     /// Handle block data
-    onBlock: *const fn (peer: *Peer, msg: messages.BlockMessage) anyerror!void,
+    onBlock: *const fn (peer: *Peer, msg: message_types.BlockMessage) anyerror!void,
     
     /// Handle transaction data
-    onTransaction: *const fn (peer: *Peer, msg: messages.TransactionMessage) anyerror!void,
+    onTransaction: *const fn (peer: *Peer, msg: message_types.TransactionMessage) anyerror!void,
     
     /// Handle get blocks request
-    onGetBlocks: *const fn (peer: *Peer, msg: messages.GetBlocksMessage) anyerror!void,
+    onGetBlocks: *const fn (peer: *Peer, msg: message_types.GetBlocksMessage) anyerror!void,
     
     /// Handle get peers request
-    onGetPeers: *const fn (peer: *Peer, msg: messages.GetPeersMessage) anyerror!void,
+    onGetPeers: *const fn (peer: *Peer, msg: message_types.GetPeersMessage) anyerror!void,
     
     /// Handle peers message
-    onPeers: *const fn (peer: *Peer, msg: messages.PeersMessage) anyerror!void,
+    onPeers: *const fn (peer: *Peer, msg: message_types.PeersMessage) anyerror!void,
     
     // ZSP-001: Inventory disabled - callback commented out
     // /// Handle not found message
