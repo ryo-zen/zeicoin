@@ -8,7 +8,7 @@ const util = @import("../util/util.zig");
 const key = @import("../crypto/key.zig");
 const ChainState = @import("../chain/state.zig").ChainState;
 
-const print = std.debug.print;
+const log = std.log.scoped(.mempool);
 
 // Type aliases for clarity
 const Transaction = types.Transaction;
@@ -68,7 +68,7 @@ pub const TransactionValidator = struct {
         
         // 2. Check replay protection
         if (self.isReplayTransaction(tx)) {
-            print("❌ Transaction already processed - replay attempt blocked\\n", .{});
+            log.info("❌ Transaction already processed - replay attempt blocked", .{});
             return false;
         }
         
@@ -84,7 +84,7 @@ pub const TransactionValidator = struct {
         
         // 5. Check self-transfer (warn but allow)
         if (tx.sender.equals(tx.recipient)) {
-            print("⚠️ Self-transfer detected (wasteful but allowed)\\n", .{});
+            log.info("⚠️ Self-transfer detected (wasteful but allowed)", .{});
         }
         
         // 6. Validate nonce
@@ -114,7 +114,7 @@ pub const TransactionValidator = struct {
         
         // 2. Check replay protection
         if (self.isReplayTransaction(tx)) {
-            print("❌ Transaction already processed - replay attempt blocked\\n", .{});
+            log.info("❌ Transaction already processed - replay attempt blocked", .{});
             return ValidationError.ReplayTransaction;
         }
         
@@ -130,7 +130,7 @@ pub const TransactionValidator = struct {
         
         // 5. Check self-transfer (warn but allow)
         if (tx.sender.equals(tx.recipient)) {
-            print("⚠️ Self-transfer detected (wasteful but allowed)\\n", .{});
+            log.info("⚠️ Self-transfer detected (wasteful but allowed)", .{});
         }
         
         // 6. Validate nonce
@@ -167,7 +167,7 @@ pub const TransactionValidator = struct {
         const current_height = try self.chain_state.getHeight();
         
         if (tx.expiry_height <= current_height) {
-            print("❌ Transaction expired: expiry height {} <= current height {}\\n", .{
+            log.info("❌ Transaction expired: expiry height {} <= current height {}", .{
                 tx.expiry_height, current_height
             });
             return false;
@@ -182,12 +182,12 @@ pub const TransactionValidator = struct {
         
         // Allow zero-amount transactions (fee-only payments)
         if (tx.amount == 0) {
-            print("💸 Zero amount transaction (fee-only payment)\\n", .{});
+            log.info("💸 Zero amount transaction (fee-only payment)", .{});
         }
         
         // Check for extremely high amounts (overflow protection)
         if (tx.amount > 1000000 * types.ZEI_COIN) {
-            print("❌ Transaction amount too high: {} ZEI (max: 1,000,000 ZEI)\\n", .{
+            log.info("❌ Transaction amount too high: {} ZEI (max: 1,000,000 ZEI)", .{
                 tx.amount / types.ZEI_COIN
             });
             return false;
@@ -206,14 +206,14 @@ pub const TransactionValidator = struct {
         const max_future_nonce = expected_nonce + 100; // Allow up to 100 transactions ahead
         
         if (tx.nonce < expected_nonce) {
-            print("❌ Invalid nonce: too low, expected >= {}, got {}\\n", .{
+            log.info("❌ Invalid nonce: too low, expected >= {}, got {}", .{
                 expected_nonce, tx.nonce
             });
             return false;
         }
         
         if (tx.nonce > max_future_nonce) {
-            print("❌ Invalid nonce: too high, expected <= {}, got {}\\n", .{
+            log.info("❌ Invalid nonce: too high, expected <= {}, got {}", .{
                 max_future_nonce, tx.nonce
             });
             return false;
@@ -228,7 +228,7 @@ pub const TransactionValidator = struct {
         
         // Check minimum fee
         if (tx.fee < types.ZenFees.MIN_FEE) {
-            print("❌ Fee too low: {} (minimum: {})\\n", .{
+            log.info("❌ Fee too low: {} (minimum: {})", .{
                 tx.fee, types.ZenFees.MIN_FEE
             });
             return false;
@@ -237,7 +237,7 @@ pub const TransactionValidator = struct {
         // Check if sender has sufficient balance
         const total_cost = tx.amount + tx.fee;
         if (sender_account.balance < total_cost) {
-            print("❌ Insufficient balance: {} needed, {} available\\n", .{
+            log.info("❌ Insufficient balance: {} needed, {} available", .{
                 total_cost, sender_account.balance
             });
             return false;
@@ -254,7 +254,7 @@ pub const TransactionValidator = struct {
         
         // Check minimum fee
         if (tx.fee < types.ZenFees.MIN_FEE) {
-            print("❌ Fee too low: {} (minimum: {})\\n", .{
+            log.info("❌ Fee too low: {} (minimum: {})", .{
                 tx.fee, types.ZenFees.MIN_FEE
             });
             return ValidationError.FeeTooLow;
@@ -263,7 +263,7 @@ pub const TransactionValidator = struct {
         // Check if sender has sufficient balance
         const total_cost = tx.amount + tx.fee;
         if (sender_account.balance < total_cost) {
-            print("❌ Insufficient balance: {} needed, {} available\\n", .{
+            log.info("❌ Insufficient balance: {} needed, {} available", .{
                 total_cost, sender_account.balance
             });
             return ValidationError.InsufficientBalance;
@@ -297,7 +297,7 @@ pub const TransactionValidator = struct {
                 _ = self.processed_transactions.orderedRemove(0);
             }
             
-            print("🧹 Cleaned {} old processed transactions (kept {} recent)\\n", .{
+            log.info("🧹 Cleaned {} old processed transactions (kept {} recent)", .{
                 items_to_remove, KEEP_RECENT_TXS
             });
         }

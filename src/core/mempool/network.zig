@@ -9,7 +9,7 @@ const net = @import("../network/peer.zig");
 const NetworkCoordinator = @import("../network/coordinator.zig").NetworkCoordinator;
 const ChainState = @import("../chain/state.zig").ChainState;
 
-const print = std.debug.print;
+const log = std.log.scoped(.mempool);
 
 // Forward declarations for components
 const MempoolStorage = @import("pool.zig").MempoolStorage;
@@ -93,7 +93,7 @@ pub const NetworkHandler = struct {
         // 1. Check if already in mempool (duplicate detection)
         if (self.storage.containsTransaction(tx_hash)) {
             self.duplicate_count += 1;
-            print("🌊 Transaction already flows in our zen mempool - gracefully ignored\\n", .{});
+            log.info("🌊 Transaction already flows in our zen mempool - gracefully ignored", .{});
             return NetworkTransactionResult{
                 .accepted = false,
                 .reason = .duplicate_in_mempool,
@@ -114,7 +114,7 @@ pub const NetworkHandler = struct {
         // 3. Validate transaction using network-specific validation
         if (!try self.validator.validateNetworkTransaction(transaction)) {
             self.rejected_count += 1;
-            print("⚠️ Rejected network transaction: validation failed\n", .{});
+            log.info("⚠️ Rejected network transaction: validation failed", .{});
             
             // Check auto-sync trigger in case account state is out of sync
             try self.checkAutoSyncTrigger(transaction);
@@ -147,7 +147,7 @@ pub const NetworkHandler = struct {
         // 6. Mark as processed for replay protection
         try self.validator.markAsProcessed(transaction);
         
-        print("✅ Network transaction flows into zen mempool\\n", .{});
+        log.info("✅ Network transaction flows into zen mempool", .{});
         
         return NetworkTransactionResult{
             .accepted = true,
@@ -161,9 +161,9 @@ pub const NetworkHandler = struct {
         if (self.network) |network| {
             network.broadcastTransaction(transaction);
             self.broadcast_count += 1;
-            print("📡 Transaction broadcasted to network peers\n", .{});
+            log.info("📡 Transaction broadcasted to network peers", .{});
         } else {
-            print("⚠️  No network manager available for transaction broadcast\n", .{});
+            log.info("⚠️  No network manager available for transaction broadcast", .{});
         }
     }
     
@@ -179,18 +179,18 @@ pub const NetworkHandler = struct {
             
             // If peers are more than 2 blocks ahead, trigger sync
             if (highest_peer_height > current_height + 2) {
-                print("🔄 Peers are {} blocks ahead, triggering auto-sync\n", .{highest_peer_height - current_height});
+                log.info("🔄 Peers are {} blocks ahead, triggering auto-sync", .{highest_peer_height - current_height});
                 
                 // Trigger sync through network coordinator
                 if (self.network_coordinator) |coordinator| {
                     coordinator.triggerSync(highest_peer_height) catch |err| {
-                        print("⚠️ Failed to trigger sync: {}\n", .{err});
+                        log.info("⚠️ Failed to trigger sync: {}", .{err});
                     };
                 } else {
-                    print("⚠️ No network coordinator available for sync trigger\n", .{});
+                    log.info("⚠️ No network coordinator available for sync trigger", .{});
                 }
             } else {
-                print("ℹ️ Chain up to date, no auto-sync needed\n", .{});
+                log.info("ℹ️ Chain up to date, no auto-sync needed", .{});
             }
             
             _ = transaction; // Transaction already processed
@@ -249,7 +249,7 @@ pub const NetworkHandler = struct {
         // 5. Mark as processed for replay protection
         try self.validator.markAsProcessed(transaction);
         
-        print("✅ Local transaction added to mempool\\n", .{});
+        log.info("✅ Local transaction added to mempool", .{});
         
         return LocalTransactionResult{
             .accepted = true,

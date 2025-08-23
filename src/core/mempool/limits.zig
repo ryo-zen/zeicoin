@@ -5,7 +5,7 @@
 const std = @import("std");
 const types = @import("../types/types.zig");
 
-const print = std.debug.print;
+const log = std.log.scoped(.mempool);
 
 // Type aliases for clarity
 const Transaction = types.Transaction;
@@ -142,25 +142,25 @@ pub const MempoolLimits = struct {
         
         switch (result.reason) {
             .accepted => {
-                print("✅ Transaction accepted (count: {}, size: {} bytes)\\n", .{
+                log.info("✅ Transaction accepted (count: {}, size: {} bytes)", .{
                     result.current_count + 1,
                     result.current_size + result.transaction_size
                 });
             },
             .transaction_too_large => {
-                print("❌ Transaction too large: {} bytes (max: {} bytes)\\n", .{
+                log.info("❌ Transaction too large: {} bytes (max: {} bytes)", .{
                     result.transaction_size,
                     types.TransactionLimits.MAX_TX_SIZE
                 });
             },
             .count_limit_exceeded => {
-                print("❌ Mempool full: {} transactions (limit: {})\\n", .{
+                log.info("❌ Mempool full: {} transactions (limit: {})", .{
                     result.current_count,
                     types.MempoolLimits.MAX_TRANSACTIONS
                 });
             },
             .size_limit_exceeded => {
-                print("❌ Mempool size limit exceeded: {} + {} bytes > {} bytes\\n", .{
+                log.info("❌ Mempool size limit exceeded: {} + {} bytes > {} bytes", .{
                     result.current_size,
                     result.transaction_size,
                     types.MempoolLimits.MAX_SIZE_BYTES

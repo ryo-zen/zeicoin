@@ -6,7 +6,7 @@ const std = @import("std");
 const types = @import("../types/types.zig");
 const util = @import("../util/util.zig");
 
-const print = std.debug.print;
+const log = std.log.scoped(.mempool);
 
 // Forward declarations for components
 const MempoolStorage = @import("pool.zig").MempoolStorage;
@@ -64,7 +64,7 @@ pub const MempoolCleaner = struct {
         for (block.transactions, 0..) |tx, i| {
             block_tx_hashes[i] = tx.hash();
             const amount_zei = @as(f64, @floatFromInt(tx.amount)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-            print("🔄 [TX LIFECYCLE] Transaction {s} included in block (mempool → blockchain): {d:.8} ZEI\n", .{
+            log.info("🔄 [TX LIFECYCLE] Transaction {s} included in block (mempool → blockchain): {d:.8} ZEI", .{
                 std.fmt.fmtSliceHexLower(tx.hash()[0..8]), amount_zei
             });
         }
@@ -79,7 +79,7 @@ pub const MempoolCleaner = struct {
         if (removed_count > 0) {
             const elapsed = util.getTime() - start_time;
             const mempool_size = self.storage.getTransactionCount();
-            print("🧹 [TX LIFECYCLE] Cleaned {} confirmed transactions from mempool ({}ms, mempool size: {})\n", .{
+            log.info("🧹 [TX LIFECYCLE] Cleaned {} confirmed transactions from mempool ({}ms, mempool size: {})", .{
                 removed_count, elapsed, mempool_size
             });
         }
@@ -111,13 +111,13 @@ pub const MempoolCleaner = struct {
         if (current_count < 100 and stats.total_size_bytes > 1024 * 1024) {
             // Placeholder for memory optimization
             result.memory_optimized = true;
-            print("🧹 Memory optimization opportunity detected\\n", .{});
+            log.info("🧹 Memory optimization opportunity detected", .{});
         }
         
         result.duration_ms = util.getTime() - start_time;
         
         if (result.processed_history_cleaned > 0 or result.memory_optimized) {
-            print("🔧 Maintenance completed: {} processed txs cleaned, memory optimized: {}\\n", .{
+            log.info("🔧 Maintenance completed: {} processed txs cleaned, memory optimized: {}", .{
                 result.processed_history_cleaned, result.memory_optimized
             });
         }
@@ -142,7 +142,7 @@ pub const MempoolCleaner = struct {
         
         if (expired_hashes.items.len > 0) {
             const removed_count = self.storage.removeTransactionsByHashes(expired_hashes.items);
-            print("⏰ Removed {} expired transactions from mempool\\n", .{removed_count});
+            log.info("⏰ Removed {} expired transactions from mempool", .{removed_count});
             return removed_count;
         }
         
@@ -170,7 +170,7 @@ pub const MempoolCleaner = struct {
         result.strategy_used = .processed_history_cleanup;
         result.duration_ms = util.getTime() - start_time;
         
-        print("🚨 Emergency cleanup completed (strategy: processed history)\\n", .{});
+        log.info("🚨 Emergency cleanup completed (strategy: processed history)", .{});
         
         return result;
     }
@@ -206,13 +206,13 @@ pub const MempoolCleaner = struct {
                     };
                     restored_count += 1;
                 } else {
-                    print("❌ Orphaned transaction no longer valid - discarded\\n", .{});
+                    log.info("❌ Orphaned transaction no longer valid - discarded", .{});
                 }
             }
         }
         
         if (restored_count > 0) {
-            print("🔄 Restored {} orphaned transactions to mempool\\n", .{restored_count});
+            log.info("🔄 Restored {} orphaned transactions to mempool", .{restored_count});
         }
         
         return restored_count;

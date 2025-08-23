@@ -2,7 +2,7 @@
 // Connects parallel download manager to existing sync infrastructure
 
 const std = @import("std");
-const print = std.debug.print;
+const log = std.log.scoped(.sync);
 
 const types = @import("../../types/types.zig");
 const ParallelDownloadManager = @import("parallel.zig").ParallelDownloadManager;
@@ -42,9 +42,9 @@ pub const EnhancedSyncManager = struct {
         if (peer.services) |services| {
             if (@import("../../network/protocol/protocol.zig").ServiceFlags.supportsFastSync(services)) {
                 try self.parallel_downloads.addPeer(peer);
-                print("✅ Added peer to parallel download pool\n");
+                log.info("Added peer to parallel download pool", .{});
             } else {
-                print("ℹ️ Peer added to traditional sync only (no fast sync support)\n");
+                log.debug("Peer added to traditional sync only (no fast sync support)", .{});
             }
         }
     }
@@ -52,7 +52,7 @@ pub const EnhancedSyncManager = struct {
     /// Remove peer from both systems
     pub fn removePeer(self: *Self, peer: *net.Peer) void {
         self.parallel_downloads.removePeer(peer);
-        print("🚫 Removed peer from download systems\n");
+        log.info("Removed peer from download systems", .{});
     }
     
     /// Start sync operation - intelligently chooses parallel vs traditional
@@ -60,7 +60,7 @@ pub const EnhancedSyncManager = struct {
         const current_height = try self.sync_manager.blockchain.getHeight();
         
         if (target_height <= current_height) {
-            print("ℹ️ Already synced (height {})\n", .{current_height});
+            log.info("Already synced (height {})", .{current_height});
             return;
         }
         
@@ -72,22 +72,22 @@ pub const EnhancedSyncManager = struct {
                                 blocks_needed > 20; // Worth the overhead
         
         if (can_use_parallel) {
-            print("🚀 Starting parallel sync: {} -> {} ({} blocks, {} peers)\n", 
+            log.info("Starting parallel sync: {} -> {} ({} blocks, {} peers)", 
                   .{current_height, target_height, blocks_needed, available_peers.len});
             
             // Add all suitable peers to parallel downloads
             for (available_peers) |peer| {
                 self.addPeer(peer) catch |err| {
-                    print("⚠️ Failed to add peer to parallel downloads: {}\n", .{err});
+                    log.warn("Failed to add peer to parallel downloads: {}", .{err});
                 };
             }
             
             // Queue blocks for download
             try self.parallel_downloads.queueBlockRange(current_height + 1, target_height);
             
-            print("📊 Queued {} blocks for parallel download\n", .{blocks_needed});
+            log.info("Queued {} blocks for parallel download", .{blocks_needed});
         } else {
-            print("🔄 Starting traditional sync: {} -> {} (fallback mode)\n", 
+            log.info("Starting traditional sync: {} -> {} (fallback mode)", 
                   .{current_height, target_height});
             
             // Use traditional sync as fallback
@@ -120,12 +120,12 @@ pub const EnhancedSyncManager = struct {
     pub fn handleIncomingBlock(self: *Self, height: u32, block: types.Block, from_peer: *net.Peer) !void {
         // Try parallel downloads first
         if (try self.parallel_downloads.handleIncomingBlock(height, block, from_peer)) {
-            print("📦 Block {} handled by parallel downloads\n", .{height});
+            log.debug("Block {} handled by parallel downloads", .{height});
             return;
         }
         
         // Fall back to traditional sync handling
-        print("📦 Block {} forwarded to traditional sync\n", .{height});
+        log.debug("Block {} forwarded to traditional sync", .{height});
         
         // Forward to sync manager for traditional block processing
         if (self.sync_manager.sync_manager) |sm| {
@@ -143,22 +143,22 @@ pub const EnhancedSyncManager = struct {
         
         // Process blocks in order
         while (self.parallel_downloads.getNextCompletedBlock(next_height)) |block| {
-            print("🔄 Processing downloaded block at height {}\n", .{next_height});
+            log.debug("Processing downloaded block at height {}", .{next_height});
             
             // Validate the block before adding to chain
             if (try self.sync_manager.blockchain.validateSyncBlock(block, next_height)) {
                 // Check consensus with peers if enabled
                 const sync = @import("../manager.zig");
                 if (!try sync.verifyBlockConsensus(self.sync_manager.blockchain, block, next_height)) {
-                    print("❌ Block {} consensus verification failed\n", .{next_height});
+                    log.warn("Block {} consensus verification failed", .{next_height});
                     continue;
                 }
                 
                 // Add validated block to chain
                 try self.sync_manager.blockchain.chain_processor.addBlockToChain(block, next_height);
-                print("✅ Block {} successfully added to chain\n", .{next_height});
+                log.info("Block {} successfully added to chain", .{next_height});
             } else {
-                print("❌ Block {} validation failed, skipping\n", .{next_height});
+                log.warn("Block {} validation failed, skipping", .{next_height});
                 // Block cleanup handled by blockchain
             }
             
@@ -175,7 +175,7 @@ pub const EnhancedSyncManager = struct {
                 (@as(f64, @floatFromInt(stats.completed_downloads)) / @as(f64, @floatFromInt(stats.total_requests))) * 100.0
                 else 0.0;
             
-            print("📊 Parallel sync: {d:.1}% complete ({}/{} blocks, {d:.2} blocks/sec, {d:.1}% success)\n", 
+            log.info("Parallel sync: {d:.1}% complete ({}/{} blocks, {d:.2} blocks/sec, {d:.1}% success)", 
                   .{completion_rate, stats.completed_downloads, stats.total_requests, 
                     stats.blocks_per_second, stats.getSuccessRate()});
         }
@@ -195,16 +195,16 @@ pub const EnhancedSyncManager = struct {
     pub fn setParallelDownloads(self: *Self, enabled: bool) void {
         self.use_parallel_downloads = enabled;
         if (enabled) {
-            print("✅ Parallel downloads enabled\n");
+            log.info("Parallel downloads enabled", .{});
         } else {
-            print("⚠️ Parallel downloads disabled - using traditional sync only\n");
+            log.warn("Parallel downloads disabled - using traditional sync only", .{});
         }
     }
     
     /// Set minimum peers required for parallel downloads
     pub fn setMinPeersForParallel(self: *Self, min_peers: u8) void {
         self.min_peers_for_parallel = min_peers;
-        print("⚙️ Set minimum peers for parallel downloads: {}\n", .{min_peers});
+        log.info("Set minimum peers for parallel downloads: {}", .{min_peers});
     }
 };
 

@@ -2,7 +2,7 @@
 // Handles high-level network operations for the Node
 
 const std = @import("std");
-const print = std.debug.print;
+const log = std.log.scoped(.network);
 const net = @import("peer.zig");
 const message_dispatcher = @import("message_dispatcher.zig");
 
@@ -37,7 +37,7 @@ pub const NetworkCoordinator = struct {
         try network.start(port);
         self.network = network;
 
-        print("🌐 ZeiCoin network started on port {}\n", .{port});
+        log.info("ZeiCoin network started on port {}", .{port});
     }
 
     /// Stop networking
@@ -50,7 +50,7 @@ pub const NetworkCoordinator = struct {
             // The network threads will naturally die when the process exits
             network.deinit();
             self.allocator.destroy(network);
-            print("🛑 ZeiCoin network stopped\n", .{});
+            log.info("ZeiCoin network stopped", .{});
         }
     }
 
@@ -96,14 +96,14 @@ pub const NetworkCoordinator = struct {
             }
             
             if (sync_peer) |_| {
-                print("🔄 Triggering sync to height {}\n", .{target_height});
+                log.info("Triggering sync to height {}", .{target_height});
                 // Note: Node will handle actual sync through its sync manager
-                print("📡 Sync request sent to peer\n", .{});
+                log.info("Sync request sent to peer", .{});
             } else {
-                print("⚠️ No suitable peer available for sync to height {}\n", .{target_height});
+                log.warn("No suitable peer available for sync to height {}", .{target_height});
             }
         } else {
-            print("❌ Network not started, cannot trigger sync\n", .{});
+            log.warn("Network not started, cannot trigger sync", .{});
             return error.NetworkNotStarted;
         }
     }

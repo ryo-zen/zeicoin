@@ -2,7 +2,7 @@
 // Handles mining thread management and coordination
 
 const std = @import("std");
-const print = std.debug.print;
+const log = std.log.scoped(.mining);
 
 const types = @import("../types/types.zig");
 const key = @import("../crypto/key.zig");
@@ -30,7 +30,7 @@ pub const MiningManager = struct {
 
         self.context.mining_state.active.store(true, .release);
         self.context.mining_state.thread = try std.Thread.spawn(.{}, miningThreadFn, .{ self.context, miner_keypair, self.mining_address });
-        print("⛏️ Mining thread started successfully\n", .{});
+        log.info("⛏️ Mining thread started successfully", .{});
     }
 
     /// Start mining using keypair stored in blockchain (for deferred start after sync)
@@ -55,7 +55,7 @@ pub const MiningManager = struct {
             thread.join();
             self.context.mining_state.thread = null;
         }
-        print("⛏️  Mining thread stopped\n", .{});
+        log.info("⛏️  Mining thread stopped", .{});
     }
 
     /// Mine a single block (public API)
@@ -71,7 +71,7 @@ pub const MiningManager = struct {
 
 /// Mining thread function - runs in background
 pub fn miningThreadFn(ctx: MiningContext, miner_keypair: key.KeyPair, mining_address: types.Address) void {
-    print("⛏️  Mining thread started\n", .{});
+    log.info("⛏️ Mining thread started", .{});
 
     while (ctx.mining_state.active.load(.acquire)) {
         // Lock for checking mempool
@@ -82,15 +82,15 @@ pub fn miningThreadFn(ctx: MiningContext, miner_keypair: key.KeyPair, mining_add
         const min_batch_size = 1; // Mine with at least 1 tx, but prefer batching
         const should_mine = tx_count >= min_batch_size;
         const current_height = ctx.blockchain.getHeight() catch 0;
-        print("🔍 [MINING CHECK] Height {} - mempool has {} transactions, should_mine={}\n", .{ current_height, tx_count, should_mine });
+        log.info("🔍 [MINING CHECK] Height {} - mempool has {} transactions, should_mine={}", .{ current_height, tx_count, should_mine });
 
         if (!should_mine) {
             // Wait for new transactions
-            print("⏳ Mining thread: Waiting for transactions (mempool empty)\n", .{});
-            print("🔐 Mining thread: About to wait on condition variable\n", .{});
+            log.info("⏳ Mining thread: Waiting for transactions (mempool empty)", .{});
+            log.info("🔐 Mining thread: About to wait on condition variable", .{});
             ctx.mining_state.condition.wait(&ctx.mining_state.mutex);
-            print("👀 Mining thread: Woke up from condition wait\n", .{});
-            print("🔍 Mining thread: Rechecking mempool after wake - has {} transactions\n", .{ctx.mempool_manager.getTransactionCount()});
+            log.info("👀 Mining thread: Woke up from condition wait", .{});
+            log.info("🔍 Mining thread: Rechecking mempool after wake - has {} transactions", .{ctx.mempool_manager.getTransactionCount()});
             // Unlock before continuing to avoid double-lock
             ctx.mining_state.mutex.unlock();
             continue;
@@ -98,18 +98,18 @@ pub fn miningThreadFn(ctx: MiningContext, miner_keypair: key.KeyPair, mining_add
 
         // BATCHING: If we have few transactions, wait a bit for more (but not forever)
         if (tx_count == 1) {
-            print("📦 Single transaction, waiting 2 seconds for more to batch...\n", .{});
+            log.info("📦 Single transaction, waiting 2 seconds for more to batch...", .{});
             ctx.mining_state.mutex.unlock();
             std.time.sleep(2 * std.time.ns_per_s); // Wait 2 seconds for more transactions
 
             // Re-check mempool count after delay
             const new_tx_count = ctx.mempool_manager.getTransactionCount();
             if (new_tx_count == 1) {
-                print("⏰ Timeout reached, mining single transaction...\n", .{});
+                log.info("⏰ Timeout reached, mining single transaction...", .{});
                 // Continue to mine the single transaction after timeout
                 // Note: mutex is already unlocked, so we DON'T unlock again below
             } else {
-                print("📦 Found {} transactions after batching delay\n", .{new_tx_count});
+                log.info("📦 Found {} transactions after batching delay", .{new_tx_count});
                 continue; // Re-check with more transactions
             }
         } else {
@@ -121,25 +121,25 @@ pub fn miningThreadFn(ctx: MiningContext, miner_keypair: key.KeyPair, mining_add
         ctx.mining_state.current_height.store(current_height, .release);
 
         // Mine the block
-        print("🔨 Mining thread: Calling zenMineBlock (mempool has {} transactions)\n", .{ctx.mempool_manager.getTransactionCount()});
+        log.info("🔨 Mining thread: Calling zenMineBlock (mempool has {} transactions)", .{ctx.mempool_manager.getTransactionCount()});
         const block = core.zenMineBlock(ctx, miner_keypair, mining_address) catch |err| {
-            print("❌ [MINING ERROR] Height {} - {}\n", .{ current_height, err });
+            log.info("❌ [MINING ERROR] Height {} - {}", .{ current_height, err });
             std.time.sleep(1 * std.time.ns_per_s); // Wait 1 second before retry
             continue;
         };
 
         // Successfully mined - the block is already added to chain in zenMineBlock
         const block_height = ctx.blockchain.getHeight() catch 0;
-        print("✅ Block #{} mined by background thread\n", .{block_height});
+        log.info("✅ Block #{} mined by background thread", .{block_height});
 
         // Broadcast block to network peers
         if (ctx.network) |net_mgr| {
             net_mgr.broadcastBlock(block) catch |err| {
-                print("⚠️  Failed to broadcast block: {}\n", .{err});
+                log.info("⚠️  Failed to broadcast block: {}", .{err});
             };
-            print("📡 Block broadcasted to {} peers\n", .{net_mgr.getConnectedPeerCount()});
+            log.info("📡 Block broadcasted to {} peers", .{net_mgr.getConnectedPeerCount()});
         }
     }
 
-    print("⛏️  Mining thread stopped\n", .{});
+    log.info("⛏️  Mining thread stopped", .{});
 }

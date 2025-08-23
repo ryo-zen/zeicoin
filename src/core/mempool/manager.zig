@@ -8,7 +8,7 @@ const util = @import("../util/util.zig");
 const net = @import("../network/peer.zig");
 const ChainState = @import("../chain/state.zig").ChainState;
 
-const print = std.debug.print;
+const log = std.log.scoped(.mempool);
 
 // Import mempool components
 const MempoolStorage = @import("pool.zig").MempoolStorage;
@@ -114,7 +114,7 @@ pub const MempoolManager = struct {
         const recipient_bech32 = transaction.recipient.toBech32(self.allocator, types.CURRENT_NETWORK) catch "invalid";
         defer if (!std.mem.eql(u8, recipient_bech32, "invalid")) self.allocator.free(recipient_bech32);
         
-        print("🔄 [TX LIFECYCLE] Received transaction {s} from {s} → {s}: {d:.8} ZEI (fee: {d:.8}, nonce: {})\n", .{
+        log.info("🔄 [TX LIFECYCLE] Received transaction {s} from {s} → {s}: {d:.8} ZEI (fee: {d:.8}, nonce: {})", .{
             std.fmt.fmtSliceHexLower(tx_hash[0..8]), sender_bech32, recipient_bech32, amount_zei, fee_zei, transaction.nonce
         });
         
@@ -125,13 +125,13 @@ pub const MempoolManager = struct {
             switch (result.reason) {
                 .accepted => {}, // This shouldn't happen when !result.accepted, but required for completeness
                 .duplicate_in_mempool => {
-                    print("❌ [TX LIFECYCLE] Transaction {s} REJECTED: duplicate in mempool\n", .{std.fmt.fmtSliceHexLower(reject_tx_hash[0..8])});
+                    log.info("❌ [TX LIFECYCLE] Transaction {s} REJECTED: duplicate in mempool", .{std.fmt.fmtSliceHexLower(reject_tx_hash[0..8])});
                     return error.DuplicateTransaction;
                 },
                 .validation_failed => {
                     // Check if we have a specific validation error
                     if (result.validation_error) |validation_error| {
-                        print("❌ [TX LIFECYCLE] Transaction {s} REJECTED: validation failed ({})\n", .{std.fmt.fmtSliceHexLower(reject_tx_hash[0..8]), validation_error});
+                        log.info("❌ [TX LIFECYCLE] Transaction {s} REJECTED: validation failed ({})", .{std.fmt.fmtSliceHexLower(reject_tx_hash[0..8]), validation_error});
                         switch (validation_error) {
                             error.InsufficientBalance => return error.InsufficientBalance,
                             error.FeeTooLow => return error.FeeTooLow,
@@ -140,11 +140,11 @@ pub const MempoolManager = struct {
                             else => return error.InvalidTransaction,
                         }
                     }
-                    print("❌ [TX LIFECYCLE] Transaction {s} REJECTED: validation failed (unknown)\n", .{std.fmt.fmtSliceHexLower(reject_tx_hash[0..8])});
+                    log.info("❌ [TX LIFECYCLE] Transaction {s} REJECTED: validation failed (unknown)", .{std.fmt.fmtSliceHexLower(reject_tx_hash[0..8])});
                     return error.InvalidTransaction;
                 },
                 .mempool_limits_exceeded => {
-                    print("❌ [TX LIFECYCLE] Transaction {s} REJECTED: mempool full\n", .{std.fmt.fmtSliceHexLower(reject_tx_hash[0..8])});
+                    log.info("❌ [TX LIFECYCLE] Transaction {s} REJECTED: mempool full", .{std.fmt.fmtSliceHexLower(reject_tx_hash[0..8])});
                     return error.MempoolFull;
                 },
             }
@@ -152,11 +152,11 @@ pub const MempoolManager = struct {
         
         const accept_tx_hash = transaction.hash();
         const mempool_size = self.getTransactionCount();
-        print("✅ [TX LIFECYCLE] Transaction {s} ACCEPTED and added to mempool (size: {})\n", .{std.fmt.fmtSliceHexLower(accept_tx_hash[0..8]), mempool_size});
+        log.info("✅ [TX LIFECYCLE] Transaction {s} ACCEPTED and added to mempool (size: {})", .{std.fmt.fmtSliceHexLower(accept_tx_hash[0..8]), mempool_size});
         
         // Signal mining thread if available
         if (self.mining_state) |mining_state| {
-            print("🔔 Broadcasting to mining thread\\n", .{});
+            log.info("🔔 Broadcasting to mining thread", .{});
             mining_state.condition.broadcast();
         }
         
@@ -278,38 +278,38 @@ pub const MempoolManager = struct {
                     // Deep copy transaction to transfer ownership to mempool
                     const tx_copy = tx.dupe(self.allocator) catch |err| switch (err) {
                         error.OutOfMemory => {
-                            print("⚠️  Out of memory restoring orphaned transaction - skipping\n", .{});
+                            log.info("⚠️  Out of memory restoring orphaned transaction - skipping", .{});
                             continue;
                         },
                     };
                     
                     // Add to mempool with proper error handling
                     if (self.addTransaction(tx_copy)) {
-                        print("🔄 Orphaned transaction restored to mempool\n", .{});
+                        log.info("🔄 Orphaned transaction restored to mempool", .{});
                     } else |err| switch (err) {
                         error.DuplicateTransaction => {
                             // Transaction already in mempool, clean up our copy
                             tx_copy.deinit(self.allocator);
-                            print("🔄 Orphaned transaction already in mempool - skipping\n", .{});
+                            log.info("🔄 Orphaned transaction already in mempool - skipping", .{});
                         },
                         error.InsufficientBalance, error.FeeTooLow, error.InvalidNonce, error.TransactionExpired, error.InvalidTransaction => {
                             // Transaction no longer valid, clean up our copy
                             tx_copy.deinit(self.allocator);
-                            print("❌ Orphaned transaction validation failed - discarded\n", .{});
+                            log.info("❌ Orphaned transaction validation failed - discarded", .{});
                         },
                         error.MempoolFull => {
                             // Mempool is full, clean up our copy
                             tx_copy.deinit(self.allocator);
-                            print("⚠️  Mempool full - cannot restore orphaned transaction\n", .{});
+                            log.info("⚠️  Mempool full - cannot restore orphaned transaction", .{});
                         },
                         else => {
                             // Unexpected error, clean up our copy and continue
                             tx_copy.deinit(self.allocator);
-                            print("⚠️  Error restoring orphaned transaction - skipping\n", .{});
+                            log.info("⚠️  Error restoring orphaned transaction - skipping", .{});
                         },
                     }
                 } else {
-                    print("❌ Orphaned transaction no longer valid - discarded\n", .{});
+                    log.info("❌ Orphaned transaction no longer valid - discarded", .{});
                 }
             }
         }
@@ -318,7 +318,7 @@ pub const MempoolManager = struct {
     /// Clear all transactions from mempool
     pub fn clearMempool(self: *Self) void {
         self.storage.clearPool();
-        print("🧹 Mempool cleared\\n", .{});
+        log.info("🧹 Mempool cleared", .{});
     }
 
     /// Get comprehensive mempool statistics
@@ -354,27 +354,27 @@ pub const MempoolManager = struct {
         const stats = self.getStats();
         const limits_config = self.limits.getLimits();
         
-        print("\\n📊 Mempool Status:\\n", .{});
-        print("   Transactions: {}/{} ({:.1}% full)\\n", .{
+        log.info("📊 Mempool Status:", .{});
+        log.info("   Transactions: {}/{} ({:.1}% full)", .{
             stats.transaction_count,
             limits_config.max_transactions,
             stats.utilization_percent
         });
-        print("   Size: {} bytes / {} bytes\\n", .{
+        log.info("   Size: {} bytes / {} bytes", .{
             stats.total_size_bytes,
             limits_config.max_size_bytes
         });
-        print("   Average TX size: {} bytes\\n", .{stats.average_tx_size});
-        print("   Network: {} received, {} broadcast, {} rejected\\n", .{
+        log.info("   Average TX size: {} bytes", .{stats.average_tx_size});
+        log.info("   Network: {} received, {} broadcast, {} rejected", .{
             stats.network_received,
             stats.network_broadcast,
             stats.network_rejected
         });
-        print("   Maintenance: {} cleanups, {} transactions cleaned\\n", .{
+        log.info("   Maintenance: {} cleanups, {} transactions cleaned", .{
             stats.total_cleanups,
             stats.transactions_cleaned
         });
-        print("\\n", .{});
+        log.info("", .{});
     }
 };
 

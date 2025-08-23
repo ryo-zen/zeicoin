@@ -7,7 +7,7 @@ const types = @import("../types/types.zig");
 const command_line = @import("../server/command_line.zig");
 const ip_detection = @import("ip_detection.zig");
 
-const print = std.debug.print;
+const log = std.log.scoped(.network);
 
 // Re-export the modular components
 pub const protocol = @import("protocol/protocol.zig");

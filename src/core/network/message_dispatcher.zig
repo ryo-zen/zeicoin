@@ -1,5 +1,5 @@
 const std = @import("std");
-const print = std.debug.print;
+const log = std.log.scoped(.message_handler);
 
 const types = @import("../types/types.zig");
 const net = @import("peer.zig");
@@ -37,31 +37,31 @@ pub const MessageDispatcher = struct {
     
     /// Handle incoming block from network peer (delegates to block processor)
     pub fn handleIncomingBlock(self: *Self, block: Block, peer: ?*net.Peer) !void {
-        print("🔧 [MESSAGE HANDLER] handleIncomingBlock() ENTRY - calling block processor\n", .{});
+        log.debug("handleIncomingBlock() ENTRY - calling block processor", .{});
         const result = try self.block_processor.processIncomingBlock(block, peer);
-        print("🔧 [MESSAGE HANDLER] Block processor returned result: {}\n", .{result});
+        log.debug("Block processor returned result: {}", .{result});
         
         // Handle post-processing actions based on result
         switch (result) {
             .accepted, .reorganized => {
                 // Block was successfully processed - network coordinator will handle broadcasting
-                print("✅ Block processing completed with result: {}\n", .{result});
+                log.info("Block processing completed with result: {}", .{result});
             },
             .stored_as_orphan => {
                 // Orphan handling is managed by block processor
-                print("🔀 Block stored as orphan for future processing\n", .{});
+                log.info("Block stored as orphan for future processing", .{});
             },
             .stored_as_sidechain => {
                 // Side chain handling is managed by block processor
-                print("📦 Block stored in side chain\n", .{});
+                log.info("Block stored in side chain", .{});
             },
             .ignored => {
                 // Already seen blocks are gracefully ignored
-                print("🌊 Block already known - gracefully ignored\n", .{});
+                log.debug("Block already known - gracefully ignored", .{});
             },
             .rejected => {
                 // Invalid blocks are rejected
-                print("❌ Block rejected due to validation failure\n", .{});
+                log.warn("Block rejected due to validation failure", .{});
             },
         }
     }
@@ -70,14 +70,14 @@ pub const MessageDispatcher = struct {
     pub fn handleIncomingTransaction(self: *Self, transaction: Transaction, peer: ?*net.Peer) !void {
         // Log peer info if available
         if (peer) |p| {
-            print("💰 Transaction received from peer {}\n", .{p.id});
+            log.info("Transaction received from peer {}", .{p.id});
         } else {
-            print("💰 Transaction received from network peer\n", .{});
+            log.info("Transaction received from network peer", .{});
         }
         
         // Forward to blockchain's transaction handler
         try self.blockchain.handleIncomingTransaction(transaction);
-        print("✅ Transaction processed successfully\n", .{});
+        log.info("Transaction processed successfully", .{});
     }
     
     /// Handle request for block hash at specific height
@@ -87,7 +87,7 @@ pub const MessageDispatcher = struct {
         
         // Check if we have the block at this height
         const chain_height = chain.getChainHeight() catch |err| {
-            print("⚠️ Error getting chain height: {}\n", .{err});
+            log.warn("Error getting chain height: {}", .{err});
             return null;
         };
         
@@ -98,7 +98,7 @@ pub const MessageDispatcher = struct {
         
         // Get the block at this height and return its hash
         const block = chain.getBlockAtHeight(height) catch |err| {
-            print("⚠️ Error getting block at height {}: {}\n", .{ height, err });
+            log.warn("Error getting block at height {}: {}", .{ height, err });
             return null;
         };
         
@@ -165,7 +165,7 @@ pub const MessageDispatcher = struct {
 
         // Safety check: prevent very deep reorganizations
         if (self.blockchain.fork_manager.isReorgTooDeep(current_height, new_chain_state.tip_height)) {
-            print("❌ Reorganization too deep ({} -> {}) - rejected for safety\n", .{ current_height, new_chain_state.tip_height });
+            log.err("Reorganization too deep ({} -> {}) - rejected for safety", .{ current_height, new_chain_state.tip_height });
             return;
         }
 
@@ -174,13 +174,13 @@ pub const MessageDispatcher = struct {
         else 
             new_chain_state.tip_height - current_height;
             
-        print("🔄 Starting reorganization: {} -> {} (depth: {})\n", .{ current_height, new_chain_state.tip_height, reorg_depth });
+        log.info("Starting reorganization: {} -> {} (depth: {})", .{ current_height, new_chain_state.tip_height, reorg_depth });
 
         // Find common ancestor and perform reorganization
         const common_ancestor_height = try self.findCommonAncestor(new_chain_state.tip_hash);
         
         if (common_ancestor_height == 0) {
-            print("⚠️ Deep reorganization required - rebuilding from genesis\n", .{});
+            log.warn("Deep reorganization required - rebuilding from genesis", .{});
         }
 
         try self.blockchain.rollbackToHeight(common_ancestor_height);
@@ -189,7 +189,7 @@ pub const MessageDispatcher = struct {
         // Update fork manager
         self.blockchain.fork_manager.updateChain(0, new_chain_state);
 
-        print("✅ Reorganization complete! New chain tip: {s}\n", .{std.fmt.fmtSliceHexLower(new_chain_state.tip_hash[0..8])});
+        log.info("Reorganization complete! New chain tip: {s}", .{std.fmt.fmtSliceHexLower(new_chain_state.tip_hash[0..8])});
     }
     
     /// Find common ancestor between current chain and new chain (private helper)

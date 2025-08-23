@@ -2,7 +2,7 @@
 // Handles block processing, application, and chain updates
 
 const std = @import("std");
-const print = std.debug.print;
+const log = std.log.scoped(.chain);
 const types = @import("../types/types.zig");
 const db = @import("../storage/db.zig");
 const util = @import("../util/util.zig");
@@ -56,16 +56,16 @@ pub const ChainProcessor = struct {
 
         // Check if block already exists to prevent double-processing during sync replay
         if (self.database.blockExistsByHeight(height)) {
-            print("🔄 [SYNC DEDUP] Block #{} already exists, skipping processing to prevent double-spend\n", .{height});
+            log.info("🔄 [SYNC DEDUP] Block #{} already exists, skipping processing to prevent double-spend", .{height});
             return; // Skip processing but don't error - this is expected during crash recovery
         }
 
         const block_hash = block.hash();
-        print("📦 [BLOCK PROCESS] Block #{} received with {} transactions (hash: {s})\n", .{ height, block.txCount(), std.fmt.fmtSliceHexLower(block_hash[0..8]) });
+        log.info("📦 [BLOCK PROCESS] Block #{} received with {} transactions (hash: {s})", .{ height, block.txCount(), std.fmt.fmtSliceHexLower(block_hash[0..8]) });
 
         // SAFETY: Check transaction array bounds
         if (block.transactions.len > 10000) { // Reasonable upper limit
-            print("❌ [SAFETY] Block has too many transactions: {}\n", .{block.transactions.len});
+            log.info("❌ [SAFETY] Block has too many transactions: {}", .{block.transactions.len});
             return error.TooManyTransactions;
         }
 
@@ -88,7 +88,7 @@ pub const ChainProcessor = struct {
         // Chain state tracking moved to modern reorganization system
         // Fork manager updateBestChain call removed - handled by ChainState
 
-        print("✅ Block #{} added to chain ({} txs)\n", .{ height, block.txCount() });
+        log.info("✅ Block #{} added to chain ({} txs)", .{ height, block.txCount() });
     }
 
     /// Apply a valid block to the blockchain (internal)
@@ -112,7 +112,7 @@ pub const ChainProcessor = struct {
         // Remove processed transactions from mempool
         self.cleanMempool(block);
 
-        print("📊 [BLOCK APPLY] Block applied at height {}, database now has {} blocks\n", .{ block_height, try self.database.getHeight() });
+        log.info("📊 [BLOCK APPLY] Block applied at height {}, database now has {} blocks", .{ block_height, try self.database.getHeight() });
     }
 
     /// Accept a block after validation (used in reorganization)
@@ -122,7 +122,7 @@ pub const ChainProcessor = struct {
         // Special case: if we're at height 0 (after rollback to genesis) and the incoming block
         // is not a genesis block, we need to save it at height 1, not height 0
         const target_height = if (current_height == 0 and !genesis.validateGenesis(block)) blk: {
-            print("🔄 Accepting non-genesis block after rollback - placing at height 1\n", .{});
+            log.info("🔄 Accepting non-genesis block after rollback - placing at height 1", .{});
             break :blk @as(u32, 1);
         } else current_height;
 
@@ -142,7 +142,7 @@ pub const ChainProcessor = struct {
         try self.chain_state.indexBlock(target_height, block_hash);
 
         const old_height = self.chain_state.getHeight() catch 0;
-        print("📦 [BLOCK PROCESS] Block #{} accepted - chain height: {} → {}\n", .{ target_height, old_height, target_height });
+        log.info("📦 [BLOCK PROCESS] Block #{} accepted - chain height: {} → {}", .{ target_height, old_height, target_height });
 
         // Broadcast to network if callback is set
         if (self.network_callback) |callback| {
@@ -156,14 +156,14 @@ pub const ChainProcessor = struct {
     fn processBlockTransactions(self: *ChainProcessor, transactions: []const types.Transaction, height: u32) !void {
         // SAFETY: Check for valid transactions array
         if (transactions.len == 0) {
-            print("⚠️ [SAFETY] Block has no transactions at height {}\n", .{height});
+            log.info("⚠️ [SAFETY] Block has no transactions at height {}", .{height});
             return; // Empty block is valid
         }
 
         for (transactions, 0..) |tx, i| {
             // SAFETY: Check transaction bounds and validity
             if (i >= transactions.len) {
-                print("❌ [SAFETY] Transaction index {} >= array length {}\n", .{ i, transactions.len });
+                log.info("❌ [SAFETY] Transaction index {} >= array length {}", .{ i, transactions.len });
                 return error.TransactionIndexOutOfBounds;
             }
 
@@ -174,11 +174,11 @@ pub const ChainProcessor = struct {
             defer if (!std.mem.eql(u8, sender_addr, "<invalid>")) self.allocator.free(sender_addr);
             const recipient_addr = bech32.encodeAddress(self.allocator, tx.recipient, types.CURRENT_NETWORK) catch "<invalid>";
             defer if (!std.mem.eql(u8, recipient_addr, "<invalid>")) self.allocator.free(recipient_addr);
-            print("📦 [BLOCK PROCESS] Processing transaction {}/{}: {s} ({d:.8} ZEI from {s} to {s})\n", .{ i + 1, transactions.len, std.fmt.fmtSliceHexLower(tx_hash[0..8]), amount_zei, sender_addr, recipient_addr });
+            log.info("📦 [BLOCK PROCESS] Processing transaction {}/{}: {s} ({d:.8} ZEI from {s} to {s})", .{ i + 1, transactions.len, std.fmt.fmtSliceHexLower(tx_hash[0..8]), amount_zei, sender_addr, recipient_addr });
 
             // SAFETY: Validate transaction structure before processing
             if (!tx.isValid()) {
-                print("❌ [SAFETY] Invalid transaction {} in block at height {}\n", .{ i, height });
+                log.info("❌ [SAFETY] Invalid transaction {} in block at height {}", .{ i, height });
                 return error.InvalidTransaction;
             }
 
@@ -201,19 +201,19 @@ pub const ChainProcessor = struct {
     fn cleanMempool(self: *ChainProcessor, block: types.Block) void {
         if (self.mempool_manager) |mempool| {
             mempool.cleanAfterBlock(block) catch |err| {
-                print("⚠️  Mempool cleanup failed: {}\n", .{err});
+                log.info("⚠️  Mempool cleanup failed: {}", .{err});
                 // Continue processing - mempool cleanup failure shouldn't stop block processing
             };
-            print("🧹 Mempool cleaned after block processing\n", .{});
+            log.info("🧹 Mempool cleaned after block processing", .{});
         } else {
-            print("🧹 No mempool manager - cleanup skipped\n", .{});
+            log.info("🧹 No mempool manager - cleanup skipped", .{});
         }
     }
 
     fn estimateCumulativeWork(self: *ChainProcessor, height: u32) !types.ChainWork {
         // SAFETY: Check for reasonable height bounds
         if (height > 1000000) { // Sanity check - 1M blocks
-            print("❌ [SAFETY] Height {} too large for cumulative work calculation\n", .{height});
+            log.info("❌ [SAFETY] Height {} too large for cumulative work calculation", .{height});
             return 0;
         }
 
@@ -221,13 +221,13 @@ pub const ChainProcessor = struct {
         for (0..height + 1) |h| {
             var block = self.database.getBlock(@intCast(h)) catch {
                 // Skip missing blocks instead of crashing
-                print("⚠️ [SAFETY] Missing block at height {} during work calculation\n", .{h});
+                log.info("⚠️ [SAFETY] Missing block at height {} during work calculation", .{h});
                 continue;
             };
 
             // SAFETY: Ensure block is valid before accessing header
             if (!block.isValid()) {
-                print("⚠️ [SAFETY] Invalid block at height {} during work calculation\n", .{h});
+                log.info("⚠️ [SAFETY] Invalid block at height {} during work calculation", .{h});
                 block.deinit(self.allocator);
                 continue;
             }

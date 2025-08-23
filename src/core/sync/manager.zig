@@ -13,7 +13,7 @@
 // - Fallback to sequential sync for legacy peer compatibility
 
 const std = @import("std");
-const print = std.debug.print;
+const log = std.log.scoped(.sync);
 
 const types = @import("../types/types.zig");
 const net = @import("../network/peer.zig");
@@ -86,7 +86,7 @@ pub const SyncManager = struct {
 
     /// Initialize the ZSP-001 sync manager
     pub fn init(allocator: Allocator, blockchain: *ZeiCoin) !Self {
-        print("🚀 [SYNC MANAGER] Initializing ZSP-001 synchronization manager\n", .{});
+        log.info("Initializing ZSP-001 synchronization manager", .{});
 
         // Set global blockchain reference for dependency injection functions
         g_blockchain = blockchain;
@@ -102,7 +102,7 @@ pub const SyncManager = struct {
         // Initialize batch sync protocol
         const batch_sync = BatchSyncProtocol.init(allocator, batch_context);
 
-        print("✅ [SYNC MANAGER] ZSP-001 sync manager initialized successfully\n", .{});
+        log.info("ZSP-001 sync manager initialized successfully", .{});
 
         return .{
             .allocator = allocator,
@@ -116,58 +116,58 @@ pub const SyncManager = struct {
 
     /// Clean up sync manager resources
     pub fn deinit(self: *Self) void {
-        print("🧹 [SYNC MANAGER] Cleaning up sync manager resources\n", .{});
+        log.debug("Cleaning up sync manager resources", .{});
 
         self.batch_sync.deinit();
         self.failed_peers.deinit();
 
-        print("✅ [SYNC MANAGER] Sync manager cleanup completed\n", .{});
+        log.debug("Sync manager cleanup completed", .{});
     }
 
     /// Start synchronization with a peer to a target height
     /// Main entry point for blockchain synchronization
     pub fn startSync(self: *Self, peer: *Peer, target_height: u32) !void {
-        print("🚀 [SYNC MANAGER] INITIATING BLOCKCHAIN SYNCHRONIZATION\n", .{});
-        print("📊 [SYNC MANAGER] Session parameters:\n", .{});
-        print("   └─ Target peer: {any}\n", .{peer.address});
-        print("   └─ Target height: {}\n", .{target_height});
-        print("   └─ Current state: {}\n", .{self.sync_state});
-        print("   └─ Failed peers: {}\n", .{self.failed_peers.items.len});
+        log.info("INITIATING BLOCKCHAIN SYNCHRONIZATION", .{});
+        log.info("Session parameters:", .{});
+        log.info("   Target peer: {any}", .{peer.address});
+        log.info("   Target height: {}", .{target_height});
+        log.info("   Current state: {}", .{self.sync_state});
+        log.info("   Failed peers: {}", .{self.failed_peers.items.len});
 
         // Check if sync can be started
-        print("🔍 [SYNC MANAGER] STEP 1: Validating sync state...\n", .{});
+        log.debug("STEP 1: Validating sync state...", .{});
         if (!self.sync_state.canStart()) {
-            print("❌ [SYNC MANAGER] STEP 1 FAILED: Sync cannot be started\n", .{});
-            print("⚠️ [SYNC MANAGER] Current state: {} (expected: idle, failed, or complete)\n", .{self.sync_state});
-            print("🔄 [SYNC MANAGER] Suggestion: Wait for current sync to complete or call stopSync()\n", .{});
+            log.err("STEP 1 FAILED: Sync cannot be started", .{});
+            log.warn("Current state: {} (expected: idle, failed, or complete)", .{self.sync_state});
+            log.info("Suggestion: Wait for current sync to complete or call stopSync()", .{});
             return;
         }
-        print("✅ [SYNC MANAGER] STEP 1 PASSED: Sync state allows new session\n", .{});
+        log.debug("STEP 1 PASSED: Sync state allows new session", .{});
 
         // Validate sync requirements
-        print("🔍 [SYNC MANAGER] STEP 2: Analyzing blockchain state...\n", .{});
+        log.debug("STEP 2: Analyzing blockchain state...", .{});
         const current_height = try getBlockchainHeight();
         const height_diff = if (target_height > current_height)
             target_height - current_height
         else
             0;
 
-        print("📊 [SYNC MANAGER] Blockchain analysis:\n", .{});
-        print("   └─ Current height: {}\n", .{current_height});
-        print("   └─ Target height: {}\n", .{target_height});
-        print("   └─ Height difference: {}\n", .{height_diff});
-        print("   └─ Minimum sync threshold: {}\n", .{SYNC_CONFIG.MIN_SYNC_HEIGHT_DIFF});
+        log.info("Blockchain analysis:", .{});
+        log.info("   Current height: {}", .{current_height});
+        log.info("   Target height: {}", .{target_height});
+        log.info("   Height difference: {}", .{height_diff});
+        log.info("   Minimum sync threshold: {}", .{SYNC_CONFIG.MIN_SYNC_HEIGHT_DIFF});
 
         if (height_diff < SYNC_CONFIG.MIN_SYNC_HEIGHT_DIFF) {
-            print("✅ [SYNC MANAGER] STEP 2 RESULT: Already synchronized\n", .{});
-            print("ℹ️ [SYNC MANAGER] Local height {} >= target height {} (diff: {})\n", .{ current_height, target_height, height_diff });
-            print("🏁 [SYNC MANAGER] No synchronization needed - session complete\n", .{});
+            log.info("STEP 2 RESULT: Already synchronized", .{});
+            log.info("Local height {} >= target height {} (diff: {})", .{ current_height, target_height, height_diff });
+            log.info("No synchronization needed - session complete", .{});
             return;
         }
-        print("✅ [SYNC MANAGER] STEP 2 PASSED: Sync required ({} blocks behind)\n", .{height_diff});
+        log.info("STEP 2 PASSED: Sync required ({} blocks behind)", .{height_diff});
 
         // Ensure genesis block exists before syncing
-        print("🔍 [SYNC MANAGER] STEP 3: Validating genesis block...\n", .{});
+        log.debug("STEP 3: Validating genesis block...", .{});
         if (current_height == 0) {
             // Check if genesis block actually exists in database
             const genesis_exists = blk: {
@@ -177,124 +177,124 @@ pub const SyncManager = struct {
             };
 
             if (!genesis_exists) {
-                print("🌟 [SYNC MANAGER] Creating canonical genesis block...\n", .{});
+                log.info("Creating canonical genesis block...", .{});
                 try self.blockchain.createCanonicalGenesis();
-                print("✅ [SYNC MANAGER] Genesis block created successfully\n", .{});
+                log.info("Genesis block created successfully", .{});
             } else {
-                print("✅ [SYNC MANAGER] Genesis block already exists in database\n", .{});
+                log.debug("Genesis block already exists in database", .{});
             }
         } else {
-            print("✅ [SYNC MANAGER] Genesis block already exists (height > 0)\n", .{});
+            log.debug("Genesis block already exists (height > 0)", .{});
         }
-        print("✅ [SYNC MANAGER] STEP 3 COMPLETED: Genesis validation passed\n", .{});
+        log.debug("STEP 3 COMPLETED: Genesis validation passed", .{});
 
         // Check peer compatibility and select sync method
-        print("🔍 [SYNC MANAGER] STEP 4: Analyzing peer capabilities...\n", .{});
+        log.debug("STEP 4: Analyzing peer capabilities...", .{});
         const supports_batch = sequential.supportsBatchRequests(peer);
-        print("📊 [SYNC MANAGER] Peer capability analysis:\n", .{});
-        print("   └─ Peer address: {any}\n", .{peer.address});
-        print("   └─ Services: 0x{X}\n", .{peer.services});
-        print("   └─ Batch support: {}\n", .{supports_batch});
-        print("   └─ Height: {}\n", .{peer.height});
+        log.info("Peer capability analysis:", .{});
+        log.info("   Peer address: {any}", .{peer.address});
+        log.info("   Services: 0x{X}", .{peer.services});
+        log.info("   Batch support: {}", .{supports_batch});
+        log.info("   Height: {}", .{peer.height});
 
         if (supports_batch) {
-            print("✅ [SYNC MANAGER] STEP 4 RESULT: Using ZSP-001 batch synchronization\n", .{});
-            print("🚀 [SYNC MANAGER] Performance: Up to 50x faster than sequential sync\n", .{});
+            log.info("STEP 4 RESULT: Using ZSP-001 batch synchronization", .{});
+            log.info("Performance: Up to 50x faster than sequential sync", .{});
 
             // Transition sync state
-            print("🔄 [SYNC MANAGER] STATE TRANSITION: {} → syncing\n", .{self.sync_state});
+            log.debug("STATE TRANSITION: {} → syncing", .{self.sync_state});
             const old_state = self.sync_state;
             self.sync_state = .syncing;
-            print("✅ [SYNC MANAGER] State transition completed: {} → {}\n", .{ old_state, self.sync_state });
+            log.debug("State transition completed: {} → {}", .{ old_state, self.sync_state });
 
             // Start ZSP-001 batch synchronization
-            print("🔍 [SYNC MANAGER] STEP 5: Delegating to ZSP-001 batch sync...\n", .{});
+            log.debug("STEP 5: Delegating to ZSP-001 batch sync...", .{});
             try self.batch_sync.startSync(peer, target_height);
-            print("✅ [SYNC MANAGER] STEP 5 COMPLETED: ZSP-001 batch sync activated\n", .{});
+            log.info("STEP 5 COMPLETED: ZSP-001 batch sync activated", .{});
         } else {
-            print("❌ [SYNC MANAGER] STEP 4 RESULT: Peer lacks batch sync capabilities\n", .{});
-            print("🔄 [SYNC MANAGER] Falling back to sequential synchronization\n", .{});
-            print("⚠️ [SYNC MANAGER] Performance: Standard speed (up to 50x slower than batch)\n", .{});
+            log.warn("STEP 4 RESULT: Peer lacks batch sync capabilities", .{});
+            log.info("Falling back to sequential synchronization", .{});
+            log.warn("Performance: Standard speed (up to 50x slower than batch)", .{});
 
             // Transition sync state for sequential mode
-            print("🔄 [SYNC MANAGER] STATE TRANSITION: {} → syncing (sequential)\n", .{self.sync_state});
+            log.debug("STATE TRANSITION: {} → syncing (sequential)", .{self.sync_state});
             const old_state = self.sync_state;
             self.sync_state = .syncing;
-            print("✅ [SYNC MANAGER] State transition completed: {} → {}\n", .{ old_state, self.sync_state });
+            log.debug("State transition completed: {} → {}", .{ old_state, self.sync_state });
 
             // Use sequential sync utilities for legacy peers
-            print("🔍 [SYNC MANAGER] STEP 5: Starting sequential sync fallback...\n", .{});
+            log.debug("STEP 5: Starting sequential sync fallback...", .{});
             try self.startSequentialSync(peer, target_height);
-            print("✅ [SYNC MANAGER] STEP 5 COMPLETED: Sequential sync activated\n", .{});
+            log.info("STEP 5 COMPLETED: Sequential sync activated", .{});
         }
 
         // Initialize state persistence
-        print("🔍 [SYNC MANAGER] STEP 6: Initializing state persistence...\n", .{});
+        log.debug("STEP 6: Initializing state persistence...", .{});
         self.last_state_save = self.getTime();
-        print("✅ [SYNC MANAGER] STEP 6 COMPLETED: State persistence initialized\n", .{});
-        print("📊 [SYNC MANAGER] Next state save: {} seconds\n", .{SYNC_CONFIG.STATE_SAVE_INTERVAL});
+        log.info("STEP 6 COMPLETED: State persistence initialized", .{});
+        log.info("Next state save: {} seconds", .{SYNC_CONFIG.STATE_SAVE_INTERVAL});
 
-        print("🎉 [SYNC MANAGER] SYNCHRONIZATION SESSION SUCCESSFULLY STARTED!\n", .{});
+        log.info("SYNCHRONIZATION SESSION SUCCESSFULLY STARTED!", .{});
     }
 
     /// Handle incoming batch of blocks from ZSP-001 protocol
     pub fn handleBatchBlocks(self: *Self, blocks: []const Block, start_height: u32) !void {
-        print("\n▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n", .{});
-        print("📥 [SYNC MANAGER] PROCESSING ZSP-001 BATCH BLOCKS\n", .{});
-        print("▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n", .{});
+        log.info("=== PROCESSING ZSP-001 BATCH BLOCKS ===", .{});
+        log.info("PROCESSING ZSP-001 BATCH BLOCKS", .{});
+        log.info("=======================================", .{});
 
-        print("📊 [SYNC MANAGER] Batch details:\n", .{});
-        print("   └─ Block count: {} blocks\n", .{blocks.len});
-        print("   └─ Start height: {}\n", .{start_height});
-        print("   └─ End height: {}\n", .{start_height + @as(u32, @intCast(blocks.len)) - 1});
-        print("   └─ Current sync state: {}\n", .{self.sync_state});
-        print("   └─ Progress: {d:.1}%\n", .{self.getProgress()});
+        log.info("Batch details:", .{});
+        log.info("   Block count: {} blocks", .{blocks.len});
+        log.info("   Start height: {}", .{start_height});
+        log.info("   └─ End height: {}", .{start_height + @as(u32, @intCast(blocks.len)) - 1});
+        log.info("   └─ Current sync state: {}", .{self.sync_state});
+        log.info("   └─ Progress: {d:.1}%", .{self.getProgress()});
 
         // CRITICAL: Validate bulk blocks for chain continuity before processing
-        print("🔍 [BULK VALIDATION] Validating batch block continuity...\n", .{});
+        log.info("🔍 [BULK VALIDATION] Validating batch block continuity...", .{});
         if (!try validateBulkBlocks(blocks, start_height, self.blockchain)) {
-            print("❌ [BULK VALIDATION] Batch validation failed - rejecting entire batch\n", .{});
+            log.info("❌ [BULK VALIDATION] Batch validation failed - rejecting entire batch", .{});
             return error.InvalidBatch;
         }
-        print("✅ [BULK VALIDATION] Batch passed validation checks\n", .{});
+        log.info("✅ [BULK VALIDATION] Batch passed validation checks", .{});
 
         // Forward to batch sync protocol for processing
-        print("🔍 [SYNC MANAGER] Delegating to ZSP-001 batch sync protocol...\n", .{});
+        log.info("🔍 [SYNC MANAGER] Delegating to ZSP-001 batch sync protocol...", .{});
         try self.batch_sync.handleBatchBlocks(blocks, start_height);
-        print("✅ [SYNC MANAGER] ZSP-001 protocol processing completed\n", .{});
+        log.info("✅ [SYNC MANAGER] ZSP-001 protocol processing completed", .{});
 
         // Update sync state based on batch sync state
-        print("🔍 [SYNC MANAGER] Synchronizing state with batch sync protocol...\n", .{});
+        log.info("🔍 [SYNC MANAGER] Synchronizing state with batch sync protocol...", .{});
         const old_sync_state = self.sync_state;
         self.sync_state = self.batch_sync.getSyncState();
         if (old_sync_state != self.sync_state) {
-            print("🔄 [SYNC MANAGER] STATE TRANSITION: {} → {}\n", .{ old_sync_state, self.sync_state });
+            log.info("🔄 [SYNC MANAGER] STATE TRANSITION: {} → {}", .{ old_sync_state, self.sync_state });
         } else {
-            print("📊 [SYNC MANAGER] State remains: {}\n", .{self.sync_state});
+            log.info("📊 [SYNC MANAGER] State remains: {}", .{self.sync_state});
         }
 
         // Handle state persistence
-        print("🔍 [SYNC MANAGER] Checking state persistence requirements...\n", .{});
+        log.info("🔍 [SYNC MANAGER] Checking state persistence requirements...", .{});
         try self.handleStatePersistence();
 
-        print("✅ [SYNC MANAGER] BATCH PROCESSING COMPLETED SUCCESSFULLY!\n", .{});
-        print("📊 [SYNC MANAGER] Updated progress: {d:.1}%\n", .{self.getProgress()});
+        log.info("✅ [SYNC MANAGER] BATCH PROCESSING COMPLETED SUCCESSFULLY!", .{});
+        log.info("📊 [SYNC MANAGER] Updated progress: {d:.1}%", .{self.getProgress()});
     }
 
     /// Handle incoming single block (for sequential sync or single block requests)
     pub fn handleSyncBlock(self: *Self, block: *const Block, height: u32) !void {
-        print("📦 [SYNC MANAGER] Handling single sync block at height {}\n", .{height});
+        log.info("📦 [SYNC MANAGER] Handling single sync block at height {}", .{height});
 
         // Validate the block before processing
         if (!try validateBlockBeforeApply(block.*, height)) {
-            print("❌ [SYNC MANAGER] Block validation failed for height {}\n", .{height});
+            log.info("❌ [SYNC MANAGER] Block validation failed for height {}", .{height});
             return error.InvalidBlock;
         }
 
         // Apply block to blockchain directly using the real chain processor
         try self.blockchain.chain_processor.addBlockToChain(block.*, height);
 
-        print("✅ [SYNC MANAGER] Single block {} applied successfully\n", .{height});
+        log.info("✅ [SYNC MANAGER] Single block {} applied successfully", .{height});
 
         // Handle state persistence
         try self.handleStatePersistence();
@@ -312,42 +312,42 @@ pub const SyncManager = struct {
 
         // Handle sync failure recovery
         if (self.sync_state == .failed) {
-            print("🔄 [SYNC MANAGER] Sync failed, attempting peer rotation\n", .{});
+            log.info("🔄 [SYNC MANAGER] Sync failed, attempting peer rotation", .{});
             try self.attemptSyncRecovery();
         }
     }
 
     /// Complete synchronization process
     pub fn completeSync(self: *Self) !void {
-        print("\n🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆\n", .{});
-        print("🎉 [SYNC MANAGER] COMPLETING SYNCHRONIZATION SESSION\n", .{});
-        print("🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆\n", .{});
+        log.info("\n🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆", .{});
+        log.info("🎉 [SYNC MANAGER] COMPLETING SYNCHRONIZATION SESSION", .{});
+        log.info("🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆", .{});
 
-        print("📊 [SYNC MANAGER] Final session statistics:\n", .{});
-        print("   └─ Current state: {}\n", .{self.sync_state});
-        print("   └─ Progress: {d:.1}%\n", .{self.getProgress()});
-        print("   └─ Failed peers handled: {}\n", .{self.failed_peers.items.len});
-        print("   └─ Session duration: {} seconds\n", .{self.getTime() - self.last_state_save});
+        log.info("📊 [SYNC MANAGER] Final session statistics:", .{});
+        log.info("   └─ Current state: {}", .{self.sync_state});
+        log.info("   └─ Progress: {d:.1}%", .{self.getProgress()});
+        log.info("   └─ Failed peers handled: {}", .{self.failed_peers.items.len});
+        log.info("   └─ Session duration: {} seconds", .{self.getTime() - self.last_state_save});
 
         // Update sync state
-        print("🔄 [SYNC MANAGER] FINAL STATE TRANSITION: {} → complete\n", .{self.sync_state});
+        log.info("🔄 [SYNC MANAGER] FINAL STATE TRANSITION: {} → complete", .{self.sync_state});
         const old_state = self.sync_state;
         self.sync_state = .complete;
-        print("✅ [SYNC MANAGER] State transition successful: {} → {}\n", .{ old_state, self.sync_state });
+        log.info("✅ [SYNC MANAGER] State transition successful: {} → {}", .{ old_state, self.sync_state });
 
         // Clear failed peers list on successful completion
-        print("🧹 [SYNC MANAGER] Clearing failed peers list ({} entries)...\n", .{self.failed_peers.items.len});
+        log.info("🧹 [SYNC MANAGER] Clearing failed peers list ({} entries)...", .{self.failed_peers.items.len});
         self.failed_peers.clearRetainingCapacity();
-        print("✅ [SYNC MANAGER] Failed peers list cleared\n", .{});
+        log.info("✅ [SYNC MANAGER] Failed peers list cleared", .{});
 
         // Final state cleanup
-        print("🧹 [SYNC MANAGER] Performing final state cleanup...\n", .{});
+        log.info("🧹 [SYNC MANAGER] Performing final state cleanup...", .{});
         self.clearSyncState();
-        print("✅ [SYNC MANAGER] State cleanup completed\n", .{});
+        log.info("✅ [SYNC MANAGER] State cleanup completed", .{});
 
-        print("\n🎊 [SYNC MANAGER] SYNCHRONIZATION COMPLETED SUCCESSFULLY!\n", .{});
-        print("🎊 [SYNC MANAGER] Blockchain is now fully synchronized\n", .{});
-        print("🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆\n", .{});
+        log.info("\n🎊 [SYNC MANAGER] SYNCHRONIZATION COMPLETED SUCCESSFULLY!", .{});
+        log.info("🎊 [SYNC MANAGER] Blockchain is now fully synchronized", .{});
+        log.info("🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆", .{});
     }
 
     /// Get current synchronization progress
@@ -367,17 +367,17 @@ pub const SyncManager = struct {
 
     /// Get detailed sync status for monitoring and debugging
     pub fn reportStatus(self: *const Self) void {
-        print("📊 [SYNC MANAGER] === Sync Status Report ===\n", .{});
-        print("📊 [SYNC MANAGER] State: {}\n", .{self.sync_state});
-        print("📊 [SYNC MANAGER] Progress: {d:.1}%\n", .{self.getProgress()});
-        print("📊 [SYNC MANAGER] Failed peers: {}\n", .{self.failed_peers.items.len});
+        log.info("📊 [SYNC MANAGER] === Sync Status Report ===", .{});
+        log.info("📊 [SYNC MANAGER] State: {}", .{self.sync_state});
+        log.info("📊 [SYNC MANAGER] Progress: {d:.1}%", .{self.getProgress()});
+        log.info("📊 [SYNC MANAGER] Failed peers: {}", .{self.failed_peers.items.len});
 
         // Get detailed batch sync status
         if (self.sync_state.isActive()) {
             self.batch_sync.getStatus();
         }
 
-        print("📊 [SYNC MANAGER] === End Status Report ===\n", .{});
+        log.info("📊 [SYNC MANAGER] === End Status Report ===", .{});
     }
 
     // ========================================================================
@@ -386,7 +386,7 @@ pub const SyncManager = struct {
 
     /// Start sequential sync for legacy peers that don't support batching
     fn startSequentialSync(self: *Self, peer: *Peer, target_height: u32) !void {
-        print("🔄 [SYNC MANAGER] Starting sequential sync for legacy peer\n", .{});
+        log.info("🔄 [SYNC MANAGER] Starting sequential sync for legacy peer", .{});
 
         const current_height = try getBlockchainHeight();
 
@@ -405,20 +405,20 @@ pub const SyncManager = struct {
             const height = current_height + 1 + @as(u32, @intCast(i));
             try applyBlockToBlockchain(block);
 
-            print("✅ [SYNC MANAGER] Sequential block {} applied\n", .{height});
+            log.info("✅ [SYNC MANAGER] Sequential block {} applied", .{height});
         }
 
         self.sync_state = .complete;
-        print("✅ [SYNC MANAGER] Sequential sync completed\n", .{});
+        log.info("✅ [SYNC MANAGER] Sequential sync completed", .{});
     }
 
     /// Attempt to recover from sync failure by trying a different peer
     fn attemptSyncRecovery(self: *Self) !void {
-        print("🔄 [SYNC MANAGER] Attempting sync recovery with peer rotation\n", .{});
+        log.info("🔄 [SYNC MANAGER] Attempting sync recovery with peer rotation", .{});
 
         // Get next available peer
         const new_peer = self.getNextAvailablePeer() orelse {
-            print("❌ [SYNC MANAGER] No peers available for recovery\n", .{});
+            log.info("❌ [SYNC MANAGER] No peers available for recovery", .{});
             return;
         };
 
@@ -427,7 +427,7 @@ pub const SyncManager = struct {
         const target_height = self.blockchain.getTargetHeight() catch current_height;
 
         if (target_height > current_height) {
-            print("🔄 [SYNC MANAGER] Restarting sync with recovery peer\n", .{});
+            log.info("🔄 [SYNC MANAGER] Restarting sync with recovery peer", .{});
             try self.startSync(new_peer, target_height);
         }
     }
@@ -437,19 +437,19 @@ pub const SyncManager = struct {
         const now = self.getTime();
 
         if (now - self.last_state_save >= SYNC_CONFIG.STATE_SAVE_INTERVAL) {
-            print("💾 [SYNC MANAGER] Saving sync state for resume capability\n", .{});
+            log.info("💾 [SYNC MANAGER] Saving sync state for resume capability", .{});
 
             // Save sync state to disk (implementation would be added here)
             // For now, just update timestamp
             self.last_state_save = now;
 
-            print("✅ [SYNC MANAGER] Sync state saved\n", .{});
+            log.info("✅ [SYNC MANAGER] Sync state saved", .{});
         }
     }
 
     /// Clear sync state and temporary files
     fn clearSyncState(self: *Self) void {
-        print("🧹 [SYNC MANAGER] Clearing sync state and temporary files\n", .{});
+        log.info("🧹 [SYNC MANAGER] Clearing sync state and temporary files", .{});
 
         // Clear any temporary sync state files
         // Implementation would go here
@@ -472,7 +472,7 @@ pub const SyncManager = struct {
         if (g_blockchain) |blockchain| {
             return blockchain.database.getHeight() catch 0;
         }
-        print("⚠️ [SYNC MANAGER] No blockchain reference available\n", .{});
+        log.info("⚠️ [SYNC MANAGER] No blockchain reference available", .{});
         return 0;
     }
 
@@ -483,17 +483,17 @@ pub const SyncManager = struct {
             const current_height = blockchain.database.getHeight() catch 0;
             const next_height = current_height + 1;
 
-            print("🔧 [SYNC MANAGER] Applying block to blockchain at height {}\n", .{next_height});
+            log.info("🔧 [SYNC MANAGER] Applying block to blockchain at height {}", .{next_height});
 
             // Apply block using the chain processor
             blockchain.chain_processor.addBlockToChain(block, next_height) catch |err| {
-                print("❌ [SYNC MANAGER] Failed to apply block to chain: {}\n", .{err});
+                log.info("❌ [SYNC MANAGER] Failed to apply block to chain: {}", .{err});
                 return err;
             };
 
-            print("✅ [SYNC MANAGER] Block applied to blockchain successfully at height {}\n", .{next_height});
+            log.info("✅ [SYNC MANAGER] Block applied to blockchain successfully at height {}", .{next_height});
         } else {
-            print("❌ [SYNC MANAGER] No blockchain reference available for applying block\n", .{});
+            log.info("❌ [SYNC MANAGER] No blockchain reference available for applying block", .{});
             return error.NoBlockchainReference;
         }
     }
@@ -502,17 +502,17 @@ pub const SyncManager = struct {
     fn getNextAvailablePeer() ?*Peer {
         // This would be implemented to get the next available peer from peer manager
         // For now, return null
-        print("🔍 [SYNC MANAGER] Getting next available peer (stub implementation)\n", .{});
+        log.info("🔍 [SYNC MANAGER] Getting next available peer (stub implementation)", .{});
         return null;
     }
 
     /// Validate block before applying
     fn validateBlockBeforeApply(block: Block, height: u32) !bool {
-        print("🔍 [SYNC MANAGER] Validating sync block at height {}\n", .{height});
+        log.info("🔍 [SYNC MANAGER] Validating sync block at height {}", .{height});
 
         // 1. Basic block structure validation
         if (!block.isValid()) {
-            print("❌ [SYNC VALIDATION] Block structure invalid\n", .{});
+            log.info("❌ [SYNC VALIDATION] Block structure invalid", .{});
             return false;
         }
 
@@ -521,26 +521,26 @@ pub const SyncManager = struct {
         if (g_blockchain) |blockchain| {
             // Get current blockchain height
             const current_height = blockchain.database.getHeight() catch {
-                print("❌ [SYNC VALIDATION] Failed to get blockchain height\n", .{});
+                log.info("❌ [SYNC VALIDATION] Failed to get blockchain height", .{});
                 return false;
             };
 
-            print("🔍 [SYNC VALIDATION] Current blockchain height: {}, validating block at height: {}\n", .{ current_height, height });
+            log.info("🔍 [SYNC VALIDATION] Current blockchain height: {}, validating block at height: {}", .{ current_height, height });
 
             // For height 1, validate against genesis block (height 0)
             if (height == 1) {
                 const genesis_block = blockchain.database.getBlock(0) catch {
-                    print("❌ [SYNC VALIDATION] Failed to get genesis block\n", .{});
+                    log.info("❌ [SYNC VALIDATION] Failed to get genesis block", .{});
                     return false;
                 };
 
                 const genesis_hash = genesis_block.hash();
                 if (!std.mem.eql(u8, &block.header.previous_hash, &genesis_hash)) {
-                    print("❌ [SYNC VALIDATION] Block 1 previous_hash doesn't match genesis hash\n", .{});
+                    log.info("❌ [SYNC VALIDATION] Block 1 previous_hash doesn't match genesis hash", .{});
                     return false;
                 }
 
-                print("✅ [SYNC VALIDATION] Block 1 hash chain validation passed\n", .{});
+                log.info("✅ [SYNC VALIDATION] Block 1 hash chain validation passed", .{});
                 return true;
             }
 
@@ -548,34 +548,34 @@ pub const SyncManager = struct {
             if (height > 1) {
                 const prev_height = height - 1;
                 const prev_block = blockchain.database.getBlock(prev_height) catch {
-                    print("❌ [SYNC VALIDATION] Failed to get block at height {}\n", .{prev_height});
+                    log.info("❌ [SYNC VALIDATION] Failed to get block at height {}", .{prev_height});
                     return false;
                 };
 
                 const prev_hash = prev_block.hash();
                 if (!std.mem.eql(u8, &block.header.previous_hash, &prev_hash)) {
-                    print("❌ [SYNC VALIDATION] Block {} previous_hash doesn't match block {} hash\n", .{ height, prev_height });
+                    log.info("❌ [SYNC VALIDATION] Block {} previous_hash doesn't match block {} hash", .{ height, prev_height });
                     return false;
                 }
 
-                print("✅ [SYNC VALIDATION] Block {} hash chain validation passed\n", .{height});
+                log.info("✅ [SYNC VALIDATION] Block {} hash chain validation passed", .{height});
                 return true;
             }
         } else {
-            print("❌ [SYNC VALIDATION] No blockchain reference available for validation\n", .{});
+            log.info("❌ [SYNC VALIDATION] No blockchain reference available for validation", .{});
             return false;
         }
 
-        print("✅ [SYNC VALIDATION] Block validation passed for height {}\n", .{height});
+        log.info("✅ [SYNC VALIDATION] Block validation passed for height {}", .{height});
         return true;
     }
 
     /// Validate a batch of blocks for chain continuity (prevents fork issue)
     fn validateBulkBlocks(blocks: []const Block, start_height: u32, blockchain: *ZeiCoin) !bool {
-        print("🔍 [BULK VALIDATION] Validating {} blocks starting at height {}\n", .{ blocks.len, start_height });
+        log.info("🔍 [BULK VALIDATION] Validating {} blocks starting at height {}", .{ blocks.len, start_height });
 
         if (blocks.len == 0) {
-            print("⚠️ [BULK VALIDATION] Empty batch - nothing to validate\n", .{});
+            log.info("⚠️ [BULK VALIDATION] Empty batch - nothing to validate", .{});
             return true;
         }
 
@@ -587,20 +587,20 @@ pub const SyncManager = struct {
                 break :blk true;
             };
             if (!parent_exists) {
-                print("❌ [BULK VALIDATION] Missing parent block at height {}\n", .{start_height - 1});
+                log.info("❌ [BULK VALIDATION] Missing parent block at height {}", .{start_height - 1});
                 return false;
             }
 
             // Get parent block to verify connection
             var parent_block = blockchain.database.getBlock(start_height - 1) catch {
-                print("❌ [BULK VALIDATION] Cannot read parent block at height {}\n", .{start_height - 1});
+                log.info("❌ [BULK VALIDATION] Cannot read parent block at height {}", .{start_height - 1});
                 return false;
             };
             defer parent_block.deinit(blockchain.allocator);
 
             const parent_hash = parent_block.hash();
             if (!std.mem.eql(u8, &blocks[0].header.previous_hash, &parent_hash)) {
-                print("❌ [BULK VALIDATION] First block doesn't connect to parent\n", .{});
+                log.info("❌ [BULK VALIDATION] First block doesn't connect to parent", .{});
                 return false;
             }
         }
@@ -619,15 +619,15 @@ pub const SyncManager = struct {
 
             // Check block connects to previous
             if (!std.mem.eql(u8, &block.header.previous_hash, &prev_hash)) {
-                print("❌ [BULK VALIDATION] Block {} doesn't connect to previous block\n", .{block_height});
-                print("   Expected: {s}\n", .{std.fmt.fmtSliceHexLower(&prev_hash)});
-                print("   Got:      {s}\n", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+                log.info("❌ [BULK VALIDATION] Block {} doesn't connect to previous block", .{block_height});
+                log.info("   Expected: {s}", .{std.fmt.fmtSliceHexLower(&prev_hash)});
+                log.info("   Got:      {s}", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
                 return false;
             }
 
             // Basic validation for each block
             if (!block.isValid()) {
-                print("❌ [BULK VALIDATION] Block {} has invalid structure\n", .{block_height});
+                log.info("❌ [BULK VALIDATION] Block {} has invalid structure", .{block_height});
                 return false;
             }
 
@@ -635,7 +635,7 @@ pub const SyncManager = struct {
             prev_hash = block.hash();
         }
 
-        print("✅ [BULK VALIDATION] All {} blocks form a valid chain\n", .{blocks.len});
+        log.info("✅ [BULK VALIDATION] All {} blocks form a valid chain", .{blocks.len});
         return true;
     }
 
@@ -648,16 +648,16 @@ pub const SyncManager = struct {
             return true;
         }
         
-        print("🔍 [CONSENSUS CHECK] Verifying block consensus at height {} (mode: {s})\n", .{ height, @tagName(mode) });
+        log.info("🔍 [CONSENSUS CHECK] Verifying block consensus at height {} (mode: {s})", .{ height, @tagName(mode) });
 
         // Get network coordinator to access peers
         const network_coordinator = blockchain.network_coordinator orelse {
-            print("⚠️ [CONSENSUS CHECK] No network coordinator available\n", .{});
+            log.info("⚠️ [CONSENSUS CHECK] No network coordinator available", .{});
             return true; // Skip consensus check if no network
         };
 
         const network_manager = network_coordinator.getNetworkManager() orelse {
-            print("⚠️ [CONSENSUS CHECK] No network manager available\n", .{});
+            log.info("⚠️ [CONSENSUS CHECK] No network manager available", .{});
             return true; // Skip consensus check if no network
         };
 
@@ -668,13 +668,13 @@ pub const SyncManager = struct {
         try network_manager.peer_manager.getConnectedPeers(&connected_peers);
 
         if (connected_peers.items.len == 0) {
-            print("⚠️ [CONSENSUS CHECK] No connected peers for consensus verification\n", .{});
+            log.info("⚠️ [CONSENSUS CHECK] No connected peers for consensus verification", .{});
             return true; // Can't verify consensus without peers
         }
 
         const block_hash = block.hash();
-        print("📊 [CONSENSUS CHECK] Checking with {} peers for block at height {}\n", .{ connected_peers.items.len, height });
-        print("📊 [CONSENSUS CHECK] Our block hash: {s}\n", .{std.fmt.fmtSliceHexLower(block_hash[0..8])});
+        log.info("📊 [CONSENSUS CHECK] Checking with {} peers for block at height {}", .{ connected_peers.items.len, height });
+        log.info("📊 [CONSENSUS CHECK] Our block hash: {s}", .{std.fmt.fmtSliceHexLower(block_hash[0..8])});
         
         // Query peers for their block hash at this height
         var responses: u32 = 0;
@@ -695,7 +695,7 @@ pub const SyncManager = struct {
             }
         }
         
-        print("📊 [CONSENSUS CHECK] Received {}/{} responses, {}/{} agreements\n", .{
+        log.info("📊 [CONSENSUS CHECK] Received {}/{} responses, {}/{} agreements", .{
             responses,
             connected_peers.items.len,
             agreements,
@@ -706,10 +706,10 @@ pub const SyncManager = struct {
         if (responses < types.CONSENSUS.min_peer_responses) {
             const msg = "Insufficient peer responses for consensus";
             if (mode == .enforced) {
-                print("❌ [CONSENSUS CHECK] {s} ({}/{} required)\n", .{ msg, responses, types.CONSENSUS.min_peer_responses });
+                log.info("❌ [CONSENSUS CHECK] {s} ({}/{} required)", .{ msg, responses, types.CONSENSUS.min_peer_responses });
                 return false;
             } else {
-                print("⚠️ [CONSENSUS CHECK] {s} ({}/{} required) - proceeding anyway (mode: optional)\n", .{ msg, responses, types.CONSENSUS.min_peer_responses });
+                log.info("⚠️ [CONSENSUS CHECK] {s} ({}/{} required) - proceeding anyway (mode: optional)", .{ msg, responses, types.CONSENSUS.min_peer_responses });
                 return true;
             }
         }
@@ -718,7 +718,7 @@ pub const SyncManager = struct {
         const consensus_ratio = if (responses > 0) @as(f32, @floatFromInt(agreements)) / @as(f32, @floatFromInt(responses)) else 0.0;
         const meets_threshold = consensus_ratio >= types.CONSENSUS.threshold;
         
-        print("📊 [CONSENSUS CHECK] Consensus ratio: {d:.1}% (threshold: {d:.1}%)\n", .{
+        log.info("📊 [CONSENSUS CHECK] Consensus ratio: {d:.1}% (threshold: {d:.1}%)", .{
             consensus_ratio * 100,
             types.CONSENSUS.threshold * 100,
         });
@@ -726,15 +726,15 @@ pub const SyncManager = struct {
         if (!meets_threshold) {
             const msg = "Block consensus threshold not met";
             if (mode == .enforced) {
-                print("❌ [CONSENSUS CHECK] {s}\n", .{msg});
+                log.info("❌ [CONSENSUS CHECK] {s}", .{msg});
                 return false;
             } else {
-                print("⚠️ [CONSENSUS CHECK] {s} - proceeding anyway (mode: optional)\n", .{msg});
+                log.info("⚠️ [CONSENSUS CHECK] {s} - proceeding anyway (mode: optional)", .{msg});
                 return true;
             }
         }
         
-        print("✅ [CONSENSUS CHECK] Block consensus verified\n", .{});
+        log.info("✅ [CONSENSUS CHECK] Block consensus verified", .{});
         return true;
     }
 
@@ -756,7 +756,7 @@ pub const SyncManager = struct {
 
         try self.failed_peers.append(peer);
 
-        print("🚫 [SYNC MANAGER] Added peer to failed list (total: {})\n", .{self.failed_peers.items.len});
+        log.info("🚫 [SYNC MANAGER] Added peer to failed list (total: {})", .{self.failed_peers.items.len});
     }
 
     /// Check if a peer is in the failed peers list
@@ -770,7 +770,7 @@ pub const SyncManager = struct {
     /// Clear failed peers list (typically after successful sync)
     pub fn clearFailedPeers(self: *Self) void {
         self.failed_peers.clearRetainingCapacity();
-        print("🧹 [SYNC MANAGER] Cleared failed peers list\n", .{});
+        log.info("🧹 [SYNC MANAGER] Cleared failed peers list", .{});
     }
 
     // ========================================================================
@@ -779,7 +779,7 @@ pub const SyncManager = struct {
 
     /// Run sync manager test suite
     pub fn runTests(allocator: Allocator) !void {
-        print("🧪 [SYNC MANAGER] Running sync manager test suite\n", .{});
+        log.info("🧪 [SYNC MANAGER] Running sync manager test suite", .{});
 
         // Test basic initialization
         var mock_blockchain: ZeiCoin = undefined; // Would be properly initialized in real tests
@@ -795,7 +795,7 @@ pub const SyncManager = struct {
             return error.ShouldBeIdleInitially;
         }
 
-        print("✅ [SYNC MANAGER] Sync manager tests passed\n", .{});
+        log.info("✅ [SYNC MANAGER] Sync manager tests passed", .{});
     }
 };
 
@@ -815,5 +815,5 @@ pub fn test_syncManager() !void {
     const allocator = gpa.allocator();
 
     try SyncManager.runTests(allocator);
-    print("✅ [SYNC MANAGER] All tests passed successfully\n", .{});
+    log.info("✅ [SYNC MANAGER] All tests passed successfully", .{});
 }

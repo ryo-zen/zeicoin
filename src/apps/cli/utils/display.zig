@@ -2,7 +2,7 @@
 // Formatting, banners, and user interface helpers
 
 const std = @import("std");
-const print = std.debug.print;
+const log = std.log.scoped(.cli);
 
 const zeicoin = @import("zeicoin");
 const util = zeicoin.util;
@@ -10,55 +10,55 @@ const protocol = @import("../client/protocol.zig");
 
 /// Print the ZeiCoin banner
 pub fn printZeiBanner() void {
-    print("\n", .{});
-    print("╔══════════════════════════════════════════════════════════════════════╗\n", .{});
-    print("║                                                                      ║\n", .{});
-    print("║            ███████╗███████╗██╗ ██████╗ ██████╗ ██╗███╗   ██╗         ║\n", .{});
-    print("║            ╚══███╔╝██╔════╝██║██╔════╝██╔═══██╗██║████╗  ██║         ║\n", .{});
-    print("║              ███╔╝ █████╗  ██║██║     ██║   ██║██║██╔██╗ ██║         ║\n", .{});
-    print("║             ███╔╝  ██╔══╝  ██║██║     ██║   ██║██║██║╚██╗██║         ║\n", .{});
-    print("║            ███████╗███████╗██║╚██████╗╚██████╔╝██║██║ ╚████║         ║\n", .{});
-    print("║            ╚══════╝╚══════╝╚═╝ ╚═════╝ ╚═════╝ ╚═╝╚═╝  ╚═══╝         ║\n", .{});
-    print("║                                                                      ║\n", .{});
-    print("║                 🚀 Minimalist Cryptocurrency in Zig 🚀              ║\n", .{});
-    print("║                                                                      ║\n", .{});
-    print("╚══════════════════════════════════════════════════════════════════════╝\n", .{});
-    print("\n", .{});
+    log.info("", .{});
+    log.info("╔══════════════════════════════════════════════════════════════════════╗", .{});
+    log.info("║                                                                      ║", .{});
+    log.info("║            ███████╗███████╗██╗ ██████╗ ██████╗ ██╗███╗   ██╗         ║", .{});
+    log.info("║            ╚══███╔╝██╔════╝██║██╔════╝██╔═══██╗██║████╗  ██║         ║", .{});
+    log.info("║              ███╔╝ █████╗  ██║██║     ██║   ██║██║██╔██╗ ██║         ║", .{});
+    log.info("║             ███╔╝  ██╔══╝  ██║██║     ██║   ██║██║██║╚██╗██║         ║", .{});
+    log.info("║            ███████╗███████╗██║╚██████╗╚██████╔╝██║██║ ╚████║         ║", .{});
+    log.info("║            ╚══════╝╚══════╝╚═╝ ╚═════╝ ╚═════╝ ╚═╝╚═╝  ╚═══╝         ║", .{});
+    log.info("║                                                                      ║", .{});
+    log.info("║                 🚀 Minimalist Cryptocurrency in Zig 🚀              ║", .{});
+    log.info("║                                                                      ║", .{});
+    log.info("╚══════════════════════════════════════════════════════════════════════╝", .{});
+    log.info("", .{});
 }
 
 /// Print help information
 pub fn printHelp() void {
     printZeiBanner();
-    print("WALLET COMMANDS:\n", .{});
-    print("  zeicoin wallet create [name]           # Create new HD wallet with mnemonic\n", .{});
-    print("  zeicoin wallet list                    # List all wallets\n", .{});
-    print("  zeicoin wallet restore <name> <words>  # Restore HD wallet from mnemonic\n", .{});
-    print("  zeicoin wallet derive <name> [index]   # Derive new HD wallet address\n", .{});
-    print("  zeicoin wallet import <genesis>        # Import genesis account (testnet)\n", .{});
-    print("  zeicoin seed <wallet>                  # Display wallet's recovery seed phrase\n", .{});
-    print("  zeicoin mnemonic <wallet>              # Display wallet's recovery seed phrase\n\n", .{});
-    print("TRANSACTION COMMANDS:\n", .{});
-    print("  zeicoin balance [wallet]               # Check wallet balance\n", .{});
-    print("  zeicoin send <amount> <recipient>      # Send ZEI to address or wallet\n", .{});
-    print("  zeicoin history [wallet]               # Show transaction history\n\n", .{});
-    print("NETWORK COMMANDS:\n", .{});
-    print("  zeicoin status                         # Show network status\n", .{});
-    print("  zeicoin status --watch (-w)            # Monitor mining status with live blockchain animation\n", .{});
-    print("  zeicoin sync                           # Trigger manual blockchain sync\n", .{});
-    print("  zeicoin block <height>                 # Inspect block at specific height\n", .{});
-    print("  zeicoin address [wallet] [--index N]   # Show wallet address at index N\n\n", .{});
-    print("EXAMPLES:\n", .{});
-    print("  zeicoin wallet create alice            # Create HD wallet named 'alice'\n", .{});
-    print("  zeicoin wallet restore myhd word1...   # Restore from 24-word mnemonic\n", .{});
-    print("  zeicoin wallet derive myhd             # Get next HD address\n", .{});
-    print("  zeicoin balance alice                  # Check alice's balance (pre-funded)\n", .{});
-    print("  zeicoin send 50 tzei1qr2q...           # Send 50 ZEI to address\n", .{});
-    print("  zeicoin send 50 bob                    # Send 50 ZEI to wallet 'bob'\n", .{});
-    print("  zeicoin status                         # Check network status\n", .{});
-    print("  zeicoin block 6                        # Inspect block at height 6\n\n", .{});
-    print("ENVIRONMENT:\n", .{});
-    print("  ZEICOIN_SERVER=ip                      # Set server IP (default: 127.0.0.1)\n\n", .{});
-    print("💡 Default wallet is 'default' if no name specified\n", .{});
+    log.info("WALLET COMMANDS:", .{});
+    log.info("  zeicoin wallet create [name]           # Create new HD wallet with mnemonic", .{});
+    log.info("  zeicoin wallet list                    # List all wallets", .{});
+    log.info("  zeicoin wallet restore <name> <words>  # Restore HD wallet from mnemonic", .{});
+    log.info("  zeicoin wallet derive <name> [index]   # Derive new HD wallet address", .{});
+    log.info("  zeicoin wallet import <genesis>        # Import genesis account (testnet)", .{});
+    log.info("  zeicoin seed <wallet>                  # Display wallet's recovery seed phrase", .{});
+    log.info("  zeicoin mnemonic <wallet>              # Display wallet's recovery seed phrase\n", .{});
+    log.info("TRANSACTION COMMANDS:", .{});
+    log.info("  zeicoin balance [wallet]               # Check wallet balance", .{});
+    log.info("  zeicoin send <amount> <recipient>      # Send ZEI to address or wallet", .{});
+    log.info("  zeicoin history [wallet]               # Show transaction history\n", .{});
+    log.info("NETWORK COMMANDS:", .{});
+    log.info("  zeicoin status                         # Show network status", .{});
+    log.info("  zeicoin status --watch (-w)            # Monitor mining status with live blockchain animation", .{});
+    log.info("  zeicoin sync                           # Trigger manual blockchain sync", .{});
+    log.info("  zeicoin block <height>                 # Inspect block at specific height", .{});
+    log.info("  zeicoin address [wallet] [--index N]   # Show wallet address at index N\n", .{});
+    log.info("EXAMPLES:", .{});
+    log.info("  zeicoin wallet create alice            # Create HD wallet named 'alice'", .{});
+    log.info("  zeicoin wallet restore myhd word1...   # Restore from 24-word mnemonic", .{});
+    log.info("  zeicoin wallet derive myhd             # Get next HD address", .{});
+    log.info("  zeicoin balance alice                  # Check alice's balance (pre-funded)", .{});
+    log.info("  zeicoin send 50 tzei1qr2q...           # Send 50 ZEI to address", .{});
+    log.info("  zeicoin send 50 bob                    # Send 50 ZEI to wallet 'bob'", .{});
+    log.info("  zeicoin status                         # Check network status", .{});
+    log.info("  zeicoin block 6                        # Inspect block at height 6\n", .{});
+    log.info("ENVIRONMENT:", .{});
+    log.info("  ZEICOIN_SERVER=ip                      # Set server IP (default: 127.0.0.1)\n", .{});
+    log.info("💡 Default wallet is 'default' if no name specified", .{});
 }
 
 /// Display balance information with proper formatting
@@ -73,29 +73,29 @@ pub fn displayBalance(allocator: std.mem.Allocator, wallet_name: []const u8, bal
     const total_display = util.formatZEI(allocator, balance_info.mature + balance_info.immature) catch "? ZEI";
     defer if (!std.mem.eql(u8, total_display, "? ZEI")) allocator.free(total_display);
 
-    print("💰 Wallet '{s}' balance:\n", .{wallet_name});
-    print("   ✅ Mature (spendable): {s}\n", .{mature_display});
+    log.info("💰 Wallet '{s}' balance:", .{wallet_name});
+    log.info("   ✅ Mature (spendable): {s}", .{mature_display});
     if (balance_info.immature > 0) {
-        print("   ⏳ Immature (not spendable): {s}\n", .{immature_display});
-        print("   📊 Total balance: {s}\n", .{total_display});
+        log.info("   ⏳ Immature (not spendable): {s}", .{immature_display});
+        log.info("   📊 Total balance: {s}", .{total_display});
     }
 
     // Show bech32 address (truncated for display)
     if (address.len > 20) {
-        print("🆔 Address: {s}...{s}\n", .{ address[0..16], address[address.len - 4 ..] });
+        log.info("🆔 Address: {s}...{s}", .{ address[0..16], address[address.len - 4 ..] });
     } else {
-        print("🆔 Address: {s}\n", .{address});
+        log.info("🆔 Address: {s}", .{address});
     }
 }
 
 /// Display transaction history with proper formatting
 pub fn displayHistory(allocator: std.mem.Allocator, wallet_name: []const u8, address: []const u8, transactions: []protocol.TransactionInfo) !void {
-    print("📜 Transaction History for '{s}':\n", .{wallet_name});
-    print("💼 Address: {s}\n", .{address});
-    print("📊 Total transactions: {}\n\n", .{transactions.len});
+    log.info("📜 Transaction History for '{s}':", .{wallet_name});
+    log.info("💼 Address: {s}", .{address});
+    log.info("📊 Total transactions: {}\n", .{transactions.len});
     
     if (transactions.len == 0) {
-        print("💡 No transactions found for this wallet\n", .{});
+        log.info("💡 No transactions found for this wallet", .{});
         return;
     }
     
@@ -115,23 +115,23 @@ pub fn displayHistory(allocator: std.mem.Allocator, wallet_name: []const u8, add
         defer if (!std.mem.eql(u8, counterparty_bech32, "invalid")) allocator.free(counterparty_bech32);
         
         // Display transaction
-        print("─────────────────────────────────────────────────────────────\n", .{});
-        print("#{} ", .{tx_num});
+        log.info("─────────────────────────────────────────────────────────────", .{});
+        log.info("#{} ", .{tx_num});
         
         if (std.mem.eql(u8, tx_info.tx_type, "SENT")) {
-            print("📤 SENT {s} to {s}\n", .{amount_display, counterparty_bech32});
+            log.info("📤 SENT {s} to {s}", .{amount_display, counterparty_bech32});
         } else if (std.mem.eql(u8, tx_info.tx_type, "RECEIVED")) {
-            print("📥 RECEIVED {s} from {s}\n", .{amount_display, counterparty_bech32});
+            log.info("📥 RECEIVED {s} from {s}", .{amount_display, counterparty_bech32});
         } else if (std.mem.eql(u8, tx_info.tx_type, "COINBASE")) {
-            print("⛏️  MINED {s} (coinbase reward)\n", .{amount_display});
+            log.info("⛏️  MINED {s} (coinbase reward)", .{amount_display});
         }
         
-        print("   🔗 Block: {} | ✅ Confirmations: {}\n", .{tx_info.height, tx_info.confirmations});
-        print("   💰 Fee: {s} | ⏰ Time: {s}\n", .{fee_display, time_str});
-        print("   🆔 Hash: {}\n", .{std.fmt.fmtSliceHexLower(&tx_info.hash)});
+        log.info("   🔗 Block: {} | ✅ Confirmations: {}", .{tx_info.height, tx_info.confirmations});
+        log.info("   💰 Fee: {s} | ⏰ Time: {s}", .{fee_display, time_str});
+        log.info("   🆔 Hash: {}", .{std.fmt.fmtSliceHexLower(&tx_info.hash)});
     }
     
-    print("─────────────────────────────────────────────────────────────\n", .{});
+    log.info("─────────────────────────────────────────────────────────────", .{});
 }
 
 /// Parse ZEI amount supporting decimals up to 8 places

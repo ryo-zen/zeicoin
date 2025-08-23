@@ -2,6 +2,7 @@
 // Thin coordinator that delegates to specialized modules
 
 const std = @import("std");
+const log = std.log.scoped(.server);
 const command_line = @import("command_line.zig");
 const initialization = @import("initialization.zig");
 const client_api = @import("client_api.zig");
@@ -12,11 +13,11 @@ var running = std.atomic.Value(bool).init(true);
 fn signalHandler(sig: c_int) callconv(.C) void {
     _ = sig;
     running.store(false, .release);
-    std.debug.print("\nReceived Ctrl+C, shutting down gracefully...\n", .{});
+    log.info("\nReceived Ctrl+C, shutting down gracefully...", .{});
     
     // Give a moment for cleanup, then force exit if needed
     std.time.sleep(2 * std.time.ns_per_s);
-    std.debug.print("Force exit after 2 seconds...\n", .{});
+    log.info("Force exit after 2 seconds...", .{});
     std.process.exit(0);
 }
 
@@ -34,7 +35,7 @@ pub fn main() !void {
     @import("../util/dotenv.zig").loadForNetwork(std.heap.page_allocator) catch |err| {
         // Don't fail if .env loading fails, just warn
         if (err != error.FileNotFound) {
-            std.debug.print("⚠️  Warning: Failed to load .env file: {}\n", .{err});
+            log.info("⚠️  Warning: Failed to load .env file: {}", .{err});
         }
     };
     
@@ -147,19 +148,19 @@ pub fn main() !void {
 }
 
 fn printBanner() void {
-    std.debug.print("\n", .{});
-    std.debug.print("╔═══════════════════════════════════════════════════════════════════╗\n", .{});
-    std.debug.print("║                  ⚡ ZeiCoin Node Server ⚡                        ║\n", .{});
-    std.debug.print("║                    Modular Architecture                           ║\n", .{});
-    std.debug.print("╚═══════════════════════════════════════════════════════════════════╝\n", .{});
-    std.debug.print("\n", .{});
+    log.info("", .{});
+    log.info("╔═══════════════════════════════════════════════════════════════════╗", .{});
+    log.info("║                  ⚡ ZeiCoin Node Server ⚡                        ║", .{});
+    log.info("║                    Modular Architecture                           ║", .{});
+    log.info("╚═══════════════════════════════════════════════════════════════════╝", .{});
+    log.info("", .{});
 }
 
 fn startMiningAfterSync(components: *const initialization.NodeComponents) bool {
     if (components.blockchain.mining_manager) |mining_manager| {
         // Get the wallet information that was stored during initialization
         // For now, we'll need to get the keypair from the mining manager
-        std.log.info("⛏️  Starting mining after initial sync completion", .{});
+        log.info("⛏️  Starting mining after initial sync completion", .{});
         
         // The mining manager should already have the keypair from initialization
         // We just need to start the mining process

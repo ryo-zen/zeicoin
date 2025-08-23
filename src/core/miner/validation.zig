@@ -3,7 +3,7 @@
 // Security: Always uses RandomX for consistent validation across all networks
 
 const std = @import("std");
-const print = std.debug.print;
+const log = std.log.scoped(.mining);
 
 const types = @import("../types/types.zig");
 const randomx = @import("../crypto/randomx.zig");
@@ -23,7 +23,7 @@ pub fn validateBlockPoW(ctx: MiningContext, block: types.Block) !bool {
     // Early exit: Check if block claims correct difficulty before expensive RandomX validation
     const difficulty_target = block.header.getDifficultyTarget();
     if (difficulty_target.base_bytes == 0 or difficulty_target.base_bytes > 32) {
-        print("❌ Invalid difficulty target: {} bytes\n", .{difficulty_target.base_bytes});
+        log.warn("❌ Invalid difficulty target: {} bytes", .{difficulty_target.base_bytes});
         return false;
     }
     
@@ -45,7 +45,7 @@ pub fn validateBlockPoW(ctx: MiningContext, block: types.Block) !bool {
     
     // Initialize RandomX context with proper error handling
     var rx_ctx = randomx.RandomXContext.init(ctx.allocator, &hex_key, mode) catch |err| {
-        print("❌ RandomX initialization failed: {}\n", .{err});
+        log.warn("❌ RandomX initialization failed: {}", .{err});
         return false;
     };
     defer rx_ctx.deinit();
@@ -54,7 +54,7 @@ pub fn validateBlockPoW(ctx: MiningContext, block: types.Block) !bool {
     var buffer: [256]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buffer);
     block.header.serialize(stream.writer()) catch |err| {
-        print("❌ Block header serialization failed: {}\n", .{err});
+        log.warn("❌ Block header serialization failed: {}", .{err});
         return false;
     };
     const header_data = stream.getWritten();
@@ -62,7 +62,7 @@ pub fn validateBlockPoW(ctx: MiningContext, block: types.Block) !bool {
     // Calculate RandomX hash with network-appropriate difficulty
     var hash: [32]u8 = undefined;
     rx_ctx.hashWithDifficulty(header_data, &hash, difficulty_target.base_bytes) catch |err| {
-        print("❌ RandomX hash calculation failed: {}\n", .{err});
+        log.warn("❌ RandomX hash calculation failed: {}", .{err});
         return false;
     };
 
@@ -72,7 +72,7 @@ pub fn validateBlockPoW(ctx: MiningContext, block: types.Block) !bool {
     // Optional: Log validation result for debugging
     if (!valid) {
         const hash_hex = std.fmt.fmtSliceHexLower(&hash);
-        print("⚠️ Block hash {} does not meet difficulty target {}\n", .{ hash_hex, difficulty_target.toU64() });
+        log.warn("⚠️ Block hash {} does not meet difficulty target {}", .{ hash_hex, difficulty_target.toU64() });
     }
     
     return valid;

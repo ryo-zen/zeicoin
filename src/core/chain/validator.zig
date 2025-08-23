@@ -10,7 +10,7 @@ const genesis = @import("genesis.zig");
 const miner_mod = @import("../miner/miner.zig");
 const ChainState = @import("state.zig").ChainState;
 
-const print = std.debug.print;
+const log = std.log.scoped(.chain);
 
 // Type aliases for clarity
 const Transaction = types.Transaction;
@@ -74,23 +74,23 @@ pub const ChainValidator = struct {
         // 1. Check if transaction has expired
         const current_height = self.chain_state.getHeight() catch 0;
         if (tx.expiry_height <= current_height) {
-            print("❌ Transaction expired: expiry height {} <= current height {}\n", .{ tx.expiry_height, current_height });
+            log.warn("❌ Transaction expired: expiry height {} <= current height {}", .{ tx.expiry_height, current_height });
             return false;
         }
 
         // 2. Prevent self-transfer (wasteful but not harmful)
         if (tx.sender.equals(tx.recipient)) {
-            print("⚠️ Self-transfer detected (wasteful but allowed)\n", .{});
+            log.warn("⚠️ Self-transfer detected (wasteful but allowed)", .{});
         }
 
         // 3. Check for zero amount (should pay fee only)
         if (tx.amount == 0) {
-            print("💸 Zero amount transaction (fee-only payment)\n", .{});
+            log.warn("💸 Zero amount transaction (fee-only payment)", .{});
         }
 
         // 4. Sanity check for extremely high amounts (overflow protection)
         if (tx.amount > 1000000 * types.ZEI_COIN) { // 1 million ZEI limit
-            print("❌ Transaction amount too high: {} ZEI (max: 1,000,000 ZEI)\n", .{tx.amount / types.ZEI_COIN});
+            log.warn("❌ Transaction amount too high: {} ZEI (max: 1,000,000 ZEI)", .{tx.amount / types.ZEI_COIN});
             return false;
         }
 
@@ -99,13 +99,13 @@ pub const ChainValidator = struct {
 
         // Check nonce (must be next expected nonce)
         if (tx.nonce != sender_account.nextNonce()) {
-            print("❌ Invalid nonce: expected {}, got {}\n", .{ sender_account.nextNonce(), tx.nonce });
+            log.warn("❌ Invalid nonce: expected {}, got {}", .{ sender_account.nextNonce(), tx.nonce });
             return false;
         }
 
         // 💰 Check fee minimum (prevent spam)
         if (tx.fee < types.ZenFees.MIN_FEE) {
-            print("❌ Fee too low: {} zei, minimum {} zei\n", .{ tx.fee, types.ZenFees.MIN_FEE });
+            log.warn("❌ Fee too low: {} zei, minimum {} zei", .{ tx.fee, types.ZenFees.MIN_FEE });
             return false;
         }
 
@@ -117,7 +117,7 @@ pub const ChainValidator = struct {
             const total_display = util.formatZEI(self.allocator, total_cost) catch "? ZEI";
             defer if (!std.mem.eql(u8, total_display, "? ZEI")) self.allocator.free(total_display);
 
-            print("❌ Insufficient balance: has {s}, needs {s}\n", .{ balance_display, total_display });
+            log.warn("❌ Insufficient balance: has {s}, needs {s}", .{ balance_display, total_display });
             return false;
         }
 
@@ -132,7 +132,7 @@ pub const ChainValidator = struct {
         // Verify transaction signature
         const tx_hash = tx.hashForSigning();
         if (!key.verify(tx.sender_public_key, &tx_hash, tx.signature)) {
-            print("❌ Invalid signature: transaction not signed by sender\n", .{});
+            log.warn("❌ Invalid signature: transaction not signed by sender", .{});
             return false;
         }
         return true;
@@ -144,16 +144,16 @@ pub const ChainValidator = struct {
 
         // Verify transaction signature
         const tx_hash = tx.hashForSigning();
-        // print("     🔍 Transaction hash for signing: {s}\n", .{std.fmt.fmtSliceHexLower(&tx_hash)});
-        // print("     🔍 Sender public key: {s}\n", .{std.fmt.fmtSliceHexLower(&tx.sender_public_key)});
-        // print("     🔍 Transaction signature: {s}\n", .{std.fmt.fmtSliceHexLower(&tx.signature)});
+        // log.warn("     🔍 Transaction hash for signing: {s}", .{std.fmt.fmtSliceHexLower(&tx_hash)});
+        // log.warn("     🔍 Sender public key: {s}", .{std.fmt.fmtSliceHexLower(&tx.sender_public_key)});
+        // log.warn("     🔍 Transaction signature: {s}", .{std.fmt.fmtSliceHexLower(&tx.signature)});
 
         if (!key.verify(tx.sender_public_key, &tx_hash, tx.signature)) {
-            print("❌ Invalid signature: transaction not signed by sender\n", .{});
-            print("❌ Signature verification failed - detailed info above\n", .{});
+            log.warn("❌ Invalid signature: transaction not signed by sender", .{});
+            log.warn("❌ Signature verification failed - detailed info above", .{});
             return false;
         }
-        print("     ✅ Signature verification passed\n", .{});
+        log.warn("     ✅ Signature verification passed", .{});
 
         return true;
     }
@@ -165,14 +165,14 @@ pub const ChainValidator = struct {
         const block_hash = block.hash();
         if (self.chain_state.hasBlock(block_hash)) {
             const existing_height = self.chain_state.block_index.getHeight(block_hash) orelse unreachable;
-            print("❌ [CONSENSUS] Block validation failed: duplicate block hash {s} already exists at height {}\n", .{ std.fmt.fmtSliceHexLower(block_hash[0..8]), existing_height });
+            log.warn("❌ [CONSENSUS] Block validation failed: duplicate block hash {s} already exists at height {}", .{ std.fmt.fmtSliceHexLower(block_hash[0..8]), existing_height });
             return false;
         }
 
         // Special validation for genesis block (height 0)
         if (expected_height == 0) {
             if (!genesis.validateGenesis(block)) {
-                print("❌ Genesis block validation failed: not canonical genesis\n", .{});
+                log.warn("❌ Genesis block validation failed: not canonical genesis", .{});
                 return false;
             }
             return true; // Genesis block passed validation
@@ -180,14 +180,14 @@ pub const ChainValidator = struct {
 
         // Check basic block structure
         if (!block.isValid()) {
-            print("❌ Block validation failed: invalid block structure\n", .{});
+            log.warn("❌ Block validation failed: invalid block structure", .{});
             return false;
         }
 
         // Check block size limit (16MB hard limit)
         const block_size = block.getSize();
         if (block_size > types.BlockLimits.MAX_BLOCK_SIZE) {
-            print("❌ Block validation failed: size {} bytes exceeds limit of {} bytes\n", .{ block_size, types.BlockLimits.MAX_BLOCK_SIZE });
+            log.warn("❌ Block validation failed: size {} bytes exceeds limit of {} bytes", .{ block_size, types.BlockLimits.MAX_BLOCK_SIZE });
             return false;
         }
 
@@ -195,7 +195,7 @@ pub const ChainValidator = struct {
         const current_time = util.getTime();
         if (!types.TimestampValidation.isTimestampValid(block.header.timestamp, current_time)) {
             const future_seconds = @as(i64, @intCast(block.header.timestamp)) - current_time;
-            print("❌ Block timestamp too far in future: {} seconds ahead\n", .{future_seconds});
+            log.warn("❌ Block timestamp too far in future: {} seconds ahead", .{future_seconds});
             return false;
         }
 
@@ -203,8 +203,8 @@ pub const ChainValidator = struct {
         const current_height = try self.chain_state.getHeight();
         // Allow either current height (reprocessing) or next height (normal progression)
         if (expected_height != current_height and expected_height != current_height + 1) {
-            print("❌ Block validation failed: height mismatch (expected: {}, current: {})\n", .{ expected_height, current_height });
-            print("💡 Block height must be current ({}) or next ({})\n", .{ current_height, current_height + 1 });
+            log.warn("❌ Block validation failed: height mismatch (expected: {}, current: {})", .{ expected_height, current_height });
+            log.warn("💡 Block height must be current ({}) or next ({})", .{ current_height, current_height + 1 });
             return false;
         }
 
@@ -216,25 +216,25 @@ pub const ChainValidator = struct {
             // Check timestamp against median time past (MTP)
             const mtp = try self.getMedianTimePast(expected_height - 1);
             if (block.header.timestamp <= mtp) {
-                print("❌ Block timestamp not greater than median time past\n", .{});
-                print("   MTP: {}, Block timestamp: {}\n", .{ mtp, block.header.timestamp });
+                log.warn("❌ Block timestamp not greater than median time past", .{});
+                log.warn("   MTP: {}, Block timestamp: {}", .{ mtp, block.header.timestamp });
                 return false;
             }
 
             // Check previous hash links correctly
             const prev_hash = prev_block.hash();
             if (!std.mem.eql(u8, &block.header.previous_hash, &prev_hash)) {
-                print("❌ Previous hash validation failed\n", .{});
-                print("   Expected: {s}\n", .{std.fmt.fmtSliceHexLower(&prev_hash)});
-                print("   Received: {s}\n", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+                log.warn("❌ Previous hash validation failed", .{});
+                log.warn("   Expected: {s}", .{std.fmt.fmtSliceHexLower(&prev_hash)});
+                log.warn("   Received: {s}", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
 
                 // CRITICAL: Check if this is actually a duplicate of a different block
                 // This catches the case where the same block is submitted at multiple heights
                 const submitted_hash = block.hash();
                 if (self.chain_state.hasBlock(submitted_hash)) {
                     const existing_height = self.chain_state.block_index.getHeight(submitted_hash) orelse unreachable;
-                    print("❌ [CHAIN CONTINUITY] This block is a duplicate of block at height {}!\n", .{existing_height});
-                    print("   Block hash: {s}\n", .{std.fmt.fmtSliceHexLower(submitted_hash[0..8])});
+                    log.warn("❌ [CHAIN CONTINUITY] This block is a duplicate of block at height {}!", .{existing_height});
+                    log.warn("   Block hash: {s}", .{std.fmt.fmtSliceHexLower(submitted_hash[0..8])});
                 }
 
                 return false;
@@ -244,14 +244,14 @@ pub const ChainValidator = struct {
         // SECURITY: Calculate required difficulty
         var difficulty_calc = @import("difficulty.zig").DifficultyCalculator.init(self.allocator, self.chain_state.database);
         const required_difficulty = difficulty_calc.calculateNextDifficulty() catch {
-            print("❌ Failed to calculate required difficulty\n", .{});
+            log.warn("❌ Failed to calculate required difficulty", .{});
             return false;
         };
 
         // SECURITY: Verify block claims correct difficulty
         const claimed_difficulty = block.header.getDifficultyTarget();
         if (claimed_difficulty.toU64() != required_difficulty.toU64()) {
-            print("❌ SECURITY: Block difficulty mismatch! Required: {}, Claimed: {}\n", .{ required_difficulty.toU64(), claimed_difficulty.toU64() });
+            log.warn("❌ SECURITY: Block difficulty mismatch! Required: {}, Claimed: {}", .{ required_difficulty.toU64(), claimed_difficulty.toU64() });
             return false;
         }
 
@@ -266,7 +266,7 @@ pub const ChainValidator = struct {
             .blockchain = undefined, // Not needed for validation
         };
         if (!try miner_mod.validateBlockPoW(mining_context, block)) {
-            print("❌ RandomX proof-of-work validation failed\n", .{});
+            log.warn("❌ RandomX proof-of-work validation failed", .{});
             return false;
         }
 
@@ -276,7 +276,7 @@ pub const ChainValidator = struct {
             if (i == 0) continue;
 
             if (!try self.validateTransaction(tx)) {
-                print("❌ Transaction {} validation failed\n", .{i});
+                log.warn("❌ Transaction {} validation failed", .{i});
                 return false;
             }
         }
@@ -287,67 +287,67 @@ pub const ChainValidator = struct {
     /// Validate a block during synchronization (more lenient)
     /// Full sync validation from node.zig with detailed logging
     pub fn validateSyncBlock(self: *Self, block: *const Block, expected_height: u32) !bool {
-        print("🔍 validateSyncBlock: Starting validation for height {}\n", .{expected_height});
+        log.warn("🔍 validateSyncBlock: Starting validation for height {}", .{expected_height});
 
         // CRITICAL: Check for duplicate block hash even during sync
         const block_hash = block.hash();
         if (self.chain_state.hasBlock(block_hash)) {
             const existing_height = self.chain_state.block_index.getHeight(block_hash) orelse unreachable;
-            print("❌ [SYNC] Block validation failed: duplicate block hash {s} already exists at height {}\n", .{ std.fmt.fmtSliceHexLower(block_hash[0..8]), existing_height });
+            log.warn("❌ [SYNC] Block validation failed: duplicate block hash {s} already exists at height {}", .{ std.fmt.fmtSliceHexLower(block_hash[0..8]), existing_height });
             return false;
         }
 
         // Special validation for genesis block (height 0)
         if (expected_height == 0) {
-            print("🔍 validateSyncBlock: Processing genesis block (height 0)\n", .{});
+            log.warn("🔍 validateSyncBlock: Processing genesis block (height 0)", .{});
 
             // Detailed genesis validation debugging
-            print("🔍 Genesis validation details:\n", .{});
-            print("   Block timestamp: {}\n", .{block.header.timestamp});
-            print("   Expected genesis timestamp: {}\n", .{types.Genesis.timestamp()});
-            // print("   Block previous_hash: {s}\n", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
-            print("   Block difficulty: {}\n", .{block.header.difficulty});
-            print("   Block nonce: 0x{X}\n", .{block.header.nonce});
-            print("   Block transaction count: {}\n", .{block.txCount()});
+            log.warn("🔍 Genesis validation details:", .{});
+            log.warn("   Block timestamp: {}", .{block.header.timestamp});
+            log.warn("   Expected genesis timestamp: {}", .{types.Genesis.timestamp()});
+            // log.warn("   Block previous_hash: {s}", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+            log.warn("   Block difficulty: {}", .{block.header.difficulty});
+            log.warn("   Block nonce: 0x{X}", .{block.header.nonce});
+            log.warn("   Block transaction count: {}", .{block.txCount()});
 
             _ = block.hash(); // Block hash calculated but not used in release mode
-            // print("   Block hash: {s}\n", .{std.fmt.fmtSliceHexLower(&block_hash)});
-            // print("   Expected genesis hash: {s}\n", .{std.fmt.fmtSliceHexLower(&genesis.getCanonicalGenesisHash())});
+            // log.warn("   Block hash: {s}", .{std.fmt.fmtSliceHexLower(&block_hash)});
+            // log.warn("   Expected genesis hash: {s}", .{std.fmt.fmtSliceHexLower(&genesis.getCanonicalGenesisHash())});
 
             if (!genesis.validateGenesis(block.*)) {
-                print("❌ Genesis block validation failed: not canonical genesis\n", .{});
-                print("❌ Genesis validation failed - detailed comparison above\n", .{});
+                log.warn("❌ Genesis block validation failed: not canonical genesis", .{});
+                log.warn("❌ Genesis validation failed - detailed comparison above", .{});
                 return false;
             }
-            print("✅ Genesis block validation passed\n", .{});
+            log.warn("✅ Genesis block validation passed", .{});
             return true; // Genesis block passed validation
         }
 
-        print("🔍 validateSyncBlock: About to check basic block structure for height {}\n", .{expected_height});
-        print("🔍 validateSyncBlock: Block pointer address: {*}\n", .{&block});
+        log.warn("🔍 validateSyncBlock: About to check basic block structure for height {}", .{expected_height});
+        log.warn("🔍 validateSyncBlock: Block pointer address: {*}", .{&block});
 
         // Try to access block fields safely first
-        print("🔍 validateSyncBlock: Checking block field access...\n", .{});
+        log.warn("🔍 validateSyncBlock: Checking block field access...", .{});
 
         // Check if we can access basic fields
         const tx_count = block.txCount();
-        print("🔍 validateSyncBlock: Block transaction count: {}\n", .{tx_count});
+        log.warn("🔍 validateSyncBlock: Block transaction count: {}", .{tx_count});
 
         const timestamp = block.header.timestamp;
-        print("🔍 validateSyncBlock: Block timestamp: {}\n", .{timestamp});
+        log.warn("🔍 validateSyncBlock: Block timestamp: {}", .{timestamp});
 
         const difficulty = block.header.difficulty;
-        print("🔍 validateSyncBlock: Block difficulty: {}\n", .{difficulty});
+        log.warn("🔍 validateSyncBlock: Block difficulty: {}", .{difficulty});
 
-        print("🔍 validateSyncBlock: Basic field access successful, now calling isValid()...\n", .{});
+        log.warn("🔍 validateSyncBlock: Basic field access successful, now calling isValid()...", .{});
 
         // Check basic block structure
         if (!block.isValid()) {
-            print("❌ Block validation failed: invalid block structure at height {}\n", .{expected_height});
+            log.warn("❌ Block validation failed: invalid block structure at height {}", .{expected_height});
             return false;
         }
 
-        print("✅ Basic block structure validation passed for height {}\n", .{expected_height});
+        log.warn("✅ Basic block structure validation passed for height {}", .{expected_height});
 
         // Timestamp validation for sync blocks (more lenient than normal validation)
         const current_time = util.getTime();
@@ -355,23 +355,23 @@ pub const ChainValidator = struct {
         const sync_future_allowance = types.TimestampValidation.MAX_FUTURE_TIME * 2; // 4 hours
         if (@as(i64, @intCast(block.header.timestamp)) > current_time + sync_future_allowance) {
             const future_seconds = @as(i64, @intCast(block.header.timestamp)) - current_time;
-            print("❌ Sync block timestamp too far in future: {} seconds ahead\n", .{future_seconds});
+            log.warn("❌ Sync block timestamp too far in future: {} seconds ahead", .{future_seconds});
             return false;
         }
 
-        print("🔍 validateSyncBlock: Checking proof-of-work for height {}\n", .{expected_height});
+        log.warn("🔍 validateSyncBlock: Checking proof-of-work for height {}", .{expected_height});
 
         // SECURITY: Calculate required difficulty for sync blocks
         var difficulty_calc = @import("difficulty.zig").DifficultyCalculator.init(self.allocator, self.chain_state.database);
         const required_difficulty = difficulty_calc.calculateNextDifficulty() catch {
-            print("❌ Failed to calculate required difficulty for sync block\n", .{});
+            log.warn("❌ Failed to calculate required difficulty for sync block", .{});
             return false;
         };
 
         // SECURITY: Verify sync block claims correct difficulty
         const claimed_difficulty = block.header.getDifficultyTarget();
         if (claimed_difficulty.toU64() != required_difficulty.toU64()) {
-            print("❌ SECURITY: Sync block difficulty mismatch! Required: {}, Claimed: {}\n", .{ required_difficulty.toU64(), claimed_difficulty.toU64() });
+            log.warn("❌ SECURITY: Sync block difficulty mismatch! Required: {}, Claimed: {}", .{ required_difficulty.toU64(), claimed_difficulty.toU64() });
             return false;
         }
 
@@ -386,88 +386,88 @@ pub const ChainValidator = struct {
             .blockchain = undefined, // Not needed for validation
         };
         if (!try miner_mod.validateBlockPoW(mining_context, block.*)) {
-            print("❌ RandomX proof-of-work validation failed for height {}\n", .{expected_height});
+            log.warn("❌ RandomX proof-of-work validation failed for height {}", .{expected_height});
             return false;
         }
-        print("✅ Proof-of-work validation passed for height {}\n", .{expected_height});
+        log.warn("✅ Proof-of-work validation passed for height {}", .{expected_height});
 
-        print("🔍 validateSyncBlock: Checking previous hash links for height {}\n", .{expected_height});
+        log.warn("🔍 validateSyncBlock: Checking previous hash links for height {}", .{expected_height});
 
         // Check previous hash links correctly (only if we have previous blocks)
         if (expected_height > 0) {
             const current_height = try self.chain_state.getHeight();
-            print("   Current blockchain height: {}\n", .{current_height});
-            print("   Expected block height: {}\n", .{expected_height});
+            log.warn("   Current blockchain height: {}", .{current_height});
+            log.warn("   Expected block height: {}", .{expected_height});
 
             if (expected_height > current_height) {
                 // During sync, we might not have the previous block yet - skip this check
-                print("⚠️ Skipping previous hash check during sync (height {} > current {})\n", .{ expected_height, current_height });
+                log.warn("⚠️ Skipping previous hash check during sync (height {} > current {})", .{ expected_height, current_height });
             } else if (expected_height == current_height) {
                 // We're about to add this block - check against our current tip
-                print("   Checking previous hash against current blockchain tip\n", .{});
+                log.warn("   Checking previous hash against current blockchain tip", .{});
                 var prev_block = try self.getBlockByHeight(expected_height - 1);
                 defer prev_block.deinit(self.allocator);
 
                 const prev_hash = prev_block.hash();
-                // print("   Previous block hash in chain: {s}\n", .{std.fmt.fmtSliceHexLower(&prev_hash)});
-                // print("   Block's previous_hash field: {s}\n", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+                // log.warn("   Previous block hash in chain: {s}", .{std.fmt.fmtSliceHexLower(&prev_hash)});
+                // log.warn("   Block's previous_hash field: {s}", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
 
                 if (!std.mem.eql(u8, &block.header.previous_hash, &prev_hash)) {
-                    print("❌ Previous hash validation failed during sync\n", .{});
-                    // print("   Expected: {s}\n", .{std.fmt.fmtSliceHexLower(&prev_hash)});
-                    // print("   Received: {s}\n", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
-                    print("⚠️ This might indicate a fork - skipping hash validation during sync\n", .{});
+                    log.warn("❌ Previous hash validation failed during sync", .{});
+                    // log.warn("   Expected: {s}", .{std.fmt.fmtSliceHexLower(&prev_hash)});
+                    // log.warn("   Received: {s}", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+                    log.warn("⚠️ This might indicate a fork - skipping hash validation during sync", .{});
                     // During sync, we trust the peer's chain - skip this validation
                 }
             } else {
                 // We already have this block height - this shouldn't happen during normal sync
-                print("⚠️ Unexpected: trying to sync block {} but we already have height {}\n", .{ expected_height, current_height });
+                log.warn("⚠️ Unexpected: trying to sync block {} but we already have height {}", .{ expected_height, current_height });
             }
         }
 
-        print("🔍 validateSyncBlock: Validating {} transactions for height {}\n", .{ block.txCount(), expected_height });
+        log.warn("🔍 validateSyncBlock: Validating {} transactions for height {}", .{ block.txCount(), expected_height });
 
         // For sync blocks, validate transaction structure but skip balance checks
         // The balance validation will happen naturally when transactions are processed
         for (block.transactions, 0..) |tx, i| {
-            print("   🔍 Validating transaction {} of {}\n", .{ i, block.txCount() - 1 });
+            log.warn("   🔍 Validating transaction {} of {}", .{ i, block.txCount() - 1 });
 
             // Skip coinbase transaction (first one) - it doesn't need signature validation
             if (i == 0) {
-                print("   ✅ Skipping coinbase transaction validation\n", .{});
+                log.warn("   ✅ Skipping coinbase transaction validation", .{});
                 continue;
             }
 
-            print("   🔍 Checking transaction structure...\n", .{});
+            log.warn("   🔍 Checking transaction structure...", .{});
 
             // Basic transaction structure validation only
             if (!tx.isValid()) {
-                print("❌ Transaction {} structure validation failed\n", .{i});
+                log.warn("❌ Transaction {} structure validation failed", .{i});
                 _ = tx.sender.toBytes(); // Sender bytes calculated but not used in release mode
                 _ = tx.recipient.toBytes(); // Recipient bytes calculated but not used in release mode
-                // print("   Sender: {s}\n", .{std.fmt.fmtSliceHexLower(&sender_bytes)});
-                // print("   Recipient: {s}\n", .{std.fmt.fmtSliceHexLower(&recipient_bytes)});
-                print("   Amount: {}\n", .{tx.amount});
-                print("   Fee: {}\n", .{tx.fee});
-                print("   Nonce: {}\n", .{tx.nonce});
-                print("   Timestamp: {}\n", .{tx.timestamp});
+                // log.warn("   Sender: {s}", .{std.fmt.fmtSliceHexLower(&sender_bytes)});
+                // log.warn("   Recipient: {s}", .{std.fmt.fmtSliceHexLower(&recipient_bytes)});
+                log.warn("   Amount: {}", .{tx.amount});
+                log.warn("   Fee: {}", .{tx.fee});
+                log.warn("   Nonce: {}", .{tx.nonce});
+                log.warn("   Timestamp: {}", .{tx.timestamp});
                 return false;
             }
-            print("   ✅ Transaction {} structure validation passed\n", .{i});
+            log.warn("   ✅ Transaction {} structure validation passed", .{i});
 
-            print("   🔍 Checking transaction signature...\n", .{});
+            log.warn("   🔍 Checking transaction signature...", .{});
 
             // Signature validation (but no balance check)
             if (!try self.validateTransactionSignatureDetailed(tx)) {
-                print("❌ Transaction {} signature validation failed\n", .{i});
-                // print("   Public key: {s}\n", .{std.fmt.fmtSliceHexLower(&tx.sender_public_key)});
-                // print("   Signature: {s}\n", .{std.fmt.fmtSliceHexLower(&tx.signature)});
+                log.warn("❌ Transaction {} signature validation failed", .{i});
+                // log.warn("   Public key: {s}", .{std.fmt.fmtSliceHexLower(&tx.sender_public_key)});
+                // log.warn("   Signature: {s}", .{std.fmt.fmtSliceHexLower(&tx.signature)});
                 return false;
             }
-            print("   ✅ Transaction {} signature validation passed\n", .{i});
+            log.warn("   ✅ Transaction {} signature validation passed", .{i});
         }
 
-        print("✅ Sync block {} structure and signatures validated\n", .{expected_height});
+        log.warn("✅ Sync block {} structure and signatures validated", .{expected_height});
         return true;
     }
 
@@ -476,7 +476,7 @@ pub const ChainValidator = struct {
         // Special validation for genesis block
         if (expected_height == 0) {
             if (!genesis.GenesisBlocks.TESTNET.getBlock().equals(&block)) {
-                print("❌ Reorg genesis block validation failed\n", .{});
+                log.warn("❌ Reorg genesis block validation failed", .{});
                 return false;
             }
             return true;
@@ -484,7 +484,7 @@ pub const ChainValidator = struct {
 
         // Check basic block structure
         if (!block.isValid()) {
-            print("❌ Reorg block structure validation failed\n", .{});
+            log.warn("❌ Reorg block structure validation failed", .{});
             return false;
         }
 
@@ -492,27 +492,27 @@ pub const ChainValidator = struct {
         const current_time = util.getTime();
         const reorg_future_allowance = types.TimestampValidation.MAX_FUTURE_TIME * 2;
         if (@as(i64, @intCast(block.header.timestamp)) > current_time + reorg_future_allowance) {
-            print("❌ Reorg block timestamp too far in future\n", .{});
+            log.warn("❌ Reorg block timestamp too far in future", .{});
             return false;
         }
 
         // SECURITY: Calculate required difficulty for reorg blocks - DO NOT trust block header!
         var difficulty_calc = @import("difficulty.zig").DifficultyCalculator.init(self.allocator, self.chain_state.database);
         const required_difficulty = difficulty_calc.calculateNextDifficulty() catch {
-            print("❌ Failed to calculate required difficulty for reorg block\n", .{});
+            log.warn("❌ Failed to calculate required difficulty for reorg block", .{});
             return false;
         };
 
         // SECURITY: Verify reorg block claims correct difficulty
         const claimed_difficulty = block.header.getDifficultyTarget();
         if (claimed_difficulty.toU64() != required_difficulty.toU64()) {
-            print("❌ SECURITY: Reorg block difficulty mismatch! Required: {}, Claimed: {}\n", .{ required_difficulty.toU64(), claimed_difficulty.toU64() });
+            log.warn("❌ SECURITY: Reorg block difficulty mismatch! Required: {}, Claimed: {}", .{ required_difficulty.toU64(), claimed_difficulty.toU64() });
             return false;
         }
 
         // Always use RandomX validation for consistent security
         if (!try self.validateBlockPoW(block)) {
-            print("❌ Reorg block RandomX validation failed\n", .{});
+            log.warn("❌ Reorg block RandomX validation failed", .{});
             return false;
         }
 
@@ -522,12 +522,12 @@ pub const ChainValidator = struct {
             if (i == 0) continue;
 
             if (!tx.isValid()) {
-                print("❌ Reorg transaction {} structure validation failed\n", .{i});
+                log.warn("❌ Reorg transaction {} structure validation failed", .{i});
                 return false;
             }
 
             if (!try self.validateTransactionSignature(tx)) {
-                print("❌ Reorg transaction {} signature validation failed\n", .{i});
+                log.warn("❌ Reorg transaction {} signature validation failed", .{i});
                 return false;
             }
         }

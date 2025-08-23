@@ -2,6 +2,7 @@
 // Handles all CLI options and configuration
 
 const std = @import("std");
+const log = std.log.scoped(.server);
 const network = @import("../network/peer.zig");
 
 pub const Config = struct {
@@ -64,15 +65,15 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Config {
                 config.miner_wallet = try allocator.dupe(u8, args[i + 1]);
                 i += 1;
             } else {
-                std.debug.print("❌ Error: --mine requires a wallet name\n", .{});
-                std.debug.print("💡 Usage: zen_server --mine <wallet_name>\n", .{});
-                std.debug.print("💡 Example: zen_server --mine miner\n", .{});
+                log.info("❌ Error: --mine requires a wallet name", .{});
+                log.info("💡 Usage: zen_server --mine <wallet_name>", .{});
+                log.info("💡 Example: zen_server --mine miner", .{});
                 return error.MissingMinerWallet;
             }
         } else if (std.mem.eql(u8, args[i], "--no-client-api")) {
             config.client_api_disabled = true;
         } else {
-            std.debug.print("Unknown argument: {s}\n", .{args[i]});
+            log.info("Unknown argument: {s}", .{args[i]});
             printHelp();
             return error.UnknownArgument;
         }
@@ -114,7 +115,7 @@ fn parseBootstrapNodes(list: *std.ArrayList(BootstrapNode), input: []const u8) !
 }
 
 fn printHelp() void {
-    std.debug.print(
+    log.info(
         \\ZeiCoin Server
         \\
         \\Usage: zen_server [options]

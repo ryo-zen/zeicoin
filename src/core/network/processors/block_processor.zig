@@ -2,7 +2,7 @@
 // Handles all block-related processing logic including validation, chain operations, and reorganization
 
 const std = @import("std");
-const print = std.debug.print;
+const log = std.log.scoped(.network);
 
 const types = @import("../../types/types.zig");
 const net = @import("../peer.zig");
@@ -46,7 +46,7 @@ pub const BlockProcessor = struct {
 
     /// Process incoming block from network
     pub fn processIncomingBlock(self: *Self, block: Block, peer: ?*net.Peer) !BlockProcessingResult {
-        print("🔧 [BLOCK PROCESSOR] processIncomingBlock() ENTRY\n", .{});
+        log.debug("processIncomingBlock() ENTRY", .{});
         var owned_block = block;
         errdefer owned_block.deinit(self.allocator);
 
@@ -55,12 +55,12 @@ pub const BlockProcessor = struct {
 
         // Validate block
         const block_height = try self.blockchain.getHeight() + 1;
-        print("🔧 [BLOCK PROCESSOR] About to validate block at height {}\n", .{block_height});
+        log.debug("About to validate block at height {}", .{block_height});
         if (!try self.validateBlock(&owned_block, block_height)) {
-            print("🔧 [BLOCK PROCESSOR] Block validation FAILED, returning rejected\n", .{});
+            log.warn("Block validation FAILED, returning rejected", .{});
             return .rejected;
         }
-        print("🔧 [BLOCK PROCESSOR] Block validation PASSED\n", .{});
+        log.debug("Block validation PASSED", .{});
 
         // Calculate cumulative work
         const cumulative_work = try self.calculateCumulativeWork(&owned_block, block_height - 1);
@@ -79,7 +79,7 @@ pub const BlockProcessor = struct {
         else
             false;
 
-        print("🔧 [BLOCK PROCESSOR] Sync status: {}, using {s} evaluation\n", .{ is_syncing, if (is_syncing) "SYNC-AWARE" else "NORMAL" });
+        log.debug("Sync status: {}, using {s} evaluation", .{ is_syncing, if (is_syncing) "SYNC-AWARE" else "NORMAL" });
 
         // Block evaluation now handled by chain validator (modern approach)
         const is_valid = try self.blockchain.validateBlock(context.block, context.block_height);
@@ -87,17 +87,17 @@ pub const BlockProcessor = struct {
         // Simplified decision processing for modern system
         if (is_valid) {
             // Valid block - check chain continuity and process as main chain extension
-            print("📈 [MODERN] Block validated - checking chain continuity\n", .{});
+            log.debug("Block validated - checking chain continuity", .{});
             var block_copy = context.block;
             if (!try self.validateChainContinuity(&block_copy, context.block_height)) {
-                print("❌ [CHAIN CONTINUITY] Block rejected - doesn't connect properly\n", .{});
+                log.warn("Block rejected - doesn't connect properly", .{});
                 return .rejected;
             }
             try self.handleMainChainExtension(&block_copy, context.block_height);
             return .accepted;
         } else {
             // Invalid block - ignore it  
-            print("🌊 Block invalid - gracefully ignored\n", .{});
+            log.debug("Block invalid - gracefully ignored", .{});
             return .ignored;
         }
     }
@@ -108,24 +108,24 @@ pub const BlockProcessor = struct {
 
         switch (decision) {
             .ignore => {
-                print("🌊 Block already seen - gracefully ignored\n", .{});
+                log.debug("Block already seen - gracefully ignored", .{});
                 return .ignored;
             },
             .store_orphan => {
-                print("🔀 Block stored as orphan - waiting for parent\n", .{});
+                log.info("Block stored as orphan - waiting for parent", .{});
                 self.handleOrphanBlock();
                 return .stored_as_orphan;
             },
             .extends_chain => |chain_info| {
                 if (chain_info.requires_reorg) {
-                    print("🔄 [FORK DECISION] Block requires reorganization - delegating to reorg handler\n", .{});
+                    log.info("Block requires reorganization - delegating to reorg handler", .{});
                     try self.handleReorganization(&owned_block);
                     return .reorganized;
                 } else {
-                    print("📈 [FORK DECISION] Block extends current chain - checking continuity\n", .{});
+                    log.debug("Block extends current chain - checking continuity", .{});
                     // Only check chain continuity for blocks extending current chain without reorg
                     if (!try self.validateChainContinuity(&owned_block, context.block_height)) {
-                        print("❌ [CHAIN CONTINUITY] Block rejected - doesn't connect properly\n", .{});
+                        log.warn("Block rejected - doesn't connect properly", .{});
                         return .rejected;
                     }
                     try self.handleMainChainExtension(&owned_block, context.block_height);
@@ -133,7 +133,7 @@ pub const BlockProcessor = struct {
                 }
             },
             .new_best_chain => |chain_index| {
-                print("🏆 New best chain {} detected!\n", .{chain_index});
+                log.info("New best chain {} detected!", .{chain_index});
                 if (chain_index == 0) {
                     try self.handleMainChainExtension(&owned_block, context.block_height);
                     return .accepted;
@@ -147,7 +147,7 @@ pub const BlockProcessor = struct {
 
     /// Validate incoming block
     fn validateBlock(self: *Self, owned_block: *Block, block_height: u32) !bool {
-        print("🔧 [BLOCK PROCESSOR] validateBlock called for height {}\n", .{block_height});
+        log.debug("validateBlock called for height {}", .{block_height});
         // Check if we're currently syncing - if so, use sync-aware validation
         const current_height = self.blockchain.getHeight() catch 0;
         const is_syncing = if (self.blockchain.sync_manager) |sync_manager|
@@ -155,27 +155,27 @@ pub const BlockProcessor = struct {
         else
             (current_height < block_height and block_height <= current_height + 10);
 
-        print("🔧 [BLOCK PROCESSOR] Validation mode: {s} (current_height: {}, block_height: {}, syncing: {})\n", .{ if (is_syncing) "SYNC" else "NORMAL", current_height, block_height, is_syncing });
+        log.debug("Validation mode: {s} (current_height: {}, block_height: {}, syncing: {})", .{ if (is_syncing) "SYNC" else "NORMAL", current_height, block_height, is_syncing });
 
         // NOTE: Chain continuity check moved to processBasedOnDecision()
         // to allow fork evaluation before rejection
 
         const is_valid = if (is_syncing) blk: {
-            print("🔧 [BLOCK PROCESSOR] Using SYNC validation for block {}\n", .{block_height});
+            log.debug("Using SYNC validation for block {}", .{block_height});
             break :blk self.blockchain.validateSyncBlock(owned_block, block_height) catch |err| {
-                print("❌ Sync block validation failed: {}\n", .{err});
+                log.warn("Sync block validation failed: {}", .{err});
                 return false;
             };
         } else blk: {
-            print("🔧 [BLOCK PROCESSOR] Using NORMAL validation for block {}\n", .{block_height});
+            log.debug("Using NORMAL validation for block {}", .{block_height});
             break :blk self.blockchain.validateBlock(owned_block.*, block_height) catch |err| {
-                print("❌ Block validation failed: {}\n", .{err});
+                log.warn("Block validation failed: {}", .{err});
                 return false;
             };
         };
 
         if (!is_valid) {
-            print("❌ Invalid block rejected\n", .{});
+            log.warn("Invalid block rejected", .{});
             return false;
         }
 
@@ -184,10 +184,10 @@ pub const BlockProcessor = struct {
 
     /// Validate chain continuity for blocks extending current chain
     fn validateChainContinuity(self: *Self, owned_block: *Block, block_height: u32) !bool {
-        print("🔍 [CHAIN CONTINUITY] Checking block {} connects to current chain\n", .{block_height});
+        log.debug("Checking block {} connects to current chain", .{block_height});
 
         if (block_height == 0) {
-            print("✅ [CHAIN CONTINUITY] Genesis block - no parent required\n", .{});
+            log.debug("Genesis block - no parent required", .{});
             return true;
         }
 
@@ -198,26 +198,26 @@ pub const BlockProcessor = struct {
             break :blk true;
         };
         if (!parent_exists) {
-            print("❌ [CHAIN CONTINUITY] Missing parent block for height {}\n", .{block_height});
+            log.warn("Missing parent block for height {}", .{block_height});
             return false;
         }
 
         // Verify block connects to parent
         var parent_block = self.blockchain.database.getBlock(block_height - 1) catch {
-            print("❌ [CHAIN CONTINUITY] Cannot read parent block at height {}\n", .{block_height - 1});
+            log.warn("Cannot read parent block at height {}", .{block_height - 1});
             return false;
         };
         defer parent_block.deinit(self.allocator);
 
         const parent_hash = parent_block.hash();
         if (!std.mem.eql(u8, &owned_block.header.previous_hash, &parent_hash)) {
-            print("❌ [CHAIN CONTINUITY] Block {} doesn't connect to parent\n", .{block_height});
-            print("   Expected: {s}\n", .{std.fmt.fmtSliceHexLower(&parent_hash)});
-            print("   Got:      {s}\n", .{std.fmt.fmtSliceHexLower(&owned_block.header.previous_hash)});
+            log.warn("Block {} doesn't connect to parent", .{block_height});
+            log.warn("   Expected: {s}", .{std.fmt.fmtSliceHexLower(&parent_hash)});
+            log.warn("   Got:      {s}", .{std.fmt.fmtSliceHexLower(&owned_block.header.previous_hash)});
             return false;
         }
 
-        print("✅ [CHAIN CONTINUITY] Block {} connects properly to parent\n", .{block_height});
+        log.debug("Block {} connects properly to parent", .{block_height});
         return true;
     }
 
@@ -236,17 +236,17 @@ pub const BlockProcessor = struct {
 
     /// Handle orphan block detection
     fn handleOrphanBlock(self: *Self) void {
-        print("🔄 Orphan block detected - we may be behind, triggering auto-sync\n", .{});
+        log.info("Orphan block detected - we may be behind, triggering auto-sync", .{});
 
         // Trigger auto-sync
         self.triggerAutoSync() catch |err| {
-            print("⚠️  Auto-sync trigger failed: {}\n", .{err});
+            log.warn("Auto-sync trigger failed: {}", .{err});
         };
     }
 
     /// Handle chain reorganization
     fn handleReorganization(self: *Self, owned_block: *Block) !void {
-        print("🏆 New best chain detected! Starting reorganization...\n", .{});
+        log.info("New best chain detected! Starting reorganization...", .{});
 
         // Import modern reorganization architecture
         const ReorgManager = @import("../../chain/reorganization/manager.zig").ReorgManager;
@@ -267,7 +267,7 @@ pub const BlockProcessor = struct {
             &chain_validator,
             &chain_operations,
         ) catch |err| {
-            print("❌ Failed to initialize reorganization manager: {}\n", .{err});
+            log.err("Failed to initialize reorganization manager: {}", .{err});
             return;
         };
         defer reorg_manager.deinit();
@@ -275,32 +275,32 @@ pub const BlockProcessor = struct {
         // Execute complete reorganization
         const new_chain_tip = owned_block.hash();
         const reorg_result = reorg_manager.executeReorganization(owned_block.*, new_chain_tip) catch |err| {
-            print("❌ Chain reorganization failed: {}\n", .{err});
+            log.err("Chain reorganization failed: {}", .{err});
             return;
         };
 
         // Handle reorganization result
         if (reorg_result.success) {
-            print("✅ Modern reorganization completed successfully!\n", .{});
-            print("📊 Stats: {} blocks reverted, {} applied, {} txs replayed ({} ms)\n", .{ reorg_result.blocks_reverted, reorg_result.blocks_applied, reorg_result.transactions_replayed, reorg_result.duration_ms });
+            log.info("Modern reorganization completed successfully!", .{});
+            log.info("Stats: {} blocks reverted, {} applied, {} txs replayed ({} ms)", .{ reorg_result.blocks_reverted, reorg_result.blocks_applied, reorg_result.transactions_replayed, reorg_result.duration_ms });
 
             // Block will be cleaned up by caller
         } else {
-            print("❌ Reorganization failed: {s}\n", .{reorg_result.error_message orelse "Unknown error"});
+            log.err("Reorganization failed: {s}", .{reorg_result.error_message orelse "Unknown error"});
             owned_block.deinit(self.allocator);
         }
     }
 
     /// Handle main chain extension
     fn handleMainChainExtension(self: *Self, owned_block: *Block, block_height: u32) !void {
-        print("📈 Block extends main chain - adding to blockchain\n", .{});
+        log.info("Block extends main chain - adding to blockchain", .{});
 
         // Create a deep copy of the block for chain processor
         var block_copy = try owned_block.dupe(self.allocator);
 
         // Transfer ownership to chain processor
         self.blockchain.chain_processor.addBlockToChain(block_copy, block_height) catch |err| {
-            print("❌ Failed to add block to chain: {}\n", .{err});
+            log.err("Failed to add block to chain: {}", .{err});
             block_copy.deinit(self.allocator);
             return;
         };
@@ -314,33 +314,33 @@ pub const BlockProcessor = struct {
     fn handleSideChainBlock(self: *Self, owned_block: *Block, block_height: u32) !void {
         _ = self;
         _ = block_height;
-        print("📦 Processing side chain block\n", .{});
+        log.debug("Processing side chain block", .{});
 
         const side_block_work = owned_block.header.getWork();
 
         // Side chain handling moved to modern reorganization system
-        print("🔄 Side chain block processing delegated to modern system\n", .{});
+        log.debug("Side chain block processing delegated to modern system", .{});
         
         // Store the side chain block (simplified approach during migration)
         _ = side_block_work; // Work tracking will be handled by modern system
         
         // Modern reorganization system will handle side chain evaluation
-        print("✅ Side chain block processed (modern system)\n", .{});
+        log.info("Side chain block processed (modern system)", .{});
 
         // Simplified result handling during migration
-        print("✅ Side chain block stored successfully\n", .{});
+        log.info("Side chain block stored successfully", .{});
         
         // Modern system will handle reorganization evaluation
-        print("🔄 Side chain reorganization evaluation moved to modern system\n", .{});
+        log.debug("Side chain reorganization evaluation moved to modern system", .{});
     }
 
     /// Log incoming block information
     fn logIncomingBlock(self: *Self, peer: ?*net.Peer, tx_count: usize) void {
         _ = self;
         if (peer) |p| {
-            print("🌊 Block flows in from peer {} with {} transactions\n", .{ p.id, tx_count });
+            log.info("Block flows in from peer {} with {} transactions", .{ p.id, tx_count });
         } else {
-            print("🌊 Block flows in from network peer with {} transactions\n", .{tx_count});
+            log.info("Block flows in from network peer with {} transactions", .{tx_count});
         }
     }
 
@@ -352,15 +352,15 @@ pub const BlockProcessor = struct {
                 if (network.peer_manager.getBestPeerForSync()) |best_peer| {
                     // Use libp2p-powered batch sync for improved performance
                     try sync_manager.startSync(best_peer, best_peer.height);
-                    print("🚀 libp2p batch auto-sync triggered due to orphan block with peer height {}\n", .{best_peer.height});
+                    log.info("libp2p batch auto-sync triggered due to orphan block with peer height {}", .{best_peer.height});
                 } else {
-                    print("⚠️ No peers available for auto-sync\n", .{});
+                    log.warn("No peers available for auto-sync", .{});
                 }
             } else {
-                print("⚠️ No network manager available for auto-sync\n", .{});
+                log.warn("No network manager available for auto-sync", .{});
             }
         } else {
-            print("⚠️ No sync manager available for auto-sync\n", .{});
+            log.warn("No sync manager available for auto-sync", .{});
         }
     }
 };

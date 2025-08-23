@@ -2,7 +2,7 @@
 // Extracted from node.zig for modular sync architecture
 
 const std = @import("std");
-const print = std.debug.print;
+const log = std.log.scoped(.sync);
 
 const types = @import("../../types/types.zig");
 const util = @import("../../util/util.zig");
@@ -111,19 +111,19 @@ pub const BlockSyncProtocol = struct {
 
     /// Logging utilities for simplicity
     fn logError(comptime fmt: []const u8, args: anytype) void {
-        print("❌ " ++ fmt ++ "\n", args);
+        log.info("❌ " ++ fmt ++ "\n", args);
     }
 
     fn logSuccess(comptime fmt: []const u8, args: anytype) void {
-        print("✅ " ++ fmt ++ "\n", args);
+        log.info("✅ " ++ fmt ++ "\n", args);
     }
 
     fn logInfo(comptime fmt: []const u8, args: anytype) void {
-        print("ℹ️  " ++ fmt ++ "\n", args);
+        log.info("ℹ️  " ++ fmt ++ "\n", args);
     }
 
     fn logProcess(comptime fmt: []const u8, args: anytype) void {
-        print("🔄 " ++ fmt ++ "\n", args);
+        log.info("🔄 " ++ fmt ++ "\n", args);
     }
 
     /// Start sync process with a peer
@@ -132,12 +132,12 @@ pub const BlockSyncProtocol = struct {
 
         // Special case: if we have no blockchain (height 0), sync from genesis (height 0)
         if (current_height == 0 and target_height > 0) {
-            print("🔄 Starting sync from genesis: 0 -> {} ({} blocks to download)\n", .{ target_height, target_height });
+            log.info("🔄 Starting sync from genesis: 0 -> {} ({} blocks to download)", .{ target_height, target_height });
         } else if (target_height <= current_height) {
-            print("ℹ️  Already up to date (height {})\n", .{current_height});
+            log.info("ℹ️  Already up to date (height {})", .{current_height});
             return;
         } else {
-            print("🔄 Starting sync: {} -> {} ({} blocks behind)\n", .{ current_height, target_height, target_height - current_height });
+            log.info("🔄 Starting sync: {} -> {} ({} blocks behind)", .{ current_height, target_height, target_height - current_height });
         }
 
         // Initialize sync state
@@ -156,7 +156,7 @@ pub const BlockSyncProtocol = struct {
         var owned_block = block;
         defer owned_block.deinit(self.context.allocator);
         
-        print("🔄 Processing sync block at height {}\n", .{expected_height});
+        log.info("🔄 Processing sync block at height {}", .{expected_height});
 
         // Check if block already exists to prevent duplicate processing
         const existing_block = self.context.database.getBlock(expected_height) catch null;
@@ -165,7 +165,7 @@ pub const BlockSyncProtocol = struct {
             var block_to_free = block_data;
             defer block_to_free.deinit(self.context.allocator);
             
-            print("ℹ️  Block {} already exists, skipping duplicate during sync\n", .{expected_height});
+            log.info("ℹ️  Block {} already exists, skipping duplicate during sync", .{expected_height});
 
             // Still need to update sync progress for this "processed" block
             if (self.sync_progress) |*progress| {
@@ -175,7 +175,7 @@ pub const BlockSyncProtocol = struct {
                 // Check if we've completed sync with this existing block
                 const current_height = self.context.getHeight(self.context) catch expected_height;
                 if (current_height >= progress.target_height) {
-                    print("🎉 Sync completed with existing blocks!\n", .{});
+                    log.info("🎉 Sync completed with existing blocks!", .{});
                     self.completSync();
                     return;
                 }
@@ -185,17 +185,17 @@ pub const BlockSyncProtocol = struct {
 
         // For sync, validate block structure and PoW only (skip transaction balance checks)
         const validation_result = self.validateSyncBlock(owned_block, expected_height) catch |err| {
-            print("❌ Block validation threw error at height {}: {}\n", .{ expected_height, err });
+            log.info("❌ Block validation threw error at height {}: {}", .{ expected_height, err });
             return;
         };
         if (!validation_result) {
-            print("❌ Block validation failed at height {}\n", .{expected_height});
+            log.info("❌ Block validation failed at height {}", .{expected_height});
 
             // Check if this is a hash validation failure during sync
             const current_height = try self.context.getHeight(self.context);
             if (expected_height == current_height) {
-                print("🔄 Hash validation failed during sync - this might be a fork situation\n", .{});
-                print("💡 Restarting sync from current position to handle potential fork\n", .{});
+                log.info("🔄 Hash validation failed during sync - this might be a fork situation", .{});
+                log.info("💡 Restarting sync from current position to handle potential fork", .{});
 
                 // Reset sync to restart from current position
                 if (self.sync_progress) |*progress| {
@@ -232,24 +232,24 @@ pub const BlockSyncProtocol = struct {
 
             // Check if we've reached the target height
             const current_height = self.context.getHeight(self.context) catch expected_height;
-            print("🔍 SYNC DEBUG: current_height={}, target_height={}, expected_height={}\n", .{ current_height, progress.target_height, expected_height });
+            log.info("🔍 SYNC DEBUG: current_height={}, target_height={}, expected_height={}", .{ current_height, progress.target_height, expected_height });
             if (current_height >= progress.target_height) {
-                print("🎉 SYNC COMPLETION: Calling completSync() because {} >= {}\n", .{ current_height, progress.target_height });
+                log.info("🎉 SYNC COMPLETION: Calling completSync() because {} >= {}", .{ current_height, progress.target_height });
                 self.completSync();
                 return;
             } else {
-                print("⏳ SYNC CONTINUING: Not complete because {} < {}\n", .{ current_height, progress.target_height });
+                log.info("⏳ SYNC CONTINUING: Not complete because {} < {}", .{ current_height, progress.target_height });
             }
         }
 
-        print("✅ Sync block {} added to chain\n", .{expected_height});
+        log.info("✅ Sync block {} added to chain", .{expected_height});
     }
 
     /// Automatically trigger sync by querying peer heights when orphan blocks indicate we're behind
     pub fn triggerAutoSyncWithPeerQuery(self: *BlockSyncProtocol) !void {
         // Check if we're already syncing
         if (self.sync_state == .syncing) {
-            print("ℹ️  Already syncing - orphan block detection ignored\n", .{});
+            log.info("ℹ️  Already syncing - orphan block detection ignored", .{});
             return;
         }
 
@@ -260,7 +260,7 @@ pub const BlockSyncProtocol = struct {
             // Get a fresh list of peers to avoid stale references
             const peer_count = network.peers.items.len;
             if (peer_count == 0) {
-                print("⚠️  No peers available for auto-sync\n", .{});
+                log.info("⚠️  No peers available for auto-sync", .{});
                 return;
             }
 
@@ -276,7 +276,7 @@ pub const BlockSyncProtocol = struct {
 
                 // Skip if socket is null
                 if (peer.socket == null) {
-                    print("⚠️  Peer has no socket, skipping\n", .{});
+                    log.info("⚠️  Peer has no socket, skipping", .{});
                     continue;
                 }
 
@@ -284,7 +284,7 @@ pub const BlockSyncProtocol = struct {
                 const is_zero_addr = peer.address.ip[0] == 0 and peer.address.ip[1] == 0 and 
                                    peer.address.ip[2] == 0 and peer.address.ip[3] == 0;
                 if (is_zero_addr) {
-                    print("⚠️  Skipping peer with invalid address 0.0.0.0\n", .{});
+                    log.info("⚠️  Skipping peer with invalid address 0.0.0.0", .{});
                     continue;
                 }
                 
@@ -292,21 +292,21 @@ pub const BlockSyncProtocol = struct {
                 var addr_buf: [64]u8 = undefined;
                 const addr_str = peer.address.toString(&addr_buf);
 
-                print("🔄 Auto-sync triggered - requesting peer height from {s}\n", .{addr_str});
+                log.info("🔄 Auto-sync triggered - requesting peer height from {s}", .{addr_str});
 
                 // Send version to query height
                 peer.sendVersion(current_height) catch |err| {
-                    print("⚠️  Failed to query peer {s}: {}\n", .{ addr_str, err });
+                    log.info("⚠️  Failed to query peer {s}: {}", .{ addr_str, err });
                     continue;
                 };
 
-                print("📡 Height query sent to peer - sync will trigger automatically if needed\n", .{});
+                log.info("📡 Height query sent to peer - sync will trigger automatically if needed", .{});
                 return;
             }
 
-            print("⚠️  Tried {} peers but none were suitable for auto-sync\n", .{attempts});
+            log.info("⚠️  Tried {} peers but none were suitable for auto-sync", .{attempts});
         } else {
-            print("⚠️  No network manager available for auto-sync\n", .{});
+            log.info("⚠️  No network manager available for auto-sync", .{});
         }
     }
 
@@ -343,12 +343,12 @@ pub const BlockSyncProtocol = struct {
 
         const batch_size = @min(types.SYNC.BATCH_SIZE, remaining);
 
-        print("📥 Requesting {} blocks starting from height {} (attempt {})\n", .{ batch_size, next_height, progress.retry_count + 1 });
+        log.info("📥 Requesting {} blocks starting from height {} (attempt {})", .{ batch_size, next_height, progress.retry_count + 1 });
 
         // Update request time and send request
         progress.last_request_time = now;
         peer.sendGetBlocks(next_height, batch_size) catch |err| {
-            print("❌ Failed to send sync request: {}\n", .{err});
+            log.info("❌ Failed to send sync request: {}", .{err});
             progress.retry_count += 1;
 
             if (progress.retry_count >= types.SYNC.MAX_SYNC_RETRIES) {
@@ -375,12 +375,12 @@ pub const BlockSyncProtocol = struct {
 
     /// Complete sync process
     fn completSync(self: *BlockSyncProtocol) void {
-        print("🎉 Sync completed! Chain is up to date\n", .{});
+        log.info("🎉 Sync completed! Chain is up to date", .{});
 
         if (self.sync_progress) |*progress| {
             const elapsed = util.getTime() - progress.start_time;
             const blocks_per_sec = progress.getBlocksPerSecond();
-            print("📊 Sync stats: {} blocks in {}s ({:.2} blocks/sec)\n", .{ progress.blocks_downloaded, elapsed, blocks_per_sec });
+            log.info("📊 Sync stats: {} blocks in {}s ({:.2} blocks/sec)", .{ progress.blocks_downloaded, elapsed, blocks_per_sec });
             // Reset consecutive failures on successful sync completion
             progress.consecutive_failures = 0;
         }
@@ -400,7 +400,7 @@ pub const BlockSyncProtocol = struct {
             const blocks_per_sec = progress.getBlocksPerSecond();
             const eta = progress.getETA();
 
-            print("🔄 Sync progress: {:.1}% ({} blocks/sec, ETA: {}s)\n", .{ percent, blocks_per_sec, eta });
+            log.info("🔄 Sync progress: {:.1}% ({} blocks/sec, ETA: {}s)", .{ percent, blocks_per_sec, eta });
         }
     }
 
@@ -410,7 +410,7 @@ pub const BlockSyncProtocol = struct {
 
         // If we have no blockchain and peer has blocks, always sync (including genesis)
         if (our_height == 0 and peer_height > 0) {
-            print("🌐 Network has blockchain (height {}), will sync from genesis\n", .{peer_height});
+            log.info("🌐 Network has blockchain (height {}), will sync from genesis", .{peer_height});
             return true;
         }
 
@@ -443,7 +443,7 @@ pub const BlockSyncProtocol = struct {
         // Add current peer to failed list
         if (self.sync_peer) |failed_peer| {
             try self.failed_peers.append(failed_peer);
-            print("🚫 Added peer to blacklist (total: {})\n", .{self.failed_peers.items.len});
+            log.info("🚫 Added peer to blacklist (total: {})", .{self.failed_peers.items.len});
         }
 
         // Find a new peer that's not in the failed list
@@ -469,20 +469,20 @@ pub const BlockSyncProtocol = struct {
         }
 
         if (new_peer) |peer| {
-            print("🔄 Switching to new sync peer\n", .{});
+            log.info("🔄 Switching to new sync peer", .{});
             self.sync_peer = peer;
 
             // Reset retry count - caller will retry the request
             self.resetSyncRetry();
         } else {
-            print("❌ No more peers available for sync\n", .{});
+            log.info("❌ No more peers available for sync", .{});
             self.failSync("No more peers available");
         }
     }
 
     /// Fail sync process with error message
     fn failSync(self: *BlockSyncProtocol, reason: []const u8) void {
-        print("❌ Sync failed: {s}\n", .{reason});
+        log.info("❌ Sync failed: {s}", .{reason});
         self.sync_state = .sync_failed;
         self.sync_progress = null;
         self.sync_peer = null;
@@ -493,45 +493,45 @@ pub const BlockSyncProtocol = struct {
 
     /// Validate block during sync (skips transaction balance checks)
     pub fn validateSyncBlock(self: *BlockSyncProtocol, block: types.Block, expected_height: u32) !bool {
-        print("🔍 validateSyncBlock: Starting validation for height {}\n", .{expected_height});
+        log.info("🔍 validateSyncBlock: Starting validation for height {}", .{expected_height});
 
         // Special validation for genesis block (height 0)
         if (expected_height == 0) {
-            print("🔍 validateSyncBlock: Processing genesis block (height 0)\n", .{});
+            log.info("🔍 validateSyncBlock: Processing genesis block (height 0)", .{});
 
             // Detailed genesis validation debugging
-            print("🔍 Genesis validation details:\n", .{});
-            print("   Block timestamp: {}\n", .{block.header.timestamp});
-            print("   Expected genesis timestamp: {}\n", .{types.Genesis.timestamp()});
-            print("   Block previous_hash: {s}\n", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
-            print("   Block difficulty: {}\n", .{block.header.difficulty});
-            print("   Block nonce: 0x{X}\n", .{block.header.nonce});
-            print("   Block transaction count: {}\n", .{block.txCount()});
+            log.info("🔍 Genesis validation details:", .{});
+            log.info("   Block timestamp: {}", .{block.header.timestamp});
+            log.info("   Expected genesis timestamp: {}", .{types.Genesis.timestamp()});
+            log.info("   Block previous_hash: {s}", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+            log.info("   Block difficulty: {}", .{block.header.difficulty});
+            log.info("   Block nonce: 0x{X}", .{block.header.nonce});
+            log.info("   Block transaction count: {}", .{block.txCount()});
 
             const block_hash = block.hash();
-            print("   Block hash: {s}\n", .{std.fmt.fmtSliceHexLower(&block_hash)});
-            print("   Expected genesis hash: {s}\n", .{std.fmt.fmtSliceHexLower(&genesis.getCanonicalGenesisHash())});
+            log.info("   Block hash: {s}", .{std.fmt.fmtSliceHexLower(&block_hash)});
+            log.info("   Expected genesis hash: {s}", .{std.fmt.fmtSliceHexLower(&genesis.getCanonicalGenesisHash())});
 
             if (!genesis.validateGenesis(block)) {
-                print("❌ Genesis block validation failed: not canonical genesis\n", .{});
-                print("❌ Genesis validation failed - detailed comparison above\n", .{});
+                log.info("❌ Genesis block validation failed: not canonical genesis", .{});
+                log.info("❌ Genesis validation failed - detailed comparison above", .{});
                 return false;
             }
-            print("✅ Genesis block validation passed\n", .{});
+            log.info("✅ Genesis block validation passed", .{});
             return true; // Genesis block passed validation
         }
 
-        print("🔍 validateSyncBlock: Checking basic block structure for height {}\n", .{expected_height});
+        log.info("🔍 validateSyncBlock: Checking basic block structure for height {}", .{expected_height});
 
         // Check basic block structure
         if (!block.isValid()) {
-            print("❌ Block validation failed: invalid block structure at height {}\n", .{expected_height});
-            print("   Block transaction count: {}\n", .{block.txCount()});
-            print("   Block timestamp: {}\n", .{block.header.timestamp});
-            print("   Block difficulty: {}\n", .{block.header.difficulty});
+            log.info("❌ Block validation failed: invalid block structure at height {}", .{expected_height});
+            log.info("   Block transaction count: {}", .{block.txCount()});
+            log.info("   Block timestamp: {}", .{block.header.timestamp});
+            log.info("   Block difficulty: {}", .{block.header.difficulty});
             return false;
         }
-        print("✅ Basic block structure validation passed for height {}\n", .{expected_height});
+        log.info("✅ Basic block structure validation passed for height {}", .{expected_height});
 
         // Timestamp validation for sync blocks (more lenient than normal validation)
         const current_time = util.getTime();
@@ -539,11 +539,11 @@ pub const BlockSyncProtocol = struct {
         const sync_future_allowance = types.TimestampValidation.MAX_FUTURE_TIME * 2; // 4 hours
         if (@as(i64, @intCast(block.header.timestamp)) > current_time + sync_future_allowance) {
             const future_seconds = @as(i64, @intCast(block.header.timestamp)) - current_time;
-            print("❌ Sync block timestamp too far in future: {} seconds ahead\n", .{future_seconds});
+            log.info("❌ Sync block timestamp too far in future: {} seconds ahead", .{future_seconds});
             return false;
         }
 
-        print("🔍 validateSyncBlock: Checking proof-of-work for height {}\n", .{expected_height});
+        log.info("🔍 validateSyncBlock: Checking proof-of-work for height {}", .{expected_height});
 
         // Always use RandomX validation for consistent security
         const mining_context = miner_mod.MiningContext{
@@ -556,88 +556,88 @@ pub const BlockSyncProtocol = struct {
             .blockchain = undefined, // Not needed for validation
         };
         if (!try miner_mod.validateBlockPoW(mining_context, block)) {
-            print("❌ RandomX proof-of-work validation failed for height {}\n", .{expected_height});
+            log.info("❌ RandomX proof-of-work validation failed for height {}", .{expected_height});
             return false;
         }
-        print("✅ Proof-of-work validation passed for height {}\n", .{expected_height});
+        log.info("✅ Proof-of-work validation passed for height {}", .{expected_height});
 
-        print("🔍 validateSyncBlock: Checking previous hash links for height {}\n", .{expected_height});
+        log.info("🔍 validateSyncBlock: Checking previous hash links for height {}", .{expected_height});
 
         // Check previous hash links correctly (only if we have previous blocks)
         if (expected_height > 0) {
             const current_height = try self.context.getHeight(self.context);
-            print("   Current blockchain height: {}\n", .{current_height});
-            print("   Expected block height: {}\n", .{expected_height});
+            log.info("   Current blockchain height: {}", .{current_height});
+            log.info("   Expected block height: {}", .{expected_height});
 
             if (expected_height > current_height) {
                 // During sync, we might not have the previous block yet - skip this check
-                print("⚠️ Skipping previous hash check during sync (height {} > current {})\n", .{ expected_height, current_height });
+                log.info("⚠️ Skipping previous hash check during sync (height {} > current {})", .{ expected_height, current_height });
             } else if (expected_height == current_height) {
                 // We're about to add this block - check against our current tip
-                print("   Checking previous hash against current blockchain tip\n", .{});
+                log.info("   Checking previous hash against current blockchain tip", .{});
                 var prev_block = try self.context.getBlockByHeight(self.context, expected_height - 1);
                 defer prev_block.deinit(self.context.allocator);
 
                 const prev_hash = prev_block.hash();
-                print("   Previous block hash in chain: {s}\n", .{std.fmt.fmtSliceHexLower(&prev_hash)});
-                print("   Block's previous_hash field: {s}\n", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+                log.info("   Previous block hash in chain: {s}", .{std.fmt.fmtSliceHexLower(&prev_hash)});
+                log.info("   Block's previous_hash field: {s}", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
 
                 if (!std.mem.eql(u8, &block.header.previous_hash, &prev_hash)) {
-                    print("❌ Previous hash validation failed during sync\n", .{});
-                    print("   Expected: {s}\n", .{std.fmt.fmtSliceHexLower(&prev_hash)});
-                    print("   Received: {s}\n", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
-                    print("⚠️ This might indicate a fork - skipping hash validation during sync\n", .{});
+                    log.info("❌ Previous hash validation failed during sync", .{});
+                    log.info("   Expected: {s}", .{std.fmt.fmtSliceHexLower(&prev_hash)});
+                    log.info("   Received: {s}", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+                    log.info("⚠️ This might indicate a fork - skipping hash validation during sync", .{});
                     // During sync, we trust the peer's chain - skip this validation
                 }
             } else {
                 // We already have this block height - this shouldn't happen during normal sync
-                print("⚠️ Unexpected: trying to sync block {} but we already have height {}\n", .{ expected_height, current_height });
+                log.info("⚠️ Unexpected: trying to sync block {} but we already have height {}", .{ expected_height, current_height });
             }
         }
 
-        print("🔍 validateSyncBlock: Validating {} transactions for height {}\n", .{ block.txCount(), expected_height });
+        log.info("🔍 validateSyncBlock: Validating {} transactions for height {}", .{ block.txCount(), expected_height });
 
         // For sync blocks, validate transaction structure but skip balance checks
         // The balance validation will happen naturally when transactions are processed
         for (block.transactions, 0..) |tx, i| {
-            print("   🔍 Validating transaction {} of {}\n", .{ i, block.txCount() - 1 });
+            log.info("   🔍 Validating transaction {} of {}", .{ i, block.txCount() - 1 });
 
             // Skip coinbase transaction (first one) - it doesn't need signature validation
             if (i == 0) {
-                print("   ✅ Skipping coinbase transaction validation\n", .{});
+                log.info("   ✅ Skipping coinbase transaction validation", .{});
                 continue;
             }
 
-            print("   🔍 Checking transaction structure...\n", .{});
+            log.info("   🔍 Checking transaction structure...", .{});
 
             // Basic transaction structure validation only
             if (!tx.isValid()) {
-                print("❌ Transaction {} structure validation failed\n", .{i});
+                log.info("❌ Transaction {} structure validation failed", .{i});
                 const sender_bytes = tx.sender.toBytes();
                 const recipient_bytes = tx.recipient.toBytes();
-                print("   Sender: {s}\n", .{std.fmt.fmtSliceHexLower(&sender_bytes)});
-                print("   Recipient: {s}\n", .{std.fmt.fmtSliceHexLower(&recipient_bytes)});
-                print("   Amount: {}\n", .{tx.amount});
-                print("   Fee: {}\n", .{tx.fee});
-                print("   Nonce: {}\n", .{tx.nonce});
-                print("   Timestamp: {}\n", .{tx.timestamp});
+                log.info("   Sender: {s}", .{std.fmt.fmtSliceHexLower(&sender_bytes)});
+                log.info("   Recipient: {s}", .{std.fmt.fmtSliceHexLower(&recipient_bytes)});
+                log.info("   Amount: {}", .{tx.amount});
+                log.info("   Fee: {}", .{tx.fee});
+                log.info("   Nonce: {}", .{tx.nonce});
+                log.info("   Timestamp: {}", .{tx.timestamp});
                 return false;
             }
-            print("   ✅ Transaction {} structure validation passed\n", .{i});
+            log.info("   ✅ Transaction {} structure validation passed", .{i});
 
-            print("   🔍 Checking transaction signature...\n", .{});
+            log.info("   🔍 Checking transaction signature...", .{});
 
             // Signature validation (but no balance check)
             if (!try self.context.validateTransactionSignature(self.context, tx)) {
-                print("❌ Transaction {} signature validation failed\n", .{i});
-                print("   Public key: {s}\n", .{std.fmt.fmtSliceHexLower(&tx.sender_public_key)});
-                print("   Signature: {s}\n", .{std.fmt.fmtSliceHexLower(&tx.signature)});
+                log.info("❌ Transaction {} signature validation failed", .{i});
+                log.info("   Public key: {s}", .{std.fmt.fmtSliceHexLower(&tx.sender_public_key)});
+                log.info("   Signature: {s}", .{std.fmt.fmtSliceHexLower(&tx.signature)});
                 return false;
             }
-            print("   ✅ Transaction {} signature validation passed\n", .{i});
+            log.info("   ✅ Transaction {} signature validation passed", .{i});
         }
 
-        print("✅ Sync block {} structure and signatures validated\n", .{expected_height});
+        log.info("✅ Sync block {} structure and signatures validated", .{expected_height});
         return true;
     }
 
@@ -652,11 +652,11 @@ pub const BlockSyncProtocol = struct {
 
         // Check if we've been stuck for too long
         if (now - progress.last_request_time > types.SYNC.SYNC_TIMEOUT_SECONDS * 2) {
-            print("⚠️  Sync timeout detected - attempting recovery\n", .{});
+            log.info("⚠️  Sync timeout detected - attempting recovery", .{});
             progress.consecutive_failures += 1;
 
             if (progress.consecutive_failures >= types.SYNC.MAX_CONSECUTIVE_FAILURES) {
-                print("❌ Too many consecutive sync failures - resetting sync\n", .{});
+                log.info("❌ Too many consecutive sync failures - resetting sync", .{});
                 self.failSync("Too many consecutive failures");
             } else {
                 // Try to recover by switching peers

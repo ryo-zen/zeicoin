@@ -2,7 +2,16 @@
 // This is the main entry point for the zeicoin node executable
 
 const std = @import("std");
-const print = std.debug.print;
+const builtin = @import("builtin");
+
+// Configure logging for the entire application
+pub const std_options: std.Options = .{
+    .log_level = switch (builtin.mode) {
+        .Debug => .debug,
+        .ReleaseSafe => .info,
+        .ReleaseFast, .ReleaseSmall => .warn,
+    },
+};
 
 // Import the server module which contains the actual node implementation
 const zeicoin = @import("zeicoin");

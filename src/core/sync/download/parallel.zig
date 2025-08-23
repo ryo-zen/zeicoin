@@ -2,7 +2,7 @@
 // Implements 5-10x faster sync through parallel downloads from multiple peers
 
 const std = @import("std");
-const print = std.debug.print;
+const log = std.log.scoped(.sync);
 
 const types = @import("../../types/types.zig");
 const protocol = @import("../../network/protocol/protocol.zig");
@@ -177,7 +177,7 @@ pub const PeerCapacity = struct {
         // Increase capacity if performing well
         if (self.success_count % 10 == 0 and self.average_response_time < 2.0 and self.max_concurrent < 8) {
             self.max_concurrent += 1;
-            print("📈 Increased peer capacity to {} concurrent downloads\n", .{self.max_concurrent});
+            log.info("Increased peer capacity to {} concurrent downloads", .{self.max_concurrent});
         }
         
         self.last_activity = util.getTime();
@@ -194,7 +194,7 @@ pub const PeerCapacity = struct {
             const failure_rate = @as(f64, @floatFromInt(self.failure_count)) / @as(f64, @floatFromInt(total));
             if (failure_rate > 0.3 and self.max_concurrent > 1) {
                 self.max_concurrent -= 1;
-                print("📉 Decreased peer capacity to {} concurrent downloads due to failures\n", .{self.max_concurrent});
+                log.warn("Decreased peer capacity to {} concurrent downloads due to failures", .{self.max_concurrent});
             }
         }
         
@@ -252,7 +252,7 @@ pub const ParallelDownloadManager = struct {
         // Only add peers that support parallel downloads
         if (peer.services) |services| {
             if (!protocol.ServiceFlags.supportsFastSync(services)) {
-                print("⚠️ Peer doesn't support fast sync, skipping for parallel downloads\n");
+                log.debug("Peer doesn't support fast sync, skipping for parallel downloads", .{});
                 return;
             }
         }
@@ -260,7 +260,7 @@ pub const ParallelDownloadManager = struct {
         try self.available_peers.append(peer);
         try self.peer_capacities.put(peer, PeerCapacity.init(peer));
         
-        print("✅ Added peer to parallel download pool (total: {})\n", .{self.available_peers.items.len});
+        log.info("Added peer to parallel download pool (total: {})", .{self.available_peers.items.len});
     }
     
     /// Remove a peer from the download pool
@@ -294,9 +294,9 @@ pub const ParallelDownloadManager = struct {
                 
                 if (request.shouldRetry()) {
                     self.pending_requests.append(request) catch {};
-                    print("🔄 Re-queued block {} after peer removal\n", .{height});
+                    log.debug("Re-queued block {} after peer removal", .{height});
                 } else {
-                    print("❌ Dropped block {} request after too many retries\n", .{height});
+                    log.warn("Dropped block {} request after too many retries", .{height});
                     self.stats.recordFailure();
                 }
             }
@@ -305,12 +305,12 @@ pub const ParallelDownloadManager = struct {
         // Remove peer capacity tracking
         _ = self.peer_capacities.remove(peer);
         
-        print("🚫 Removed peer from parallel download pool (remaining: {})\n", .{self.available_peers.items.len});
+        log.info("Removed peer from parallel download pool (remaining: {})", .{self.available_peers.items.len});
     }
     
     /// Queue a range of blocks for download
     pub fn queueBlockRange(self: *Self, start_height: u32, end_height: u32) !void {
-        print("📥 Queuing blocks {} to {} for parallel download ({} blocks)\n", .{start_height, end_height, end_height - start_height + 1});
+        log.info("Queuing blocks {} to {} for parallel download ({} blocks)", .{start_height, end_height, end_height - start_height + 1});
         
         var height = start_height;
         while (height <= end_height) : (height += 1) {
@@ -319,12 +319,12 @@ pub const ParallelDownloadManager = struct {
             self.stats.total_requests += 1;
         }
         
-        print("📊 Total pending requests: {}\n", .{self.pending_requests.items.len});
+        log.debug("Total pending requests: {}", .{self.pending_requests.items.len});
     }
     
     /// Queue blocks with known hashes for verification
     pub fn queueBlocksWithHashes(self: *Self, block_headers: []const types.BlockHeader, start_height: u32) !void {
-        print("📥 Queuing {} blocks with hash verification\n", .{block_headers.len});
+        log.info("Queuing {} blocks with hash verification", .{block_headers.len});
         
         for (block_headers, 0..) |header, i| {
             const height = start_height + @as(u32, @intCast(i));
@@ -334,7 +334,7 @@ pub const ParallelDownloadManager = struct {
             self.stats.total_requests += 1;
         }
         
-        print("📊 Total pending requests: {}\n", .{self.pending_requests.items.len});
+        log.debug("Total pending requests: {}", .{self.pending_requests.items.len});
     }
     
     /// Process download queue and assign requests to available peers
@@ -375,9 +375,9 @@ pub const ParallelDownloadManager = struct {
                         capacity.recordDownloadStart();
                     }
                     
-                    print("📤 Sent request for block {} to peer\n", .{request.height});
+                    log.debug("Sent request for block {} to peer", .{request.height});
                 } else |err| {
-                    print("❌ Failed to send block request: {}\n", .{err});
+                    log.err("Failed to send block request: {}", .{err});
                     processed += 1; // Skip this request for now
                 }
             } else {
@@ -394,7 +394,7 @@ pub const ParallelDownloadManager = struct {
             
             // Verify this block came from the assigned peer
             if (request.assigned_peer != from_peer) {
-                print("⚠️ Received block {} from unexpected peer, ignoring\n", .{height});
+                log.warn("Received block {} from unexpected peer, ignoring", .{height});
                 // Put the request back
                 try self.active_requests.put(height, request);
                 return false;
@@ -404,7 +404,7 @@ pub const ParallelDownloadManager = struct {
             if (request.hash) |expected_hash| {
                 const block_hash = block.hash();
                 if (!std.mem.eql(u8, &expected_hash, &block_hash)) {
-                    print("❌ Block {} hash mismatch, requesting retry\n", .{height});
+                    log.warn("Block {} hash mismatch, requesting retry", .{height});
                     
                     // Record failure and retry
                     if (self.peer_capacities.getPtr(from_peer)) |capacity| {
@@ -438,12 +438,12 @@ pub const ParallelDownloadManager = struct {
             // Store the completed block
             try self.completed_blocks.put(height, block);
             
-            print("✅ Successfully downloaded block {} in {}s\n", .{height, download_time});
+            log.info("Successfully downloaded block {} in {}s", .{height, download_time});
             
             return true;
         }
         
-        print("⚠️ Received unrequested block {} from peer\n", .{height});
+        log.debug("Received unrequested block {} from peer", .{height});
         return false;
     }
     
@@ -518,7 +518,7 @@ pub const ParallelDownloadManager = struct {
             if (self.active_requests.fetchRemove(height)) |kv| {
                 var request = kv.value;
                 
-                print("⏰ Request for block {} timed out\n", .{height});
+                log.warn("Request for block {} timed out", .{height});
                 
                 // Record failure for the peer
                 if (request.assigned_peer) |peer| {
@@ -534,9 +534,9 @@ pub const ParallelDownloadManager = struct {
                 
                 if (request.shouldRetry()) {
                     try self.pending_requests.append(request);
-                    print("🔄 Re-queued block {} for retry (attempt {})\n", .{height, request.retry_count + 1});
+                    log.debug("Re-queued block {} for retry (attempt {})", .{height, request.retry_count + 1});
                 } else {
-                    print("❌ Dropped block {} after too many retries\n", .{height});
+                    log.warn("Dropped block {} after too many retries", .{height});
                     self.stats.recordFailure();
                 }
             }

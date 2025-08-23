@@ -2,7 +2,7 @@
 // Common request/response patterns and data structures
 
 const std = @import("std");
-const print = std.debug.print;
+const log = std.log.scoped(.cli);
 
 const zeicoin = @import("zeicoin");
 const types = zeicoin.types;
@@ -102,25 +102,25 @@ pub fn getHistory(allocator: std.mem.Allocator, address: types.Address) ![]Trans
     const response = try connection.sendRequest(allocator, history_request, &buffer);
 
     if (std.mem.startsWith(u8, response, "ERROR:")) {
-        print("❌ {s}\n", .{response[7..]});
+        log.info("❌ {s}", .{response[7..]});
         return &[_]TransactionInfo{};
     }
 
     // Parse HISTORY:count\n format
     if (!std.mem.startsWith(u8, response, "HISTORY:")) {
-        print("❌ Invalid server response\n", .{});
+        log.info("❌ Invalid server response", .{});
         return &[_]TransactionInfo{};
     }
 
     // Find the newline after count
     const first_newline = std.mem.indexOfScalar(u8, response[8..], '\n') orelse {
-        print("❌ Invalid history response format\n", .{});
+        log.info("❌ Invalid history response format", .{});
         return &[_]TransactionInfo{};
     };
 
     const count_str = response[8..8 + first_newline];
     const tx_count = std.fmt.parseInt(usize, count_str, 10) catch {
-        print("❌ Invalid transaction count\n", .{});
+        log.info("❌ Invalid transaction count", .{});
         return &[_]TransactionInfo{};
     };
 
@@ -204,17 +204,17 @@ pub fn sendTransaction(allocator: std.mem.Allocator, transaction: *const types.T
     if (!std.mem.startsWith(u8, response, "OK:")) {
         // Provide helpful error messages based on server response
         if (std.mem.startsWith(u8, response, "ERROR: Insufficient balance")) {
-            print("❌ Insufficient balance! You don't have enough ZEI for this transaction.\n", .{});
-            print("💡 Check your balance with: zeicoin balance\n", .{});
-            print("💡 Use genesis accounts (alice, bob, charlie, david, eve) which have pre-funded balances\n", .{});
+            log.info("❌ Insufficient balance! You don't have enough ZEI for this transaction.", .{});
+            log.info("💡 Check your balance with: zeicoin balance", .{});
+            log.info("💡 Use genesis accounts (alice, bob, charlie, david, eve) which have pre-funded balances", .{});
         } else if (std.mem.startsWith(u8, response, "ERROR: Invalid nonce")) {
-            print("❌ Invalid transaction nonce. This usually means another transaction is pending.\n", .{});
-            print("💡 Wait a moment and try again after the current transaction is processed.\n", .{});
+            log.info("❌ Invalid transaction nonce. This usually means another transaction is pending.", .{});
+            log.info("💡 Wait a moment and try again after the current transaction is processed.", .{});
         } else if (std.mem.startsWith(u8, response, "ERROR: Sender account not found")) {
-            print("❌ Wallet account not found on the network.\n", .{});
-            print("💡 Use genesis accounts (alice, bob, charlie, david, eve) which have pre-funded balances\n", .{});
+            log.info("❌ Wallet account not found on the network.", .{});
+            log.info("💡 Use genesis accounts (alice, bob, charlie, david, eve) which have pre-funded balances", .{});
         } else {
-            print("❌ Transaction failed: {s}\n", .{response});
+            log.info("❌ Transaction failed: {s}", .{response});
         }
         return connection.ConnectionError.NetworkError;
     }

@@ -6,7 +6,7 @@ const std = @import("std");
 const util = @import("../util/util.zig");
 const bech32 = @import("../crypto/bech32.zig");
 
-const print = std.debug.print;
+const log = std.log.scoped(.types);
 
 // Money constants - ZeiCoin monetary units
 pub const ZEI_COIN: u64 = 100000000; // 1 Zeicoin = 100,000,000 zei
@@ -369,25 +369,25 @@ pub const Transaction = struct {
     pub fn isValid(self: *const Transaction) bool {
         // Version validation - only version 0 is currently supported
         if (self.version != 0) {
-            std.debug.print("❌ Transaction invalid: unsupported version {}\n", .{self.version});
+            log.warn("❌ Transaction invalid: unsupported version {}", .{self.version});
             return false;
         }
 
         // Size validation - prevent DoS with oversized transactions
         const tx_size = self.getSerializedSize();
         if (tx_size > TransactionLimits.MAX_TX_SIZE) {
-            std.debug.print("❌ Transaction invalid: size {} bytes exceeds maximum {} bytes\n", .{ tx_size, TransactionLimits.MAX_TX_SIZE });
+            log.warn("❌ Transaction invalid: size {} bytes exceeds maximum {} bytes", .{ tx_size, TransactionLimits.MAX_TX_SIZE });
             return false;
         }
 
         // Validate field sizes
         if (self.witness_data.len > TransactionLimits.MAX_WITNESS_SIZE) {
-            std.debug.print("❌ Transaction invalid: witness_data size {} bytes exceeds maximum {} bytes\n", .{ self.witness_data.len, TransactionLimits.MAX_WITNESS_SIZE });
+            log.warn("❌ Transaction invalid: witness_data size {} bytes exceeds maximum {} bytes", .{ self.witness_data.len, TransactionLimits.MAX_WITNESS_SIZE });
             return false;
         }
 
         if (self.extra_data.len > TransactionLimits.MAX_EXTRA_DATA_SIZE) {
-            std.debug.print("❌ Transaction invalid: extra_data size {} bytes exceeds maximum {} bytes\n", .{ self.extra_data.len, TransactionLimits.MAX_EXTRA_DATA_SIZE });
+            log.warn("❌ Transaction invalid: extra_data size {} bytes exceeds maximum {} bytes", .{ self.extra_data.len, TransactionLimits.MAX_EXTRA_DATA_SIZE });
             return false;
         }
 
@@ -395,11 +395,11 @@ pub const Transaction = struct {
         if (self.isCoinbase()) {
             // Coinbase validation: amount > 0, timestamp > 0
             if (self.amount == 0) {
-                std.debug.print("❌ Coinbase invalid: amount is 0\n", .{});
+                log.warn("❌ Coinbase invalid: amount is 0", .{});
                 return false;
             }
             if (self.timestamp == 0) {
-                std.debug.print("❌ Coinbase invalid: timestamp is 0\n", .{});
+                log.warn("❌ Coinbase invalid: timestamp is 0", .{});
                 return false;
             }
             // Coinbase can send to any recipient
@@ -408,21 +408,21 @@ pub const Transaction = struct {
 
         // Regular transaction validation
         if (self.amount == 0) {
-            std.debug.print("❌ Transaction invalid: amount is 0\n", .{});
+            log.warn("❌ Transaction invalid: amount is 0", .{});
             return false;
         }
         if (self.timestamp == 0) {
-            std.debug.print("❌ Transaction invalid: timestamp is 0\n", .{});
+            log.warn("❌ Transaction invalid: timestamp is 0", .{});
             return false;
         }
         if (self.sender.equals(self.recipient)) {
-            std.debug.print("❌ Transaction invalid: sender equals recipient\n", .{});
+            log.warn("❌ Transaction invalid: sender equals recipient", .{});
             return false;
         }
 
         // Validate future-proof fields
         if (self.script_version != 0) {
-            std.debug.print("❌ Transaction invalid: unsupported script version {}\n", .{self.script_version});
+            log.warn("❌ Transaction invalid: unsupported script version {}", .{self.script_version});
             return false;
         }
 
@@ -432,7 +432,7 @@ pub const Transaction = struct {
         // Verify that sender address matches the hash of provided public key
         const derived_address = Address.fromPublicKey(self.sender_public_key);
         if (!self.sender.equals(derived_address)) {
-            std.debug.print("❌ Transaction invalid: sender address doesn't match public key\n", .{});
+            log.warn("❌ Transaction invalid: sender address doesn't match public key", .{});
             return false;
         }
 
@@ -704,7 +704,7 @@ pub const BlockHeader = struct {
 
         // Log work calculation for consensus debugging
         if (work > 1000000) { // Only log significant work values
-            print("⚡ [CONSENSUS] Block work calculated: {} (difficulty: base_bytes={}, threshold={x})\n", .{ work, target.base_bytes, target.threshold });
+            log.debug("⚡ [CONSENSUS] Block work calculated: {} (difficulty: base_bytes={}, threshold={x})", .{ work, target.base_bytes, target.threshold });
         }
 
         return work;
@@ -756,7 +756,7 @@ pub const Block = struct {
     pub fn isValid(self: *const Block) bool {
         // Check block version - only version 0 is currently supported
         if (self.header.version != 0) {
-            std.debug.print("❌ Block invalid: unsupported version {}\n", .{self.header.version});
+            log.warn("❌ Block invalid: unsupported version {}", .{self.header.version});
             return false;
         }
 
@@ -765,14 +765,14 @@ pub const Block = struct {
 
         // Regular blocks must have transactions
         if (self.transactions.len == 0) {
-            std.debug.print("❌ Block invalid: no transactions\n", .{});
+            log.warn("❌ Block invalid: no transactions", .{});
             return false;
         }
 
         // All transactions must be valid
         for (self.transactions, 0..) |tx, i| {
             if (!tx.isValid()) {
-                std.debug.print("❌ Block invalid: transaction {} failed validation\n", .{i});
+                log.warn("❌ Block invalid: transaction {} failed validation", .{i});
                 return false;
             }
         }
@@ -1105,13 +1105,13 @@ pub const NetworkConfig = struct {
     pub fn displayInfo() void {
         const config = current();
         const initial_difficulty = ZenMining.initialDifficultyTarget();
-        std.debug.print("🌐 Network: {s}\n", .{networkName()});
-        std.debug.print("⚡ Difficulty: {}-byte range (dynamic)\n", .{initial_difficulty.base_bytes});
+        log.info("🌐 Network: {s}", .{networkName()});
+        log.info("⚡ Difficulty: {}-byte range (dynamic)", .{initial_difficulty.base_bytes});
         // Always use RandomX for consistent security
-        std.debug.print("🧠 Mining Algorithm: RandomX {s}\n", .{if (config.randomx_mode) "Fast (2GB RAM)" else "Light (256MB RAM)"});
-        std.debug.print("⏰ Target Block Time: {}s\n", .{config.target_block_time});
-        std.debug.print("💰 Block Reward: {d:.8} ZEI\n", .{@as(f64, @floatFromInt(config.block_reward)) / @as(f64, @floatFromInt(ZEI_COIN))});
-        std.debug.print("💸 Minimum Fee: {d:.8} ZEI\n", .{@as(f64, @floatFromInt(config.min_fee)) / @as(f64, @floatFromInt(ZEI_COIN))});
+        log.info("🧠 Mining Algorithm: RandomX {s}", .{if (config.randomx_mode) "Fast (2GB RAM)" else "Light (256MB RAM)"});
+        log.info("⏰ Target Block Time: {}s", .{config.target_block_time});
+        log.info("💰 Block Reward: {d:.8} ZEI", .{@as(f64, @floatFromInt(config.block_reward)) / @as(f64, @floatFromInt(ZEI_COIN))});
+        log.info("💸 Minimum Fee: {d:.8} ZEI", .{@as(f64, @floatFromInt(config.min_fee)) / @as(f64, @floatFromInt(ZEI_COIN))});
     }
 };
 

@@ -2,7 +2,7 @@
 // Clean main entry point that delegates to specialized modules
 
 const std = @import("std");
-const print = std.debug.print;
+const log = std.log.scoped(.cli);
 
 const zeicoin = @import("zeicoin");
 
@@ -16,6 +16,9 @@ const CLIError = error{
     InvalidCommand,
     InvalidArguments,
 };
+
+// Import CLIError from transaction commands for error handling
+const TransactionCLIError = transaction_commands.CLIError;
 
 const Command = enum {
     wallet,
@@ -40,7 +43,7 @@ pub fn main() !void {
     zeicoin.dotenv.loadForNetwork(allocator) catch |err| {
         // Don't fail if .env loading fails, just warn
         if (err != error.FileNotFound) {
-            print("⚠️  Warning: Failed to load .env file: {}\n", .{err});
+            log.info("⚠️  Warning: Failed to load .env file: {}", .{err});
         }
     };
     
@@ -54,8 +57,8 @@ pub fn main() !void {
     
     const command_str = args[1];
     const command = std.meta.stringToEnum(Command, command_str) orelse {
-        print("❌ Unknown command: {s}\n", .{command_str});
-        print("💡 Use 'zeicoin help' to see available commands\n", .{});
+        log.info("❌ Unknown command: {s}", .{command_str});
+        log.info("💡 Use 'zeicoin help' to see available commands", .{});
         display.printHelp();
         return;
     };
@@ -63,13 +66,28 @@ pub fn main() !void {
     // Delegate to appropriate command handler
     switch (command) {
         .wallet => try wallet_commands.handleWallet(allocator, args[2..]),
-        .balance => try transaction_commands.handleBalance(allocator, args[2..]),
-        .send => try transaction_commands.handleSend(allocator, args[2..]),
+        .balance => transaction_commands.handleBalance(allocator, args[2..]) catch |err| {
+            switch (err) {
+                TransactionCLIError.TransactionFailed => std.process.exit(1),
+                else => return err,
+            }
+        },
+        .send => transaction_commands.handleSend(allocator, args[2..]) catch |err| {
+            switch (err) {
+                TransactionCLIError.TransactionFailed => std.process.exit(1),
+                else => return err,
+            }
+        },
         .status => try network_commands.handleStatus(allocator, args[2..]),
         .address => try wallet_commands.handleAddress(allocator, args[2..]),
         .sync => try network_commands.handleSync(allocator, args[2..]),
         .block => try network_commands.handleBlock(allocator, args[2..]),
-        .history => try transaction_commands.handleHistory(allocator, args[2..]),
+        .history => transaction_commands.handleHistory(allocator, args[2..]) catch |err| {
+            switch (err) {
+                TransactionCLIError.TransactionFailed => std.process.exit(1),
+                else => return err,
+            }
+        },
         .seed, .mnemonic => try wallet_commands.handleSeed(allocator, args[2..]),
         .help => display.printHelp(),
     }

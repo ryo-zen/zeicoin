@@ -2,7 +2,7 @@
 // Handles balance, send, and history commands
 
 const std = @import("std");
-const print = std.debug.print;
+const log = std.log.scoped(.cli);
 
 const zeicoin = @import("zeicoin");
 const types = zeicoin.types;
@@ -13,7 +13,7 @@ const util = zeicoin.util;
 const protocol = @import("../client/protocol.zig");
 const display = @import("../utils/display.zig");
 
-const CLIError = error{
+pub const CLIError = error{
     WalletNotFound,
     NetworkError,
     TransactionFailed,
@@ -32,8 +32,8 @@ fn loadHDWalletForOperation(allocator: std.mem.Allocator, wallet_name: []const u
     
     // Check if wallet file exists
     std.fs.cwd().access(wallet_path, .{}) catch {
-        print("❌ Wallet '{s}' not found\n", .{wallet_name});
-        print("💡 Use 'zeicoin wallet create {s}' to create it\n", .{wallet_name});
+        log.info("❌ Wallet '{s}' not found", .{wallet_name});
+        log.info("💡 Use 'zeicoin wallet create {s}' to create it", .{wallet_name});
         return CLIError.WalletNotFound;
     };
 
@@ -47,7 +47,7 @@ fn loadHDWalletForOperation(allocator: std.mem.Allocator, wallet_name: []const u
 
     // Get password for wallet
     const password = password_util.getPasswordForWallet(allocator, wallet_name, false) catch |err| {
-        print("❌ Failed to get password for wallet '{s}': {}\n", .{ wallet_name, err });
+        log.info("❌ Failed to get password for wallet '{s}': {}", .{ wallet_name, err });
         return CLIError.WalletNotFound;
     };
     defer allocator.free(password);
@@ -58,8 +58,17 @@ fn loadHDWalletForOperation(allocator: std.mem.Allocator, wallet_name: []const u
     defer allocator.free(wallet_path_for_load);
     
     zen_wallet.loadFromFile(wallet_path_for_load, password) catch |err| {
-        print("❌ Failed to load wallet '{s}': {}\n", .{ wallet_name, err });
-        return CLIError.WalletNotFound;
+        switch (err) {
+            wallet.WalletError.InvalidPassword => {
+                log.info("❌ Failed to load wallet '{s}': Invalid password", .{wallet_name});
+                log.info("💡 Please check your password and try again", .{});
+                return CLIError.WalletNotFound;
+            },
+            else => {
+                log.info("❌ Failed to load wallet '{s}': {}", .{ wallet_name, err });
+                return CLIError.WalletNotFound;
+            },
+        }
     };
 
     return zen_wallet;
@@ -101,7 +110,7 @@ pub fn handleBalance(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
     // Format bech32 address for display
     const bech32_addr = address.toBech32(allocator, types.CURRENT_NETWORK) catch {
-        print("❌ Failed to encode address\n", .{});
+        log.info("❌ Failed to encode address", .{});
         return;
     };
     defer allocator.free(bech32_addr);
@@ -113,10 +122,10 @@ pub fn handleBalance(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 /// Handle send command
 pub fn handleSend(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     if (args.len < 2) {
-        print("❌ Usage: zeicoin send <amount> <recipient> [wallet_name]\n", .{});
-        print("💡 Recipient can be a bech32 address or wallet name\n", .{});
-        print("💡 Example: zeicoin send 10 tzei1qr2qge3sdeq... alice\n", .{});
-        print("💡 Example: zeicoin send 10 bob alice\n", .{});
+        log.info("❌ Usage: zeicoin send <amount> <recipient> [wallet_name]", .{});
+        log.info("💡 Recipient can be a bech32 address or wallet name", .{});
+        log.info("💡 Example: zeicoin send 10 tzei1qr2qge3sdeq... alice", .{});
+        log.info("💡 Example: zeicoin send 10 bob alice", .{});
         return CLIError.TransactionFailed;
     }
 
@@ -126,14 +135,14 @@ pub fn handleSend(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
     // Parse amount (supports decimals)
     const amount = display.parseZeiAmount(amount_str) catch {
-        print("❌ Invalid amount: {s}\n", .{amount_str});
-        print("💡 Amount must be a positive number (supports up to 8 decimal places)\n", .{});
+        log.info("❌ Invalid amount: {s}", .{amount_str});
+        log.info("💡 Amount must be a positive number (supports up to 8 decimal places)", .{});
         return CLIError.TransactionFailed;
     };
 
     // Validate amount is not zero or negative
     if (amount == 0) {
-        print("❌ Invalid amount: cannot send zero ZEI\n", .{});
+        log.info("❌ Invalid amount: cannot send zero ZEI", .{});
         return CLIError.TransactionFailed;
     }
 
@@ -141,17 +150,17 @@ pub fn handleSend(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const recipient_address = types.Address.fromString(allocator, recipient_hex) catch blk: {
         // Check if this looks like a bech32 address but is invalid
         if (std.mem.startsWith(u8, recipient_hex, "tzei1") or std.mem.startsWith(u8, recipient_hex, "mzei1")) {
-            print("❌ Invalid bech32 address: '{s}'\n", .{recipient_hex});
-            print("💡 Address format is invalid or has wrong checksum\n", .{});
+            log.info("❌ Invalid bech32 address: '{s}'", .{recipient_hex});
+            log.info("💡 Address format is invalid or has wrong checksum", .{});
             return CLIError.TransactionFailed;
         }
 
         // If not a bech32 format, try to resolve as wallet name
         const recipient_wallet = loadHDWalletForOperation(allocator, recipient_hex) catch {
-            print("❌ Invalid recipient: '{s}'\n", .{recipient_hex});
-            print("💡 Recipient must be a valid bech32 address or wallet name\n", .{});
-            print("💡 Example: zeicoin send 10 tzei1qr2q... alice\n", .{});
-            print("💡 Example: zeicoin send 10 bob alice\n", .{});
+            log.info("❌ Invalid recipient: '{s}'", .{recipient_hex});
+            log.info("💡 Recipient must be a valid bech32 address or wallet name", .{});
+            log.info("💡 Example: zeicoin send 10 tzei1qr2q... alice", .{});
+            log.info("💡 Example: zeicoin send 10 bob alice", .{});
             return CLIError.TransactionFailed;
         };
         defer {
@@ -160,11 +169,11 @@ pub fn handleSend(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         }
 
         const addr = recipient_wallet.getAddress(0) catch {
-            print("❌ Could not get address from wallet '{s}'\n", .{recipient_hex});
+            log.info("❌ Could not get address from wallet '{s}'", .{recipient_hex});
             return;
         };
 
-        print("💡 Resolved wallet '{s}' to address\n", .{recipient_hex});
+        log.info("💡 Resolved wallet '{s}' to address", .{recipient_hex});
         break :blk addr;
     };
 
@@ -189,12 +198,12 @@ pub fn handleSend(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
     // Get current nonce and height from server
     const current_nonce = protocol.getNonce(allocator, sender_address) catch {
-        print("❌ Failed to get nonce from server\n", .{});
+        log.info("❌ Failed to get nonce from server", .{});
         return CLIError.NetworkError;
     };
 
     const current_height = protocol.getHeight(allocator) catch {
-        print("❌ Failed to get height from server\n", .{});
+        log.info("❌ Failed to get height from server", .{});
         return CLIError.NetworkError;
     };
 
@@ -234,13 +243,13 @@ pub fn handleSend(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
     // Success message
     const tx_hash_final = transaction.hash();
-    print("✅ Transaction sent successfully!\n", .{});
-    print("🆔 Transaction hash: {}\n", .{std.fmt.fmtSliceHexLower(&tx_hash_final)});
+    log.info("✅ Transaction sent successfully!", .{});
+    log.info("🆔 Transaction hash: {}", .{std.fmt.fmtSliceHexLower(&tx_hash_final)});
     
     const amount_display = util.formatZEI(allocator, amount) catch "? ZEI";
     defer if (!std.mem.eql(u8, amount_display, "? ZEI")) allocator.free(amount_display);
     
-    print("💰 Sent {s} from '{s}'\n", .{amount_display, wallet_name});
+    log.info("💰 Sent {s} from '{s}'", .{amount_display, wallet_name});
 }
 
 /// Handle history command
@@ -285,7 +294,7 @@ pub fn handleHistory(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
     // Format bech32 address for display
     const bech32_addr = address.toBech32(allocator, types.CURRENT_NETWORK) catch {
-        print("❌ Failed to encode address\n", .{});
+        log.info("❌ Failed to encode address", .{});
         return;
     };
     defer allocator.free(bech32_addr);

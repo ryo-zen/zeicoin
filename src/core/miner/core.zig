@@ -2,7 +2,7 @@
 // Handles block creation, transaction selection, and mining orchestration
 
 const std = @import("std");
-const print = std.debug.print;
+const log = std.log.scoped(.mining);
 const ArrayList = std.ArrayList;
 
 const types = @import("../types/types.zig");
@@ -22,7 +22,7 @@ const Address = types.Address;
 /// Mine a new block with transactions from mempool
 pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_address: Address) !types.Block {
     _ = miner_keypair; // Coinbase transactions don't need signatures
-    print("⛏️ ZenMineBlock: Starting to mine new block\n", .{});
+    log.info("⛏️ ZenMineBlock: Starting to mine new block", .{});
 
     // Get transactions from mempool manager
     const mempool_transactions = try ctx.mempool_manager.getTransactionsForMining();
@@ -61,7 +61,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
     const total_reward_display = util.formatZEI(ctx.allocator, miner_reward) catch "? ZEI";
     defer if (!std.mem.eql(u8, total_reward_display, "? ZEI")) ctx.allocator.free(total_reward_display);
 
-    print("💰 Miner reward: {s} (base) + {s} (fees) = {s} total\n", .{ base_reward_display, fees_display, total_reward_display });
+    log.info("💰 Miner reward: {s} (base) + {s} (fees) = {s} total", .{ base_reward_display, fees_display, total_reward_display });
 
     // Apply soft limit for mining (2MB default, configurable)
     var transactions_to_include = std.ArrayList(Transaction).init(ctx.allocator);
@@ -78,8 +78,8 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
     for (mempool_transactions) |tx| {
         const tx_size: usize = 192; // Approximate transaction size
         if (current_block_size + tx_size > types.BlockLimits.SOFT_BLOCK_SIZE) {
-            print("📦 Soft block size limit reached: {} bytes (limit: {} bytes)\n", .{ current_block_size, types.BlockLimits.SOFT_BLOCK_SIZE });
-            print("📊 Including {} of {} mempool transactions\n", .{ transactions_to_include.items.len - 1, mempool_transactions.len });
+            log.info("📦 Soft block size limit reached: {} bytes (limit: {} bytes)", .{ current_block_size, types.BlockLimits.SOFT_BLOCK_SIZE });
+            log.info("📊 Including {} of {} mempool transactions", .{ transactions_to_include.items.len - 1, mempool_transactions.len });
             break;
         }
         try transactions_to_include.append(tx);
@@ -94,7 +94,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
 
     // Update mining state height before mining
     ctx.mining_state.current_height.store(current_height, .release);
-    print("🔍 zenMineBlock: storing current_height = {} to atomic\n", .{current_height});
+    log.info("🔍 zenMineBlock: storing current_height = {} to atomic", .{current_height});
 
     // Get previous block hash even for block 1 (height 0 = genesis exists)
     // Check if database is completely empty (no blocks at all)
@@ -107,11 +107,11 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
     } else blk: {
         // Normal case: get the hash of the previous block (current_height is the existing tip)
         // When mining block at height N+1, we need hash of block N
-        print("🔍 Mining block at height {}, getting previous block at height {}\n", .{ current_height + 1, current_height });
+        log.info("🔍 Mining block at height {}, getting previous block at height {}", .{ current_height + 1, current_height });
         var prev_block = try ctx.database.getBlock(current_height);
         const hash = prev_block.hash();
         const hash_hex = std.fmt.fmtSliceHexLower(&hash);
-        print("🔍 Previous block hash: {}\n", .{hash_hex});
+        log.info("🔍 Previous block hash: {}", .{hash_hex});
         prev_block.deinit(ctx.allocator);
         break :blk hash;
     };
@@ -159,7 +159,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
         },
     };
 
-    print("👌 Starting mining\n", .{});
+    log.info("👌 Starting mining", .{});
     const start_time = util.getTime();
 
     // ZEN PROOF-OF-WORK: Find valid nonce
@@ -185,7 +185,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
         const block_height = current_height + 1;
         const block_hash_hex = std.fmt.fmtSliceHexLower(&new_block.hash());
         const prev_hash_hex = std.fmt.fmtSliceHexLower(&new_block.header.previous_hash);
-        print("💾 Saving block {} with hash {} and previous_hash {}\n", .{ block_height, block_hash_hex, prev_hash_hex });
+        log.info("💾 Saving block {} with hash {} and previous_hash {}", .{ block_height, block_hash_hex, prev_hash_hex });
         try ctx.database.saveBlock(block_height, new_block);
 
         // Check for matured coinbase rewards (100 block maturity)
@@ -197,7 +197,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
         // Clean mempool of confirmed transactions
         try ctx.mempool_manager.cleanAfterBlock(new_block);
 
-        print("⛏️  ZEN BLOCK #{} MINED! ({} txs, {} ZEI reward, {}s)\n", .{ block_height, new_block.txCount(), types.ZenMining.BLOCK_REWARD / types.ZEI_COIN, mining_time });
+        log.info("⛏️  ZEN BLOCK #{} MINED! ({} txs, {} ZEI reward, {}s)", .{ block_height, new_block.txCount(), types.ZenMining.BLOCK_REWARD / types.ZEI_COIN, mining_time });
 
         // Chain state updates handled by modern reorganization system
         // Fork manager updateBestChain call removed - handled internally
@@ -205,12 +205,12 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
         // Broadcast the newly mined block to network peers (zen propagation)
         try ctx.blockchain.broadcastNewBlock(new_block);
 
-        print("📡 Block propagates through zen network like ripples in water\n", .{});
+        log.info("📡 Block propagates through zen network like ripples in water", .{});
 
         return new_block;
     } else {
         const height = ctx.blockchain.getHeight() catch 0;
-        print("😔 [MINING TIMEOUT] Height {} - nonce not found (the universe wasn't ready)\n", .{height});
+        log.info("😔 [MINING TIMEOUT] Height {} - nonce not found (the universe wasn't ready)", .{height});
         // Free block memory and return error
         new_block.deinit(ctx.allocator);
         return error.MiningFailed;

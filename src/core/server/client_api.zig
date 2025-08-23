@@ -2,7 +2,7 @@
 // Handles transaction submission, balance queries, and other client operations
 
 const std = @import("std");
-const print = std.debug.print;
+const log = std.log.scoped(.server);
 const net = std.net;
 const types = @import("../types/types.zig");
 const zen = @import("../node.zig");
@@ -45,7 +45,7 @@ pub const ClientApiServer = struct {
         const address = try net.Address.parseIp(self.bind_address, CLIENT_API_PORT);
         self.server = try address.listen(.{ .reuse_address = true });
         
-        std.log.info("Client API listening on {s}:{}", .{self.bind_address, CLIENT_API_PORT});
+        log.info("Client API listening on {s}:{}", .{self.bind_address, CLIENT_API_PORT});
         
         self.running = true;
         while (self.running) {
@@ -781,7 +781,7 @@ pub const ClientApiServer = struct {
             defer self.allocator.free(counterparty_bech32);
             
             // Format: height|hash|type|amount|fee|timestamp|confirmations|counterparty
-            try response.writer().print("{}|{}|{s}|{}|{}|{}|{}|{s}\n", .{
+            try response.writer().print("{}|{}|{s}|{}|{}|{}|{}|{s}", .{
                 tx_info.height,
                 std.fmt.fmtSliceHexLower(&tx_info.hash),
                 tx_info.tx_type,

@@ -3,7 +3,7 @@
 // Provides high-level API for blockchain operations
 
 const std = @import("std");
-const print = std.debug.print;
+const log = std.log.scoped(.chain);
 const types = @import("../types/types.zig");
 const util = @import("../util/util.zig");
 const db = @import("../storage/db.zig");
@@ -69,7 +69,7 @@ pub const ChainManager = struct {
         
         // Initialize block index from existing blockchain data
         self.state.initializeBlockIndex() catch |err| {
-            print("⚠️ Failed to initialize block index: {} - O(1) lookups disabled\n", .{err});
+            log.info("⚠️ Failed to initialize block index: {} - O(1) lookups disabled", .{err});
         };
     }
 
@@ -162,6 +162,6 @@ pub const ChainManager = struct {
         // Process genesis transactions to initialize accounts
         try self.state.processBlockTransactions(genesis_block.transactions, 0);
         
-        print("✅ Genesis block initialized for network {}\n", .{network});
+        log.info("✅ Genesis block initialized for network {}", .{network});
     }
 };

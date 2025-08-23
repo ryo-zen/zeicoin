@@ -2,7 +2,7 @@
 // Handles server discovery, connection establishment, and basic communication
 
 const std = @import("std");
-const print = std.debug.print;
+const log = std.log.scoped(.cli);
 const net = std.net;
 
 const zeicoin = @import("zeicoin");
@@ -33,7 +33,7 @@ pub const ClientConnection = struct {
         const bytes_read = readWithTimeout(self.stream, buffer) catch |err| {
             switch (err) {
                 error.ReadTimeout => {
-                    print("❌ Server response timeout (5s)\n", .{});
+                    log.info("❌ Server response timeout (5s)", .{});
                     return ConnectionError.ConnectionTimeout;
                 },
             }
@@ -101,31 +101,31 @@ pub fn getServerIP(allocator: std.mem.Allocator) ![]const u8 {
 
     // 3. Try bootstrap servers from JSON config
     const bootstrap_nodes = types.loadBootstrapNodes(allocator) catch |err| {
-        print("⚠️  Failed to load bootstrap nodes: {}\n", .{err});
+        log.info("⚠️  Failed to load bootstrap nodes: {}", .{err});
         return ConnectionError.NetworkError;
     };
     defer types.freeBootstrapNodes(allocator, bootstrap_nodes);
 
-    print("🔍 Testing bootstrap nodes for health...\n", .{});
+    log.info("🔍 Testing bootstrap nodes for health...", .{});
     for (bootstrap_nodes) |bootstrap_addr| {
         // Parse IP from "ip:port" format
         var it = std.mem.splitScalar(u8, bootstrap_addr, ':');
         if (it.next()) |ip_str| {
-            print("  Testing {s}... ", .{ip_str});
+            log.info("  Testing {s}... ", .{ip_str});
             if (testServerConnection(ip_str)) {
-                print("✅ Healthy!\n", .{});
-                print("🌐 Using healthy bootstrap node: {s}\n", .{ip_str});
+                log.info("✅ Healthy!", .{});
+                log.info("🌐 Using healthy bootstrap node: {s}", .{ip_str});
                 return allocator.dupe(u8, ip_str);
             } else {
-                print("❌ Unhealthy or offline\n", .{});
+                log.info("❌ Unhealthy or offline", .{});
             }
         }
     }
 
-    print("⚠️  No healthy bootstrap nodes found\n", .{});
+    log.info("⚠️  No healthy bootstrap nodes found", .{});
 
     // 4. Final fallback to localhost
-    print("💡 Using localhost fallback (set ZEICOIN_SERVER to override)\n", .{});
+    log.info("💡 Using localhost fallback (set ZEICOIN_SERVER to override)", .{});
     return allocator.dupe(u8, "127.0.0.1");
 }
 
@@ -225,19 +225,19 @@ pub fn connect(allocator: std.mem.Allocator) !ClientConnection {
     errdefer allocator.free(server_ip);
 
     const server_address = net.Address.parseIp4(server_ip, 10802) catch {
-        print("❌ Invalid server address: {s}\n", .{server_ip});
+        log.info("❌ Invalid server address: {s}", .{server_ip});
         return ConnectionError.InvalidServerAddress;
     };
 
     const stream = connectWithTimeout(server_address) catch |err| {
         switch (err) {
             ConnectionError.ConnectionTimeout => {
-                print("❌ Connection timeout to ZeiCoin server at {s}:10802 (5s)\n", .{server_ip});
+                log.info("❌ Connection timeout to ZeiCoin server at {s}:10802 (5s)", .{server_ip});
                 return ConnectionError.ConnectionTimeout;
             },
             ConnectionError.ConnectionFailed => {
-                print("❌ Cannot connect to ZeiCoin server at {s}:10802\n", .{server_ip});
-                print("💡 Make sure the server is running\n", .{});
+                log.info("❌ Cannot connect to ZeiCoin server at {s}:10802", .{server_ip});
+                log.info("💡 Make sure the server is running", .{});
                 return ConnectionError.ConnectionFailed;
             },
             else => return err,

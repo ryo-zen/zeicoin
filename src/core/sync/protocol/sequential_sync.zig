@@ -3,7 +3,7 @@
 // Used by batch sync for error recovery and specific block requests
 
 const std = @import("std");
-const print = std.debug.print;
+const log = std.log.scoped(.sync);
 
 const types = @import("../../types/types.zig");
 const net = @import("../../network/peer.zig");
@@ -17,7 +17,7 @@ const Peer = net.Peer;
 /// Request a single block by hash from a peer
 /// Used for error recovery when batch requests fail
 pub fn requestBlock(peer: *Peer, hash: Hash) !Block {
-    print("📤 [SEQUENTIAL] Requesting block by hash: {s}\n", .{std.fmt.fmtSliceHexLower(&hash)});
+    log.debug("Requesting block by hash: {s}", .{std.fmt.fmtSliceHexLower(&hash)});
     
     // Send single block request
     try peer.sendGetBlockByHash(hash);
@@ -29,7 +29,7 @@ pub fn requestBlock(peer: *Peer, hash: Hash) !Block {
     while (util.getTime() - start_time < timeout_ms / 1000) {
         // Check if block has arrived
         if (peer.getReceivedBlock(hash)) |block| {
-            print("✅ [SEQUENTIAL] Block received by hash: {s}\n", .{std.fmt.fmtSliceHexLower(&hash)});
+            log.info("Block received by hash: {s}", .{std.fmt.fmtSliceHexLower(&hash)});
             return block;
         }
         
@@ -37,14 +37,14 @@ pub fn requestBlock(peer: *Peer, hash: Hash) !Block {
         std.time.sleep(100 * std.time.ns_per_ms);
     }
     
-    print("❌ [SEQUENTIAL] Block request timed out: {s}\n", .{std.fmt.fmtSliceHexLower(&hash)});
+    log.warn("Block request timed out: {s}", .{std.fmt.fmtSliceHexLower(&hash)});
     return error.BlockRequestTimeout;
 }
 
 /// Request a single block by height from a peer
 /// Used for latest block requests and specific height recovery
 pub fn requestBlockByHeight(peer: *Peer, height: u32) !Block {
-    print("📤 [SEQUENTIAL] Requesting block by height: {}\n", .{height});
+    log.debug("Requesting block by height: {}", .{height});
     
     // Send single block request by height
     try peer.sendGetBlock(height);
@@ -57,19 +57,19 @@ pub fn requestBlockByHeight(peer: *Peer, height: u32) !Block {
     // In practice, ZSP-001 batch sync is preferred
     _ = timeout_ms;
     _ = start_time;
-    print("⚠️ [SEQUENTIAL] Block request by height not implemented (use batch sync)\n", .{});
+    log.warn("Block request by height not implemented (use batch sync)", .{});
     return error.NotImplemented;
 }
 
 /// Request the latest block from a peer
 /// Used when near chain tip for real-time sync
 pub fn requestLatestBlock(peer: *Peer) !?Block {
-    print("📤 [SEQUENTIAL] Requesting latest block from peer\n", .{});
+    log.debug("Requesting latest block from peer", .{});
     
     // First get peer's current height
     const peer_height = peer.height;
     if (peer_height == 0) {
-        print("⚠️ [SEQUENTIAL] Peer has no blocks\n", .{});
+        log.warn("Peer has no blocks", .{});
         return null;
     }
     
@@ -80,13 +80,13 @@ pub fn requestLatestBlock(peer: *Peer) !?Block {
 /// Verify a specific block exists on a peer
 /// Used for fork resolution and chain validation
 pub fn verifyBlockExists(peer: *Peer, hash: Hash) !bool {
-    print("🔍 [SEQUENTIAL] Verifying block exists: {s}\n", .{std.fmt.fmtSliceHexLower(&hash)});
+    log.debug("Verifying block exists: {s}", .{std.fmt.fmtSliceHexLower(&hash)});
     
     // Try to request the block
     const block = requestBlock(peer, hash) catch |err| {
         switch (err) {
             error.BlockRequestTimeout => {
-                print("⚠️ [SEQUENTIAL] Block verification timeout (likely doesn't exist)\n", .{});
+                log.warn("Block verification timeout (likely doesn't exist)", .{});
                 return false;
             },
             else => return err,
@@ -97,7 +97,7 @@ pub fn verifyBlockExists(peer: *Peer, hash: Hash) !bool {
     var owned_block = block;
     defer owned_block.deinit(std.heap.page_allocator);
     
-    print("✅ [SEQUENTIAL] Block verified to exist\n", .{});
+    log.debug("Block verified to exist", .{});
     return true;
 }
 
@@ -108,21 +108,21 @@ pub fn recoverFailedBlocks(
     peer: *Peer, 
     failed_heights: []const u32
 ) !std.ArrayList(Block) {
-    print("🔄 [SEQUENTIAL] Recovering {} failed blocks\n", .{failed_heights.len});
+    log.info("Recovering {} failed blocks", .{failed_heights.len});
     
     var recovered_blocks = std.ArrayList(Block).init(allocator);
     
     for (failed_heights) |height| {
         const block = requestBlockByHeight(peer, height) catch |err| {
-            print("❌ [SEQUENTIAL] Failed to recover block {}: {}\n", .{height, err});
+            log.err("Failed to recover block {}: {}", .{height, err});
             continue;
         };
         
         try recovered_blocks.append(block);
-        print("✅ [SEQUENTIAL] Recovered block {}\n", .{height});
+        log.info("Recovered block {}", .{height});
     }
     
-    print("🔄 [SEQUENTIAL] Recovery complete: {}/{} blocks recovered\n", 
+    log.info("Recovery complete: {}/{} blocks recovered", 
         .{recovered_blocks.items.len, failed_heights.len});
     
     return recovered_blocks;
@@ -136,7 +136,7 @@ pub fn requestBlockRange(
     start_height: u32,
     count: u32
 ) !std.ArrayList(Block) {
-    print("📤 [SEQUENTIAL] Requesting {} blocks starting from height {}\n", .{count, start_height});
+    log.debug("Requesting {} blocks starting from height {}", .{count, start_height});
     
     var blocks = std.ArrayList(Block).init(allocator);
     
@@ -144,7 +144,7 @@ pub fn requestBlockRange(
         const height = start_height + @as(u32, @intCast(i));
         
         const block = requestBlockByHeight(peer, height) catch |err| {
-            print("❌ [SEQUENTIAL] Failed to get block {}: {}\n", .{height, err});
+            log.err("Failed to get block {}: {}", .{height, err});
             // Clean up any blocks we got so far
             for (blocks.items) |*b| {
                 b.deinit(allocator);
@@ -154,10 +154,10 @@ pub fn requestBlockRange(
         };
         
         try blocks.append(block);
-        print("✅ [SEQUENTIAL] Got block {} ({}/{})\n", .{height, i + 1, count});
+        log.debug("Got block {} ({}/{})", .{height, i + 1, count});
     }
     
-    print("✅ [SEQUENTIAL] Sequential range request complete: {} blocks\n", .{blocks.items.len});
+    log.info("Sequential range request complete: {} blocks", .{blocks.items.len});
     return blocks;
 }
 
@@ -193,7 +193,7 @@ pub fn estimatePeerPerformance(peer: *Peer) f64 {
 
 /// Test function to validate sequential sync utilities
 pub fn testSequentialSync() !void {
-    print("🧪 [SEQUENTIAL] Running sequential sync tests...\n", .{});
+    log.debug("Running sequential sync tests...", .{});
     
     // Test peer performance estimation
     var test_peer = Peer{
@@ -205,10 +205,10 @@ pub fn testSequentialSync() !void {
     };
     
     const performance = estimatePeerPerformance(&test_peer);
-    print("📊 [SEQUENTIAL] Test peer performance: {d:.1}\n", .{performance});
+    log.debug("Test peer performance: {d:.1}", .{performance});
     
     const supports_batch = supportsBatchRequests(&test_peer);
-    print("📊 [SEQUENTIAL] Test peer supports batch: {}\n", .{supports_batch});
+    log.debug("Test peer supports batch: {}", .{supports_batch});
     
-    print("✅ [SEQUENTIAL] Sequential sync tests passed\n", .{});
+    log.debug("Sequential sync tests passed", .{});
 }
