@@ -79,6 +79,8 @@ pub const Database = struct {
         if (err != null) {
             log.info("RocksDB open error: {s}", .{err.?});
             c.rocksdb_free(@constCast(@ptrCast(err)));
+            // Clean up partially constructed Database on failure
+            self.deinit();
             return DatabaseError.OpenFailed;
         }
 

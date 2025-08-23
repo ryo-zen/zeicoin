@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const log = std.log.scoped(.cli);
+const print = std.debug.print;
 
 const zeicoin = @import("zeicoin");
 const types = zeicoin.types;
@@ -30,14 +31,14 @@ pub fn handleStatus(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         return;
     }
     
-    log.info("📊 ZeiCoin Network Status:", .{});
+    print("📊 ZeiCoin Network Status:\n", .{});
     
     // Show server information (try to get it, fallback to localhost)
     if (connection.getServerIP(allocator)) |server_ip| {
         defer allocator.free(server_ip);
-        log.info("🌐 Server: {s}:10802", .{server_ip});
+        print("🌐 Server: {s}:10802\n", .{server_ip});
     } else |_| {
-        log.info("🌐 Server: 127.0.0.1:10802", .{});
+        print("🌐 Server: 127.0.0.1:10802\n", .{});
     }
     
     var buffer: [1024]u8 = undefined;
@@ -57,56 +58,57 @@ pub fn handleStatus(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     if (std.mem.startsWith(u8, response, "STATUS:")) {
         var parts = std.mem.splitScalar(u8, response[7..], ':'); // Skip "STATUS:"
         if (parts.next()) |height_str| {
-            log.info("📊 Network Height: {s}", .{std.mem.trim(u8, height_str, " \n\r\t")});
+            print("📊 Network Height: {s}\n", .{std.mem.trim(u8, height_str, " \n\r\t")});
         }
         if (parts.next()) |peers_str| {
-            log.info("👥 Connected Peers: {s}", .{std.mem.trim(u8, peers_str, " \n\r\t")});
+            print("👥 Connected Peers: {s}\n", .{std.mem.trim(u8, peers_str, " \n\r\t")});
         }
         if (parts.next()) |mempool_str| {
-            log.info("⏳ Pending Transactions: {s}", .{std.mem.trim(u8, mempool_str, " \n\r\t")});
+            print("⏳ Pending Transactions: {s}\n", .{std.mem.trim(u8, mempool_str, " \n\r\t")});
         }
         if (parts.next()) |mining_str| {
             const is_mining = std.mem.eql(u8, std.mem.trim(u8, mining_str, " \n\r\t"), "true");
-            log.info("⛏️  Mining: {s}", .{if (is_mining) "Active" else "Inactive"});
+            print("⛏️ Mining: {s}\n", .{if (is_mining) "Active" else "Inactive"});
         }
         if (parts.next()) |hashrate_str| {
-            log.info("🔥 Hash Rate: {s} H/s", .{std.mem.trim(u8, hashrate_str, " \n\r\t")});
+            print("🔥 Hash Rate: {s} H/s\n", .{std.mem.trim(u8, hashrate_str, " \n\r\t")});
         }
     } else {
-        log.info("📨 Server Response: {s}", .{response});
+        print("📨 Server Response: {s}\n", .{response});
     }
 }
 
 /// Handle watch status with enhanced blockchain animation
 fn handleWatchStatus(allocator: std.mem.Allocator) !void {
-    log.info("🔍 Monitoring ZeiCoin network status... (Press Ctrl+C to stop)\n", .{});
+    print("🔍 Monitoring ZeiCoin network status... (Press Ctrl+C to stop)\n", .{});
     
     // Blockchain animation frames
     const blockchain_frames = [_][]const u8{
-        "⛓️ ▓▓▓▓▓▓▓▓▓▓ ⛓️",
-        "⛓️ ▓▓▓▓▓▓▓▓▓░ ⛓️", 
-        "⛓️ ▓▓▓▓▓▓▓▓░░ ⛓️",
-        "⛓️ ▓▓▓▓▓▓▓░░░ ⛓️",
-        "⛓️ ▓▓▓▓▓▓░░░░ ⛓️",
-        "⛓️ ▓▓▓▓▓░░░░░ ⛓️",
-        "⛓️ ▓▓▓▓░░░░░░ ⛓️",
-        "⛓️ ▓▓▓░░░░░░░ ⛓️",
-        "⛓️ ▓▓░░░░░░░░ ⛓️",
-        "⛓️ ▓░░░░░░░░░ ⛓️",
-        "⛓️ ░░░░░░░░░░ ⛓️",
-        "⛓️ ░▓░░░░░░░░ ⛓️",
-        "⛓️ ░░▓░░░░░░░ ⛓️",
-        "⛓️ ░░░▓░░░░░░ ⛓️",
-        "⛓️ ░░░░▓░░░░░ ⛓️",
-        "⛓️ ░░░░░▓░░░░ ⛓️",
-        "⛓️ ░░░░░░▓░░░ ⛓️",
-        "⛓️ ░░░░░░░▓░░ ⛓️",
-        "⛓️ ░░░░░░░░▓░ ⛓️",
-        "⛓️ ░░░░░░░░░▓ ⛓️",
+        "▓▓▓▓▓▓▓▓▓▓",
+        "▓▓▓▓▓▓▓▓▓░", 
+        "▓▓▓▓▓▓▓▓░░",
+        "▓▓▓▓▓▓▓░░░",
+        "▓▓▓▓▓▓░░░░",
+        "▓▓▓▓▓░░░░░",
+        "▓▓▓▓░░░░░░",
+        "▓▓▓░░░░░░░",
+        "▓▓░░░░░░░░",
+        "▓░░░░░░░░░",
+        "░░░░░░░░░░",
+        "░▓░░░░░░░░",
+        "░░▓░░░░░░░",
+        "░░░▓░░░░░░",
+        "░░░░▓░░░░░",
+        "░░░░░▓░░░░",
+        "░░░░░░▓░░░",
+        "░░░░░░░▓░░",
+        "░░░░░░░░▓░",
+        "░░░░░░░░░▓",
     };
     
     var frame_counter: u32 = 0;
     var last_mining_state: ?bool = null;
+    var first_iteration: bool = true;
     
     while (true) {
         // Get status from server
@@ -146,22 +148,25 @@ fn handleWatchStatus(allocator: std.mem.Allocator) !void {
         }
         last_mining_state = is_mining;
         
-        // Clear previous display (2 lines)
-        log.info("\r\x1b[K", .{}); // Clear current line
-        log.info("\x1b[1A\x1b[K", .{}); // Move up and clear line
+        // Clear previous display (2 lines) - but not on first iteration
+        if (!first_iteration) {
+            print("\r\x1b[K", .{}); // Clear current line
+            print("\x1b[1A\x1b[K", .{}); // Move up and clear line
+        }
+        first_iteration = false;
         
         if (is_mining) {
             // Show blockchain animation when mining
             const frame = blockchain_frames[frame_counter % blockchain_frames.len];
-            log.info("{s}", .{frame});
-            log.info("⛏️  Mining Block {s} | Peers: {s} | Mempool: {s} | {s} H/s", .{
+            print("{s}\n", .{frame});
+            print("⛏️  Mining Block {s} | Peers: {s} | Mempool: {s} | {s} H/s", .{
                 height orelse "?", peers orelse "?", pending orelse "?", hashrate orelse "0"
             });
             frame_counter += 1;
         } else {
             // Show static status when not mining
-            log.info("⏸️  Mining Inactive", .{});
-            log.info("📊 Height: {s} | Peers: {s} | Mempool: {s} | Ready for transactions", .{
+            print("⏸️  Mining Inactive\n", .{});
+            print("📊 Height: {s} | Peers: {s} | Mempool: {s} | Ready for transactions", .{
                 height orelse "?", peers orelse "?", pending orelse "?"
             });
             frame_counter = 0; // Keep at start when inactive
@@ -189,14 +194,14 @@ pub fn handleSync(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         }
     };
     
-    log.info("📨 Sync response: {s}", .{response});
+    print("📨 Sync response: {s}\n", .{response});
 }
 
 /// Handle block inspection command
 pub fn handleBlock(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     if (args.len < 1) {
-        log.info("❌ Block height required", .{});
-        log.info("Usage: zeicoin block <height>", .{});
+        print("❌ Block height required\n", .{});
+        print("Usage: zeicoin block <height>\n", .{});
         return;
     }
     
@@ -204,8 +209,8 @@ pub fn handleBlock(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     
     // Validate height is a number
     _ = std.fmt.parseInt(u64, height_str, 10) catch {
-        log.info("❌ Invalid block height: {s}", .{height_str});
-        return CLIError.InvalidArguments;
+        print("❌ Invalid block height: {s}\n", .{height_str});
+        return;
     };
     
     // Format block request
@@ -226,14 +231,14 @@ pub fn handleBlock(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     };
     
     if (std.mem.startsWith(u8, response, "ERROR:")) {
-        log.info("❌ {s}", .{response[7..]});
+        print("❌ {s}\n", .{response[7..]});
         return;
     }
     
     if (std.mem.startsWith(u8, response, "BLOCK:")) {
-        log.info("📦 Block Information:", .{});
-        log.info("{s}", .{response[6..]});
+        print("📦 Block Information:\n", .{});
+        print("{s}\n", .{response[6..]});
     } else {
-        log.info("📨 Response: {s}", .{response});
+        print("📨 Response: {s}\n", .{response});
     }
 }

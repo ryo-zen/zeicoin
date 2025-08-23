@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const log = std.log.scoped(.cli);
+const print = std.debug.print;
 
 const zeicoin = @import("zeicoin");
 
@@ -57,8 +58,8 @@ pub fn main() !void {
     
     const command_str = args[1];
     const command = std.meta.stringToEnum(Command, command_str) orelse {
-        log.info("❌ Unknown command: {s}", .{command_str});
-        log.info("💡 Use 'zeicoin help' to see available commands", .{});
+        print("❌ Unknown command: {s}\n", .{command_str});
+        print("💡 Use 'zeicoin help' to see available commands\n", .{});
         display.printHelp();
         return;
     };

@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const log = std.log.scoped(.server);
+const print = std.debug.print;
 const command_line = @import("command_line.zig");
 const initialization = @import("initialization.zig");
 const client_api = @import("client_api.zig");
@@ -148,12 +149,12 @@ pub fn main() !void {
 }
 
 fn printBanner() void {
-    log.info("", .{});
-    log.info("╔═══════════════════════════════════════════════════════════════════╗", .{});
-    log.info("║                  ⚡ ZeiCoin Node Server ⚡                        ║", .{});
-    log.info("║                    Modular Architecture                           ║", .{});
-    log.info("╚═══════════════════════════════════════════════════════════════════╝", .{});
-    log.info("", .{});
+    print("\n", .{});
+    print("╔═══════════════════════════════════════════════════════════════════╗\n", .{});
+    print("║                  ⚡ ZeiCoin Node Server ⚡                        ║\n", .{});
+    print("║                    Modular Architecture                           ║\n", .{});
+    print("╚═══════════════════════════════════════════════════════════════════╝\n", .{});
+    print("\n", .{});
 }
 
 fn startMiningAfterSync(components: *const initialization.NodeComponents) bool {

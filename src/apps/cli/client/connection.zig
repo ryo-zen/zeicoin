@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const log = std.log.scoped(.cli);
+const print = std.debug.print;
 const net = std.net;
 
 const zeicoin = @import("zeicoin");
@@ -125,7 +126,7 @@ pub fn getServerIP(allocator: std.mem.Allocator) ![]const u8 {
     log.info("⚠️  No healthy bootstrap nodes found", .{});
 
     // 4. Final fallback to localhost
-    log.info("💡 Using localhost fallback (set ZEICOIN_SERVER to override)", .{});
+    print("💡 Using localhost fallback (set ZEICOIN_SERVER to override)\n", .{});
     return allocator.dupe(u8, "127.0.0.1");
 }
 
@@ -232,12 +233,12 @@ pub fn connect(allocator: std.mem.Allocator) !ClientConnection {
     const stream = connectWithTimeout(server_address) catch |err| {
         switch (err) {
             ConnectionError.ConnectionTimeout => {
-                log.info("❌ Connection timeout to ZeiCoin server at {s}:10802 (5s)", .{server_ip});
+                print("❌ Connection timeout to ZeiCoin server at {s}:10802 (5s)\n", .{server_ip});
                 return ConnectionError.ConnectionTimeout;
             },
             ConnectionError.ConnectionFailed => {
-                log.info("❌ Cannot connect to ZeiCoin server at {s}:10802", .{server_ip});
-                log.info("💡 Make sure the server is running", .{});
+                print("❌ Cannot connect to ZeiCoin server at {s}:10802\n", .{server_ip});
+                print("💡 Make sure the server is running\n", .{});
                 return ConnectionError.ConnectionFailed;
             },
             else => return err,

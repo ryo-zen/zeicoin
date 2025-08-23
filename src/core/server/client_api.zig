@@ -781,7 +781,7 @@ pub const ClientApiServer = struct {
             defer self.allocator.free(counterparty_bech32);
             
             // Format: height|hash|type|amount|fee|timestamp|confirmations|counterparty
-            try response.writer().print("{}|{}|{s}|{}|{}|{}|{}|{s}", .{
+            try response.writer().print("{}|{}|{s}|{}|{}|{}|{}|{s}\n", .{
                 tx_info.height,
                 std.fmt.fmtSliceHexLower(&tx_info.hash),
                 tx_info.tx_type,

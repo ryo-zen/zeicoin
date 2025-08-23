@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const log = std.log.scoped(.cli);
+const print = std.debug.print;
 
 const zeicoin = @import("zeicoin");
 const types = zeicoin.types;
@@ -25,15 +26,15 @@ const WalletSubcommand = enum {
 /// Handle wallet command with subcommands
 pub fn handleWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     if (args.len < 1) {
-        log.info("❌ Wallet subcommand required", .{});
-        log.info("Usage: zeicoin wallet <create|list|restore|derive|import> [name]", .{});
+        print("❌ Wallet subcommand required\n", .{});
+        print("Usage: zeicoin wallet <create|list|restore|derive|import> [name]\n", .{});
         return;
     }
     
     const subcommand_str = args[0];
     const subcommand = std.meta.stringToEnum(WalletSubcommand, subcommand_str) orelse {
-        log.info("❌ Unknown wallet subcommand: {s}", .{subcommand_str});
-        log.info("💡 Available subcommands: create, list, restore, derive, import", .{});
+        print("❌ Unknown wallet subcommand: {s}\n", .{subcommand_str});
+        print("💡 Available subcommands: create, list, restore, derive, import\n", .{});
         return;
     };
 
@@ -60,7 +61,7 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     std.fs.cwd().makePath(data_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {}, // This is fine
         else => {
-            log.info("❌ Failed to create data directory: {}", .{err});
+            print("❌ Failed to create data directory: {}\n", .{err});
             return;
         },
     };
@@ -72,7 +73,7 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     std.fs.cwd().makePath(wallets_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {}, // This is fine
         else => {
-            log.info("❌ Failed to create wallets directory: {}", .{err});
+            print("❌ Failed to create wallets directory: {}\n", .{err});
             return;
         },
     };
@@ -84,8 +85,8 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     std.fs.cwd().access(wallet_path, .{}) catch |err| switch (err) {
         error.FileNotFound => {}, // This is what we want
         else => {
-            log.info("❌ Wallet '{s}' already exists", .{wallet_name});
-            log.info("💡 Use a different name or 'zeicoin wallet load {s}'", .{wallet_name});
+            print("❌ Wallet '{s}' already exists\n", .{wallet_name});
+            print("💡 Use a different name or 'zeicoin wallet load {s}'\n", .{wallet_name});
             return;
         },
     };
@@ -100,7 +101,7 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
     // Get password for wallet
     const password = password_util.getPasswordForWallet(allocator, wallet_name, true) catch {
-        log.info("❌ Password setup failed", .{});
+        print("❌ Password setup failed\n", .{});
         return;
     };
     defer allocator.free(password);
@@ -108,29 +109,29 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
     // Save wallet to file
     new_wallet.saveToFile(wallet_path, password) catch |err| {
-        log.info("❌ Failed to save wallet: {}", .{err});
+        print("❌ Failed to save wallet: {}\n", .{err});
         return;
     };
 
     // Success message
-    log.info("✅ HD wallet '{s}' created successfully!", .{wallet_name});
-    log.info("🔑 Mnemonic (12 words):", .{});
-    log.info("{s}", .{mnemonic});
-    log.info("\n⚠️  IMPORTANT: Save these 12 words in a secure place!", .{});
-    log.info("💡 These words can restore your wallet if lost.", .{});
+    print("✅ HD wallet '{s}' created successfully!\n", .{wallet_name});
+    print("🔑 Mnemonic (12 words):\n", .{});
+    print("{s}\n", .{mnemonic});
+    print("\n⚠️  IMPORTANT: Save these 12 words in a secure place!\n", .{});
+    print("💡 These words can restore your wallet if lost.\n", .{});
     
     // Show first address
     const first_address = new_wallet.getAddress(0) catch {
-        log.info("❌ Failed to get address", .{});
+        print("❌ Failed to get address\n", .{});
         return;
     };
     const bech32_addr = first_address.toBech32(allocator, types.CURRENT_NETWORK) catch {
-        log.info("❌ Failed to encode address", .{});
+        print("❌ Failed to encode address\n", .{});
         return;
     };
     defer allocator.free(bech32_addr);
     
-    log.info("🆔 First address: {s}", .{bech32_addr});
+    print("🆔 First address: {s}\n", .{bech32_addr});
 }
 
 
@@ -149,8 +150,8 @@ fn listWallets(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     var dir = std.fs.cwd().openDir(wallets_dir, .{ .iterate = true }) catch |err| {
         switch (err) {
             error.FileNotFound => {
-                log.info("📁 No wallets directory found.", .{});
-                log.info("💡 Create a wallet with: zeicoin wallet create", .{});
+                print("📁 No wallets directory found.\n", .{});
+                print("💡 Create a wallet with: zeicoin wallet create\n", .{});
                 return;
             },
             else => return err,
@@ -158,7 +159,7 @@ fn listWallets(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     };
     defer dir.close();
     
-    log.info("📁 Wallets in {s}:", .{wallets_dir});
+    print("📁 Wallets in {s}:\n", .{wallets_dir});
     
     var iterator = dir.iterate();
     var wallet_count: usize = 0;
@@ -167,24 +168,24 @@ fn listWallets(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".wallet")) {
             // Extract wallet name (remove .wallet extension)
             const wallet_name = entry.name[0..entry.name.len - 7];
-            log.info("  💼 {s}", .{wallet_name});
+            print("  💼 {s}\n", .{wallet_name});
             wallet_count += 1;
         }
     }
     
     if (wallet_count == 0) {
-        log.info("  (No wallets found)", .{});
-        log.info("💡 Create a wallet with: zeicoin wallet create", .{});
+        print("  (No wallets found)\n", .{});
+        print("💡 Create a wallet with: zeicoin wallet create\n", .{});
     } else {
-        log.info("\n💡 Use 'zeicoin balance <name>' to check wallet balance", .{});
+        print("\n💡 Use 'zeicoin balance <name>' to check wallet balance\n", .{});
     }
 }
 
 /// Restore HD wallet from mnemonic
 fn restoreWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     if (args.len < 25) { // name + 24 words
-        log.info("❌ Usage: zeicoin wallet restore <name> <24-word-mnemonic>", .{});
-        log.info("💡 Example: zeicoin wallet restore mywallet word1 word2 ... word24", .{});
+        print("❌ Usage: zeicoin wallet restore <name> <24-word-mnemonic>\n", .{});
+        print("💡 Example: zeicoin wallet restore mywallet word1 word2 ... word24\n", .{});
         return;
     }
     
@@ -204,8 +205,8 @@ fn restoreWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     
     // Validate mnemonic
     bip39.validateMnemonic(mnemonic) catch {
-        log.info("❌ Invalid mnemonic phrase", .{});
-        log.info("💡 Please check your mnemonic and try again", .{});
+        print("❌ Invalid mnemonic phrase\n", .{});
+        print("💡 Please check your mnemonic and try again\n", .{});
         return;
     };
     
@@ -236,8 +237,8 @@ fn restoreWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     std.fs.cwd().access(wallet_path, .{}) catch |err| switch (err) {
         error.FileNotFound => {}, // This is what we want
         else => {
-            log.info("❌ Wallet '{s}' already exists", .{wallet_name});
-            log.info("💡 Use a different name or remove the existing wallet", .{});
+            print("❌ Wallet '{s}' already exists\n", .{wallet_name});
+            print("💡 Use a different name or remove the existing wallet\n", .{});
             return;
         },
     };
@@ -247,13 +248,13 @@ fn restoreWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     defer restored_wallet.deinit();
     
     restored_wallet.fromMnemonic(mnemonic, null) catch |err| {
-        log.info("❌ Failed to restore from mnemonic: {}", .{err});
+        print("❌ Failed to restore from mnemonic: {}\n", .{err});
         return;
     };
     
     // Get password for wallet
     const password = password_util.getPasswordForWallet(allocator, wallet_name, true) catch {
-        log.info("❌ Password setup failed", .{});
+        print("❌ Password setup failed\n", .{});
         return;
     };
     defer allocator.free(password);
@@ -261,32 +262,32 @@ fn restoreWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     
     // Save wallet to file
     restored_wallet.saveToFile(wallet_path, password) catch |err| {
-        log.info("❌ Failed to save restored wallet: {}", .{err});
+        print("❌ Failed to save restored wallet: {}\n", .{err});
         return;
     };
     
     // Success message
-    log.info("✅ HD wallet '{s}' restored successfully from mnemonic!", .{wallet_name});
+    print("✅ HD wallet '{s}' restored successfully from mnemonic!\n", .{wallet_name});
     
     // Show first address
     const first_address = restored_wallet.getAddress(0) catch {
-        log.info("❌ Failed to get address", .{});
+        print("❌ Failed to get address\n", .{});
         return;
     };
     const bech32_addr = first_address.toBech32(allocator, types.CURRENT_NETWORK) catch {
-        log.info("❌ Failed to encode address", .{});
+        print("❌ Failed to encode address\n", .{});
         return;
     };
     defer allocator.free(bech32_addr);
     
-    log.info("🆔 First address: {s}", .{bech32_addr});
+    print("🆔 First address: {s}\n", .{bech32_addr});
 }
 
 /// Derive new address from HD wallet
 fn deriveAddress(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     if (args.len < 1) {
-        log.info("❌ Wallet name required", .{});
-        log.info("Usage: zeicoin wallet derive <wallet_name> [index]", .{});
+        print("❌ Wallet name required\n", .{});
+        print("Usage: zeicoin wallet derive <wallet_name> [index]\n", .{});
         return;
     }
     
@@ -295,7 +296,7 @@ fn deriveAddress(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     
     if (args.len > 1) {
         index = std.fmt.parseInt(u32, args[1], 10) catch {
-            log.info("❌ Invalid index: {s}", .{args[1]});
+            print("❌ Invalid index: {s}\n", .{args[1]});
             return;
         };
     }
@@ -311,15 +312,15 @@ fn deriveAddress(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     
     // Check if wallet exists
     std.fs.cwd().access(wallet_path, .{}) catch {
-        log.info("❌ Wallet '{s}' not found", .{wallet_name});
-        log.info("💡 Create it with: zeicoin wallet create {s}", .{wallet_name});
+        print("❌ Wallet '{s}' not found\n", .{wallet_name});
+        print("💡 Create it with: zeicoin wallet create {s}\n", .{wallet_name});
         return;
     };
     
     // Check if this is an HD wallet
     if (!std.mem.endsWith(u8, wallet_path, ".wallet")) {
-        log.info("❌ '{s}' is not an HD wallet", .{wallet_name});
-        log.info("💡 Only HD wallets support address derivation", .{});
+        print("❌ '{s}' is not an HD wallet\n", .{wallet_name});
+        print("💡 Only HD wallets support address derivation\n", .{});
         return;
     }
     
@@ -328,7 +329,7 @@ fn deriveAddress(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     defer hd_zen_wallet.deinit();
     
     const password = password_util.getPasswordForWallet(allocator, wallet_name, false) catch {
-        log.info("❌ Failed to get password", .{});
+        print("❌ Failed to get password\n", .{});
         return;
     };
     defer allocator.free(password);
@@ -336,12 +337,12 @@ fn deriveAddress(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     hd_zen_wallet.loadFromFile(wallet_path, password) catch |err| {
         switch (err) {
             wallet.WalletError.InvalidPassword => {
-                log.info("❌ Failed to load wallet '{s}': Invalid password", .{wallet_name});
-                log.info("💡 Please check your password and try again", .{});
+                print("❌ Failed to load wallet '{s}': Invalid password\n", .{wallet_name});
+                print("💡 Please check your password and try again\n", .{});
                 return;
             },
             else => {
-                log.info("❌ Failed to load wallet '{s}': {}", .{ wallet_name, err });
+                print("❌ Failed to load wallet '{s}': {}\n", .{ wallet_name, err });
                 return;
             },
         }
@@ -350,32 +351,32 @@ fn deriveAddress(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     if (index) |idx| {
         // Derive specific address
         const address = hd_zen_wallet.getAddress(idx) catch {
-            log.info("❌ Failed to get address #{}", .{idx});
+            print("❌ Failed to get address #{}\n", .{idx});
             return;
         };
         const bech32_addr = address.toBech32(allocator, types.CURRENT_NETWORK) catch {
-            log.info("🆔 Address #{}: <encoding error>", .{idx});
+            print("🆔 Address #{}: <encoding error>\n", .{idx});
             return;
         };
         defer allocator.free(bech32_addr);
         
-        log.info("🆔 Address #{}: {s}", .{ idx, bech32_addr });
+        print("🆔 Address #{}: {s}\n", .{ idx, bech32_addr });
     } else {
         // Get next address
         const address = hd_zen_wallet.getNextAddress() catch {
-            log.info("❌ Failed to get next address", .{});
+            print("❌ Failed to get next address\n", .{});
             return;
         };
         const new_index = hd_zen_wallet.highest_index;
         
         const bech32_addr = address.toBech32(allocator, types.CURRENT_NETWORK) catch {
-            log.info("🆔 Address #{}: <encoding error>", .{new_index});
+            print("🆔 Address #{}: <encoding error>\n", .{new_index});
             return;
         };
         defer allocator.free(bech32_addr);
         
-        log.info("✅ New address derived!", .{});
-        log.info("🆔 Address #{}: {s}", .{ new_index, bech32_addr });
+        print("✅ New address derived!\n", .{});
+        print("🆔 Address #{}: {s}\n", .{ new_index, bech32_addr });
         
         // Save updated wallet with new highest index
         try hd_zen_wallet.saveToFile(wallet_path, password);
@@ -385,8 +386,8 @@ fn deriveAddress(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 /// Import genesis wallet
 fn importGenesisWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     if (args.len < 1) {
-        log.info("❌ Genesis account name required", .{});
-        log.info("Usage: zeicoin wallet import <alice|bob|charlie|david|eve>", .{});
+        print("❌ Genesis account name required\n", .{});
+        print("Usage: zeicoin wallet import <alice|bob|charlie|david|eve>\n", .{});
         return;
     }
 
@@ -403,27 +404,27 @@ fn importGenesisWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     }
 
     if (!is_genesis) {
-        log.info("❌ '{s}' is not a valid genesis account name", .{wallet_name});
-        log.info("💡 Valid genesis accounts: alice, bob, charlie, david, eve", .{});
+        print("❌ '{s}' is not a valid genesis account name\n", .{wallet_name});
+        print("💡 Valid genesis accounts: alice, bob, charlie, david, eve\n", .{});
         return;
     }
 
     if (types.CURRENT_NETWORK != .testnet) {
-        log.info("❌ Genesis accounts are only available on TestNet", .{});
+        print("❌ Genesis accounts are only available on TestNet\n", .{});
         return;
     }
 
     // Read genesis mnemonic from keys.config
     const config_path = "config/keys.config";
     const config_file = std.fs.cwd().openFile(config_path, .{}) catch |err| {
-        log.info("❌ Cannot open genesis keys config: {}", .{err});
-        log.info("💡 Make sure config/keys.config exists", .{});
+        print("❌ Cannot open genesis keys config: {}\n", .{err});
+        print("💡 Make sure config/keys.config exists\n", .{});
         return;
     };
     defer config_file.close();
 
     const config_content = config_file.readToEndAlloc(allocator, 4096) catch |err| {
-        log.info("❌ Cannot read genesis keys config: {}", .{err});
+        print("❌ Cannot read genesis keys config: {}\n", .{err});
         return;
     };
     defer allocator.free(config_content);
@@ -447,7 +448,7 @@ fn importGenesisWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     }
 
     if (genesis_mnemonic == null) {
-        log.info("❌ Genesis mnemonic for '{s}' not found in config", .{wallet_name});
+        print("❌ Genesis mnemonic for '{s}' not found in config\n", .{wallet_name});
         return;
     }
 
@@ -478,7 +479,7 @@ fn importGenesisWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     std.fs.cwd().access(wallet_path, .{}) catch |err| switch (err) {
         error.FileNotFound => {}, // This is what we want
         else => {
-            log.info("✅ Genesis wallet '{s}' already exists", .{wallet_name});
+            print("✅ Genesis wallet '{s}' already exists\n", .{wallet_name});
             return; // Don't error on existing genesis wallets
         },
     };
@@ -490,7 +491,22 @@ fn importGenesisWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     try genesis_wallet.fromMnemonic(genesis_mnemonic.?, null);
     
     // Get password for wallet
-    const password = try password_util.getPasswordForWallet(allocator, wallet_name, true);
+    const password = password_util.getPasswordForWallet(allocator, wallet_name, true) catch |err| {
+        switch (err) {
+            error.EndOfStream => {
+                print("❌ Password input cancelled\n", .{});
+                return;
+            },
+            error.PasswordMismatch => {
+                print("❌ Passwords do not match\n", .{});
+                return;
+            },
+            else => {
+                print("❌ Failed to get password: {}\n", .{err});
+                return;
+            },
+        }
+    };
     defer allocator.free(password);
     defer password_util.clearPassword(password);
     
@@ -498,17 +514,17 @@ fn importGenesisWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     try genesis_wallet.saveToFile(wallet_path, password);
     
     // Success message
-    log.info("✅ Genesis wallet '{s}' imported successfully!", .{wallet_name});
+    print("✅ Genesis wallet '{s}' imported successfully!\n", .{wallet_name});
     
     // Show first address
     const first_address = try genesis_wallet.getAddress(0);
     const bech32_addr = first_address.toBech32(allocator, types.CURRENT_NETWORK) catch {
-        log.info("❌ Failed to encode address", .{});
+        print("❌ Failed to encode address\n", .{});
         return;
     };
     defer allocator.free(bech32_addr);
     
-    log.info("🆔 First address: {s}", .{bech32_addr});
+    print("🆔 First address: {s}\n", .{bech32_addr});
 }
 
 /// Handle address command (moved from main CLI)
@@ -541,7 +557,7 @@ pub fn handleAddress(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     
     // Check if wallet exists
     std.fs.cwd().access(wallet_path, .{}) catch {
-        log.info("❌ Wallet '{s}' not found", .{wallet_name});
+        print("❌ Wallet '{s}' not found\n", .{wallet_name});
         log.info("💡 Create it with: zeicoin wallet create {s}", .{wallet_name});
         return;
     };
@@ -551,7 +567,7 @@ pub fn handleAddress(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     defer hd_zen_wallet.deinit();
     
     const password = password_util.getPasswordForWallet(allocator, wallet_name, false) catch {
-        log.info("❌ Failed to get password", .{});
+        print("❌ Failed to get password\n", .{});
         return;
     };
     defer allocator.free(password);
@@ -559,12 +575,12 @@ pub fn handleAddress(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     hd_zen_wallet.loadFromFile(wallet_path, password) catch |err| {
         switch (err) {
             wallet.WalletError.InvalidPassword => {
-                log.info("❌ Failed to load wallet '{s}': Invalid password", .{wallet_name});
-                log.info("💡 Please check your password and try again", .{});
+                print("❌ Failed to load wallet '{s}': Invalid password\n", .{wallet_name});
+                print("💡 Please check your password and try again\n", .{});
                 return;
             },
             else => {
-                log.info("❌ Failed to load wallet '{s}': {}", .{ wallet_name, err });
+                print("❌ Failed to load wallet '{s}': {}\n", .{ wallet_name, err });
                 return;
             },
         }
@@ -573,37 +589,37 @@ pub fn handleAddress(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     if (index) |idx| {
         // Show specific address
         const address = hd_zen_wallet.getAddress(idx) catch {
-            log.info("❌ Failed to get address #{}", .{idx});
+            print("❌ Failed to get address #{}\n", .{idx});
             return;
         };
         const bech32_addr = address.toBech32(allocator, types.CURRENT_NETWORK) catch {
-            log.info("🆔 Address #{}: <encoding error>", .{idx});
+            print("🆔 Address #{}: <encoding error>\n", .{idx});
             return;
         };
         defer allocator.free(bech32_addr);
         
-        log.info("🆔 Address #{}: {s}", .{ idx, bech32_addr });
+        print("🆔 Address #{}: {s}\n", .{ idx, bech32_addr });
     } else {
         // Show current/first address
         const address = hd_zen_wallet.getAddress(0) catch {
-            log.info("❌ Failed to get address", .{});
+            print("❌ Failed to get address\n", .{});
             return;
         };
         const bech32_addr = address.toBech32(allocator, types.CURRENT_NETWORK) catch {
-            log.info("🆔 Address: <encoding error>", .{});
+            print("🆔 Address: <encoding error>\n", .{});
             return;
         };
         defer allocator.free(bech32_addr);
         
-        log.info("🆔 Address: {s}", .{bech32_addr});
+        print("🆔 Address: {s}\n", .{bech32_addr});
     }
 }
 
 /// Handle seed/mnemonic command - display wallet's recovery phrase
 pub fn handleSeed(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     if (args.len < 1) {
-        log.info("❌ Wallet name required", .{});
-        log.info("Usage: zeicoin seed <wallet_name>", .{});
+        print("❌ Wallet name required\n", .{});
+        print("Usage: zeicoin seed <wallet_name>\n", .{});
         return;
     }
     
@@ -620,7 +636,7 @@ pub fn handleSeed(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     
     // Check if wallet exists
     const file = std.fs.cwd().openFile(wallet_path, .{}) catch {
-        log.info("❌ Wallet '{s}' not found", .{wallet_name});
+        print("❌ Wallet '{s}' not found\n", .{wallet_name});
         log.info("💡 Create it with: zeicoin wallet create {s}", .{wallet_name});
         return;
     };
@@ -628,18 +644,18 @@ pub fn handleSeed(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     
     // Load wallet file
     const wallet_file = wallet.WalletFile.load(wallet_path) catch {
-        log.info("❌ Invalid or corrupted wallet file", .{});
+        print("❌ Invalid or corrupted wallet file\n", .{});
         return;
     };
     
     // Show security warning
-    log.info("\n⚠️  WARNING: You are about to display your wallet's recovery seed phrase!", .{});
-    log.info("⚠️  Anyone with these words can access your funds!", .{});
-    log.info("⚠️  Make sure no one is watching your screen!\n", .{});
+    print("\n⚠️  WARNING: You are about to display your wallet's recovery seed phrase!\n", .{});
+    print("⚠️  Anyone with these words can access your funds!\n", .{});
+    print("⚠️  Make sure no one is watching your screen!\n\n", .{});
     
     // Get password to decrypt mnemonic
     const password = password_util.getPasswordForWallet(allocator, wallet_name, false) catch {
-        log.info("❌ Failed to get password", .{});
+        print("❌ Failed to get password\n", .{});
         return;
     };
     defer allocator.free(password);
@@ -648,23 +664,23 @@ pub fn handleSeed(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     
     // Decrypt mnemonic
     const mnemonic = wallet_file.decrypt(password, allocator) catch {
-        log.info("❌ Invalid password or corrupted wallet", .{});
+        print("❌ Invalid password or corrupted wallet\n", .{});
         return;
     };
     defer allocator.free(mnemonic);
     defer std.crypto.utils.secureZero(u8, mnemonic);
     
     // Display mnemonic
-    log.info("🔑 Recovery Seed Phrase (12 words):", .{});
-    log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", .{});
-    log.info("{s}", .{mnemonic});
-    log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n", .{});
+    print("🔑 Recovery Seed Phrase (12 words):\n", .{});
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n", .{});
+    print("{s}\n", .{mnemonic});
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n", .{});
     
     // Final security reminder
-    log.info("⚠️  IMPORTANT SECURITY REMINDERS:", .{});
-    log.info("   • Write these words down on paper and store in a secure location", .{});
-    log.info("   • Never share these words with anyone", .{});
-    log.info("   • Never store these words digitally (email, photos, cloud storage)", .{});
-    log.info("   • These words can restore your wallet on any device", .{});
-    log.info("   • If you lose these words, your funds cannot be recovered", .{});
+    print("⚠️  IMPORTANT SECURITY REMINDERS:\n", .{});
+    print("   • Write these words down on paper and store in a secure location\n", .{});
+    print("   • Never share these words with anyone\n", .{});
+    print("   • Never store these words digitally (email, photos, cloud storage)\n", .{});
+    print("   • These words can restore your wallet on any device\n", .{});
+    print("   • If you lose these words, your funds cannot be recovered\n", .{});
 }

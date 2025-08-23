@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const log = std.log.scoped(.cli);
+const print = std.debug.print;
 
 const zeicoin = @import("zeicoin");
 const types = zeicoin.types;
@@ -204,17 +205,17 @@ pub fn sendTransaction(allocator: std.mem.Allocator, transaction: *const types.T
     if (!std.mem.startsWith(u8, response, "OK:")) {
         // Provide helpful error messages based on server response
         if (std.mem.startsWith(u8, response, "ERROR: Insufficient balance")) {
-            log.info("❌ Insufficient balance! You don't have enough ZEI for this transaction.", .{});
-            log.info("💡 Check your balance with: zeicoin balance", .{});
-            log.info("💡 Use genesis accounts (alice, bob, charlie, david, eve) which have pre-funded balances", .{});
+            print("❌ Insufficient balance! You don't have enough ZEI for this transaction.\n", .{});
+            print("💡 Check your balance with: zeicoin balance\n", .{});
+            print("💡 Use genesis accounts (alice, bob, charlie, david, eve) which have pre-funded balances\n", .{});
         } else if (std.mem.startsWith(u8, response, "ERROR: Invalid nonce")) {
-            log.info("❌ Invalid transaction nonce. This usually means another transaction is pending.", .{});
-            log.info("💡 Wait a moment and try again after the current transaction is processed.", .{});
+            print("❌ Invalid transaction nonce. This usually means another transaction is pending.\n", .{});
+            print("💡 Wait a moment and try again after the current transaction is processed.\n", .{});
         } else if (std.mem.startsWith(u8, response, "ERROR: Sender account not found")) {
-            log.info("❌ Wallet account not found on the network.", .{});
-            log.info("💡 Use genesis accounts (alice, bob, charlie, david, eve) which have pre-funded balances", .{});
+            print("❌ Wallet account not found on the network.\n", .{});
+            print("💡 Use genesis accounts (alice, bob, charlie, david, eve) which have pre-funded balances\n", .{});
         } else {
-            log.info("❌ Transaction failed: {s}", .{response});
+            print("❌ Transaction failed: {s}\n", .{response});
         }
         return connection.ConnectionError.NetworkError;
     }

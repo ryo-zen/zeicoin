@@ -67,12 +67,13 @@ pub fn readPasswordFromStdin(allocator: std.mem.Allocator, options: PasswordOpti
     };
 
     const reader = stdin.reader();
-    const password = try reader.readUntilDelimiterAlloc(allocator, '\n', options.max_length);
+    const password = reader.readUntilDelimiterAlloc(allocator, '\n', options.max_length) catch |err| {
+        return err;
+    };
     errdefer allocator.free(password);
     
     const trimmed = std.mem.trim(u8, password, " \r\n\t");
     if (trimmed.len < options.min_length) {
-        allocator.free(password);
         return PasswordError.PasswordTooShort;
     }
     

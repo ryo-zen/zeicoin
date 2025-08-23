@@ -26,11 +26,11 @@ pub fn getTime() i64 {
 }
 
 /// Format Unix timestamp to human-readable string
-pub fn formatTime(timestamp: u64) [19]u8 {
+pub fn formatTime(timestamp: u64) [23]u8 {
     const seconds = timestamp;
     
-    var buf: [19]u8 = undefined;
-    const fmt = "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}";
+    var buf: [23]u8 = undefined;
+    const fmt = "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2} UTC";
     
     // Convert to epoch seconds struct
     const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(seconds) };
@@ -49,7 +49,7 @@ pub fn formatTime(timestamp: u64) [19]u8 {
         hours,
         minutes,
         seconds_in_minute,
-    }) catch return "0000-00-00 00:00:00".*;
+    }) catch return "0000-00-00 00:00:00 UTC".*;
     
     return buf;
 }

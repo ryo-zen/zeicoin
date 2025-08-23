@@ -12,6 +12,7 @@ pub const Config = struct {
     miner_wallet: ?[]const u8 = null,
     client_api_disabled: bool = false,
     bind_address: []const u8 = "127.0.0.1",
+    bind_address_allocated: bool = false, // Track if bind_address was allocated
     allocator: std.mem.Allocator,
     
     pub fn deinit(self: *Config) void {
@@ -26,8 +27,8 @@ pub const Config = struct {
         if (self.miner_wallet) |wallet_name| {
             self.allocator.free(wallet_name);
         }
-        // Free bind_address if it's not the default literal
-        if (!std.mem.eql(u8, self.bind_address, "127.0.0.1")) {
+        // Free bind_address if it was allocated
+        if (self.bind_address_allocated) {
             self.allocator.free(self.bind_address);
         }
     }
@@ -82,6 +83,7 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Config {
     // Handle environment variable for bind address
     if (std.process.getEnvVarOwned(allocator, "ZEICOIN_BIND_IP")) |bind_ip| {
         config.bind_address = bind_ip; // Transfer ownership to config
+        config.bind_address_allocated = true;
     } else |_| {}
     
     // Handle environment variable for bootstrap nodes
