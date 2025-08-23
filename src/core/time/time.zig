@@ -2,7 +2,8 @@
 // Provides accurate time synchronization using NTP servers and peer consensus
 
 const std = @import("std");
-const print = std.debug.print;
+
+const log = std.log.scoped(.time);
 
 /// Time synchronization configuration
 pub const TimeConfig = struct {
@@ -79,7 +80,7 @@ pub const TimeSynchronizer = struct {
         // Check if offset is large enough to warrant NTP verification
         if (@abs(median_offset) > self.config.max_peer_offset) {
             if (self.config.debug) {
-                print("⏰ Large time offset detected: {:+}s, verifying with NTP...\n", .{median_offset});
+                log.info("⏰ Large time offset detected: {:+}s, verifying with NTP...", .{median_offset});
             }
 
             try self.verifyWithNTP(median_offset);
@@ -88,7 +89,7 @@ pub const TimeSynchronizer = struct {
             self.time_offset = median_offset;
 
             if (self.config.debug) {
-                print("⏰ Time synchronized with peers (offset: {:+}s)\n", .{median_offset});
+                log.info("⏰ Time synchronized with peers (offset: {:+}s)", .{median_offset});
             }
         }
     }
@@ -97,7 +98,7 @@ pub const TimeSynchronizer = struct {
     fn verifyWithNTP(self: *Self, peer_offset: i64) !void {
         const ntp_time = self.getNTPTime() catch |err| {
             if (self.config.debug) {
-                print("⚠️ NTP verification failed: {}, using peer consensus\n", .{err});
+                log.info("⚠️ NTP verification failed: {}, using peer consensus", .{err});
             }
             self.time_offset = peer_offset;
             return;
@@ -112,13 +113,13 @@ pub const TimeSynchronizer = struct {
         if (disagreement > self.config.max_ntp_disagreement) {
             // Significant disagreement - prefer NTP (more authoritative)
             if (self.config.debug) {
-                print("🕐 NTP disagrees with peers (NTP: {:+}s, Peers: {:+}s), using NTP\n", .{ ntp_offset, peer_offset });
+                log.info("🕐 NTP disagrees with peers (NTP: {:+}s, Peers: {:+}s), using NTP", .{ ntp_offset, peer_offset });
             }
             self.time_offset = ntp_offset;
         } else {
             // NTP and peers agree - use peer consensus
             if (self.config.debug) {
-                print("✅ NTP confirms peer consensus (offset: {:+}s)\n", .{peer_offset});
+                log.info("✅ NTP confirms peer consensus (offset: {:+}s)", .{peer_offset});
             }
             self.time_offset = peer_offset;
         }
@@ -134,7 +135,7 @@ pub const TimeSynchronizer = struct {
         self.last_ntp_sync = system_time;
 
         if (self.config.debug) {
-            print("🌐 Force NTP sync completed (offset: {:+}s)\n", .{self.time_offset});
+            log.info("🌐 Force NTP sync completed (offset: {:+}s)", .{self.time_offset});
         }
     }
 
@@ -161,7 +162,7 @@ pub const TimeSynchronizer = struct {
         // Resolve server address and connect
         const address = std.net.Address.resolveIp(server, 123) catch |err| {
             if (self.config.debug) {
-                print("⚠️ Failed to resolve NTP server {s}: {}\n", .{ server, err });
+                log.info("⚠️ Failed to resolve NTP server {s}: {}", .{ server, err });
             }
             return err;
         };
@@ -169,7 +170,7 @@ pub const TimeSynchronizer = struct {
         // Use UDP for NTP (standard protocol)
         const socket = std.net.tcpConnectToAddress(address) catch |err| {
             if (self.config.debug) {
-                print("⚠️ Failed to connect to NTP server {s}: {}\n", .{ server, err });
+                log.info("⚠️ Failed to connect to NTP server {s}: {}", .{ server, err });
             }
             return err;
         };
@@ -178,7 +179,7 @@ pub const TimeSynchronizer = struct {
         // Send NTP request
         _ = socket.writeAll(&ntp_packet) catch |err| {
             if (self.config.debug) {
-                print("⚠️ Failed to send NTP request to {s}: {}\n", .{ server, err });
+                log.info("⚠️ Failed to send NTP request to {s}: {}", .{ server, err });
             }
             return err;
         };
@@ -187,14 +188,14 @@ pub const TimeSynchronizer = struct {
         var response: [48]u8 = undefined;
         const bytes_read = socket.readAll(&response) catch |err| {
             if (self.config.debug) {
-                print("⚠️ Failed to read NTP response from {s}: {}\n", .{ server, err });
+                log.info("⚠️ Failed to read NTP response from {s}: {}", .{ server, err });
             }
             return err;
         };
 
         if (bytes_read != 48) {
             if (self.config.debug) {
-                print("⚠️ Invalid NTP response size from {s}: {} bytes\n", .{ server, bytes_read });
+                log.info("⚠️ Invalid NTP response size from {s}: {} bytes", .{ server, bytes_read });
             }
             return error.InvalidNTPResponse;
         }
@@ -206,7 +207,7 @@ pub const TimeSynchronizer = struct {
         const unix_timestamp: i64 = @as(i64, ntp_timestamp) - 2208988800;
 
         if (self.config.debug) {
-            print("✅ NTP response from {s}: {}\n", .{ server, unix_timestamp });
+            log.info("✅ NTP response from {s}: {}", .{ server, unix_timestamp });
         }
 
         return unix_timestamp;

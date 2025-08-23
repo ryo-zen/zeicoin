@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const testing = std.testing;
-const print = std.debug.print;
+const log = std.log.scoped(.test);
 
 // Import the zeicoin module
 const zei = @import("zeicoin");
@@ -484,7 +484,7 @@ test "coinbase maturity basic" {
     try testing.expectEqual(@as(u64, 0), account1.balance); // No mature balance
     try testing.expectEqual(@as(u64, types.ZenMining.BLOCK_REWARD), account1.immature_balance); // All immature
     
-    print("\n✅ Coinbase maturity test: Mining reward correctly marked as immature\n", .{});
+    log.info("\n✅ Coinbase maturity test: Mining reward correctly marked as immature", .{});
 }
 
 test "mempool limits enforcement" {
@@ -498,7 +498,7 @@ test "mempool limits enforcement" {
     }
 
     // Test 1: Test reaching transaction count limit
-    print("\n🧪 Testing mempool transaction count limit...\n", .{});
+    log.info("\n🧪 Testing mempool transaction count limit...", .{});
     
     // Directly fill mempool to limit by manipulating internal state
     // This avoids creating 10,000 actual transactions
@@ -539,7 +539,7 @@ test "mempool limits enforcement" {
     }
     
     try testing.expectEqual(@as(usize, max_tx), zeicoin.mempool.items.len);
-    print("  ✅ Mempool filled to exactly {} transactions (limit)\n", .{max_tx});
+    log.info("  ✅ Mempool filled to exactly {} transactions (limit)", .{max_tx});
     
     
     // Try to add one more (should fail)
@@ -580,21 +580,21 @@ test "mempool limits enforcement" {
     
     const result = zeicoin.addTransaction(signed_overflow);
     try testing.expectError(error.MempoolFull, result);
-    print("  ✅ Transaction correctly rejected when mempool full\n", .{});
+    log.info("  ✅ Transaction correctly rejected when mempool full", .{});
     
     // Test 2: Size tracking
     const expected_size = max_tx * types.MempoolLimits.TRANSACTION_SIZE;
     try testing.expectEqual(expected_size, zeicoin.mempool_size_bytes);
-    print("  ✅ Mempool size correctly tracked: {} bytes\n", .{expected_size});
+    log.info("  ✅ Mempool size correctly tracked: {} bytes", .{expected_size});
     
     // Test 3: Clear mempool and test size limit
     zeicoin.mempool.clearRetainingCapacity();
     zeicoin.mempool_size_bytes = 0;
-    print("\n🧪 Testing mempool size limit...\n", .{});
+    log.info("\n🧪 Testing mempool size limit...", .{});
     
     // Calculate how many transactions fit in size limit
     const txs_for_size_limit = types.MempoolLimits.MAX_SIZE_BYTES / types.MempoolLimits.TRANSACTION_SIZE;
-    print("  📊 Size limit allows for {} transactions\n", .{txs_for_size_limit});
+    log.info("  📊 Size limit allows for {} transactions", .{txs_for_size_limit});
     
     // Artificially set the size to just below limit
     zeicoin.mempool_size_bytes = types.MempoolLimits.MAX_SIZE_BYTES - types.MempoolLimits.TRANSACTION_SIZE + 1;
@@ -637,9 +637,9 @@ test "mempool limits enforcement" {
     
     const size_result = zeicoin.addTransaction(signed_size_test);
     try testing.expectError(error.MempoolSizeLimitExceeded, size_result);
-    print("  ✅ Transaction correctly rejected when size limit exceeded\n", .{});
+    log.info("  ✅ Transaction correctly rejected when size limit exceeded", .{});
     
-    print("\n🎉 All mempool limit tests passed!\n", .{});
+    log.info("\n🎉 All mempool limit tests passed!", .{});
 }
 
 test "transaction expiration" {
@@ -666,7 +666,7 @@ test "transaction expiration" {
         .immature_balance = 0,
     });
 
-    print("\n📅 Testing transaction expiration...\n", .{});
+    log.info("\n📅 Testing transaction expiration...", .{});
 
     // Test 1: Valid transaction with future expiry
     const current_height = zeicoin.getHeight() catch 0;
@@ -691,7 +691,7 @@ test "transaction expiration" {
     
     try zeicoin.addTransaction(signed_valid);
     try testing.expectEqual(@as(usize, 1), zeicoin.mempool.items.len);
-    print("  ✅ Transaction with future expiry accepted\n", .{});
+    log.info("  ✅ Transaction with future expiry accepted", .{});
 
     // Clear mempool
     zeicoin.mempool.clearRetainingCapacity();
@@ -719,7 +719,7 @@ test "transaction expiration" {
     const expired_result = zeicoin.addTransaction(signed_expired);
     try testing.expectError(error.InvalidTransaction, expired_result);
     try testing.expectEqual(@as(usize, 0), zeicoin.mempool.items.len);
-    print("  ✅ Expired transaction correctly rejected\n", .{});
+    log.info("  ✅ Expired transaction correctly rejected", .{});
 
     // Test 3: Mine blocks and verify transaction expiration
     // Add a transaction that expires in 2 blocks
@@ -758,14 +758,14 @@ test "transaction expiration" {
     // Try to add the same transaction again (simulating rebroadcast)
     const rebroadcast_result = zeicoin.addTransaction(signed_short);
     try testing.expectError(error.InvalidTransaction, rebroadcast_result);
-    print("  ✅ Transaction expired after mining blocks\n", .{});
+    log.info("  ✅ Transaction expired after mining blocks", .{});
 
     // Test 4: Verify default expiry window is set correctly
     const expiry_window = types.TransactionExpiry.getExpiryWindow();
     try testing.expectEqual(@as(u64, 8_640), expiry_window); // TestNet: 24 hours
-    print("  ✅ Default expiry window is 24 hours (8,640 blocks)\n", .{});
+    log.info("  ✅ Default expiry window is 24 hours (8,640 blocks)", .{});
 
-    print("\n🎉 All transaction expiration tests passed!\n", .{});
+    log.info("\n🎉 All transaction expiration tests passed!", .{});
 }
 
 test "reorganization with coinbase maturity" {
@@ -794,10 +794,10 @@ test "reorganization with coinbase maturity" {
         .immature_balance = 0,
     });
     
-    print("\n🧪 Testing reorganization with coinbase maturity...\n", .{});
+    log.info("\n🧪 Testing reorganization with coinbase maturity...", .{});
     
     // Scenario: Mine 101 blocks so first coinbase matures
-    print("  1️⃣ Mining 101 blocks to mature first coinbase...\n", .{});
+    log.info("  1️⃣ Mining 101 blocks to mature first coinbase...", .{});
     var i: u32 = 0;
     while (i < 101) : (i += 1) {
         // Mine a block and immediately deinitialize it to free its transactions
@@ -809,12 +809,12 @@ test "reorganization with coinbase maturity" {
     // Note: We start at height 0 (genesis), so after mining 101 blocks we're at height 101
     // Block at height 1 matures at height 101 (100 blocks later)
     const height = try zeicoin.getHeight();
-    print("  📊 Current height: {}\n", .{height});
+    log.info("  📊 Current height: {}", .{height});
     const account_before = try zeicoin.getAccount(miner1_addr);
-    print("  💰 Miner balance - mature: {}, immature: {}\n", .{account_before.balance, account_before.immature_balance});
+    log.info("  💰 Miner balance - mature: {}, immature: {}", .{account_before.balance, account_before.immature_balance});
     try testing.expectEqual(@as(u64, types.ZenMining.BLOCK_REWARD), account_before.balance); // Block 1 matured
     try testing.expectEqual(@as(u64, 100 * types.ZenMining.BLOCK_REWARD), account_before.immature_balance); // Blocks 2-101 still immature
-    print("  ✅ Block 1 coinbase matured correctly\n", .{});
+    log.info("  ✅ Block 1 coinbase matured correctly", .{});
     
     // Create a transaction that spends the matured coinbase
     const spend_tx = types.Transaction{
@@ -841,20 +841,20 @@ test "reorganization with coinbase maturity" {
     const block_with_spend = try zeicoin.zenMineBlock(miner1);
     var mutable_block_with_spend = block_with_spend;
     defer mutable_block_with_spend.deinit(zeicoin.allocator);
-    print("  ✅ Spent matured coinbase in block 102\n", .{});
+    log.info("  ✅ Spent matured coinbase in block 102", .{});
     
     // Verify the spend worked
     const miner1_after_spend = try zeicoin.getAccount(miner1_addr);
     const miner2_after_spend = try zeicoin.getAccount(miner2_addr);
-    print("  💰 After spend - Miner1: mature={}, immature={}\n", .{miner1_after_spend.balance, miner1_after_spend.immature_balance});
-    print("  💰 After spend - Miner2: mature={}, immature={}\n", .{miner2_after_spend.balance, miner2_after_spend.immature_balance});
+    log.info("  💰 After spend - Miner1: mature={}, immature={}", .{miner1_after_spend.balance, miner1_after_spend.immature_balance});
+    log.info("  💰 After spend - Miner2: mature={}, immature={}", .{miner2_after_spend.balance, miner2_after_spend.immature_balance});
     // Miner1 spent half of first mature block but block 2 also matured, plus got fees
     // So balance should be: 0.5 ZEI (remaining from block 1) + 1 ZEI (block 2) + small fees
     try testing.expect(miner1_after_spend.balance > 0); // Has balance
     try testing.expect(miner2_after_spend.balance == types.ZenMining.BLOCK_REWARD / 2); // Got exactly half
     
     // Now trigger a reorg back to height 50 (before maturity)
-    print("  2️⃣ Simulating reorganization back to height 50...\n", .{});
+    log.info("  2️⃣ Simulating reorganization back to height 50...", .{});
     const current_height = try zeicoin.getHeight();
     try testing.expectEqual(@as(u32, 102), current_height); // Genesis(0) + 101 mined blocks + 1 spend block
     
@@ -874,18 +874,18 @@ test "reorganization with coinbase maturity" {
     // Miner2 should have no balance
     const miner2_after_reorg = zeicoin.getAccount(miner2_addr) catch {
         // Account might not exist, which is fine
-        print("  ✅ Miner2 account correctly doesn't exist after reorg\n", .{});
+        log.info("  ✅ Miner2 account correctly doesn't exist after reorg", .{});
         return;
     };
     try testing.expectEqual(@as(u64, 0), miner2_after_reorg.balance);
     try testing.expectEqual(@as(u64, 0), miner2_after_reorg.immature_balance);
     
-    print("  ✅ Reorganization correctly rolled back matured coinbase and dependent transactions\n", .{});
+    log.info("  ✅ Reorganization correctly rolled back matured coinbase and dependent transactions", .{});
 }
 
 test "transaction size limit" {
     // This test verifies that transactions exceeding MAX_TX_SIZE are rejected
-    print("\n🔍 Testing transaction size limit...\n", .{});
+    log.info("\n🔍 Testing transaction size limit...", .{});
     
     // Create test blockchain
     var zeicoin = try createTestZeiCoin("test_zeicoin_data_tx_size");
@@ -934,7 +934,7 @@ test "transaction size limit" {
     
     // Check that the transaction is invalid due to size
     try testing.expectEqual(false, oversized_tx.isValid());
-    print("  ✅ Oversized transaction ({} bytes) correctly rejected by isValid()\n", .{oversized_tx.getSerializedSize()});
+    log.info("  ✅ Oversized transaction ({} bytes) correctly rejected by isValid()", .{oversized_tx.getSerializedSize()});
     
     // Don't try to sign or add invalid transaction - it would panic during hashing
     
@@ -963,19 +963,19 @@ test "transaction size limit" {
     
     // Check that this transaction is valid
     try testing.expectEqual(true, valid_tx.isValid());
-    print("  ✅ Transaction with {} bytes extra_data accepted (under {} byte limit)\n", .{small_data.len, types.TransactionLimits.MAX_EXTRA_DATA_SIZE});
+    log.info("  ✅ Transaction with {} bytes extra_data accepted (under {} byte limit)", .{small_data.len, types.TransactionLimits.MAX_EXTRA_DATA_SIZE});
     
     // Sign and add to mempool
     var signed_valid_tx = valid_tx;
     signed_valid_tx.signature = try alice.signTransaction(valid_tx.hash());
     try zeicoin.addTransaction(signed_valid_tx);
-    print("  ✅ Valid transaction successfully added to mempool\n", .{});
+    log.info("  ✅ Valid transaction successfully added to mempool", .{});
     
-    print("  ✅ Transaction size limit tests passed!\n", .{});
+    log.info("  ✅ Transaction size limit tests passed!", .{});
 }
 
 test "genesis distribution validation" {
-    print("\n🎯 Testing genesis distribution validation...\n", .{});
+    log.info("\n🎯 Testing genesis distribution validation...", .{});
     
     const test_dir = "test_genesis_distribution";
     defer std.fs.cwd().deleteTree(test_dir) catch {};
@@ -990,7 +990,7 @@ test "genesis distribution validation" {
     const genesis = @import("core/chain/genesis.zig");
     const genesis_wallet = @import("core/wallet/genesis_wallet.zig");
     
-    print("  📊 Testing {} pre-funded accounts...\n", .{genesis.TESTNET_DISTRIBUTION.len});
+    log.info("  📊 Testing {} pre-funded accounts...", .{genesis.TESTNET_DISTRIBUTION.len});
     
     // Test 1: Verify all genesis accounts have correct balances
     for (genesis.TESTNET_DISTRIBUTION) |account| {
@@ -1001,7 +1001,7 @@ test "genesis distribution validation" {
         try testing.expectEqual(@as(u64, 0), chain_account.immature_balance);
         try testing.expectEqual(@as(u64, 0), chain_account.nonce);
         
-        print("  ✅ {s}: {} ZEI at {s}\n", .{
+        log.info("  ✅ {s}: {} ZEI at {s}", .{
             account.name,
             account.amount / types.ZEI_COIN,
             @as([]const u8, &std.fmt.bufPrint(&[_]u8{0} ** 64, "tzei1{s}", .{
@@ -1025,7 +1025,7 @@ test "genesis distribution validation" {
         const expected_addr = genesis.getTestAccountAddress(account.name).?;
         try testing.expectEqualSlices(u8, &derived_addr.hash, &expected_addr.hash);
     }
-    print("  ✅ Genesis key pairs are deterministic and match addresses\n", .{});
+    log.info("  ✅ Genesis key pairs are deterministic and match addresses", .{});
     
     // Test 3: Verify total genesis supply
     var total_supply: u64 = 0;
@@ -1037,7 +1037,7 @@ test "genesis distribution validation" {
     
     const expected_supply = 5 * 1000 * types.ZEI_COIN + types.ZenMining.BLOCK_REWARD; // 5 accounts × 1000 ZEI + coinbase
     try testing.expectEqual(expected_supply, total_supply);
-    print("  ✅ Total genesis supply: {} ZEI (5000 distributed + {} coinbase)\n", .{
+    log.info("  ✅ Total genesis supply: {} ZEI (5000 distributed + {} coinbase)", .{
         total_supply / types.ZEI_COIN,
         types.ZenMining.BLOCK_REWARD / types.ZEI_COIN
     });
@@ -1065,13 +1065,13 @@ test "genesis distribution validation" {
         try testing.expectEqual(account.amount, tx.amount);
         try testing.expectEqual(@as(u64, 0), tx.fee); // No fees for genesis distribution
     }
-    print("  ✅ Genesis block contains correct distribution transactions\n", .{});
+    log.info("  ✅ Genesis block contains correct distribution transactions", .{});
     
     // Test 5: Verify genesis hash matches expected
     const expected_hash = genesis.getCanonicalGenesisHash();
     const actual_hash = genesis_block.hash();
     try testing.expectEqualSlices(u8, &expected_hash, &actual_hash);
-    print("  ✅ Genesis block hash matches canonical hash\n", .{});
+    log.info("  ✅ Genesis block hash matches canonical hash", .{});
     
     // Test 6: Test transaction capability from genesis accounts
     const alice_kp = try genesis_wallet.getTestAccountKeyPair("alice");
@@ -1101,21 +1101,21 @@ test "genesis distribution validation" {
     // Should be able to add to mempool
     try zeicoin.addTransaction(signed_tx);
     try testing.expectEqual(@as(usize, 1), zeicoin.mempool.items.len);
-    print("  ✅ Genesis accounts can create valid transactions\n", .{});
+    log.info("  ✅ Genesis accounts can create valid transactions", .{});
     
-    print("  🎉 All genesis distribution validation tests passed!\n", .{});
+    log.info("  🎉 All genesis distribution validation tests passed!", .{});
 }
 
 
 test "memory leak detection - block operations" {
-    print("\n🔍 Testing memory leak prevention in block operations...\n", .{});
+    log.info("\n🔍 Testing memory leak prevention in block operations...", .{});
     
     // Use testing allocator which tracks leaks
     const allocator = testing.allocator;
     
     // Test 1: Block loading and cleanup
     {
-        print("  Testing block load/free cycle...\n", .{});
+        log.info("  Testing block load/free cycle...", .{});
         var zeicoin = try createTestZeiCoin("test_memory_leak_blocks");
         defer {
         zeicoin.deinit();
@@ -1157,12 +1157,12 @@ test "memory leak detection - block operations" {
             loaded_block.deinit(zeicoin.allocator);
         }
         
-        print("  ✅ Block load/free cycle completed without leaks\n", .{});
+        log.info("  ✅ Block load/free cycle completed without leaks", .{});
     }
     
     // Test 2: Sync block handling
     {
-        print("  Testing sync block memory management...\n", .{});
+        log.info("  Testing sync block memory management...", .{});
         var zeicoin = try createTestZeiCoin("test_memory_leak_sync");
         defer {
         zeicoin.deinit();
@@ -1241,12 +1241,12 @@ test "memory leak detection - block operations" {
             try testing.expectEqual(test_block.transactions.len, deserialized.transactions.len);
         }
         
-        print("  ✅ Sync block memory management completed without leaks\n", .{});
+        log.info("  ✅ Sync block memory management completed without leaks", .{});
     }
     
     // Clean up test directories
     std.fs.cwd().deleteTree("test_memory_leak_blocks") catch {};
     std.fs.cwd().deleteTree("test_memory_leak_sync") catch {};
     
-    print("  🎉 Memory leak detection tests passed!\n", .{});
+    log.info("  🎉 Memory leak detection tests passed!", .{});
 }

@@ -3,6 +3,8 @@ const testing = std.testing;
 const serialize = @import("serialize.zig");
 const types = @import("../types/types.zig");
 
+const log = std.log.scoped(.storage);
+
 const c = @cImport({
     @cInclude("rocksdb/c.h");
 });
@@ -75,7 +77,7 @@ pub const Database = struct {
 
         self.db = c.rocksdb_open(self.options, db_path.ptr, @ptrCast(&err));
         if (err != null) {
-            std.debug.print("RocksDB open error: {s}\n", .{err.?});
+            log.info("RocksDB open error: {s}", .{err.?});
             c.rocksdb_free(@constCast(@ptrCast(err)));
             return DatabaseError.OpenFailed;
         }
@@ -161,7 +163,7 @@ pub const Database = struct {
         );
 
         if (err != null) {
-            std.debug.print("RocksDB write error: {s}\n", .{err.?});
+            log.info("RocksDB write error: {s}", .{err.?});
             c.rocksdb_free(@constCast(@ptrCast(err)));
             return DatabaseError.SaveFailed;
         }
@@ -185,7 +187,7 @@ pub const Database = struct {
         );
 
         if (err != null) {
-            std.debug.print("RocksDB read error: {s}\n", .{err.?});
+            log.info("RocksDB read error: {s}", .{err.?});
             c.rocksdb_free(@constCast(@ptrCast(err)));
             return DatabaseError.LoadFailed;
         }
@@ -224,7 +226,7 @@ pub const Database = struct {
         );
 
         if (err != null) {
-            std.debug.print("RocksDB write error: {s}\n", .{err.?});
+            log.info("RocksDB write error: {s}", .{err.?});
             c.rocksdb_free(@constCast(@ptrCast(err)));
             return DatabaseError.SaveFailed;
         }
@@ -248,7 +250,7 @@ pub const Database = struct {
         );
 
         if (err != null) {
-            std.debug.print("RocksDB read error: {s}\n", .{err.?});
+            log.info("RocksDB read error: {s}", .{err.?});
             c.rocksdb_free(@constCast(@ptrCast(err)));
             return DatabaseError.LoadFailed;
         }
@@ -517,12 +519,12 @@ pub const Database = struct {
         );
 
         if (err != null) {
-            std.debug.print("RocksDB delete error: {s}\n", .{err.?});
+            log.info("RocksDB delete error: {s}", .{err.?});
             c.rocksdb_free(@constCast(@ptrCast(err)));
             return DatabaseError.DeletionFailed;
         }
 
-        std.debug.print("🗑️ Removed block at height {}\n", .{height});
+        log.info("🗑️ Removed block at height {}", .{height});
     }
 
     pub fn saveHeight(self: *Database, height: u32) !void {
@@ -588,7 +590,7 @@ pub const Database = struct {
             );
 
             if (err != null) {
-                std.debug.print("RocksDB batch write error: {s}\n", .{err.?});
+                log.info("RocksDB batch write error: {s}", .{err.?});
                 c.rocksdb_free(@constCast(@ptrCast(err)));
                 return DatabaseError.SaveFailed;
             }

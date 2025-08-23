@@ -10,7 +10,7 @@ const ChainState = @import("state.zig").ChainState;
 const ChainValidator = @import("validator.zig").ChainValidator;
 const ReorgManager = @import("reorganization/manager.zig").ReorgManager;
 
-const print = std.debug.print;
+const log = std.log.scoped(.chain);
 
 // Type aliases for clarity
 const Transaction = types.Transaction;
@@ -134,7 +134,7 @@ pub const ChainOperations = struct {
         }
 
         // This is an adjustment block! Calculate new difficulty
-        print("📊 Difficulty adjustment at block {}\n", .{current_height});
+        log.info("📊 Difficulty adjustment at block {}", .{current_height});
 
         // Get timestamps from last 20 blocks for time calculation
         const lookback_blocks = types.ZenMining.DIFFICULTY_ADJUSTMENT_PERIOD;
@@ -176,7 +176,7 @@ pub const ChainOperations = struct {
         const new_difficulty = current_difficulty.adjust(adjustment_factor, types.CURRENT_NETWORK);
 
         // Log the adjustment
-        print("📈 Difficulty adjusted: factor={d:.3}, time={}s->{}s\n", .{ adjustment_factor, actual_time, target_time });
+        log.info("📈 Difficulty adjusted: factor={d:.3}, time={}s->{}s", .{ adjustment_factor, actual_time, target_time });
 
         return new_difficulty;
     }
@@ -206,7 +206,7 @@ pub const ChainOperations = struct {
             try self.chain_state.matureCoinbaseRewards(maturity_height);
         }
 
-        print("✅ Block #{} added to chain ({} txs)\n", .{ height, block.txCount() });
+        log.info("✅ Block #{} added to chain ({} txs)", .{ height, block.txCount() });
     }
 
     /// Accept a block during reorganization
@@ -215,7 +215,7 @@ pub const ChainOperations = struct {
 
         // Special case: if we're at height 0 and incoming block is not genesis
         const target_height = if (current_height == 0 and !self.isGenesisBlock(block)) blk: {
-            print("🔄 Accepting non-genesis block after rollback - placing at height 1\n", .{});
+            log.info("🔄 Accepting non-genesis block after rollback - placing at height 1", .{});
             break :blk @as(u32, 1);
         } else current_height;
 
@@ -230,7 +230,7 @@ pub const ChainOperations = struct {
         // Save to database
         try self.chain_state.database.saveBlock(target_height, block);
 
-        print("✅ Block accepted at height {}\n", .{target_height});
+        log.info("✅ Block accepted at height {}", .{target_height});
     }
 
     /// Apply a block (simpler version without validation)
@@ -255,7 +255,7 @@ pub const ChainOperations = struct {
 
             const existing_hash = existing_block.hash();
             if (std.mem.eql(u8, &block.header.previous_hash, &existing_hash)) {
-                print("🔗 Fork block builds on height {} (current tip: {})\n", .{ height, current_height - 1 });
+                log.info("🔗 Fork block builds on height {} (current tip: {})", .{ height, current_height - 1 });
                 return true;
             }
         }
@@ -265,14 +265,14 @@ pub const ChainOperations = struct {
 
     /// Store a fork block and check for reorganization
     pub fn storeForkBlock(self: *Self, block: Block, fork_height: u32) !void {
-        print("🔀 Storing fork block at height {}\n", .{fork_height});
+        log.info("🔀 Storing fork block at height {}", .{fork_height});
 
         // Calculate cumulative work of the fork
         const fork_work = block.header.getWork();
 
         // Get current chain work at the same height
         const current_block = self.chain_state.database.getBlock(fork_height) catch |err| {
-            print("❌ Cannot compare fork - missing block at height {}: {}\n", .{ fork_height, err });
+            log.info("❌ Cannot compare fork - missing block at height {}: {}", .{ fork_height, err });
             return;
         };
         defer current_block.deinit(self.allocator);
@@ -281,7 +281,7 @@ pub const ChainOperations = struct {
 
         // Highest cumulative work rule: if fork has more work, reorganize
         if (fork_work > current_work) {
-            print("🏆 Fork block has more work ({} vs {}) - triggering reorganization\n", .{ fork_work, current_work });
+            log.info("🏆 Fork block has more work ({} vs {}) - triggering reorganization", .{ fork_work, current_work });
 
             // Delegate to modern reorganization system
             var reorg_manager = try ReorgManager.init(
@@ -294,7 +294,7 @@ pub const ChainOperations = struct {
 
             _ = try reorg_manager.executeReorganization(block, block.hash());
         } else {
-            print("📊 Fork block has less work ({} vs {}) - keeping current chain\n", .{ fork_work, current_work });
+            log.info("📊 Fork block has less work ({} vs {}) - keeping current chain", .{ fork_work, current_work });
         }
     }
 

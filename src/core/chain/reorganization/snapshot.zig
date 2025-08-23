@@ -6,6 +6,8 @@ const types = @import("../../types/types.zig");
 const ChainState = @import("../state.zig").ChainState;
 const db = @import("../../storage/db.zig");
 
+const log = std.log.scoped(.reorg);
+
 // Type aliases
 const Block = types.Block;
 const Account = types.Account;
@@ -130,7 +132,7 @@ pub const ChainSnapshot = struct {
         snapshot.chain_height = current_height;
         snapshot.snapshot_height = from_height;
         
-        std.debug.print("📸 Capturing chain snapshot from height {} to {}\n", .{ from_height, current_height });
+        log.info("📸 Capturing chain snapshot from height {} to {}", .{ from_height, current_height });
         
         // Capture blocks from fork point to current tip
         try self.captureBlocks(&snapshot, chain_state, from_height, current_height);
@@ -149,7 +151,7 @@ pub const ChainSnapshot = struct {
         }
         
         const stats = snapshot.getStats();
-        std.debug.print("✅ Snapshot captured: {} blocks, {} accounts, ~{}KB\n", .{
+        log.info("✅ Snapshot captured: {} blocks, {} accounts, ~{}KB", .{
             stats.blocks, stats.accounts, stats.memory_usage / 1024
         });
         
@@ -159,7 +161,7 @@ pub const ChainSnapshot = struct {
     /// Restore chain state from snapshot
     pub fn restoreChainState(self: *Self, snapshot: *const Snapshot, chain_state: *ChainState) !void {
         _ = self;
-        std.debug.print("🔄 Restoring chain state from snapshot\n", .{});
+        log.info("🔄 Restoring chain state from snapshot", .{});
         
         // Rollback to snapshot height
         try chain_state.rollbackToHeight(snapshot.snapshot_height, snapshot.chain_height);
@@ -177,7 +179,7 @@ pub const ChainSnapshot = struct {
             _ = entry;
         }
         
-        std.debug.print("✅ Chain state restored to height {}\n", .{snapshot.snapshot_height});
+        log.info("✅ Chain state restored to height {}", .{snapshot.snapshot_height});
     }
     
     /// Capture blocks from height range
@@ -190,7 +192,7 @@ pub const ChainSnapshot = struct {
         // Capture each block
         for (from_height..to_height) |height| {
             var block = chain_state.database.getBlock(@intCast(height)) catch |err| {
-                std.debug.print("⚠️ Failed to capture block at height {}: {}\n", .{ height, err });
+                log.info("⚠️ Failed to capture block at height {}: {}", .{ height, err });
                 continue;
             };
             
@@ -218,7 +220,7 @@ pub const ChainSnapshot = struct {
         // 3. Store in snapshot's account HashMap
         
         // For now, we'll capture a minimal set
-        std.debug.print("📊 Account capture (simplified implementation)\n", .{});
+        log.info("📊 Account capture (simplified implementation)", .{});
     }
     
     /// Calculate state root hash (simplified)

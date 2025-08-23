@@ -7,6 +7,8 @@ const types = @import("../../types/types.zig");
 const ChainState = @import("../state.zig").ChainState;
 const Database = @import("../../storage/db.zig").Database;
 
+const log = std.log.scoped(.test);
+
 // Import reorganization components
 const ReorgManager = @import("manager.zig").ReorgManager;
 const ChainSnapshot = @import("snapshot.zig").ChainSnapshot;
@@ -459,7 +461,7 @@ test "ReorgManager - Performance benchmarking" {
     try testing.expectEqual(true, result.success);
     try testing.expect(duration < 1000); // Should complete within 1 second
     
-    std.debug.print("Reorganization performance: {}ms\n", .{duration});
+    log.info("Reorganization performance: {}ms", .{duration});
 }
 
 // ===================== INTEGRATION WITH MESSAGE HANDLER =====================
@@ -504,7 +506,7 @@ test "ReorgManager - Network integration simulation" {
     try testing.expect(reorg_result.blocks_applied >= 1);
     try testing.expect(reorg_result.duration_ms >= 0);
     
-    std.debug.print("Network integration test: {} blocks reverted, {} applied in {}ms\n", .{
+    log.info("Network integration test: {} blocks reverted, {} applied in {}ms", .{
         reorg_result.blocks_reverted,
         reorg_result.blocks_applied,
         reorg_result.duration_ms,

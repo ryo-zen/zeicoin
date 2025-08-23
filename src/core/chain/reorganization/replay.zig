@@ -6,6 +6,8 @@ const types = @import("../../types/types.zig");
 const ChainState = @import("../state.zig").ChainState;
 const ChainValidator = @import("../validator.zig").ChainValidator;
 
+const log = std.log.scoped(.reorg);
+
 // Type aliases
 const Transaction = types.Transaction;
 const Hash = types.Hash;
@@ -201,7 +203,7 @@ pub const TxReplayEngine = struct {
         chain_state: *ChainState,
         chain_validator: *ChainValidator,
     ) !ReplayResult {
-        std.debug.print("🔄 Replaying {} orphaned transactions\n", .{orphaned_txs.len});
+        log.info("🔄 Replaying {} orphaned transactions", .{orphaned_txs.len});
         
         // Initialize result containers
         var result = ReplayResult{
@@ -215,7 +217,7 @@ pub const TxReplayEngine = struct {
         
         for (orphaned_txs) |tx| {
             if (isCoinbaseTransaction(tx)) {
-                std.debug.print("⚠️ Skipping coinbase transaction in replay\n", .{});
+                log.info("⚠️ Skipping coinbase transaction in replay", .{});
                 continue;
             }
             try valid_txs.append(tx);
@@ -247,7 +249,7 @@ pub const TxReplayEngine = struct {
                 
                 // Transaction successfully replayed
                 try result.replayed.append(tx);
-                std.debug.print("✅ Replayed transaction: {}\n", .{std.fmt.fmtSliceHexLower(tx.hash()[0..8])});
+                log.info("✅ Replayed transaction: {}", .{std.fmt.fmtSliceHexLower(tx.hash()[0..8])});
                 
             } else {
                 // Transaction validation failed
@@ -256,12 +258,12 @@ pub const TxReplayEngine = struct {
                     .reason = .InvalidAfterReorg,
                 };
                 try result.failed.append(failed_tx);
-                std.debug.print("❌ Transaction invalid after reorg: {}\n", .{std.fmt.fmtSliceHexLower(tx.hash()[0..8])});
+                log.info("❌ Transaction invalid after reorg: {}", .{std.fmt.fmtSliceHexLower(tx.hash()[0..8])});
             }
         }
         
         const stats = result.getStats();
-        std.debug.print("🎯 Replay complete: {}/{} success ({:.1}%)\n", .{
+        log.info("🎯 Replay complete: {}/{} success ({:.1}%)", .{
             stats.replayed_count, stats.replayed_count + stats.failed_count, stats.success_rate * 100
         });
         
@@ -332,7 +334,7 @@ pub const TxReplayEngine = struct {
             _ = self.validation_cache.remove(hash);
         }
         
-        std.debug.print("🧹 Evicted {} old validation cache entries\n", .{to_remove.items.len});
+        log.info("🧹 Evicted {} old validation cache entries", .{to_remove.items.len});
     }
     
     /// Build dependency graph for transactions
@@ -369,6 +371,6 @@ pub const TxReplayEngine = struct {
         self.dependency_graph.deinit();
         self.dependency_graph = TxDependencyGraph.init(self.allocator);
         
-        std.debug.print("🔄 Transaction replay engine reset\n", .{});
+        log.info("🔄 Transaction replay engine reset", .{});
     }
 };

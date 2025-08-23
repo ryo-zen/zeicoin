@@ -121,9 +121,10 @@ pub fn validateGenesis(block: types.Block) bool {
 
     // Must match canonical genesis hash
     if (!std.mem.eql(u8, &block_hash, &canonical_hash)) {
-        std.debug.print("❌ Genesis validation failed: hash mismatch\n", .{});
-        std.debug.print("   Expected: {s}\n", .{std.fmt.fmtSliceHexLower(&canonical_hash)});
-        std.debug.print("   Received: {s}\n", .{std.fmt.fmtSliceHexLower(&block_hash)});
+        const log = std.log.scoped(.chain);
+        log.info("❌ Genesis validation failed: hash mismatch", .{});
+        log.info("   Expected: {s}", .{std.fmt.fmtSliceHexLower(&canonical_hash)});
+        log.info("   Received: {s}", .{std.fmt.fmtSliceHexLower(&block_hash)});
         return false;
     }
 
@@ -262,5 +263,6 @@ test "Genesis block validation" {
         try std.testing.expect(tx.isCoinbase());
     }
 
-    std.debug.print("\n✅ Genesis block validation tests passed\n", .{});
+    const log = std.log.scoped(.chain);
+    log.info("✅ Genesis block validation tests passed", .{});
 }

@@ -5,6 +5,8 @@ const std = @import("std");
 const testing = std.testing;
 const types = @import("../types/types.zig");
 
+const log = std.log.scoped(.storage);
+
 // Error types for serialization
 pub const SerializeError = error{
     EndOfStream,
@@ -288,45 +290,45 @@ pub fn readBlockHeader(reader: anytype) !types.BlockHeader {
 
 /// Serialize a Block to a writer
 pub fn writeBlock(writer: anytype, block: types.Block) !void {
-    std.debug.print("🔍 SYNC DEBUG: writeBlock() starting\n", .{});
-    std.debug.print("  📋 Block header version: {}\n", .{block.header.version});
-    std.debug.print("  📋 Block timestamp: {}\n", .{block.header.timestamp});
-    std.debug.print("  📋 Block nonce: {}\n", .{block.header.nonce});
-    std.debug.print("  📋 Transaction count: {}\n", .{block.transactions.len});
+    log.info("🔍 SYNC DEBUG: writeBlock() starting", .{});
+    log.info("  📋 Block header version: {}", .{block.header.version});
+    log.info("  📋 Block timestamp: {}", .{block.header.timestamp});
+    log.info("  📋 Block nonce: {}", .{block.header.nonce});
+    log.info("  📋 Transaction count: {}", .{block.transactions.len});
     
     // Serialize header
     try block.header.serialize(writer);
-    std.debug.print("  ✅ Header serialized\n", .{});
+    log.info("  ✅ Header serialized", .{});
 
     // Serialize transaction count
     try writer.writeInt(u32, @intCast(block.transactions.len), .little);
-    std.debug.print("  ✅ Transaction count serialized: {}\n", .{block.transactions.len});
+    log.info("  ✅ Transaction count serialized: {}", .{block.transactions.len});
 
     // Serialize each transaction
     for (block.transactions, 0..) |tx, i| {
-        std.debug.print("  📝 Serializing transaction {}/{}\n", .{i + 1, block.transactions.len});
+        log.info("  📝 Serializing transaction {}/{}", .{i + 1, block.transactions.len});
         try writeTransaction(writer, tx);
     }
-    std.debug.print("🔍 SYNC DEBUG: writeBlock() completed\n", .{});
+    log.info("🔍 SYNC DEBUG: writeBlock() completed", .{});
 }
 
 /// Deserialize a Block from a reader
 pub fn readBlock(reader: anytype, allocator: std.mem.Allocator) !types.Block {
-    std.debug.print("🔍 SYNC DEBUG: readBlock() starting\n", .{});
+    log.info("🔍 SYNC DEBUG: readBlock() starting", .{});
     
     // Deserialize header
     const header = try types.BlockHeader.deserialize(reader);
-    std.debug.print("  📋 Deserialized header version: {} (hex: 0x{X})\n", .{header.version, header.version});
-    std.debug.print("  📋 Deserialized timestamp: {}\n", .{header.timestamp});
-    std.debug.print("  📋 Deserialized nonce: {}\n", .{header.nonce});
-    std.debug.print("  📋 Deserialized difficulty: {}\n", .{header.difficulty});
+    log.info("  📋 Deserialized header version: {} (hex: 0x{X})", .{header.version, header.version});
+    log.info("  📋 Deserialized timestamp: {}", .{header.timestamp});
+    log.info("  📋 Deserialized nonce: {}", .{header.nonce});
+    log.info("  📋 Deserialized difficulty: {}", .{header.difficulty});
 
     // Deserialize transaction count
     const tx_count = try reader.readInt(u32, .little);
-    std.debug.print("  📋 Deserialized transaction count: {}\n", .{tx_count});
+    log.info("  📋 Deserialized transaction count: {}", .{tx_count});
     
     if (tx_count > 100000) {
-        std.debug.print("  ❌ WARNING: Suspicious transaction count: {}\n", .{tx_count});
+        log.info("  ❌ WARNING: Suspicious transaction count: {}", .{tx_count});
     }
 
     // Deserialize transactions
@@ -335,9 +337,9 @@ pub fn readBlock(reader: anytype, allocator: std.mem.Allocator) !types.Block {
 
     var i: usize = 0;
     while (i < tx_count) : (i += 1) {
-        std.debug.print("  📝 Deserializing transaction {}/{}\n", .{i + 1, tx_count});
+        log.info("  📝 Deserializing transaction {}/{}", .{i + 1, tx_count});
         transactions[i] = readTransaction(reader, allocator) catch |err| {
-            std.debug.print("  ❌ Error deserializing transaction {}: {}\n", .{i, err});
+            log.info("  ❌ Error deserializing transaction {}: {}", .{i, err});
             // If an error occurs, deinit all previously read transactions to prevent leaks
             for (transactions[0..i]) |*tx| {
                 tx.deinit(allocator);
@@ -347,7 +349,7 @@ pub fn readBlock(reader: anytype, allocator: std.mem.Allocator) !types.Block {
         };
     }
 
-    std.debug.print("🔍 SYNC DEBUG: readBlock() completed successfully\n", .{});
+    log.info("🔍 SYNC DEBUG: readBlock() completed successfully", .{});
     return types.Block{
         .header = header,
         .transactions = transactions,

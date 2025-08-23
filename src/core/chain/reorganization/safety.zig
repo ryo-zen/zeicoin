@@ -4,6 +4,8 @@
 const std = @import("std");
 const types = @import("../../types/types.zig");
 
+const log = std.log.scoped(.reorg);
+
 /// Work type for chain work comparison
 pub const ChainWork = struct {
     value: u256,
@@ -59,7 +61,7 @@ pub const ReorgSafety = struct {
     
     /// Main reorganization validation function
     pub fn validateReorganization(self: *Self, depth: u32, current_height: u32) !void {
-        std.debug.print("🔒 Safety check: depth={}, height={}\n", .{ depth, current_height });
+        log.info("🔒 Safety check: depth={}, height={}", .{ depth, current_height });
         
         // Emergency brake check
         if (self.emergency_brake) {
@@ -78,7 +80,7 @@ pub const ReorgSafety = struct {
         // Resource limits
         try self.checkResourceLimits(depth);
         
-        std.debug.print("✅ Safety validation passed\n", .{});
+        log.info("✅ Safety validation passed", .{});
     }
     
     /// Validate reorganization work requirements (from atomic_reorg)
@@ -88,34 +90,34 @@ pub const ReorgSafety = struct {
         
         // Must have more work to justify reorganization
         if (new_work.lessThanOrEqual(current_work)) {
-            std.debug.print("⚠️ [REORG] New chain has insufficient work: {} <= {}\n", .{ new_work.value, current_work.value });
+            log.info("⚠️ [REORG] New chain has insufficient work: {} <= {}", .{ new_work.value, current_work.value });
             return false;
         }
         
         // Check if already on the same chain
         if (std.mem.eql(u8, &current_tip_hash, &new_tip_hash)) {
-            std.debug.print("ℹ️ [REORG] Already on best chain\n", .{});
+            log.info("ℹ️ [REORG] Already on best chain", .{});
             return false;
         }
         
-        std.debug.print("✅ [REORG] Work validation passed: new_work={} > current_work={}\n", .{ new_work.value, current_work.value });
+        log.info("✅ [REORG] Work validation passed: new_work={} > current_work={}", .{ new_work.value, current_work.value });
         return true;
     }
     
     /// Check if reorganization depth is within limits
     fn checkDepthLimit(self: *Self, depth: u32) !void {
         if (depth > self.max_reorg_depth) {
-            std.debug.print("❌ Reorganization too deep: {} > {}\n", .{ depth, self.max_reorg_depth });
+            log.info("❌ Reorganization too deep: {} > {}", .{ depth, self.max_reorg_depth });
             return error.ReorgTooDeep;
         }
         
         // Special handling for deep reorganizations
         if (depth > 10) {
-            std.debug.print("⚠️ Deep reorganization detected: {} blocks\n", .{depth});
+            log.info("⚠️ Deep reorganization detected: {} blocks", .{depth});
             
             if (self.require_confirmation) {
                 // In a full implementation, would prompt for confirmation
-                std.debug.print("🛑 Deep reorganization requires manual confirmation\n", .{});
+                log.info("🛑 Deep reorganization requires manual confirmation", .{});
                 return error.ConfirmationRequired;
             }
         }
@@ -132,7 +134,7 @@ pub const ReorgSafety = struct {
         const fork_height = current_height - depth;
         
         if (fork_height < final_height) {
-            std.debug.print("❌ Reorganization violates finality: fork_height={}, final_height={}\n", .{ fork_height, final_height });
+            log.info("❌ Reorganization violates finality: fork_height={}, final_height={}", .{ fork_height, final_height });
             return error.FinalityViolation;
         }
     }
@@ -141,7 +143,7 @@ pub const ReorgSafety = struct {
     fn checkCheckpoints(self: *Self, fork_height: u32) !void {
         for (self.checkpoint_heights.items) |checkpoint| {
             if (fork_height < checkpoint) {
-                std.debug.print("❌ Reorganization beyond checkpoint: fork_height={}, checkpoint={}\n", .{ fork_height, checkpoint });
+                log.info("❌ Reorganization beyond checkpoint: fork_height={}, checkpoint={}", .{ fork_height, checkpoint });
                 return error.ReorgBeyondCheckpoint;
             }
         }
@@ -153,7 +155,7 @@ pub const ReorgSafety = struct {
         const estimated_memory_mb = depth * 2; // ~2MB per block
         
         if (estimated_memory_mb > self.max_memory_usage_mb) {
-            std.debug.print("❌ Reorganization exceeds memory limit: {}MB > {}MB\n", .{ estimated_memory_mb, self.max_memory_usage_mb });
+            log.info("❌ Reorganization exceeds memory limit: {}MB > {}MB", .{ estimated_memory_mb, self.max_memory_usage_mb });
             return error.MemoryLimitExceeded;
         }
     }
@@ -174,7 +176,7 @@ pub const ReorgSafety = struct {
         }
         
         try self.checkpoint_heights.insert(insert_pos, height);
-        std.debug.print("📍 Checkpoint added at height {}\n", .{height});
+        log.info("📍 Checkpoint added at height {}", .{height});
     }
     
     /// Remove a checkpoint height
@@ -182,7 +184,7 @@ pub const ReorgSafety = struct {
         for (self.checkpoint_heights.items, 0..) |checkpoint, i| {
             if (checkpoint == height) {
                 _ = self.checkpoint_heights.orderedRemove(i);
-                std.debug.print("📍 Checkpoint removed at height {}\n", .{height});
+                log.info("📍 Checkpoint removed at height {}", .{height});
                 return true;
             }
         }
@@ -202,19 +204,19 @@ pub const ReorgSafety = struct {
         self.max_memory_usage_mb = config.max_memory_usage_mb;
         self.require_confirmation = config.require_confirmation;
         
-        std.debug.print("🔒 Safety configuration updated\n", .{});
+        log.info("🔒 Safety configuration updated", .{});
     }
     
     /// Activate emergency brake (stops all reorganizations)
     pub fn activateEmergencyBrake(self: *Self) void {
         self.emergency_brake = true;
-        std.debug.print("🚨 EMERGENCY BRAKE ACTIVATED - All reorganizations stopped\n", .{});
+        log.info("🚨 EMERGENCY BRAKE ACTIVATED - All reorganizations stopped", .{});
     }
     
     /// Deactivate emergency brake
     pub fn deactivateEmergencyBrake(self: *Self) void {
         self.emergency_brake = false;
-        std.debug.print("✅ Emergency brake deactivated\n", .{});
+        log.info("✅ Emergency brake deactivated", .{});
     }
     
     /// Check if specific reorganization operation is safe
@@ -223,7 +225,7 @@ pub const ReorgSafety = struct {
         
         // Run all safety checks
         self.validateReorganization(depth, current_height) catch |err| {
-            std.debug.print("🚫 Reorganization rejected: {}\n", .{err});
+            log.info("🚫 Reorganization rejected: {}", .{err});
             return false;
         };
         
@@ -250,7 +252,7 @@ pub const ReorgSafety = struct {
                 self.finality_depth = 3;
                 self.require_confirmation = false;
                 self.max_reorg_time_ms = 60000; // 1 minute
-                std.debug.print("🧪 Applied TestNet safety preset\n", .{});
+                log.info("🧪 Applied TestNet safety preset", .{});
             },
             .mainnet => {
                 // Conservative for production
@@ -258,7 +260,7 @@ pub const ReorgSafety = struct {
                 self.finality_depth = 6;
                 self.require_confirmation = true; // Require confirmation for deep reorgs
                 self.max_reorg_time_ms = 30000; // 30 seconds
-                std.debug.print("🏭 Applied MainNet safety preset\n", .{});
+                log.info("🏭 Applied MainNet safety preset", .{});
             },
         }
     }

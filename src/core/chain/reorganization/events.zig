@@ -5,6 +5,8 @@ const std = @import("std");
 const types = @import("../../types/types.zig");
 const ReorgManager = @import("manager.zig");
 
+const log = std.log.scoped(.reorg);
+
 // Type aliases
 const Block = types.Block;
 const Transaction = types.Transaction;
@@ -179,24 +181,24 @@ pub const ReorgEventHandler = struct {
 pub fn defaultLoggingHandler(event: ReorgEvent) void {
     switch (event) {
         .started => |e| {
-            std.debug.print("🔄 Reorganization started: depth={}, fork_height={}\n", .{ e.depth, e.fork_height });
+            log.info("🔄 Reorganization started: depth={}, fork_height={}", .{ e.depth, e.fork_height });
         },
         .block_reverted => |e| {
-            std.debug.print("⏪ Block reverted: height={}, txs={}\n", .{ e.height, e.transaction_count });
+            log.info("⏪ Block reverted: height={}, txs={}", .{ e.height, e.transaction_count });
         },
         .block_applied => |e| {
-            std.debug.print("📈 Block applied: height={}, txs={}\n", .{ e.height, e.transaction_count });
+            log.info("📈 Block applied: height={}, txs={}", .{ e.height, e.transaction_count });
         },
         .completed => |e| {
-            std.debug.print("✅ Reorganization completed: {}/{}ms, {}/{} blocks, {}/{} txs\n", .{
+            log.info("✅ Reorganization completed: {}/{}ms, {}/{} blocks, {}/{} txs", .{
                 e.duration_ms, e.blocks_reverted, e.blocks_applied, e.transactions_replayed, e.transactions_orphaned
             });
         },
         .failed => |e| {
-            std.debug.print("❌ Reorganization failed at {}: {}\n", .{ e.error_stage, e.error_message });
+            log.info("❌ Reorganization failed at {}: {}", .{ e.error_stage, e.error_message });
         },
         .state_changed => |e| {
-            std.debug.print("🔄 Reorg state: {} → {}\n", .{ e.from_state, e.to_state });
+            log.info("🔄 Reorg state: {} → {}", .{ e.from_state, e.to_state });
         },
     }
 }

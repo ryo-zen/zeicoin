@@ -1,22 +1,23 @@
 // Utilities for Zeicoin
 
 const std = @import("std");
-const print = std.debug.print;
+
+const log = std.log.scoped(.util);
 
 // Global debug flag
 pub var debug_mode: bool = false;
 
 /// Simple logging utilities for blockchain
 pub fn logSuccess(comptime fmt: []const u8, args: anytype) void {
-    print("✅ " ++ fmt ++ "\n", args);
+    log.info("✅ " ++ fmt, args);
 }
 
 pub fn logInfo(comptime fmt: []const u8, args: anytype) void {
-    print("ℹ️  " ++ fmt ++ "\n", args);
+    log.info("ℹ️  " ++ fmt, args);
 }
 
 pub fn logProcess(comptime fmt: []const u8, args: anytype) void {
-    print("🔄 " ++ fmt ++ "\n", args);
+    log.info("🔄 " ++ fmt, args);
 }
 
 /// Get current Unix timestamp

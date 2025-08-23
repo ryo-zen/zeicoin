@@ -2,7 +2,7 @@
 // Handles all difficulty adjustment calculations for the blockchain
 
 const std = @import("std");
-const print = std.debug.print;
+const log = std.log.scoped(.chain);
 const types = @import("../types/types.zig");
 const db = @import("../storage/db.zig");
 
@@ -39,7 +39,7 @@ pub const DifficultyCalculator = struct {
         }
 
         // This is an adjustment block! Calculate new difficulty
-        print("📊 Difficulty adjustment at block {}\n", .{current_height});
+        log.info("📊 Difficulty adjustment at block {}", .{current_height});
 
         // Get timestamps from last 20 blocks for time calculation
         const lookback_blocks = types.ZenMining.DIFFICULTY_ADJUSTMENT_PERIOD;
@@ -81,7 +81,7 @@ pub const DifficultyCalculator = struct {
         const new_difficulty = current_difficulty.adjust(adjustment_factor, types.CURRENT_NETWORK);
 
         // Log the adjustment
-        print("📈 Difficulty adjusted: factor={d:.3}, time={}s->{}s\n", .{ adjustment_factor, actual_time, target_time });
+        log.info("📈 Difficulty adjusted: factor={d:.3}, time={}s->{}s", .{ adjustment_factor, actual_time, target_time });
 
         return new_difficulty;
     }

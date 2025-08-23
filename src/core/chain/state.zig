@@ -9,7 +9,7 @@ const db = @import("../storage/db.zig");
 const block_index = @import("block_index.zig");
 const bech32 = @import("../crypto/bech32.zig");
 
-const print = std.debug.print;
+const log = std.log.scoped(.chain);
 
 // Helper function to format address as bech32 string for logging
 fn formatAddress(allocator: std.mem.Allocator, address: Address) []const u8 {
@@ -66,7 +66,7 @@ pub const ChainState = struct {
     /// Should be called after ChainState creation to populate O(1) lookups
     pub fn initializeBlockIndex(self: *Self) !void {
         try self.block_index.rebuild(self.database);
-        print("✅ ChainState: Block index initialized\n", .{});
+        log.info("✅ ChainState: Block index initialized", .{});
     }
 
     /// Check if a block hash already exists in the chain
@@ -118,7 +118,7 @@ pub const ChainState = struct {
             const balance_zei = @as(f64, @floatFromInt(account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
             const addr_str = self.formatAddressForLogging(address);
             defer self.allocator.free(addr_str);
-            print("🔍 [ACCOUNT LOAD] Found existing account {s}: balance={d:.8} ZEI, nonce={}\n", .{ addr_str, balance_zei, account.nonce });
+            log.info("🔍 [ACCOUNT LOAD] Found existing account {s}: balance={d:.8} ZEI, nonce={}", .{ addr_str, balance_zei, account.nonce });
             return account;
         } else |err| switch (err) {
             db.DatabaseError.NotFound => {
@@ -131,7 +131,7 @@ pub const ChainState = struct {
                 const balance_zei = @as(f64, @floatFromInt(new_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
                 const addr_str = self.formatAddressForLogging(address);
                 defer self.allocator.free(addr_str);
-                print("🔍 [ACCOUNT LOAD] Created new account {s}: balance={d:.8} ZEI, nonce={}\n", .{ addr_str, balance_zei, new_account.nonce });
+                log.info("🔍 [ACCOUNT LOAD] Created new account {s}: balance={d:.8} ZEI, nonce={}", .{ addr_str, balance_zei, new_account.nonce });
                 // Save to database immediately
                 try self.database.saveAccount(address, new_account);
                 return new_account;
@@ -157,60 +157,60 @@ pub const ChainState = struct {
         const tx_hash = tx.hash();
         if (self.database.hasTransaction(tx_hash)) {
             const tx_hash_hex = std.fmt.fmtSliceHexLower(tx_hash[0..8]);
-            print("🚫 [DUPLICATE TX] Transaction {s} already exists in blockchain - SKIPPING to prevent double-spend\n", .{tx_hash_hex});
+            log.info("🚫 [DUPLICATE TX] Transaction {s} already exists in blockchain - SKIPPING to prevent double-spend", .{tx_hash_hex});
             return; // Skip processing duplicate transaction
         }
 
-        print("🔍 [TX VALIDATION] =============================================\n", .{});
-        print("🔍 [TX VALIDATION] Processing transaction:\n", .{});
+        log.info("🔍 [TX VALIDATION] =============================================", .{});
+        log.info("🔍 [TX VALIDATION] Processing transaction:", .{});
         const sender_addr = self.formatAddressForLogging(tx.sender);
         defer self.allocator.free(sender_addr);
         const recipient_addr = self.formatAddressForLogging(tx.recipient);
         defer self.allocator.free(recipient_addr);
-        print("🔍 [TX VALIDATION]   Sender: {s}\n", .{sender_addr});
-        print("🔍 [TX VALIDATION]   Recipient: {s}\n", .{recipient_addr});
-        print("🔍 [TX VALIDATION]   Amount: {} ZEI\n", .{tx.amount});
-        print("🔍 [TX VALIDATION]   Fee: {} ZEI\n", .{tx.fee});
-        print("🔍 [TX VALIDATION]   Nonce: {}\n", .{tx.nonce});
+        log.info("🔍 [TX VALIDATION]   Sender: {s}", .{sender_addr});
+        log.info("🔍 [TX VALIDATION]   Recipient: {s}", .{recipient_addr});
+        log.info("🔍 [TX VALIDATION]   Amount: {} ZEI", .{tx.amount});
+        log.info("🔍 [TX VALIDATION]   Fee: {} ZEI", .{tx.fee});
+        log.info("🔍 [TX VALIDATION]   Nonce: {}", .{tx.nonce});
 
         // Get accounts
-        print("🔍 [TX VALIDATION] Loading sender account...\n", .{});
+        log.info("🔍 [TX VALIDATION] Loading sender account...", .{});
         var sender_account = try self.getAccount(tx.sender);
-        print("🔍 [TX VALIDATION] Loading recipient account...\n", .{});
+        log.info("🔍 [TX VALIDATION] Loading recipient account...", .{});
         var recipient_account = try self.getAccount(tx.recipient);
 
         const sender_addr_2 = self.formatAddressForLogging(tx.sender);
         defer self.allocator.free(sender_addr_2);
-        print("🔍 [TX VALIDATION] Processing transaction from sender: {s}\n", .{sender_addr_2});
+        log.info("🔍 [TX VALIDATION] Processing transaction from sender: {s}", .{sender_addr_2});
         const sender_balance_zei = @as(f64, @floatFromInt(sender_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
         const recipient_balance_zei = @as(f64, @floatFromInt(recipient_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
         const amount_zei = @as(f64, @floatFromInt(tx.amount)) / @as(f64, @floatFromInt(types.ZEI_COIN));
         const fee_zei = @as(f64, @floatFromInt(tx.fee)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-        print("🔍 [TX VALIDATION] Sender balance: {d:.8} ZEI, nonce: {}\n", .{ sender_balance_zei, sender_account.nonce });
-        print("🔍 [TX VALIDATION] Recipient balance: {d:.8} ZEI, nonce: {}\n", .{ recipient_balance_zei, recipient_account.nonce });
-        print("🔍 [TX VALIDATION] Transaction amount: {d:.8} ZEI, fee: {d:.8} ZEI\n", .{ amount_zei, fee_zei });
+        log.info("🔍 [TX VALIDATION] Sender balance: {d:.8} ZEI, nonce: {}", .{ sender_balance_zei, sender_account.nonce });
+        log.info("🔍 [TX VALIDATION] Recipient balance: {d:.8} ZEI, nonce: {}", .{ recipient_balance_zei, recipient_account.nonce });
+        log.info("🔍 [TX VALIDATION] Transaction amount: {d:.8} ZEI, fee: {d:.8} ZEI", .{ amount_zei, fee_zei });
 
         // 💰 Apply transaction with fee deduction
         // Check for integer overflow in addition
         const total_cost = std.math.add(u64, tx.amount, tx.fee) catch {
-            print("❌ [TX VALIDATION] Integer overflow in cost calculation\n", .{});
+            log.info("❌ [TX VALIDATION] Integer overflow in cost calculation", .{});
             return error.IntegerOverflow;
         };
 
         const total_cost_zei = @as(f64, @floatFromInt(total_cost)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-        print("🔍 [TX VALIDATION] Total cost: {d:.8} ZEI\n", .{total_cost_zei});
+        log.info("🔍 [TX VALIDATION] Total cost: {d:.8} ZEI", .{total_cost_zei});
 
         // Safety check for sufficient balance
         if (sender_account.balance < total_cost) {
             const sender_balance_zei_err = @as(f64, @floatFromInt(sender_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
             const needed_zei = @as(f64, @floatFromInt(total_cost)) / @as(f64, @floatFromInt(types.ZEI_COIN));
             const shortfall_zei = @as(f64, @floatFromInt(total_cost - sender_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-            print("❌ [TX VALIDATION] INSUFFICIENT BALANCE! Sender has {d:.8} ZEI, needs {d:.8} ZEI\n", .{ sender_balance_zei_err, needed_zei });
-            print("❌ [TX VALIDATION] Shortfall: {d:.8} ZEI\n", .{shortfall_zei});
+            log.info("❌ [TX VALIDATION] INSUFFICIENT BALANCE! Sender has {d:.8} ZEI, needs {d:.8} ZEI", .{ sender_balance_zei_err, needed_zei });
+            log.info("❌ [TX VALIDATION] Shortfall: {d:.8} ZEI", .{shortfall_zei});
             return error.InsufficientBalance;
         }
 
-        print("✅ [TX VALIDATION] Balance check passed\n", .{});
+        log.info("✅ [TX VALIDATION] Balance check passed", .{});
 
         // Log account state changes
         const sender_old_balance = sender_account.balance;
@@ -242,8 +242,8 @@ pub const ChainState = struct {
         defer self.allocator.free(sender_addr_update);
         const recipient_addr_update = self.formatAddressForLogging(tx.recipient);
         defer self.allocator.free(recipient_addr_update);
-        print("💰 [ACCOUNT UPDATE] SENDER {s}: {d:.8} → {d:.8} ZEI (−{d:.8}, nonce: {}→{})\n", .{ sender_addr_update, sender_old_zei, sender_new_zei, change_zei + update_fee_zei, sender_old_nonce, sender_account.nonce });
-        print("💰 [ACCOUNT UPDATE] RECIPIENT {s}: {d:.8} → {d:.8} ZEI (+{d:.8})\n", .{ recipient_addr_update, recipient_old_zei, recipient_new_zei, change_zei });
+        log.info("💰 [ACCOUNT UPDATE] SENDER {s}: {d:.8} → {d:.8} ZEI (−{d:.8}, nonce: {}→{})", .{ sender_addr_update, sender_old_zei, sender_new_zei, change_zei + update_fee_zei, sender_old_nonce, sender_account.nonce });
+        log.info("💰 [ACCOUNT UPDATE] RECIPIENT {s}: {d:.8} → {d:.8} ZEI (+{d:.8})", .{ recipient_addr_update, recipient_old_zei, recipient_new_zei, change_zei });
 
         // Save updated accounts to database
         try self.database.saveAccount(tx.sender, sender_account);
@@ -256,15 +256,15 @@ pub const ChainState = struct {
         const tx_hash = coinbase_tx.hash();
         if (self.database.hasTransaction(tx_hash)) {
             const tx_hash_hex = std.fmt.fmtSliceHexLower(tx_hash[0..8]);
-            print("🚫 [DUPLICATE COINBASE] Coinbase transaction {s} already exists in blockchain - SKIPPING to prevent double-spend\n", .{tx_hash_hex});
+            log.info("🚫 [DUPLICATE COINBASE] Coinbase transaction {s} already exists in blockchain - SKIPPING to prevent double-spend", .{tx_hash_hex});
             return; // Skip processing duplicate coinbase transaction
         }
 
-        print("🔍 [COINBASE TX] =============================================\n", .{});
+        log.info("🔍 [COINBASE TX] =============================================", .{});
         const miner_addr = self.formatAddressForLogging(miner_address);
         defer self.allocator.free(miner_addr);
-        print("🔍 [COINBASE TX] Processing coinbase transaction to miner: {s}\n", .{miner_addr});
-        print("🔍 [COINBASE TX] Coinbase amount: {} ZEI, height: {}\n", .{ coinbase_tx.amount, current_height });
+        log.info("🔍 [COINBASE TX] Processing coinbase transaction to miner: {s}", .{miner_addr});
+        log.info("🔍 [COINBASE TX] Coinbase amount: {} ZEI, height: {}", .{ coinbase_tx.amount, current_height });
 
         // Get or create miner account
         var miner_account = self.getAccount(miner_address) catch types.Account{
@@ -275,36 +275,36 @@ pub const ChainState = struct {
 
         const balance_before = @as(f64, @floatFromInt(miner_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
         const immature_before = @as(f64, @floatFromInt(miner_account.immature_balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-        print("🔍 [COINBASE TX] Miner account BEFORE: balance={d:.8} ZEI, immature={d:.8} ZEI, nonce={}\n", .{ balance_before, immature_before, miner_account.nonce });
+        log.info("🔍 [COINBASE TX] Miner account BEFORE: balance={d:.8} ZEI, immature={d:.8} ZEI, nonce={}", .{ balance_before, immature_before, miner_account.nonce });
 
         // Check if this is a genesis block (height 0) transaction
         if (current_height == 0) {
-            print("🔍 [COINBASE TX] Genesis block - adding {} ZEI to mature balance\n", .{coinbase_tx.amount});
+            log.info("🔍 [COINBASE TX] Genesis block - adding {} ZEI to mature balance", .{coinbase_tx.amount});
             // Genesis block pre-mine allocations are immediately mature
             miner_account.balance += coinbase_tx.amount;
         } else {
-            print("🔍 [COINBASE TX] Regular block - adding {} ZEI to immature balance\n", .{coinbase_tx.amount});
+            log.info("🔍 [COINBASE TX] Regular block - adding {} ZEI to immature balance", .{coinbase_tx.amount});
             // Regular mining rewards go to immature balance (100 block maturity)
             miner_account.immature_balance += coinbase_tx.amount;
         }
 
         const balance_after = @as(f64, @floatFromInt(miner_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
         const immature_after = @as(f64, @floatFromInt(miner_account.immature_balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-        print("🔍 [COINBASE TX] Miner account AFTER: balance={d:.8} ZEI, immature={d:.8} ZEI, nonce={}\n", .{ balance_after, immature_after, miner_account.nonce });
+        log.info("🔍 [COINBASE TX] Miner account AFTER: balance={d:.8} ZEI, immature={d:.8} ZEI, nonce={}", .{ balance_after, immature_after, miner_account.nonce });
 
         // Log coinbase reward account change
         const reward_zei = @as(f64, @floatFromInt(coinbase_tx.amount)) / @as(f64, @floatFromInt(types.ZEI_COIN));
         const miner_addr_update = self.formatAddressForLogging(miner_address);
         defer self.allocator.free(miner_addr_update);
         if (current_height == 0) {
-            print("💰 [COINBASE UPDATE] MINER {s}: {d:.8} → {d:.8} ZEI (+{d:.8} mature reward)\n", .{ miner_addr_update, balance_before, balance_after, reward_zei });
+            log.info("💰 [COINBASE UPDATE] MINER {s}: {d:.8} → {d:.8} ZEI (+{d:.8} mature reward)", .{ miner_addr_update, balance_before, balance_after, reward_zei });
         } else {
-            print("💰 [COINBASE UPDATE] MINER {s}: immature {d:.8} → {d:.8} ZEI (+{d:.8} immature reward)\n", .{ miner_addr_update, immature_before, immature_after, reward_zei });
+            log.info("💰 [COINBASE UPDATE] MINER {s}: immature {d:.8} → {d:.8} ZEI (+{d:.8} immature reward)", .{ miner_addr_update, immature_before, immature_after, reward_zei });
         }
 
         // Save miner account
         try self.database.saveAccount(miner_address, miner_account);
-        print("🔍 [COINBASE TX] Miner account saved to database\n", .{});
+        log.info("🔍 [COINBASE TX] Miner account saved to database", .{});
     }
 
     /// Clear all account state for rebuild
@@ -313,7 +313,7 @@ pub const ChainState = struct {
         // For now, this is a no-op since we don't have a batch delete API
         // Accounts will be overwritten as needed during rebuild
         _ = self;
-        std.debug.print("  ⚠️  Account clearing not implemented for RocksDB backend\n", .{});
+        log.info("  ⚠️  Account clearing not implemented for RocksDB backend", .{});
     }
 
     /// Replay blockchain from genesis to rebuild state
@@ -328,7 +328,7 @@ pub const ChainState = struct {
             // Rebuild block index during replay
             const block_hash = block.hash();
             self.indexBlock(@intCast(height), block_hash) catch |err| {
-                print("⚠️ Failed to rebuild block index at height {}: {}\n", .{ height, err });
+                log.info("⚠️ Failed to rebuild block index at height {}: {}", .{ height, err });
             };
 
             // Process each transaction in the block
@@ -435,7 +435,7 @@ pub const ChainState = struct {
                     miner_account.immature_balance -= tx.amount;
                     miner_account.balance += tx.amount;
                     try self.database.saveAccount(tx.recipient, miner_account);
-                    print("💰 Coinbase reward matured: {} ZEI for block {} (recipient: {})\n", .{ tx.amount, maturity_height, std.fmt.fmtSliceHexLower(tx.recipient.hash[0..8]) });
+                    log.info("💰 Coinbase reward matured: {} ZEI for block {} (recipient: {})", .{ tx.amount, maturity_height, std.fmt.fmtSliceHexLower(tx.recipient.hash[0..8]) });
                 }
             }
         }
@@ -443,7 +443,7 @@ pub const ChainState = struct {
 
     /// Process all transactions in a block
     pub fn processBlockTransactions(self: *Self, transactions: []Transaction, current_height: u32) !void {
-        print("🔍 [BLOCK TX] Processing {} transactions at height {}\n", .{ transactions.len, current_height });
+        log.info("🔍 [BLOCK TX] Processing {} transactions at height {}", .{ transactions.len, current_height });
 
         // First pass: process all coinbase transactions
         for (transactions, 0..) |tx, i| {
@@ -452,11 +452,11 @@ pub const ChainState = struct {
 
                 // Check for duplicate processing to prevent double-spend during sync replay
                 if (self.isTransactionProcessed(tx_hash)) {
-                    print("🔄 [TX DEDUP] Coinbase transaction {} already processed, skipping\n", .{i});
+                    log.info("🔄 [TX DEDUP] Coinbase transaction {} already processed, skipping", .{i});
                     continue;
                 }
 
-                print("🔍 [BLOCK TX] Processing coinbase transaction {} at height {}\n", .{ i, current_height });
+                log.info("🔍 [BLOCK TX] Processing coinbase transaction {} at height {}", .{ i, current_height });
                 try self.processCoinbaseTransaction(tx, tx.recipient, current_height);
             }
         }
@@ -468,11 +468,11 @@ pub const ChainState = struct {
 
                 // Check for duplicate processing to prevent double-spend during sync replay
                 if (self.isTransactionProcessed(tx_hash)) {
-                    print("🔄 [TX DEDUP] Regular transaction {} already processed, skipping\n", .{i});
+                    log.info("🔄 [TX DEDUP] Regular transaction {} already processed, skipping", .{i});
                     continue;
                 }
 
-                print("🔍 [BLOCK TX] Processing regular transaction {} at height {}\n", .{ i, current_height });
+                log.info("🔍 [BLOCK TX] Processing regular transaction {} at height {}", .{ i, current_height });
                 try self.processTransaction(tx);
             }
         }

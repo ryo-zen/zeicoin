@@ -2,11 +2,12 @@
 // Handles status display and monitoring output
 
 const std = @import("std");
-const print = std.debug.print;
 const types = @import("../types/types.zig");
 const db = @import("../storage/db.zig");
 const net = @import("../network/peer.zig");
 const NetworkCoordinator = @import("../network/coordinator.zig").NetworkCoordinator;
+
+const log = std.log.scoped(.monitoring);
 
 pub const StatusReporter = struct {
     allocator: std.mem.Allocator,
@@ -27,18 +28,18 @@ pub const StatusReporter = struct {
     
     /// Print blockchain status
     pub fn printStatus(self: *StatusReporter) void {
-        print("\n📊 ZeiCoin Blockchain Status:\n", .{});
+        log.info("📊 ZeiCoin Blockchain Status:", .{});
         const height = self.database.getHeight() catch 0;
         const account_count = self.database.getAccountCount() catch 0;
-        print("   Height: {} blocks\n", .{height});
-        print("   Pending: {} transactions (moved to MempoolManager)\n", .{0});
-        print("   Accounts: {} active\n", .{account_count});
+        log.info("   Height: {} blocks", .{height});
+        log.info("   Pending: {} transactions (moved to MempoolManager)", .{0});
+        log.info("   Accounts: {} active", .{account_count});
 
         // Show network status
         if (self.network_coordinator.getNetworkManager()) |network| {
             const connected_peers = network.getConnectedPeers();
             const total_peers = network.peers.items.len;
-            print("   Network: {} of {} peers connected\n", .{ connected_peers, total_peers });
+            log.info("   Network: {} of {} peers connected", .{ connected_peers, total_peers });
 
             if (total_peers > 0) {
                 for (network.peers.items) |peer| {
@@ -52,11 +53,11 @@ pub const StatusReporter = struct {
                         .disconnecting => "🔴",
                         .disconnected => "🔴",
                     };
-                    print("     {s} {s}\n", .{ status, addr_str });
+                    log.info("     {s} {s}", .{ status, addr_str });
                 }
             }
         } else {
-            print("   Network: offline\n", .{});
+            log.info("   Network: offline", .{});
         }
 
         // Show recent blocks
@@ -65,14 +66,13 @@ pub const StatusReporter = struct {
         while (i < height) : (i += 1) {
             if (self.database.getBlock(i)) |block_data| {
                 var block = block_data;
-                print("   Block #{}: {} txs\n", .{ i, block.txCount() });
+                log.info("   Block #{}: {} txs", .{ i, block.txCount() });
                 // Free block memory after displaying
                 block.deinit(self.allocator);
             } else |_| {
-                print("   Block #{}: Error loading\n", .{i});
+                log.info("   Block #{}: Error loading", .{i});
             }
         }
-        print("\n", .{});
     }
     
     pub fn getStatus(self: *StatusReporter) !types.BlockchainStatus {

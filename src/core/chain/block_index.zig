@@ -5,7 +5,7 @@ const std = @import("std");
 const types = @import("../types/types.zig");
 const db = @import("../storage/db.zig");
 
-const print = std.debug.print;
+const log = std.log.scoped(.chain);
 
 // Type aliases
 const Hash = types.Hash;
@@ -69,7 +69,7 @@ pub const BlockIndex = struct {
         // Prevent duplicate blocks from being indexed - Important!
         if (self.hasBlock(block_hash)) {
             const existing_height = self.getHeight(block_hash) orelse unreachable;
-            print("❌ [BLOCK INDEX] Duplicate block detected! Hash {s} already exists at height {}\n", .{ std.fmt.fmtSliceHexLower(block_hash[0..8]), existing_height });
+            log.info("❌ [BLOCK INDEX] Duplicate block detected! Hash {s} already exists at height {}", .{ std.fmt.fmtSliceHexLower(block_hash[0..8]), existing_height });
             return error.DuplicateBlock;
         }
 
@@ -142,7 +142,7 @@ pub const BlockIndex = struct {
         self.height_to_hash.clearRetainingCapacity();
 
         const current_height = database.getHeight() catch |err| {
-            print("⚠️ Failed to get chain height during index rebuild: {}\n", .{err});
+            log.info("⚠️ Failed to get chain height during index rebuild: {}", .{err});
             return err;
         };
 
@@ -155,27 +155,27 @@ pub const BlockIndex = struct {
             // Cleanup on failure - clear partial state
             self.hash_to_height.clearRetainingCapacity();
             self.height_to_hash.clearRetainingCapacity();
-            print("⚠️ Index rebuild failed after {} blocks\n", .{successful_blocks});
+            log.info("⚠️ Index rebuild failed after {} blocks", .{successful_blocks});
         }
 
         // Build index from all blocks
         for (0..current_height + 1) |height| {
             const block = database.getBlock(@intCast(height)) catch |err| {
-                print("⚠️ Failed to load block {} during rebuild: {}\n", .{ height, err });
+                log.info("⚠️ Failed to load block {} during rebuild: {}", .{ height, err });
                 continue; // Skip missing blocks, don't fail entirely
             };
             defer block.deinit(self.allocator);
 
             const block_hash = block.hash();
             self.addBlock(@intCast(height), block_hash) catch |err| {
-                print("⚠️ Failed to index block {} during rebuild: {}\n", .{ height, err });
+                log.info("⚠️ Failed to index block {} during rebuild: {}", .{ height, err });
                 continue; // Skip failed additions
             };
 
             successful_blocks += 1;
         }
 
-        print("✅ Block index rebuilt: {} blocks indexed\n", .{successful_blocks});
+        log.info("✅ Block index rebuilt: {} blocks indexed", .{successful_blocks});
     }
 
     /// Get current index statistics for monitoring

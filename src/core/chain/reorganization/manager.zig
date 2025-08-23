@@ -2,7 +2,7 @@
 // State-machine driven reorganization with atomic operations and event handling
 
 const std = @import("std");
-const print = std.debug.print;
+const log = std.log.scoped(.reorg);
 const types = @import("../../types/types.zig");
 const ChainState = @import("../state.zig").ChainState;
 const ChainValidator = @import("../validator.zig").ChainValidator;
@@ -144,17 +144,17 @@ pub const ReorgManager = struct {
             };
         }
         
-        print("\n🔄 [CONSENSUS] === CHAIN REORGANIZATION STARTING ===\n", .{});
-        print("   - New chain tip: {s}\n", .{std.fmt.fmtSliceHexLower(new_chain_tip[0..8])});
-        print("   - New block height: {}\n", .{new_block.header.timestamp});
-        print("   - Current time: {}\n", .{std.time.milliTimestamp()});
+        log.info("\n🔄 [CONSENSUS] === CHAIN REORGANIZATION STARTING ===", .{});
+        log.info("   - New chain tip: {s}", .{std.fmt.fmtSliceHexLower(new_chain_tip[0..8])});
+        log.info("   - New block height: {}", .{new_block.header.timestamp});
+        log.info("   - Current time: {}", .{std.time.milliTimestamp()});
         
         // Record operation start time
         self.operation_start_time = std.time.milliTimestamp();
         
         // Execute state machine
         var result = self.executeStateMachine(new_block, new_chain_tip) catch |err| {
-            print("❌ [CONSENSUS] Reorganization failed: {}\n", .{err});
+            log.info("❌ [CONSENSUS] Reorganization failed: {}", .{err});
             // Ensure cleanup on any error
             self.cleanup();
             return ReorgResult{
@@ -219,7 +219,7 @@ pub const ReorgManager = struct {
         result.success = true;
         try self.transitionTo(.idle);
         
-        print("✅ Reorganization completed: {} blocks reverted, {} applied\n", .{ result.blocks_reverted, result.blocks_applied });
+        log.info("✅ Reorganization completed: {} blocks reverted, {} applied", .{ result.blocks_reverted, result.blocks_applied });
         
         return result;
     }
@@ -249,7 +249,7 @@ pub const ReorgManager = struct {
         // Emit state change event
         try self.event_handler.emitStateChange(old_state, new_state);
         
-        print("🔄 Reorganization: {} → {}\n", .{ old_state, new_state });
+        log.info("🔄 Reorganization: {} → {}", .{ old_state, new_state });
     }
     
     /// Analyze reorganization requirements and safety
@@ -264,7 +264,7 @@ pub const ReorgManager = struct {
         // Safety check
         try self.safety_checker.validateReorganization(reorg_depth, current_height);
         
-        print("🔍 Reorganization analysis: depth={}, fork_height={}\n", .{ reorg_depth, common_ancestor });
+        log.info("🔍 Reorganization analysis: depth={}, fork_height={}", .{ reorg_depth, common_ancestor });
         
         return .{ .fork_height = common_ancestor, .depth = reorg_depth };
     }
@@ -274,7 +274,7 @@ pub const ReorgManager = struct {
         // Capture current chain state
         self.old_chain_snapshot = try self.snapshot_manager.captureChainState(self.chain_state, fork_height);
         
-        print("📸 Chain snapshots captured from height {}\n", .{fork_height});
+        log.info("📸 Chain snapshots captured from height {}", .{fork_height});
     }
     
     /// Revert chain to fork point
@@ -285,7 +285,7 @@ pub const ReorgManager = struct {
         // Use existing rollback mechanism
         try self.chain_state.rollbackToHeight(fork_height, current_height);
         
-        print("⏪ Reverted {} blocks to height {}\n", .{ blocks_to_revert, fork_height });
+        log.info("⏪ Reverted {} blocks to height {}", .{ blocks_to_revert, fork_height });
         
         return blocks_to_revert;
     }
@@ -296,7 +296,7 @@ pub const ReorgManager = struct {
         // In a full implementation, this would apply all blocks in the new chain
         try self.chain_operations.acceptBlock(new_block);
         
-        print("📈 Applied new chain block\n", .{});
+        log.info("📈 Applied new chain block", .{});
         
         return 1; // Number of blocks applied
     }
@@ -311,7 +311,7 @@ pub const ReorgManager = struct {
             return error.InvalidChainState;
         }
         
-        print("✓ Reorganization result validated\n", .{});
+        log.info("✓ Reorganization result validated", .{});
     }
     
     /// Commit changes and handle orphaned transactions
@@ -330,7 +330,7 @@ pub const ReorgManager = struct {
         // For now, return placeholder values
         const result = TxReplayResult{ .replayed = 0, .orphaned = 0 };
         
-        print("✅ Changes committed, {} transactions replayed\n", .{result.replayed});
+        log.info("✅ Changes committed, {} transactions replayed", .{result.replayed});
         
         return result;
     }
@@ -361,7 +361,7 @@ pub const ReorgManager = struct {
         // Reset to idle state
         self.current_state = .idle;
         
-        print("🧹 Reorganization cleanup completed\n", .{});
+        log.info("🧹 Reorganization cleanup completed", .{});
     }
     
     /// Get current reorganization statistics
