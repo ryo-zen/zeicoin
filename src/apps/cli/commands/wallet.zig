@@ -98,6 +98,7 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     // Generate new HD wallet with 12-word mnemonic
     const mnemonic = try new_wallet.createNew(bip39.WordCount.twelve);
     defer allocator.free(mnemonic);
+    defer std.crypto.utils.secureZero(u8, @constCast(mnemonic));
 
     // Get password for wallet
     const password = password_util.getPasswordForWallet(allocator, wallet_name, true) catch {
@@ -202,6 +203,7 @@ fn restoreWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     
     const mnemonic = try mnemonic_list.toOwnedSlice();
     defer allocator.free(mnemonic);
+    defer std.crypto.utils.secureZero(u8, @constCast(mnemonic));
     
     // Validate mnemonic
     bip39.validateMnemonic(mnemonic) catch {
@@ -428,9 +430,10 @@ fn importGenesisWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         return;
     };
     defer allocator.free(config_content);
+    defer std.crypto.utils.secureZero(u8, @constCast(config_content));
 
     // Parse config file for the genesis account mnemonic
-    var genesis_mnemonic: ?[]const u8 = null;
+    var genesis_mnemonic_slice: ?[]const u8 = null;
     var lines = std.mem.splitScalar(u8, config_content, '\n');
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r\n");
@@ -441,16 +444,21 @@ fn importGenesisWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
             const value = std.mem.trim(u8, trimmed[eq_pos + 1..], " \t");
             
             if (std.mem.eql(u8, key, wallet_name)) {
-                genesis_mnemonic = value;
+                genesis_mnemonic_slice = value;
                 break;
             }
         }
     }
 
-    if (genesis_mnemonic == null) {
+    if (genesis_mnemonic_slice == null) {
         print("❌ Genesis mnemonic for '{s}' not found in config\n", .{wallet_name});
         return;
     }
+
+    // Make a secure copy of the genesis mnemonic
+    const genesis_mnemonic = try allocator.dupe(u8, genesis_mnemonic_slice.?);
+    defer allocator.free(genesis_mnemonic);
+    defer std.crypto.utils.secureZero(u8, @constCast(genesis_mnemonic));
 
     // Get data directory path
     const data_dir = switch (types.CURRENT_NETWORK) {
@@ -488,7 +496,7 @@ fn importGenesisWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     var genesis_wallet = wallet.Wallet.init(allocator);
     defer genesis_wallet.deinit();
     
-    try genesis_wallet.fromMnemonic(genesis_mnemonic.?, null);
+    try genesis_wallet.fromMnemonic(genesis_mnemonic, null);
     
     // Get password for wallet
     const password = password_util.getPasswordForWallet(allocator, wallet_name, true) catch |err| {
