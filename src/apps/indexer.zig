@@ -6,8 +6,11 @@ const types = zeicoin.types;
 const serialize = zeicoin.serialize;
 const db = zeicoin.db;
 const util = zeicoin.util;
+const l2_service = @import("l2_service.zig");
 
 const Pool = pg.Pool;
+const DatabaseError = zeicoin.db.DatabaseError;
+const print = std.debug.print;
 
 /// PostgreSQL connection config
 pub const PgConfig = struct {
@@ -93,30 +96,101 @@ fn loadConfig(allocator: std.mem.Allocator) !PgConfig {
 }
 
 
-/// Simple blockchain height reader
+/// Concurrent blockchain indexer using RocksDB secondary instance
 pub const Indexer = struct {
     allocator: std.mem.Allocator,
     blockchain_path: []const u8,
+    secondary_path: []const u8,
     config: PgConfig,
+    database: ?db.Database,
+    last_checked_height: u32,
 
     pub fn init(allocator: std.mem.Allocator, blockchain_path: []const u8, config: PgConfig) !Indexer {
+        const secondary_path = try std.fmt.allocPrint(allocator, "{s}_indexer_secondary", .{blockchain_path});
+        
         return Indexer{
             .allocator = allocator,
             .blockchain_path = blockchain_path,
+            .secondary_path = secondary_path,
             .config = config,
+            .database = null,
+            .last_checked_height = 0,
         };
     }
 
     pub fn deinit(self: *Indexer) void {
-        _ = self; // Nothing to clean up
+        if (self.database) |*database| {
+            database.deinit();
+        }
+        self.allocator.free(self.secondary_path);
     }
 
-    /// Get the current blockchain height from database
-    pub fn getBlockchainHeight(self: *Indexer) !u32 {
-        var database = try db.Database.init(self.allocator, self.blockchain_path);
-        defer database.deinit();
+    /// Initialize secondary database connection
+    pub fn initSecondaryDatabase(self: *Indexer) !void {
+        if (self.database != null) return; // Already initialized
         
-        return try database.getHeight();
+        // Try secondary instance first (concurrent access)
+        self.database = db.Database.initSecondary(
+            self.allocator, 
+            self.blockchain_path, 
+            self.secondary_path
+        ) catch |err| switch (err) {
+            DatabaseError.OpenFailed => {
+                std.log.info("⚠️  Secondary instance failed, trying primary (mining node may be stopped)", .{});
+                // Fallback to primary instance if secondary fails
+                self.database = db.Database.init(self.allocator, self.blockchain_path) catch |primary_err| {
+                    std.log.err("❌ Cannot access blockchain database in any mode", .{});
+                    std.log.err("   Primary error: {}", .{primary_err});  
+                    std.log.err("   Secondary error: {}", .{err});
+                    std.log.err("🛑 Ensure zen_server is running or database exists", .{});
+                    return primary_err;
+                };
+                return;
+            },
+            else => return err,
+        };
+        
+        std.log.info("✅ Secondary database initialized: {s}", .{self.secondary_path});
+    }
+
+    /// Get the current blockchain height with secondary instance sync
+    pub fn getBlockchainHeight(self: *Indexer) !u32 {
+        if (self.database == null) {
+            try self.initSecondaryDatabase();
+        }
+        
+        var database = &self.database.?;
+        
+        // Try to catch up with primary database changes
+        database.catchUpWithPrimary() catch |err| {
+            std.log.warn("Failed to sync with primary: {}", .{err});
+        };
+        
+        const height = try database.getHeight();
+        self.last_checked_height = height;
+        return height;
+    }
+
+    /// Check if new blocks are available since last check
+    pub fn hasNewBlocks(self: *Indexer) !bool {
+        const current_height = try self.getBlockchainHeight();
+        return current_height > self.last_checked_height;
+    }
+
+    /// Get block safely with error handling
+    pub fn getBlock(self: *Indexer, height: u32) !types.Block {
+        if (self.database == null) {
+            try self.initSecondaryDatabase();
+        }
+        
+        var database = &self.database.?;
+        
+        // Try to catch up with primary before reading
+        database.catchUpWithPrimary() catch |err| {
+            std.log.warn("Failed to sync with primary: {}", .{err});
+        };
+        
+        return try database.getBlock(height);
     }
 };
 
@@ -198,7 +272,7 @@ pub fn main() !void {
         // Index new blocks
         var height = last_height + 1;
         while (height <= current_height) : (height += 1) {
-            try indexBlock(pool, allocator, blockchain_path, height);
+            try indexBlock(pool, allocator, &indexer, height);
 
             // Update last indexed height
             try updateLastIndexedHeight(pool, height);
@@ -236,13 +310,12 @@ fn updateLastIndexedHeight(pool: *Pool, height: u32) !void {
     , .{height_str});
 }
 
-fn indexBlock(pool: *Pool, allocator: std.mem.Allocator, blockchain_path: []const u8, height: u32) !void {
-    // Initialize database to read block
-    var database = try db.Database.init(allocator, blockchain_path);
-    defer database.deinit();
+fn indexBlock(pool: *Pool, allocator: std.mem.Allocator, indexer: *Indexer, height: u32) !void {
+    // Initialize L2 service for enhancement confirmation  
+    var l2_svc = l2_service.L2Service.init(allocator, pool);
     
-    // Load block from database
-    var block = try database.getBlock(height);
+    // Load block from indexer (uses secondary instance)
+    var block = try indexer.getBlock(height);
     defer block.deinit(allocator);
 
     // Begin transaction
@@ -289,6 +362,46 @@ fn indexBlock(pool: *Pool, allocator: std.mem.Allocator, blockchain_path: []cons
     // Insert transactions
     for (block.transactions, 0..) |tx, pos| {
         try indexTransaction(pool, allocator, &tx, height, &hash_hex, @intCast(pos));
+        
+        // Check for pending L2 enhancements to confirm
+        if (!tx.isCoinbase()) {
+            // Convert addresses to bech32 for L2 matching
+            const sender_bech32 = try tx.sender.toBech32(allocator, types.CURRENT_NETWORK);
+            defer allocator.free(sender_bech32);
+            
+            const recipient_bech32 = try tx.recipient.toBech32(allocator, types.CURRENT_NETWORK);
+            defer allocator.free(recipient_bech32);
+            
+            // Query for pending enhancements matching this transaction
+            const pending_enhancements = l2_svc.queryEnhancementsBySenderRecipient(
+                sender_bech32,
+                recipient_bech32,
+                .pending
+            ) catch |err| {
+                std.log.warn("Failed to query L2 enhancements: {}", .{err});
+                continue;
+            };
+            defer l2_svc.freeEnhancements(pending_enhancements);
+            
+            // Confirm the first matching enhancement
+            if (pending_enhancements.len > 0) {
+                const enhancement = pending_enhancements[0];
+                const tx_hash = tx.hash();
+                var tx_hash_hex: [64]u8 = undefined;
+                _ = try std.fmt.bufPrint(&tx_hash_hex, "{}", .{std.fmt.fmtSliceHexLower(&tx_hash)});
+                
+                l2_svc.confirmEnhancement(
+                    enhancement.temp_id,
+                    &tx_hash_hex,
+                    height
+                ) catch |err| {
+                    std.log.warn("Failed to confirm L2 enhancement {s}: {}", .{enhancement.temp_id, err});
+                    continue;
+                };
+                
+                std.log.info("✅ Confirmed L2 enhancement {s} with tx {s}", .{enhancement.temp_id, &tx_hash_hex});
+            }
+        }
     }
 
     // Commit transaction

@@ -203,6 +203,35 @@ pub fn build(b: *std.Build) !void {
     }
 
     // **************************************************************
+    // *              CLI BRIDGE AS AN EXECUTABLE                  *
+    // **************************************************************
+    {
+        const exe = b.addExecutable(.{
+            .name = "cli_bridge",
+            .root_source_file = b.path("src/apps/cli_bridge.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        // Add dependency modules to the executable.
+        for (deps) |mod| exe.root_module.addImport(
+            mod.name,
+            mod.module,
+        );
+        exe.root_module.addImport("zeicoin", lib.root_module);
+        exe.linkLibC();
+
+        b.installArtifact(exe);
+
+        const run_cmd = b.addRunArtifact(exe);
+        run_cmd.step.dependOn(b.getInstallStep());
+        if (b.args) |args| {
+            run_cmd.addArgs(args);
+        }
+        const run_step = b.step("run-cli-bridge", "Run the CLI bridge service");
+        run_step.dependOn(&run_cmd.step);
+    }
+
+    // **************************************************************
     // *              CHECK FOR FAST FEEDBACK LOOP                  *
     // **************************************************************
     // Tip taken from: `https://kristoff.it/blog/improving-your-zls-experience/`

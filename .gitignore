@@ -82,3 +82,8 @@ TODO.md
 .env.mainnet
 .gitignore
 .env.testnet
+web/l2-test-app.html
+scripts/check_l2_tables.sh
+.gitignore
+scripts/check_tx_table.sh
+scripts/test_l2_integration.sh

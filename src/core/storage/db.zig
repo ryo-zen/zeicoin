@@ -87,6 +87,77 @@ pub const Database = struct {
         return self;
     }
 
+    /// Initialize as secondary instance for concurrent read-only access
+    pub fn initSecondary(allocator: std.mem.Allocator, base_path: []const u8, secondary_path: []const u8) !Database {
+        var self = Database{
+            .db = null,
+            .options = null,
+            .read_options = null,
+            .write_options = null,
+            .allocator = allocator,
+            .base_path = try allocator.dupe(u8, base_path),
+        };
+
+        // Configure for secondary instance (read-only)
+        self.options = c.rocksdb_options_create();
+        c.rocksdb_options_set_create_if_missing(self.options, 0); // Don't create if missing
+        c.rocksdb_options_set_compression(self.options, c.rocksdb_snappy_compression);
+        c.rocksdb_options_set_max_open_files(self.options, 1000);
+        
+        c.rocksdb_options_set_block_based_table_factory(
+            self.options,
+            createBlockBasedTableOptions(),
+        );
+
+        self.read_options = c.rocksdb_readoptions_create();
+        // No write_options needed for secondary instance
+
+        var err: ?[*:0]u8 = null;
+        const primary_db_path = try std.fmt.allocPrintZ(allocator, "{s}/rocksdb", .{base_path});
+        defer allocator.free(primary_db_path);
+
+        const secondary_db_path = try std.fmt.allocPrintZ(allocator, "{s}", .{secondary_path});
+        defer allocator.free(secondary_db_path);
+
+        // Create secondary path if it doesn't exist
+        std.fs.cwd().makePath(secondary_path) catch |e| switch (e) {
+            error.PathAlreadyExists => {},
+            else => return e,
+        };
+
+        // Open as secondary instance
+        self.db = c.rocksdb_open_as_secondary(
+            self.options, 
+            primary_db_path.ptr, 
+            secondary_db_path.ptr, 
+            @ptrCast(&err)
+        );
+
+        if (err != null) {
+            log.info("RocksDB secondary open error: {s}", .{err.?});
+            c.rocksdb_free(@constCast(@ptrCast(err)));
+            self.deinit();
+            return DatabaseError.OpenFailed;
+        }
+
+        log.info("✅ Opened RocksDB secondary instance: {s} -> {s}", .{ primary_db_path, secondary_db_path });
+        return self;
+    }
+
+    /// Try to catch up with primary database (for secondary instances)
+    pub fn catchUpWithPrimary(self: *Database) !void {
+        if (self.db == null) return DatabaseError.OpenFailed;
+        
+        var err: ?[*:0]u8 = null;
+        c.rocksdb_try_catch_up_with_primary(self.db, @ptrCast(&err));
+        
+        if (err != null) {
+            log.warn("Failed to catch up with primary: {s}", .{err.?});
+            c.rocksdb_free(@constCast(@ptrCast(err)));
+            // Don't fail - just log warning
+        }
+    }
+
     fn createBlockBasedTableOptions() ?*c.rocksdb_block_based_table_options_t {
         const table_options = c.rocksdb_block_based_options_create();
         c.rocksdb_block_based_options_set_block_cache(

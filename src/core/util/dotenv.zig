@@ -178,23 +178,34 @@ pub fn loadForNetwork(allocator: std.mem.Allocator) !void {
     var dotenv = DotEnv.init(allocator);
     defer dotenv.deinit(); // Clean up after applying to environment
     
-    // Try to load .env files in order of precedence
-    // More specific files override general ones
-    const files_to_try = [_][]const u8{
-        ".env",            // Base configuration
-        ".env.testnet",    // Network-specific (if exists)
-        ".env.mainnet",    // Network-specific (if exists)  
-        ".env.local",      // Local overrides (git-ignored)
+    // First, load base configuration to get ZEICOIN_NETWORK
+    dotenv.loadFromFile(".env") catch |err| {
+        if (err != error.FileNotFound) {
+            return err;
+        }
     };
-
-    for (files_to_try) |file| {
-        dotenv.loadFromFile(file) catch |err| {
-            if (err != error.FileNotFound) {
-                return err;
-            }
-            // Continue if file not found
-        };
-    }
+    
+    // Determine which network-specific file to load based on ZEICOIN_NETWORK
+    const network = dotenv.get("ZEICOIN_NETWORK") orelse "testnet"; // Default to testnet
+    
+    // Load network-specific configuration
+    const network_file = if (std.mem.eql(u8, network, "mainnet")) 
+        ".env.mainnet" 
+    else 
+        ".env.testnet";
+        
+    dotenv.loadFromFile(network_file) catch |err| {
+        if (err != error.FileNotFound) {
+            return err;
+        }
+    };
+    
+    // Load local overrides (git-ignored)
+    dotenv.loadFromFile(".env.local") catch |err| {
+        if (err != error.FileNotFound) {
+            return err;
+        }
+    };
     
     // Apply to environment (setenv copies, so we can free after)
     try dotenv.applyToEnvironment();
