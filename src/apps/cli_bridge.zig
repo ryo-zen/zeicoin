@@ -114,7 +114,25 @@ fn handleSendTransaction(r: zap.Request, json: std.json.Value, allocator: std.me
     const wallet = obj.get("wallet").?.string;
     const password = obj.get("password").?.string;
     const recipient = obj.get("recipient").?.string;
-    const amount = obj.get("amount").?.string;
+    
+    // Handle amount as either number or string
+    const amount_value = obj.get("amount") orelse {
+        r.setStatus(.bad_request);
+        r.sendBody("{\"error\":\"Missing amount field\"}") catch {};
+        return;
+    };
+    
+    const amount = switch (amount_value) {
+        .string => |s| s,
+        .integer => |i| try std.fmt.allocPrint(allocator, "{}", .{i}),
+        .float => |f| try std.fmt.allocPrint(allocator, "{d}", .{f}),
+        else => {
+            r.setStatus(.bad_request);
+            r.sendBody("{\"error\":\"Amount must be a number or string\"}") catch {};
+            return;
+        },
+    };
+    defer if (amount_value != .string) allocator.free(amount);
     
     // Build CLI command
     var cmd_args = std.ArrayList([]const u8).init(allocator);
