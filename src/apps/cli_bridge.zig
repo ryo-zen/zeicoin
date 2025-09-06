@@ -102,6 +102,12 @@ fn handleCLIRequest(r: zap.Request) !void {
         try handleGetStatus(r, allocator);
     } else if (std.mem.eql(u8, command_type, "address")) {
         try handleGetAddress(r, json, allocator);
+    } else if (std.mem.eql(u8, command_type, "wallet_create")) {
+        try handleWalletCreate(r, json, allocator);
+    } else if (std.mem.eql(u8, command_type, "wallet_list")) {
+        try handleWalletList(r, allocator);
+    } else if (std.mem.eql(u8, command_type, "wallet_restore")) {
+        try handleWalletRestore(r, json, allocator);
     } else {
         r.setStatus(.bad_request);
         r.sendBody("{\"error\":\"Unknown command\"}") catch {};
@@ -111,9 +117,26 @@ fn handleCLIRequest(r: zap.Request) !void {
 fn handleSendTransaction(r: zap.Request, json: std.json.Value, allocator: std.mem.Allocator) !void {
     const obj = json.object;
     
-    const wallet = obj.get("wallet").?.string;
-    const password = obj.get("password").?.string;
-    const recipient = obj.get("recipient").?.string;
+    // Validate required fields
+    const wallet_value = obj.get("wallet") orelse {
+        r.setStatus(.bad_request);
+        r.sendBody("{\"success\":false,\"error\":\"❌ Missing required field: 'wallet'\"}") catch {};
+        return;
+    };
+    const password_value = obj.get("password") orelse {
+        r.setStatus(.bad_request);
+        r.sendBody("{\"success\":false,\"error\":\"❌ Missing required field: 'password'\"}") catch {};
+        return;
+    };
+    const recipient_value = obj.get("recipient") orelse {
+        r.setStatus(.bad_request);
+        r.sendBody("{\"success\":false,\"error\":\"❌ Missing required field: 'recipient'\"}") catch {};
+        return;
+    };
+    
+    const wallet = wallet_value.string;
+    const password = password_value.string;
+    const recipient = recipient_value.string;
     
     // Handle amount as either number or string
     const amount_value = obj.get("amount") orelse {
@@ -206,8 +229,21 @@ fn handleSendTransaction(r: zap.Request, json: std.json.Value, allocator: std.me
 
 fn handleGetBalance(r: zap.Request, json: std.json.Value, allocator: std.mem.Allocator) !void {
     const obj = json.object;
-    const wallet = obj.get("wallet").?.string;
-    const password = obj.get("password").?.string;
+    
+    // Validate required fields
+    const wallet_value = obj.get("wallet") orelse {
+        r.setStatus(.bad_request);
+        r.sendBody("{\"success\":false,\"error\":\"❌ Missing required field: 'wallet'\"}") catch {};
+        return;
+    };
+    const password_value = obj.get("password") orelse {
+        r.setStatus(.bad_request);
+        r.sendBody("{\"success\":false,\"error\":\"❌ Missing required field: 'password'\"}") catch {};
+        return;
+    };
+    
+    const wallet = wallet_value.string;
+    const password = password_value.string;
     
     var cmd_args = std.ArrayList([]const u8).init(allocator);
     defer cmd_args.deinit();
@@ -286,8 +322,21 @@ fn handleGetBalance(r: zap.Request, json: std.json.Value, allocator: std.mem.All
 
 fn handleGetAddress(r: zap.Request, json: std.json.Value, allocator: std.mem.Allocator) !void {
     const obj = json.object;
-    const wallet = obj.get("wallet").?.string;
-    const password = obj.get("password").?.string;
+    
+    // Validate required fields
+    const wallet_value = obj.get("wallet") orelse {
+        r.setStatus(.bad_request);
+        r.sendBody("{\"success\":false,\"error\":\"❌ Missing required field: 'wallet'\"}") catch {};
+        return;
+    };
+    const password_value = obj.get("password") orelse {
+        r.setStatus(.bad_request);
+        r.sendBody("{\"success\":false,\"error\":\"❌ Missing required field: 'password'\"}") catch {};
+        return;
+    };
+    
+    const wallet = wallet_value.string;
+    const password = password_value.string;
     
     var cmd_args = std.ArrayList([]const u8).init(allocator);
     defer cmd_args.deinit();
@@ -386,6 +435,318 @@ fn handleGetStatus(r: zap.Request, allocator: std.mem.Allocator) !void {
     
     r.setStatus(.ok);
     r.sendBody(response) catch {};
+}
+
+fn handleWalletCreate(r: zap.Request, json: std.json.Value, allocator: std.mem.Allocator) !void {
+    const obj = json.object;
+    
+    // Validate required fields
+    const wallet_name_value = obj.get("wallet_name") orelse {
+        r.setStatus(.bad_request);
+        r.sendBody("{\"success\":false,\"error\":\"❌ Missing required field: 'wallet_name'\"}") catch {};
+        return;
+    };
+    const password_value = obj.get("password") orelse {
+        r.setStatus(.bad_request);
+        r.sendBody("{\"success\":false,\"error\":\"❌ Missing required field: 'password'\"}") catch {};
+        return;
+    };
+    
+    const wallet_name = wallet_name_value.string;
+    const password = password_value.string;
+    
+    var cmd_args = std.ArrayList([]const u8).init(allocator);
+    defer cmd_args.deinit();
+    
+    try cmd_args.append("./zig-out/bin/zeicoin");
+    try cmd_args.append("wallet");
+    try cmd_args.append("create");
+    try cmd_args.append(wallet_name);
+    
+    var env_map = std.process.EnvMap.init(allocator);
+    defer env_map.deinit();
+    
+    try env_map.put("ZEICOIN_SERVER", "127.0.0.1");
+    try env_map.put("ZEICOIN_WALLET_PASSWORD", password);
+    
+    // Create child process (no stdin pipe needed with env var)
+    var child = std.process.Child.init(cmd_args.items, allocator);
+    child.env_map = &env_map;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+    
+    try child.spawn();
+    
+    // Read outputs BEFORE waiting (to avoid pipe deadlock)
+    const stdout = if (child.stdout) |pipe| 
+        pipe.readToEndAlloc(allocator, 1024 * 1024) catch ""
+    else "";
+    const stderr = if (child.stderr) |pipe| 
+        pipe.readToEndAlloc(allocator, 1024 * 1024) catch ""
+    else "";
+    
+    // Wait for completion with timeout
+    const term = child.wait() catch |err| {
+        _ = child.kill() catch {};
+        log.err("Failed to wait for wallet creation: {}", .{err});
+        r.setStatus(.internal_server_error);
+        r.sendBody("{\"error\":\"Wallet creation failed\"}") catch {};
+        return;
+    };
+    
+    defer if (stdout.len > 0) allocator.free(stdout);
+    defer if (stderr.len > 0) allocator.free(stderr);
+    
+    const result = std.process.Child.RunResult{
+        .term = term,
+        .stdout = @constCast(stdout),
+        .stderr = @constCast(stderr),
+    };
+    
+    // Clear password from memory immediately
+    @memset(@as([*]u8, @ptrCast(@constCast(password.ptr)))[0..password.len], 0);
+    
+    if (result.term.Exited == 0) {
+        // Extract mnemonic and first address from CLI output
+        var mnemonic: ?[]const u8 = null;
+        var first_address: ?[]const u8 = null;
+        
+        var lines = std.mem.splitScalar(u8, result.stderr, '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r\n");
+            
+            // Look for mnemonic pattern with emoji
+            if (std.mem.indexOf(u8, trimmed, "🔑 Mnemonic (12 words):")) |_| {
+                if (lines.next()) |mnemonic_line| {
+                    mnemonic = std.mem.trim(u8, mnemonic_line, " \t\r\n");
+                }
+            }
+            
+            // Look for first address pattern with emoji
+            if (std.mem.indexOf(u8, trimmed, "🆔 First address: ")) |pos| {
+                const prefix = "🆔 First address: ";
+                first_address = std.mem.trim(u8, trimmed[pos + prefix.len..], " \t\r\n");
+            }
+        }
+        
+        const response = if (mnemonic != null and first_address != null)
+            try std.fmt.allocPrint(allocator,
+                "{{\"success\":true,\"wallet_name\":\"{s}\",\"mnemonic\":\"{s}\",\"first_address\":\"{s}\"}}",
+                .{ wallet_name, mnemonic.?, first_address.? })
+        else
+            try std.fmt.allocPrint(allocator,
+                "{{\"success\":true,\"wallet_name\":\"{s}\",\"output\":\"{s}\"}}",
+                .{ wallet_name, escapedJsonString(allocator, result.stderr) });
+                
+        defer allocator.free(response);
+        
+        r.setStatus(.ok);
+        r.sendBody(response) catch {};
+        
+        log.info("✅ Wallet created successfully: {s}", .{wallet_name});
+    } else {
+        const response = try std.fmt.allocPrint(allocator,
+            "{{\"success\":false,\"error\":\"Wallet creation failed\"}}", .{});
+        defer allocator.free(response);
+        
+        r.setStatus(.bad_request);
+        r.sendBody(response) catch {};
+        
+        log.warn("❌ Wallet creation failed for: {s}", .{wallet_name});
+    }
+}
+
+fn handleWalletList(r: zap.Request, allocator: std.mem.Allocator) !void {
+    var cmd_args = std.ArrayList([]const u8).init(allocator);
+    defer cmd_args.deinit();
+    
+    try cmd_args.append("./zig-out/bin/zeicoin");
+    try cmd_args.append("wallet");
+    try cmd_args.append("list");
+    
+    var env_map = std.process.EnvMap.init(allocator);
+    defer env_map.deinit();
+    
+    try env_map.put("ZEICOIN_SERVER", "127.0.0.1");
+    
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = cmd_args.items,
+        .env_map = &env_map,
+    }) catch |err| {
+        log.err("Failed to list wallets: {}", .{err});
+        r.setStatus(.internal_server_error);
+        r.sendBody("{\"error\":\"Failed to list wallets\"}") catch {};
+        return;
+    };
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    
+    if (result.term.Exited == 0) {
+        // Parse wallet list from CLI output - extract wallet names
+        var wallet_list = std.ArrayList([]const u8).init(allocator);
+        defer wallet_list.deinit();
+        
+        // Try both stdout and stderr for wallet list output
+        const output = if (result.stdout.len > 0) result.stdout else result.stderr;
+        var lines = std.mem.splitScalar(u8, output, '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trim(u8, line, " \t\r\n");
+            // Look for lines with wallet emoji indicator
+            if (std.mem.indexOf(u8, trimmed, "💼 ")) |pos| {
+                const emoji_and_space = "💼 ";
+                const wallet_name = std.mem.trim(u8, trimmed[pos + emoji_and_space.len..], " \t\r\n");
+                if (wallet_name.len > 0) {
+                    try wallet_list.append(wallet_name);
+                }
+            }
+        }
+        
+        // Build JSON array of wallet names
+        var json_builder = std.ArrayList(u8).init(allocator);
+        defer json_builder.deinit();
+        
+        try json_builder.appendSlice("{\"success\":true,\"wallets\":[");
+        for (wallet_list.items, 0..) |wallet, i| {
+            if (i > 0) try json_builder.appendSlice(",");
+            try json_builder.append('"');
+            try json_builder.appendSlice(wallet);
+            try json_builder.append('"');
+        }
+        try json_builder.appendSlice("]}");
+        
+        const response = try json_builder.toOwnedSlice();
+        defer allocator.free(response);
+        
+        r.setStatus(.ok);
+        r.sendBody(response) catch {};
+        
+        log.info("✅ Wallet list retrieved successfully", .{});
+    } else {
+        const response = try std.fmt.allocPrint(allocator, 
+            "{{\"success\":false,\"error\":\"{s}\"}}", 
+            .{escapedJsonString(allocator, result.stderr)});
+        defer allocator.free(response);
+        
+        r.setStatus(.bad_request);
+        r.sendBody(response) catch {};
+        
+        log.warn("❌ Failed to list wallets: {s}", .{result.stderr});
+    }
+}
+
+fn handleWalletRestore(r: zap.Request, json: std.json.Value, allocator: std.mem.Allocator) !void {
+    const obj = json.object;
+    
+    // Validate required fields
+    const wallet_name_value = obj.get("wallet_name") orelse {
+        r.setStatus(.bad_request);
+        r.sendBody("{\"success\":false,\"error\":\"❌ Missing required field: 'wallet_name'\"}") catch {};
+        return;
+    };
+    const mnemonic_value = obj.get("mnemonic") orelse {
+        r.setStatus(.bad_request);
+        r.sendBody("{\"success\":false,\"error\":\"❌ Missing required field: 'mnemonic'\"}") catch {};
+        return;
+    };
+    const password_value = obj.get("password") orelse {
+        r.setStatus(.bad_request);
+        r.sendBody("{\"success\":false,\"error\":\"❌ Missing required field: 'password'\"}") catch {};
+        return;
+    };
+    
+    const wallet_name = wallet_name_value.string;
+    const mnemonic = mnemonic_value.string;
+    const password = password_value.string;
+    
+    // Build CLI command: zeicoin wallet restore <name> <word1> <word2> ... <wordN>
+    var cmd_args = std.ArrayList([]const u8).init(allocator);
+    defer cmd_args.deinit();
+    
+    try cmd_args.append("./zig-out/bin/zeicoin");
+    try cmd_args.append("wallet");
+    try cmd_args.append("restore");
+    try cmd_args.append(wallet_name);
+    
+    // Split mnemonic into individual words
+    var word_iterator = std.mem.splitSequence(u8, mnemonic, " ");
+    while (word_iterator.next()) |word| {
+        const trimmed_word = std.mem.trim(u8, word, " \t\r\n");
+        if (trimmed_word.len > 0) {
+            try cmd_args.append(trimmed_word);
+        }
+    }
+    
+    var env_map = std.process.EnvMap.init(allocator);
+    defer env_map.deinit();
+    
+    try env_map.put("ZEICOIN_SERVER", "127.0.0.1");
+    try env_map.put("ZEICOIN_WALLET_PASSWORD", password);
+    
+    // Create child process similar to wallet creation
+    var child = std.process.Child.init(cmd_args.items, allocator);
+    child.env_map = &env_map;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+    
+    try child.spawn();
+    
+    // Read outputs BEFORE waiting (to avoid pipe deadlock)
+    const stdout = if (child.stdout) |pipe| 
+        pipe.readToEndAlloc(allocator, 1024 * 1024) catch ""
+    else "";
+    const stderr = if (child.stderr) |pipe| 
+        pipe.readToEndAlloc(allocator, 1024 * 1024) catch ""
+    else "";
+    
+    // Wait for completion
+    const term = child.wait() catch |err| {
+        _ = child.kill() catch {};
+        log.err("Failed to wait for wallet restoration: {}", .{err});
+        r.setStatus(.internal_server_error);
+        r.sendBody("{\"error\":\"Wallet restoration failed\"}") catch {};
+        return;
+    };
+    
+    defer if (stdout.len > 0) allocator.free(stdout);
+    defer if (stderr.len > 0) allocator.free(stderr);
+    
+    // Clear mnemonic from memory immediately
+    @memset(@as([*]u8, @ptrCast(@constCast(mnemonic.ptr)))[0..mnemonic.len], 0);
+    
+    if (term.Exited == 0) {
+        const response = try std.fmt.allocPrint(allocator,
+            "{{\"success\":true,\"wallet_name\":\"{s}\",\"message\":\"Wallet restored successfully\"}}",
+            .{ wallet_name });
+        defer allocator.free(response);
+        
+        r.setStatus(.ok);
+        r.sendBody(response) catch {};
+        
+        log.info("✅ Wallet restored successfully: {s}", .{wallet_name});
+    } else {
+        const error_msg = if (std.mem.indexOf(u8, stderr, "Invalid mnemonic") != null)
+            "❌ Invalid mnemonic seed phrase. Please check your 12 words and try again."
+        else if (std.mem.indexOf(u8, stderr, "already exists") != null)
+            "❌ Wallet name already exists. Please choose a different name."
+        else if (std.mem.indexOf(u8, stderr, "Invalid password") != null)
+            "❌ Invalid password. Please check your password and try again."
+        else
+            stderr;
+            
+        const escaped_error = escapedJsonString(allocator, error_msg);
+        defer if (escaped_error.ptr != error_msg.ptr) allocator.free(escaped_error);
+        
+        const response = try std.fmt.allocPrint(allocator,
+            "{{\"success\":false,\"error\":\"{s}\"}}", 
+            .{escaped_error});
+        defer allocator.free(response);
+        
+        r.setStatus(.bad_request);
+        r.sendBody(response) catch {};
+        
+        log.warn("❌ Wallet restoration failed for: {s}, error: {s}", .{ wallet_name, stderr });
+    }
 }
 
 fn escapedJsonString(allocator: std.mem.Allocator, input: []const u8) []const u8 {

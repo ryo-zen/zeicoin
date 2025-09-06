@@ -568,30 +568,29 @@ fn queryEnhancedTransactions(r: zap.Request) void {
         return;
     };
     
-    // For now, always show Alice transactions (debugging)
+    // Query all transactions including coinbase transactions
     const path = r.path orelse "";
     const has_sender_param = std.mem.indexOf(u8, path, "sender=") != null;
     
     std.log.info("Query enhanced transactions: path={s}, has_sender={}", .{ path, has_sender_param });
     
-    // Always show Alice transactions for debugging (message and category only)
+    // Query all transactions from the regular transactions table (includes coinbase)
     var result = app.query(
-        \\SELECT hash, sender, recipient, amount, fee, message, category, block_height, 
-        \\       TO_CHAR(block_timestamp, 'YYYY-MM-DD HH24:MI:SS UTC') as formatted_timestamp
-        \\FROM enhanced_transactions
-        \\WHERE sender LIKE '%alice%' OR sender LIKE '%tzei1qzhrhfgcdpz%'
+        \\SELECT hash, sender, recipient, amount, fee, message, block_height, 
+        \\       block_timestamp
+        \\FROM transactions
         \\ORDER BY block_height DESC
         \\LIMIT 100
     , .{}) catch |err| {
-        std.log.err("Failed to query enhanced transactions with sender filter: {}", .{err});
+        std.log.err("Failed to query transactions: {}", .{err});
         r.setStatus(.internal_server_error);
         r.sendBody("{\"error\":\"Database query failed\"}") catch return;
         return;
     };
     defer result.deinit();
     
-    // Format response
-    var buffer: [8192]u8 = undefined;
+    // Format response - increased buffer size for 40+ transactions
+    var buffer: [32768]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buffer);
     const writer = stream.writer();
     
@@ -603,6 +602,7 @@ fn queryEnhancedTransactions(r: zap.Request) void {
     
     var count: usize = 0;
     while (result.next() catch null) |row| {
+        std.log.info("Processing transaction row {}", .{count});
         if (count > 0) writer.print(",", .{}) catch return;
         
         const hash = row.get([]const u8, 0);
@@ -611,48 +611,24 @@ fn queryEnhancedTransactions(r: zap.Request) void {
         const amount = row.get(i64, 3);
         const fee = row.get(i64, 4);
         const message = row.get(?[]const u8, 5);
-        const category = row.get(?[]const u8, 6);
-        const block_height = row.get(i32, 7);
-        // Get timestamp as formatted string from PostgreSQL
-        const timestamp = row.get(?[]const u8, 8);
+        const block_height = row.get(i32, 6);
+        // Get timestamp as proper timestamp from database 
+        const block_timestamp = row.get(?i64, 7);
         
         writer.print("{{\"hash\":\"{s}\",\"sender\":\"{s}\",\"recipient\":\"{s}\",\"amount\":{},\"fee\":{},\"block_height\":{}", .{
             hash, sender, recipient, amount, fee, block_height,
         }) catch return;
         
-        if (timestamp) |ts| {
-            // Escape the timestamp string to prevent JSON parsing errors
-            writer.print(",\"timestamp\":\"", .{}) catch return;
-            for (ts) |char| {
-                switch (char) {
-                    '"' => writer.print("\\\"", .{}) catch return,
-                    '\\' => writer.print("\\\\", .{}) catch return,
-                    '\n' => writer.print("\\n", .{}) catch return,
-                    '\r' => writer.print("\\r", .{}) catch return,
-                    '\t' => writer.print("\\t", .{}) catch return,
-                    else => writer.print("{c}", .{char}) catch return,
-                }
-            }
-            writer.print("\"", .{}) catch return;
+        if (block_timestamp) |ts| {
+            // Format timestamp as ISO 8601 string or Unix timestamp
+            writer.print(",\"timestamp\":{}", .{ts}) catch return;
+            // Also provide block_timestamp for compatibility
+            writer.print(",\"block_timestamp\":{}", .{ts}) catch return;
         }
         
         if (message) |msg| {
             writer.print(",\"message\":\"", .{}) catch return;
             for (msg) |char| {
-                switch (char) {
-                    '"' => writer.print("\\\"", .{}) catch return,
-                    '\\' => writer.print("\\\\", .{}) catch return,
-                    '\n' => writer.print("\\n", .{}) catch return,
-                    '\r' => writer.print("\\r", .{}) catch return,
-                    '\t' => writer.print("\\t", .{}) catch return,
-                    else => writer.print("{c}", .{char}) catch return,
-                }
-            }
-            writer.print("\"", .{}) catch return;
-        }
-        if (category) |cat| {
-            writer.print(",\"category\":\"", .{}) catch return;
-            for (cat) |char| {
                 switch (char) {
                     '"' => writer.print("\\\"", .{}) catch return,
                     '\\' => writer.print("\\\\", .{}) catch return,

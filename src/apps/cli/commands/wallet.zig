@@ -184,9 +184,17 @@ fn listWallets(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
 /// Restore HD wallet from mnemonic
 fn restoreWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
-    if (args.len < 25) { // name + 24 words
-        print("❌ Usage: zeicoin wallet restore <name> <24-word-mnemonic>\n", .{});
+    if (args.len < 13) { // name + 12 words minimum
+        print("❌ Usage: zeicoin wallet restore <name> <12-or-24-word-mnemonic>\n", .{});
+        print("💡 Example: zeicoin wallet restore mywallet word1 word2 ... word12\n", .{});
         print("💡 Example: zeicoin wallet restore mywallet word1 word2 ... word24\n", .{});
+        return;
+    }
+    
+    // Validate word count (must be 12, 15, 18, 21, or 24)
+    const word_count = args.len - 1; // subtract wallet name
+    if (word_count != 12 and word_count != 15 and word_count != 18 and word_count != 21 and word_count != 24) {
+        print("❌ Invalid word count: {}. Must be 12, 15, 18, 21, or 24 words\n", .{word_count});
         return;
     }
     
