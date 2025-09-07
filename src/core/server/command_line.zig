@@ -49,7 +49,7 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Config {
     
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
+        if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h") or std.mem.eql(u8, args[i], "help")) {
             printHelp();
             return error.HelpRequested;
         } else if (std.mem.eql(u8, args[i], "--port") and i + 1 < args.len) {
@@ -117,7 +117,8 @@ fn parseBootstrapNodes(list: *std.ArrayList(BootstrapNode), input: []const u8) !
 }
 
 fn printHelp() void {
-    log.info(
+    const print = std.debug.print;
+    print(
         \\ZeiCoin Server
         \\
         \\Usage: zen_server [options]
@@ -127,7 +128,7 @@ fn printHelp() void {
         \\  --bootstrap <nodes>     Bootstrap nodes (ip:port,ip:port,...)
         \\  --mine <wallet>         Enable mining to specified wallet (REQUIRED)
         \\  --no-client-api         Disable client API on port 10802
-        \\  --help, -h              Show this help message
+        \\  --help, -h, help        Show this help message
         \\
         \\Environment variables:
         \\  ZEICOIN_P2P_PORT        P2P listen port (default: 10801)

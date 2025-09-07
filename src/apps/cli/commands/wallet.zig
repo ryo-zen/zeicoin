@@ -82,14 +82,18 @@ fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const wallet_path = try std.fmt.allocPrint(allocator, "{s}/wallets/{s}.wallet", .{ data_dir, wallet_name });
     defer allocator.free(wallet_path);
 
-    std.fs.cwd().access(wallet_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => {}, // This is what we want
+    if (std.fs.cwd().access(wallet_path, .{})) {
+        print("❌ Wallet '{s}' already exists at: {s}\n", .{wallet_name, wallet_path});
+        print("💡 Use a different name or remove the existing wallet first\n", .{});
+        print("💡 List existing wallets with: zeicoin wallet list\n", .{});
+        return;
+    } else |err| switch (err) {
+        error.FileNotFound => {}, // This is what we want - wallet doesn't exist
         else => {
-            print("❌ Wallet '{s}' already exists\n", .{wallet_name});
-            print("💡 Use a different name or 'zeicoin wallet load {s}'\n", .{wallet_name});
+            print("❌ Error checking wallet file: {}\n", .{err});
             return;
         },
-    };
+    }
 
     // Create new HD wallet
     var new_wallet = wallet.Wallet.init(allocator);
@@ -244,14 +248,18 @@ fn restoreWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const wallet_path = try std.fmt.allocPrint(allocator, "{s}/wallets/{s}.wallet", .{ data_dir, wallet_name });
     defer allocator.free(wallet_path);
 
-    std.fs.cwd().access(wallet_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => {}, // This is what we want
+    if (std.fs.cwd().access(wallet_path, .{})) {
+        print("❌ Wallet '{s}' already exists at: {s}\n", .{wallet_name, wallet_path});
+        print("💡 Use a different name or remove the existing wallet first\n", .{});
+        print("💡 List existing wallets with: zeicoin wallet list\n", .{});
+        return;
+    } else |err| switch (err) {
+        error.FileNotFound => {}, // This is what we want - wallet doesn't exist
         else => {
-            print("❌ Wallet '{s}' already exists\n", .{wallet_name});
-            print("💡 Use a different name or remove the existing wallet\n", .{});
+            print("❌ Error checking wallet file: {}\n", .{err});
             return;
         },
-    };
+    }
     
     // Create HD wallet from mnemonic
     var restored_wallet = wallet.Wallet.init(allocator);
