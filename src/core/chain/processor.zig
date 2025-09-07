@@ -117,6 +117,14 @@ pub const ChainProcessor = struct {
 
     /// Accept a block after validation (used in reorganization)
     pub fn acceptBlock(self: *ChainProcessor, block: types.Block) !void {
+        const block_hash = block.hash();
+        
+        // CRITICAL FIX: Check if block hash already exists anywhere in the chain
+        if (self.chain_state.getBlockHeight(block_hash)) |existing_height| {
+            log.info("🔄 [SYNC DEDUP] Block with hash {s} already exists at height {}, skipping processing to prevent double-spend", .{ std.fmt.fmtSliceHexLower(block_hash[0..8]), existing_height });
+            return; // Skip processing but don't error - this is expected during sync replay
+        }
+
         const current_height = try self.database.getHeight();
 
         // Special case: if we're at height 0 (after rollback to genesis) and the incoming block
@@ -124,7 +132,13 @@ pub const ChainProcessor = struct {
         const target_height = if (current_height == 0 and !genesis.validateGenesis(block)) blk: {
             log.info("🔄 Accepting non-genesis block after rollback - placing at height 1", .{});
             break :blk @as(u32, 1);
-        } else current_height;
+        } else current_height + 1;  // FIXED: Properly increment height for chain extension
+
+        // Secondary check: verify height is available (defensive programming)
+        if (self.database.blockExistsByHeight(target_height)) {
+            log.info("🔄 [SYNC DEDUP] Block #{} already exists by height, skipping processing to prevent double-spend", .{target_height});
+            return; // Skip processing but don't error - this is expected during sync replay
+        }
 
         // During reorganization, use reorganization-specific validation (skips hash chain checks)
         if (!try self.chain_validator.validateReorgBlock(&block, target_height)) {
@@ -138,8 +152,8 @@ pub const ChainProcessor = struct {
         try self.database.saveBlock(target_height, block);
 
         // Update block index for O(1) lookups in reorganizations
-        const block_hash = block.hash();
-        try self.chain_state.indexBlock(target_height, block_hash);
+        const index_block_hash = block.hash();
+        try self.chain_state.indexBlock(target_height, index_block_hash);
 
         const old_height = self.chain_state.getHeight() catch 0;
         log.info("📦 [BLOCK PROCESS] Block #{} accepted - chain height: {} → {}", .{ target_height, old_height, target_height });

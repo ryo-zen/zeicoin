@@ -142,7 +142,7 @@ pub const PeerConnection = struct {
 
         switch (msg) {
             .handshake => |handshake| try self.handleHandshake(handshake),
-            .handshake_ack => try self.handleHandshakeAck(),
+            .handshake_ack => |ack_msg| try self.handleHandshakeAck(ack_msg),
             .ping => |ping| try self.handlePing(ping),
             .pong => |pong| try self.handlePong(pong),
             .block => |block| try self.handleBlock(block),
@@ -172,9 +172,10 @@ pub const PeerConnection = struct {
         }
         self.peer.user_agent = try self.allocator.dupe(u8, handshake.user_agent);
 
-        // Send handshake ack
+        // Send handshake ack with our current height
         std.log.info("📤 [HANDSHAKE] Sending ack to peer {} (we are at height {})", .{ self.peer.id, our_height });
-        _ = try self.peer.sendMessage(.handshake_ack, {});
+        const ack_msg = message_types.HandshakeAckMessage.init(our_height);
+        _ = try self.peer.sendMessage(.handshake_ack, ack_msg);
 
         self.peer.state = .connected;
         std.log.info("✅ [HANDSHAKE] Complete with {}: peer_height={}, our_height={}, agent={s}", .{ self.peer, handshake.start_height, our_height, handshake.user_agent });
@@ -184,9 +185,14 @@ pub const PeerConnection = struct {
         try self.message_handler.onPeerConnected(self.peer);
     }
 
-    fn handleHandshakeAck(self: *Self) !void {
+    fn handleHandshakeAck(self: *Self, ack_msg: message_types.HandshakeAckMessage) !void {
         if (self.peer.state == .handshaking) {
             const our_height = try self.message_handler.getHeight();
+            
+            // CRITICAL FIX: Update peer height with the height from handshake_ack
+            std.log.info("🔧 [HANDSHAKE ACK] Updating peer {} height from {} to {}", .{ self.peer.id, self.peer.height, ack_msg.current_height });
+            self.peer.height = ack_msg.current_height;
+            
             std.log.info("✅ [HANDSHAKE ACK] Received - peer height: {}, our height: {}", .{ self.peer.height, our_height });
 
             self.peer.state = .connected;

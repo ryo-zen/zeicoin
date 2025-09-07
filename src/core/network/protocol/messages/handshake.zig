@@ -189,6 +189,58 @@ pub const HandshakeMessage = struct {
     }
 };
 
+/// Handshake acknowledgment message containing server's current blockchain height
+/// Sent in response to a handshake to communicate the responding node's height
+pub const HandshakeAckMessage = struct {
+    /// Current blockchain height of the responding node
+    current_height: u32,
+    
+    /// Initialize handshake ack with current height
+    pub fn init(current_height: u32) HandshakeAckMessage {
+        return .{
+            .current_height = current_height,
+        };
+    }
+    
+    /// Validate handshake ack message (basic sanity checks)
+    pub fn validate(self: *const HandshakeAckMessage) !void {
+        // Height validation - allow any valid height including 0 (genesis)
+        if (self.current_height > 0xFFFFFF) { // Reasonable max height check
+            return error.InvalidHeight;
+        }
+    }
+    
+    /// Serialize handshake ack to bytes
+    pub fn serialize(self: *const HandshakeAckMessage, writer: anytype) !void {
+        try writer.writeInt(u32, self.current_height, .little);
+    }
+    
+    /// Encode method for compatibility with wire protocol
+    pub fn encode(self: *const HandshakeAckMessage, writer: anytype) !void {
+        try self.serialize(writer);
+    }
+    
+    /// Deserialize handshake ack from bytes
+    pub fn deserialize(reader: anytype) !HandshakeAckMessage {
+        const current_height = try reader.readInt(u32, .little);
+        
+        const msg = HandshakeAckMessage.init(current_height);
+        try msg.validate();
+        return msg;
+    }
+    
+    /// Get serialized size in bytes
+    pub fn getSize(self: *const HandshakeAckMessage) usize {
+        _ = self;
+        return @sizeOf(u32); // Just the height field
+    }
+    
+    /// Estimate encoded size for wire protocol compatibility
+    pub fn estimateSize(self: *const HandshakeAckMessage) usize {
+        return self.getSize();
+    }
+};
+
 // Tests
 test "HandshakeMessage encode/decode" {
     const allocator = std.testing.allocator;
@@ -254,4 +306,36 @@ test "ServiceFlags functionality" {
     
     try std.testing.expect(mining_quality >= full_quality); // Mining nodes often have good sync capabilities
     try std.testing.expect(full_quality > pruned_quality); // Full node better than pruned when behind
+}
+
+test "HandshakeAckMessage creation and validation" {
+    const testing = std.testing;
+    
+    // Test valid handshake ack
+    const ack = HandshakeAckMessage.init(42);
+    try testing.expect(ack.current_height == 42);
+    try ack.validate();
+    
+    // Test genesis height
+    const genesis_ack = HandshakeAckMessage.init(0);
+    try genesis_ack.validate();
+    
+    // Test invalid height (too high)
+    const invalid_ack = HandshakeAckMessage.init(0xFFFFFFFF);
+    try testing.expectError(error.InvalidHeight, invalid_ack.validate());
+}
+
+test "HandshakeAckMessage serialization" {
+    const testing = std.testing;
+    var buffer: [1024]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buffer);
+    
+    // Test serialization
+    const original = HandshakeAckMessage.init(100);
+    try original.serialize(fbs.writer());
+    
+    // Test deserialization  
+    fbs.reset();
+    const deserialized = try HandshakeAckMessage.deserialize(fbs.reader());
+    try testing.expect(deserialized.current_height == 100);
 }

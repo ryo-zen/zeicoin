@@ -87,3 +87,4 @@ scripts/check_l2_tables.sh
 .gitignore
 scripts/check_tx_table.sh
 scripts/test_l2_integration.sh
+/zeicoin_data_testnet_indexer_secondary

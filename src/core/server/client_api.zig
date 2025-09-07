@@ -201,13 +201,90 @@ pub const ClientApiServer = struct {
     }
     
     fn handleTriggerSync(self: *Self, connection: net.Server.Connection) !void {
-        _ = self;
-        // For now, just return a Ready status as the sync is handled by the network layer
-        _ = try connection.stream.write("Ready\n");
-        
-        // In a full implementation, this would trigger a sync with peers
-        // For now, we return success as the node is always syncing
         std.log.info("Manual sync triggered via client API", .{});
+        
+        // Check if sync manager is available
+        if (self.blockchain.sync_manager == null) {
+            _ = try connection.stream.write("ERROR: Sync manager not initialized\n");
+            return;
+        }
+        
+        const sync_manager = self.blockchain.sync_manager.?;
+        
+        // Check for sync timeout before checking state
+        sync_manager.checkTimeout();
+        
+        // Check if sync can start
+        if (!sync_manager.getSyncState().canStart()) {
+            const response = try std.fmt.allocPrint(
+                self.allocator,
+                "SYNC_STATUS: Already syncing (state: {})\n",
+                .{sync_manager.getSyncState()}
+            );
+            defer self.allocator.free(response);
+            _ = try connection.stream.write(response);
+            return;
+        }
+        
+        // Get current blockchain height
+        const current_height = self.blockchain.getHeight() catch |err| {
+            std.log.err("Failed to get blockchain height: {}", .{err});
+            _ = try connection.stream.write("ERROR: Failed to get blockchain height\n");
+            return;
+        };
+        
+        // Try to find peers to sync with
+        if (self.blockchain.network_coordinator.getNetworkManager()) |network_manager| {
+            const peer_stats = network_manager.getPeerStats();
+            
+            if (peer_stats.connected == 0) {
+                _ = try connection.stream.write("ERROR: No connected peers available for sync\n");
+                return;
+            }
+            
+            // Try to get a peer with higher height than us
+            var connected_peers = std.ArrayList(*@import("../network/peer.zig").Peer).init(self.allocator);
+            defer connected_peers.deinit();
+            
+            try network_manager.peer_manager.getConnectedPeers(&connected_peers);
+            
+            var best_peer: ?*@import("../network/peer.zig").Peer = null;
+            var max_height: u32 = current_height;
+            
+            for (connected_peers.items) |peer| {
+                if (peer.height > max_height) {
+                    best_peer = peer;
+                    max_height = peer.height;
+                }
+            }
+            
+            if (best_peer) |peer| {
+                // Start sync with the best peer
+                sync_manager.startSync(peer, peer.height) catch |err| {
+                    std.log.err("Failed to start sync: {}", .{err});
+                    _ = try connection.stream.write("ERROR: Failed to start synchronization\n");
+                    return;
+                };
+                
+                const response = try std.fmt.allocPrint(
+                    self.allocator,
+                    "SYNC_STARTED: Syncing from height {} to {} with peer\n",
+                    .{current_height, peer.height}
+                );
+                defer self.allocator.free(response);
+                _ = try connection.stream.write(response);
+            } else {
+                const response = try std.fmt.allocPrint(
+                    self.allocator,
+                    "SYNC_STATUS: Already up to date (height: {}, {} peers)\n",
+                    .{current_height, peer_stats.connected}
+                );
+                defer self.allocator.free(response);
+                _ = try connection.stream.write(response);
+            }
+        } else {
+            _ = try connection.stream.write("ERROR: Network manager not available\n");
+        }
     }
     
     fn handleGetBlock(self: *Self, connection: net.Server.Connection, message: []const u8) !void {

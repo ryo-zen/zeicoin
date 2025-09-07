@@ -55,6 +55,9 @@ const SYNC_CONFIG = struct {
 
     /// Peer selection timeout (seconds)
     const PEER_SELECTION_TIMEOUT: i64 = 10;
+    
+    /// Maximum sync duration before timeout (seconds)
+    const SYNC_TIMEOUT: i64 = 120;
 };
 
 // ============================================================================
@@ -81,6 +84,9 @@ pub const SyncManager = struct {
 
     /// Last sync state save timestamp for persistence
     last_state_save: i64,
+    
+    /// Timestamp when sync session started (for timeout detection)
+    sync_start_time: i64,
 
     const Self = @This();
 
@@ -111,6 +117,7 @@ pub const SyncManager = struct {
             .sync_state = .idle,
             .failed_peers = std.ArrayList(*Peer).init(allocator),
             .last_state_save = 0,
+            .sync_start_time = 0,
         };
     }
 
@@ -157,9 +164,11 @@ pub const SyncManager = struct {
         log.info("   Target height: {}", .{target_height});
         log.info("   Height difference: {}", .{height_diff});
         log.info("   Minimum sync threshold: {}", .{SYNC_CONFIG.MIN_SYNC_HEIGHT_DIFF});
+        log.info("   Peer info: {any}", .{peer.address});
+        log.info("   Peer height: {}", .{peer.height});
 
         if (height_diff < SYNC_CONFIG.MIN_SYNC_HEIGHT_DIFF) {
-            log.info("STEP 2 RESULT: Already synchronized", .{});
+            log.warn("🚫 [SYNC ABORT] Already synchronized - height diff {} < threshold {}", .{ height_diff, SYNC_CONFIG.MIN_SYNC_HEIGHT_DIFF });
             log.info("Local height {} >= target height {} (diff: {})", .{ current_height, target_height, height_diff });
             log.info("No synchronization needed - session complete", .{});
             return;
@@ -201,11 +210,13 @@ pub const SyncManager = struct {
             log.info("STEP 4 RESULT: Using ZSP-001 batch synchronization", .{});
             log.info("Performance: Up to 50x faster than sequential sync", .{});
 
-            // Transition sync state
+            // Transition sync state and set timeout timer
             log.debug("STATE TRANSITION: {} → syncing", .{self.sync_state});
             const old_state = self.sync_state;
             self.sync_state = .syncing;
+            self.sync_start_time = std.time.timestamp();
             log.debug("State transition completed: {} → {}", .{ old_state, self.sync_state });
+            log.info("🕒 [SYNC TIMEOUT] Started timeout timer (max {} seconds)", .{SYNC_CONFIG.SYNC_TIMEOUT});
 
             // Start ZSP-001 batch synchronization
             log.debug("STEP 5: Delegating to ZSP-001 batch sync...", .{});
@@ -216,11 +227,13 @@ pub const SyncManager = struct {
             log.info("Falling back to sequential synchronization", .{});
             log.warn("Performance: Standard speed (up to 50x slower than batch)", .{});
 
-            // Transition sync state for sequential mode
+            // Transition sync state for sequential mode and set timeout timer
             log.debug("STATE TRANSITION: {} → syncing (sequential)", .{self.sync_state});
             const old_state = self.sync_state;
             self.sync_state = .syncing;
+            self.sync_start_time = std.time.timestamp();
             log.debug("State transition completed: {} → {}", .{ old_state, self.sync_state });
+            log.info("🕒 [SYNC TIMEOUT] Started timeout timer (max {} seconds)", .{SYNC_CONFIG.SYNC_TIMEOUT});
 
             // Use sequential sync utilities for legacy peers
             log.debug("STEP 5: Starting sequential sync fallback...", .{});
@@ -363,6 +376,22 @@ pub const SyncManager = struct {
     /// Check if sync is currently active
     pub fn isActive(self: *const Self) bool {
         return self.sync_state.isActive();
+    }
+    
+    /// Check if sync has timed out and reset state if needed
+    pub fn checkTimeout(self: *Self) void {
+        if (self.sync_state.isActive() and self.sync_start_time > 0) {
+            const current_time = std.time.timestamp();
+            const elapsed_time = current_time - self.sync_start_time;
+            
+            if (elapsed_time > SYNC_CONFIG.SYNC_TIMEOUT) {
+                log.warn("🚨 [SYNC TIMEOUT] Synchronization timed out after {} seconds", .{elapsed_time});
+                log.warn("🔄 [SYNC TIMEOUT] Resetting sync state to idle", .{});
+                self.sync_state = .idle;
+                self.sync_start_time = 0;
+                log.info("✅ [SYNC TIMEOUT] Sync state reset - ready for new sync attempts", .{});
+            }
+        }
     }
 
     /// Get detailed sync status for monitoring and debugging

@@ -93,9 +93,36 @@ pub const ServerHandlers = struct {
 
     fn onGetBlocks(self: *Self, peer: *network.Peer, msg: network.message_types.GetBlocksMessage) !void {
         std.log.info("📋 [GET_BLOCKS] Request from {any}", .{peer.address});
-        // Handle block requests - send blocks back to peer
-        _ = self;
-        _ = msg;
+        std.log.info("📋 [GET_BLOCKS] Requested hashes: {}", .{msg.hashes.len});
+        
+        // Get current blockchain height
+        const current_height = self.blockchain.getHeight() catch |err| {
+            std.log.err("Failed to get blockchain height: {}", .{err});
+            return;
+        };
+        
+        std.log.info("📋 [GET_BLOCKS] Current height: {}, peer requesting blocks", .{current_height});
+        
+        // Send blocks starting from height 1 up to current height
+        // This handles the common case where peer is at genesis (height 0) and needs all blocks
+        var height: u32 = 1;
+        while (height <= current_height) : (height += 1) {
+            if (self.blockchain.database.getBlock(height)) |block| {
+                std.log.info("📤 [GET_BLOCKS] Sending block {} to peer {any}", .{ height, peer.address });
+                
+                // Send block to peer
+                const block_msg = network.message_types.BlockMessage{ .block = block };
+                _ = peer.sendMessage(.block, block_msg) catch |err| {
+                    std.log.err("Failed to send block {} to peer: {}", .{ height, err });
+                    break;
+                };
+            } else |err| {
+                std.log.err("Failed to get block {}: {}", .{ height, err });
+                break;
+            }
+        }
+        
+        std.log.info("✅ [GET_BLOCKS] Sent {} blocks to peer {any}", .{ current_height, peer.address });
     }
 
     fn onGetPeers(self: *Self, peer: *network.Peer, msg: network.message_types.GetPeersMessage) !void {

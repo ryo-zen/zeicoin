@@ -6,6 +6,7 @@ const protocol = @import("../protocol.zig");
 
 // Import all message types
 pub const HandshakeMessage = @import("handshake.zig").HandshakeMessage;
+pub const HandshakeAckMessage = @import("handshake.zig").HandshakeAckMessage;
 pub const PingMessage = @import("ping.zig").PingMessage;
 pub const PongMessage = @import("pong.zig").PongMessage;
 // Headers-first messages removed per ZSP-001 (batch sync only)
@@ -28,7 +29,7 @@ pub const BlockHashMessage = @import("block_hash.zig").BlockHashMessage;
 /// Union of all message types - clean batch sync protocol
 pub const Message = union(protocol.MessageType) {
     handshake: HandshakeMessage,
-    handshake_ack: void, // Simple ack, no payload
+    handshake_ack: HandshakeAckMessage, // Now includes height payload
     ping: PingMessage,
     pong: PongMessage,
     // Headers-first messages removed per ZSP-001
@@ -52,7 +53,7 @@ pub const Message = union(protocol.MessageType) {
     /// Encode any message type
     pub fn encode(self: Message, writer: anytype) !void {
         switch (self) {
-            .handshake_ack => {}, // Empty message
+            .handshake_ack => |msg| try msg.serialize(writer),
             .blocks => {}, // Handled separately
             inline else => |msg| try msg.encode(writer),
         }
@@ -66,7 +67,7 @@ pub const Message = union(protocol.MessageType) {
     ) !Message {
         return switch (msg_type) {
             .handshake => .{ .handshake = try HandshakeMessage.decode(allocator, reader) },
-            .handshake_ack => .{ .handshake_ack = {} },
+            .handshake_ack => .{ .handshake_ack = try HandshakeAckMessage.deserialize(reader) },
             .ping => .{ .ping = try PingMessage.decode(reader) },
             .pong => .{ .pong = try PongMessage.decode(reader) },
             // Headers-first messages removed per ZSP-001
@@ -94,7 +95,7 @@ pub const Message = union(protocol.MessageType) {
     /// Estimate encoded size
     pub fn estimateSize(self: Message) usize {
         return switch (self) {
-            .handshake_ack => 0,
+            .handshake_ack => |msg| msg.getSize(),
             .blocks => 0,
             inline else => |msg| msg.estimateSize(),
         };

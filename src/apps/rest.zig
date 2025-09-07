@@ -127,11 +127,20 @@ pub fn initApp(allocator: std.mem.Allocator, config: ApiConfig) !*AppContext {
         },
     });
 
-    // Test connection
+    // Test connection and get TimescaleDB version
     var test_result = try pool.query("SELECT 1", .{});
     defer test_result.deinit();
 
-    std.log.info("✅ Connected to TimescaleDB: {s}", .{config.pg_database});
+    // Get TimescaleDB version
+    var version_result = try pool.query("SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'", .{});
+    defer version_result.deinit();
+    
+    const timescale_version = if (version_result.next() catch null) |row| 
+        row.get([]const u8, 0)
+    else 
+        "unknown";
+
+    std.log.info("✅ Connected to TimescaleDB: {s} (v{s})", .{config.pg_database, timescale_version});
 
     // Initialize L2 service
     const l2_svc = try allocator.create(l2_service.L2Service);
@@ -574,12 +583,14 @@ fn queryEnhancedTransactions(r: zap.Request) void {
     
     std.log.info("Query enhanced transactions: path={s}, has_sender={}", .{ path, has_sender_param });
     
-    // Query all transactions from the regular transactions table (includes coinbase)
+    // Query all transactions with L2 enhancements (LEFT JOIN to include non-enhanced transactions)
     var result = app.query(
-        \\SELECT hash, sender, recipient, amount, fee, message, block_height, 
-        \\       block_timestamp
-        \\FROM transactions
-        \\ORDER BY block_height DESC
+        \\SELECT t.hash, t.sender, t.recipient, t.amount, t.fee, t.block_height, 
+        \\       t.block_timestamp, l2.message, l2.category, l2.status,
+        \\       (SELECT MAX(height) FROM blocks) - t.block_height + 1 as confirmations
+        \\FROM transactions t
+        \\LEFT JOIN l2_transaction_enhancements l2 ON t.hash = l2.tx_hash
+        \\ORDER BY t.block_height DESC
         \\LIMIT 100
     , .{}) catch |err| {
         std.log.err("Failed to query transactions: {}", .{err});
@@ -605,18 +616,22 @@ fn queryEnhancedTransactions(r: zap.Request) void {
         std.log.info("Processing transaction row {}", .{count});
         if (count > 0) writer.print(",", .{}) catch return;
         
-        const hash = row.get([]const u8, 0);
-        const sender = row.get([]const u8, 1);
-        const recipient = row.get([]const u8, 2);
+        const hash = row.get(?[]const u8, 0); // tx_hash can be null for coinbase
+        const sender = row.get(?[]const u8, 1); // sender can be null for coinbase
+        const recipient = row.get(?[]const u8, 2); // recipient can be null 
         const amount = row.get(i64, 3);
         const fee = row.get(i64, 4);
-        const message = row.get(?[]const u8, 5);
-        const block_height = row.get(i32, 6);
+        const block_height = row.get(i64, 5); // block_height is bigint in PostgreSQL
         // Get timestamp as proper timestamp from database 
-        const block_timestamp = row.get(?i64, 7);
+        const block_timestamp = row.get(?i64, 6);
+        // L2 enhancement fields (can be null)
+        const message = row.get(?[]const u8, 7);
+        const category = row.get(?[]const u8, 8);
+        const l2_status = row.get(?[]const u8, 9);
+        const confirmations = row.get(i64, 10);
         
-        writer.print("{{\"hash\":\"{s}\",\"sender\":\"{s}\",\"recipient\":\"{s}\",\"amount\":{},\"fee\":{},\"block_height\":{}", .{
-            hash, sender, recipient, amount, fee, block_height,
+        writer.print("{{\"hash\":\"{s}\",\"sender\":\"{s}\",\"recipient\":\"{s}\",\"amount\":{},\"fee\":{},\"block_height\":{},\"confirmations\":{}", .{
+            hash orelse "", sender orelse "coinbase", recipient orelse "", amount, fee, block_height, confirmations,
         }) catch return;
         
         if (block_timestamp) |ts| {
@@ -639,6 +654,17 @@ fn queryEnhancedTransactions(r: zap.Request) void {
                 }
             }
             writer.print("\"", .{}) catch return;
+        }
+        
+        if (category) |cat| {
+            writer.print(",\"category\":\"{s}\"", .{cat}) catch return;
+        }
+        
+        if (l2_status) |status| {
+            writer.print(",\"status\":\"{s}\"", .{status}) catch return;
+        } else {
+            // Default status for transactions without L2 enhancements
+            writer.print(",\"status\":\"confirmed\"", .{}) catch return;
         }
         
         writer.print("}}", .{}) catch return;
