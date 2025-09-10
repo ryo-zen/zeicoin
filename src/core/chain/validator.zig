@@ -251,7 +251,17 @@ pub const ChainValidator = struct {
         // SECURITY: Verify block claims correct difficulty
         const claimed_difficulty = block.header.getDifficultyTarget();
         if (claimed_difficulty.toU64() != required_difficulty.toU64()) {
-            log.warn("❌ SECURITY: Block difficulty mismatch! Required: {}, Claimed: {}", .{ required_difficulty.toU64(), claimed_difficulty.toU64() });
+            // ENHANCED: Log detailed difficulty calculation chain for debugging
+            log.warn("❌ SECURITY: Block difficulty mismatch detected!", .{});
+            log.warn("   📊 Required difficulty: {} (base_bytes={}, threshold=0x{X})", .{ required_difficulty.toU64(), required_difficulty.base_bytes, required_difficulty.threshold });
+            log.warn("   📦 Block claimed difficulty: {} (base_bytes={}, threshold=0x{X})", .{ claimed_difficulty.toU64(), claimed_difficulty.base_bytes, claimed_difficulty.threshold });
+            log.warn("   🔍 Block height: {}, timestamp: {}", .{ expected_height, block.header.timestamp });
+            
+            // Log detailed calculation chain for debugging
+            self.logDifficultyCalculationChain(expected_height) catch |err| {
+                log.warn("   ⚠️ Failed to log difficulty calculation chain: {}", .{err});
+            };
+            
             return false;
         }
 
@@ -269,6 +279,18 @@ pub const ChainValidator = struct {
             log.warn("❌ RandomX proof-of-work validation failed", .{});
             return false;
         }
+
+        // CRITICAL: Validate account state root commitment
+        // This prevents hidden state divergence where nodes have same block hash but different account states
+        const expected_state_root = try self.chain_state.calculateStateRoot();
+        if (!std.mem.eql(u8, &block.header.state_root, &expected_state_root)) {
+            log.warn("❌ CRITICAL: Account state root mismatch - hidden divergence detected!", .{});
+            log.warn("   Expected: {}", .{std.fmt.fmtSliceHexLower(&expected_state_root)});
+            log.warn("   Block:    {}", .{std.fmt.fmtSliceHexLower(&block.header.state_root)});
+            log.warn("   This indicates the block was created with different account states than this node has");
+            return false;
+        }
+        log.info("✅ [STATE ROOT] Account state root verified: {}", .{std.fmt.fmtSliceHexLower(&expected_state_root)});
 
         // Validate all transactions in block
         for (block.transactions, 0..) |tx, i| {
@@ -371,7 +393,17 @@ pub const ChainValidator = struct {
         // SECURITY: Verify sync block claims correct difficulty
         const claimed_difficulty = block.header.getDifficultyTarget();
         if (claimed_difficulty.toU64() != required_difficulty.toU64()) {
-            log.warn("❌ SECURITY: Sync block difficulty mismatch! Required: {}, Claimed: {}", .{ required_difficulty.toU64(), claimed_difficulty.toU64() });
+            // ENHANCED: Log detailed sync block difficulty calculation chain
+            log.warn("❌ SECURITY: Sync block difficulty mismatch detected!", .{});
+            log.warn("   📊 Required difficulty: {} (base_bytes={}, threshold=0x{X})", .{ required_difficulty.toU64(), required_difficulty.base_bytes, required_difficulty.threshold });
+            log.warn("   📦 Sync block claimed difficulty: {} (base_bytes={}, threshold=0x{X})", .{ claimed_difficulty.toU64(), claimed_difficulty.base_bytes, claimed_difficulty.threshold });
+            log.warn("   🔍 Block height: {}, timestamp: {}", .{ expected_height, block.header.timestamp });
+            
+            // Log detailed calculation chain for sync debugging
+            self.logDifficultyCalculationChain(expected_height) catch |err| {
+                log.warn("   ⚠️ Failed to log sync difficulty calculation chain: {}", .{err});
+            };
+            
             return false;
         }
 
@@ -390,6 +422,17 @@ pub const ChainValidator = struct {
             return false;
         }
         log.warn("✅ Proof-of-work validation passed for height {}", .{expected_height});
+
+        // CRITICAL: Validate account state root commitment during sync
+        // This prevents acceptance of blocks with divergent account states
+        const expected_state_root = try self.chain_state.calculateStateRoot();
+        if (!std.mem.eql(u8, &block.header.state_root, &expected_state_root)) {
+            log.warn("❌ CRITICAL: Sync block state root mismatch - rejecting divergent state!", .{});
+            log.warn("   Expected: {}", .{std.fmt.fmtSliceHexLower(&expected_state_root)});
+            log.warn("   Block:    {}", .{std.fmt.fmtSliceHexLower(&block.header.state_root)});
+            return false;
+        }
+        log.warn("✅ [SYNC] Account state root verified for height {}: {}", .{ expected_height, std.fmt.fmtSliceHexLower(&expected_state_root) });
 
         log.warn("🔍 validateSyncBlock: Checking previous hash links for height {}", .{expected_height});
 
@@ -506,7 +549,17 @@ pub const ChainValidator = struct {
         // SECURITY: Verify reorg block claims correct difficulty
         const claimed_difficulty = block.header.getDifficultyTarget();
         if (claimed_difficulty.toU64() != required_difficulty.toU64()) {
-            log.warn("❌ SECURITY: Reorg block difficulty mismatch! Required: {}, Claimed: {}", .{ required_difficulty.toU64(), claimed_difficulty.toU64() });
+            // ENHANCED: Log detailed reorg block difficulty calculation chain
+            log.warn("❌ SECURITY: Reorg block difficulty mismatch detected!", .{});
+            log.warn("   📊 Required difficulty: {} (base_bytes={}, threshold=0x{X})", .{ required_difficulty.toU64(), required_difficulty.base_bytes, required_difficulty.threshold });
+            log.warn("   📦 Reorg block claimed difficulty: {} (base_bytes={}, threshold=0x{X})", .{ claimed_difficulty.toU64(), claimed_difficulty.base_bytes, claimed_difficulty.threshold });
+            log.warn("   🔍 Block height: {}, timestamp: {}", .{ expected_height, block.header.timestamp });
+            
+            // Log detailed calculation chain for reorg debugging
+            self.logDifficultyCalculationChain(expected_height) catch |err| {
+                log.warn("   ⚠️ Failed to log reorg difficulty calculation chain: {}", .{err});
+            };
+            
             return false;
         }
 
@@ -575,5 +628,85 @@ pub const ChainValidator = struct {
         // Return median (middle value for odd count)
         const median_index = timestamps.items.len / 2;
         return timestamps.items[median_index];
+    }
+
+    /// ENHANCED: Log detailed difficulty calculation chain for debugging mismatches
+    fn logDifficultyCalculationChain(self: *Self, height: u32) !void {
+        log.warn("   🔗 DIFFICULTY CALCULATION CHAIN DEBUG:", .{});
+        
+        const current_height = try self.chain_state.getHeight();
+        log.warn("   📊 Current blockchain height: {}", .{current_height});
+        log.warn("   🎯 Target block height: {}", .{height});
+        
+        // Check if we're in adjustment period
+        const lookback_blocks = types.ZenMining.DIFFICULTY_ADJUSTMENT_PERIOD;
+        const target_block_time = types.ZenMining.TARGET_BLOCK_TIME;
+        
+        if (height < lookback_blocks) {
+            log.warn("   ⚡ Using initial difficulty (height {} < adjustment period {})", .{ height, lookback_blocks });
+            const initial_difficulty = types.ZenMining.initialDifficultyTarget();
+            log.warn("   📈 Initial difficulty: {} (base_bytes={}, threshold=0x{X})", .{ initial_difficulty.toU64(), initial_difficulty.base_bytes, initial_difficulty.threshold });
+            return;
+        }
+        
+        if (height % lookback_blocks != 0) {
+            log.warn("   ↔️ Not adjustment block (height {} % {} = {})", .{ height, lookback_blocks, height % lookback_blocks });
+            if (height > 0) {
+                var prev_block = try self.getBlockByHeight(height - 1);
+                defer prev_block.deinit(self.allocator);
+                const prev_difficulty = prev_block.header.getDifficultyTarget();
+                log.warn("   📈 Using previous block difficulty: {} (base_bytes={}, threshold=0x{X})", .{ prev_difficulty.toU64(), prev_difficulty.base_bytes, prev_difficulty.threshold });
+            }
+            return;
+        }
+        
+        log.warn("   🎯 ADJUSTMENT BLOCK - Calculating new difficulty:", .{});
+        
+        // Get timestamps for calculation
+        const old_block_height: u32 = @intCast(height - lookback_blocks);
+        const new_block_height: u32 = @intCast(height - 1);
+        
+        var old_block = try self.getBlockByHeight(old_block_height);
+        defer old_block.deinit(self.allocator);
+        var new_block = try self.getBlockByHeight(new_block_height);
+        defer new_block.deinit(self.allocator);
+        
+        const oldest_timestamp = old_block.header.timestamp;
+        const newest_timestamp = new_block.header.timestamp;
+        const actual_time_raw = newest_timestamp - oldest_timestamp;
+        const target_time = lookback_blocks * target_block_time;
+        
+        log.warn("   📅 Timestamp analysis:", .{});
+        log.warn("     🕐 Block {} timestamp: {}", .{ old_block_height, oldest_timestamp });
+        log.warn("     🕐 Block {} timestamp: {}", .{ new_block_height, newest_timestamp });
+        log.warn("     ⏱️ Raw time difference: {} seconds", .{actual_time_raw});
+        log.warn("     🎯 Target time ({} blocks × {} seconds): {} seconds", .{ lookback_blocks, target_block_time, target_time });
+        
+        // Apply bounds checking
+        const bounded_actual_time = if (actual_time_raw == 0) 
+            1 
+        else if (actual_time_raw > target_time * 4) 
+            target_time * 2 
+        else 
+            actual_time_raw;
+            
+        if (bounded_actual_time != actual_time_raw) {
+            log.warn("     ⚠️ Time bounded: {} → {} seconds", .{ actual_time_raw, bounded_actual_time });
+        }
+        
+        // Calculate adjustment factor using fixed-point arithmetic
+        const FIXED_POINT_MULTIPLIER: u64 = 1_000_000;
+        const adjustment_factor_fixed = (target_time * FIXED_POINT_MULTIPLIER) / bounded_actual_time;
+        const adjustment_factor_display = @as(f64, @floatFromInt(adjustment_factor_fixed)) / @as(f64, @floatFromInt(FIXED_POINT_MULTIPLIER));
+        
+        log.warn("   🧮 Adjustment calculation:", .{});
+        log.warn("     📐 Fixed-point factor: {} (= {d:.6})", .{ adjustment_factor_fixed, adjustment_factor_display });
+        
+        // Get current difficulty and show adjustment
+        const current_difficulty = new_block.header.getDifficultyTarget();
+        log.warn("     📊 Current difficulty: {} (base_bytes={}, threshold=0x{X})", .{ current_difficulty.toU64(), current_difficulty.base_bytes, current_difficulty.threshold });
+        
+        const new_difficulty = current_difficulty.adjustFixed(adjustment_factor_fixed, FIXED_POINT_MULTIPLIER, types.CURRENT_NETWORK);
+        log.warn("     📈 Calculated new difficulty: {} (base_bytes={}, threshold=0x{X})", .{ new_difficulty.toU64(), new_difficulty.base_bytes, new_difficulty.threshold });
     }
 };

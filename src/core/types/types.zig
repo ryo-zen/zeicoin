@@ -25,7 +25,7 @@ pub const TIMING = struct {
 
 // Progress reporting constants
 pub const PROGRESS = struct {
-    pub const RANDOMX_REPORT_INTERVAL: u32 = 10_000;
+    pub const RANDOMX_REPORT_INTERVAL: u32 = 5_000;  // More frequent updates for better feedback
     // SHA256_REPORT_INTERVAL removed - SHA256 mining no longer supported
     pub const DECIMAL_PRECISION_MULTIPLIER: u64 = 100_000;
 };
@@ -80,8 +80,11 @@ pub const BlockVersion = enum(u32) {
 // Current block version used by the protocol
 pub const CURRENT_BLOCK_VERSION: u32 = @intFromEnum(BlockVersion.V0);
 
-// Mining constants
-pub const COINBASE_MATURITY: u32 = 100; // Coinbase rewards require 100 confirmations
+// Mining constants - Network-specific coinbase maturity
+pub const COINBASE_MATURITY: u32 = switch (CURRENT_NETWORK) {
+    .testnet => 10,  // TestNet: 10 blocks for faster testing
+    .mainnet => 100, // MainNet: 100 blocks for security
+};
 
 // Bootstrap node configuration structure
 pub const BootstrapConfig = struct {
@@ -545,7 +548,7 @@ pub const DifficultyTarget = struct {
         return switch (network) {
             .testnet => DifficultyTarget{
                 .base_bytes = 1,
-                .threshold = 0xFF000000, // Super easy difficulty for reorganization testing (~1-5s blocks)
+                .threshold = 0xFFFF0000, // Ultra-easy difficulty for fast testing (near-instant blocks)
             },
             .mainnet => DifficultyTarget{
                 .base_bytes = 2,
@@ -574,7 +577,7 @@ pub const DifficultyTarget = struct {
         return hash_value < self.threshold;
     }
 
-    /// Adjust difficulty by factor, constrained to network limits
+    /// Adjust difficulty by factor, constrained to network limits (LEGACY - use adjustFixed for determinism)
     pub fn adjust(self: DifficultyTarget, factor: f64, network: NetworkType) DifficultyTarget {
         // Clamp factor to prevent extreme changes
         const clamped_factor = @max(0.5, @min(2.0, factor));
@@ -589,11 +592,73 @@ pub const DifficultyTarget = struct {
             .mainnet => 0x00000001, // Hardest 2-byte difficulty
         };
         const max_threshold: u32 = switch (network) {
-            .testnet => 0xFF000000, // Easiest 1-byte difficulty
+            .testnet => 0xFFFFF000, // Allow MUCH easier difficulty for testing (almost no work required)
             .mainnet => 0x00FF0000, // Easiest 2-byte difficulty
         };
 
         new_threshold = @max(min_threshold, @min(max_threshold, new_threshold));
+
+        return DifficultyTarget{
+            .base_bytes = self.base_bytes,
+            .threshold = new_threshold,
+        };
+    }
+
+    /// DETERMINISTIC: Adjust difficulty using fixed-point arithmetic (completely deterministic)
+    /// @param factor_fixed: Adjustment factor multiplied by fixed_point_multiplier
+    /// @param fixed_point_multiplier: The multiplier used (typically 1,000,000)
+    /// @param network: Network type for constraint validation
+    pub fn adjustFixed(self: DifficultyTarget, factor_fixed: u64, fixed_point_multiplier: u64, network: NetworkType) DifficultyTarget {
+        const debug_log = std.log.scoped(.chain);
+        
+        // DETERMINISTIC: Clamp factor to prevent extreme changes using integer math
+        // Convert bounds to fixed-point: 0.5 -> (0.5 * multiplier), 2.0 -> (2.0 * multiplier)
+        const min_factor_fixed = fixed_point_multiplier / 2; // 0.5 in fixed-point
+        const max_factor_fixed = fixed_point_multiplier * 2; // 2.0 in fixed-point
+        const clamped_factor_fixed = if (factor_fixed < min_factor_fixed) 
+            min_factor_fixed 
+        else if (factor_fixed > max_factor_fixed) 
+            max_factor_fixed 
+        else 
+            factor_fixed;
+
+        // DEBUG: Log factor clamping
+        debug_log.info("   🔧 Factor clamping: {} -> {} (min: {}, max: {})", .{ factor_fixed, clamped_factor_fixed, min_factor_fixed, max_factor_fixed });
+
+        // DETERMINISTIC: Calculate new threshold using integer-only arithmetic
+        // IMPORTANT: When factor < 1.0 (blocks too slow), we want HIGHER threshold (easier mining)
+        // So we DIVIDE by the factor: new_threshold = (current_threshold * multiplier) / factor
+        const threshold_u64 = @as(u64, self.threshold);
+        const new_threshold_u64 = (threshold_u64 * fixed_point_multiplier) / clamped_factor_fixed;
+        
+        // DEBUG: Log threshold calculation
+        debug_log.info("   🎯 Threshold calc: {} * {} / {} = {}", .{ threshold_u64, fixed_point_multiplier, clamped_factor_fixed, new_threshold_u64 });
+        
+        // Ensure result fits in u32
+        var new_threshold = if (new_threshold_u64 > 0xFFFFFFFF) 
+            0xFFFFFFFF 
+        else if (new_threshold_u64 == 0) 
+            1 
+        else 
+            @as(u32, @intCast(new_threshold_u64));
+
+        // DETERMINISTIC: Network constraints using simple integer comparison
+        const min_threshold: u32 = switch (network) {
+            .testnet => 0x00010000, // Hardest 1-byte difficulty
+            .mainnet => 0x00000001, // Hardest 2-byte difficulty
+        };
+        const max_threshold: u32 = switch (network) {
+            .testnet => 0xFFFFF000, // Allow MUCH easier difficulty for testing (almost no work required)
+            .mainnet => 0x00FF0000, // Easiest 2-byte difficulty
+        };
+
+        // Apply network constraints
+        const unconstrained_threshold = new_threshold;
+        if (new_threshold < min_threshold) new_threshold = min_threshold;
+        if (new_threshold > max_threshold) new_threshold = max_threshold;
+        
+        // DEBUG: Log network constraints
+        debug_log.info("   🌐 Network constraints: {} -> {} (min: 0x{X}, max: 0x{X})", .{ unconstrained_threshold, new_threshold, min_threshold, max_threshold });
 
         return DifficultyTarget{
             .base_bytes = self.base_bytes,
@@ -1015,7 +1080,7 @@ pub const Genesis = struct {
     pub fn getConfig() GenesisConfig {
         return switch (CURRENT_NETWORK) {
             .testnet => GenesisConfig{
-                .timestamp = 1704067200, // January 1, 2024 00:00:00 UTC
+                .timestamp = 1757419151, // January 1, 2024 00:00:00 UTC
                 .message = "ZeiCoin TestNet Genesis - A minimal digital currency written in ⚡Zig",
                 .reward = 50 * ZEI_COIN,
                 .nonce = 0x7E57DE7,
@@ -1121,9 +1186,12 @@ pub const ZenMining = struct {
     pub const TARGET_BLOCK_TIME: u64 = NetworkConfig.current().target_block_time;
     pub const MAX_NONCE: u32 = NetworkConfig.current().max_nonce;
     pub const RANDOMX_MODE: bool = NetworkConfig.current().randomx_mode;
-    pub const DIFFICULTY_ADJUSTMENT_PERIOD: u64 = 20; // Adjust every 20 blocks
+    pub const DIFFICULTY_ADJUSTMENT_PERIOD: u64 = 3; // Adjust every 3 blocks (temporary for testing, will be 20 in production)
     pub const MAX_ADJUSTMENT_FACTOR: f64 = 2.0; // Maximum 2x change per adjustment
-    pub const COINBASE_MATURITY: u32 = 100; // Coinbase rewards require 100 confirmations
+    pub const COINBASE_MATURITY: u32 = switch (CURRENT_NETWORK) {
+        .testnet => 10,  // TestNet: 10 blocks for faster testing
+        .mainnet => 100, // MainNet: 100 blocks for security
+    };
 
     /// Get initial difficulty target for current network
     pub fn initialDifficultyTarget() DifficultyTarget {
@@ -1242,7 +1310,7 @@ test "transaction validation" {
         .amount = 100 * ZEI_COIN,
         .fee = ZenFees.STANDARD_FEE,
         .nonce = 1,
-        .timestamp = 1704067200,
+        .timestamp = 1757419151,
         .expiry_height = 10000,
         .sender_public_key = alice_public_key,
         .signature = std.mem.zeroes(Signature),
@@ -1285,7 +1353,7 @@ test "block validation" {
         .amount = 100 * ZEI_COIN,
         .fee = ZenFees.STANDARD_FEE,
         .nonce = 1,
-        .timestamp = 1704067200,
+        .timestamp = 1757419151,
         .expiry_height = 10000,
         .sender_public_key = alice_public_key,
         .signature = std.mem.zeroes(Signature),
@@ -1301,7 +1369,7 @@ test "block validation" {
             .version = 0, // Block version 0 for current protocol
             .previous_hash = std.mem.zeroes(BlockHash),
             .merkle_root = std.mem.zeroes(Hash),
-            .timestamp = 1704067200,
+            .timestamp = 1757419151,
             .difficulty = ZenMining.initialDifficultyTarget().toU64(),
             .nonce = 0,
             .witness_root = std.mem.zeroes(Hash),
@@ -1405,7 +1473,7 @@ test "block header hash consistency" {
         .version = 0, // Block version 0 for current protocol
         .previous_hash = std.mem.zeroes(Hash),
         .merkle_root = [_]u8{1} ++ std.mem.zeroes([31]u8),
-        .timestamp = 1704067200,
+        .timestamp = 1757419151,
         .difficulty = test_difficulty,
         .nonce = 42,
         .witness_root = std.mem.zeroes(Hash),
@@ -1419,7 +1487,7 @@ test "block header hash consistency" {
         .version = 0, // Block version 0 for current protocol
         .previous_hash = std.mem.zeroes(Hash),
         .merkle_root = [_]u8{1} ++ std.mem.zeroes([31]u8),
-        .timestamp = 1704067200,
+        .timestamp = 1757419151,
         .difficulty = test_difficulty,
         .nonce = 42,
         .witness_root = std.mem.zeroes(Hash),
@@ -1444,7 +1512,7 @@ test "block header hash uniqueness" {
         .version = 0, // Block version 0 for current protocol
         .previous_hash = std.mem.zeroes(Hash),
         .merkle_root = std.mem.zeroes(Hash),
-        .timestamp = 1704067200,
+        .timestamp = 1757419151,
         .difficulty = test_difficulty,
         .nonce = 0,
         .witness_root = std.mem.zeroes(Hash),
@@ -1465,7 +1533,7 @@ test "block header hash uniqueness" {
 
     // Different timestamp should produce different hash
     var header_time1 = base_header;
-    header_time1.timestamp = 1704067200;
+    header_time1.timestamp = 1757419151;
     var header_time2 = base_header;
     header_time2.timestamp = 1704067300;
 
@@ -1503,7 +1571,7 @@ test "block hash delegated to header hash" {
         .amount = 100 * ZEI_COIN,
         .fee = ZenFees.STANDARD_FEE,
         .nonce = 1,
-        .timestamp = 1704067200,
+        .timestamp = 1757419151,
         .expiry_height = 10000,
         .sender_public_key = alice_public_key,
         .signature = std.mem.zeroes(Signature),
@@ -1519,7 +1587,7 @@ test "block hash delegated to header hash" {
             .version = 0, // Block version 0 for current protocol
             .previous_hash = std.mem.zeroes(BlockHash),
             .merkle_root = std.mem.zeroes(Hash),
-            .timestamp = 1704067200,
+            .timestamp = 1757419151,
             .difficulty = ZenMining.initialDifficultyTarget().toU64(),
             .nonce = 12345,
             .witness_root = std.mem.zeroes(Hash),
