@@ -2,8 +2,8 @@
 
 const std = @import("std");
 
-// Protocol version - increment due to inventory protocol removal
-pub const PROTOCOL_VERSION: u16 = 102; // 1.02 - inventory protocol removed
+// Protocol version - increment due to deterministic difficulty consensus fixes
+pub const PROTOCOL_VERSION: u16 = 103; // 1.03 - deterministic difficulty consensus
 
 // Network magic bytes - "ZEIC"
 pub const MAGIC: u32 = 0x5A454943;

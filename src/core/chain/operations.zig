@@ -119,12 +119,12 @@ pub const ChainOperations = struct {
     pub fn calculateNextDifficulty(self: *Self) !types.DifficultyTarget {
         const current_height = try self.getHeight();
 
-        // For first 20 blocks, use initial difficulty
+        // For first adjustment period blocks, use initial difficulty
         if (current_height < types.ZenMining.DIFFICULTY_ADJUSTMENT_PERIOD) {
             return types.ZenMining.initialDifficultyTarget();
         }
 
-        // Only adjust every 20 blocks
+        // Only adjust every DIFFICULTY_ADJUSTMENT_PERIOD blocks
         if (current_height % types.ZenMining.DIFFICULTY_ADJUSTMENT_PERIOD != 0) {
             // Not an adjustment block, use previous difficulty
             const prev_block_height: u32 = @intCast(current_height - 1);
@@ -136,12 +136,12 @@ pub const ChainOperations = struct {
         // This is an adjustment block! Calculate new difficulty
         log.info("📊 Difficulty adjustment at block {}", .{current_height});
 
-        // Get timestamps from last 20 blocks for time calculation
+        // Get timestamps from last adjustment period blocks for time calculation
         const lookback_blocks = types.ZenMining.DIFFICULTY_ADJUSTMENT_PERIOD;
         var oldest_timestamp: u64 = 0;
         var newest_timestamp: u64 = 0;
 
-        // Get timestamp from 20 blocks ago
+        // Get timestamp from adjustment period blocks ago
         {
             const old_block_height: u32 = @intCast(current_height - lookback_blocks);
             var old_block = try self.chain_state.database.getBlock(old_block_height);
@@ -162,7 +162,7 @@ pub const ChainOperations = struct {
         defer prev_block.deinit(self.allocator);
         const current_difficulty = prev_block.header.getDifficultyTarget();
 
-        // Calculate actual time for last 20 blocks
+        // Calculate actual time for last adjustment period blocks
         const actual_time = newest_timestamp - oldest_timestamp;
         const target_time = lookback_blocks * types.ZenMining.TARGET_BLOCK_TIME;
 

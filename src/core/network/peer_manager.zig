@@ -49,6 +49,7 @@ pub const Peer = struct {
     services: u64,
     height: u32,
     user_agent: []const u8,
+    best_block_hash: [32]u8,
 
     // Connection management
     last_ping: i64,
@@ -67,6 +68,9 @@ pub const Peer = struct {
     // TCP send callback
     tcp_send_fn: ?*const fn (ctx: ?*anyopaque, data: []const u8) anyerror!void,
     tcp_send_ctx: ?*anyopaque,
+    
+    // Shutdown synchronization
+    is_shutting_down: std.atomic.Value(bool),
 
     const Self = @This();
 
@@ -81,6 +85,7 @@ pub const Peer = struct {
             .services = 0,
             .height = 0,
             .user_agent = &[_]u8{},
+            .best_block_hash = [_]u8{0} ** 32,
             .last_ping = std.time.timestamp(),
             .last_recv = std.time.timestamp(),
             .ping_nonce = null,
@@ -91,10 +96,17 @@ pub const Peer = struct {
             .consecutive_failures = 0,
             .tcp_send_fn = null,
             .tcp_send_ctx = null,
+            .is_shutting_down = std.atomic.Value(bool).init(false),
         };
     }
 
     pub fn deinit(self: *Self) void {
+        // Signal shutdown to connection threads
+        self.is_shutting_down.store(true, .release);
+        
+        // Give threads a moment to notice the shutdown flag
+        std.time.sleep(10 * std.time.ns_per_ms);
+        
         if (self.user_agent.len > 0) {
             self.allocator.free(self.user_agent);
         }
@@ -121,12 +133,22 @@ pub const Peer = struct {
 
     /// Process received data
     pub fn receiveData(self: *Self, data: []const u8) !void {
+        // Check if we're shutting down before accessing connection
+        if (self.is_shutting_down.load(.acquire)) {
+            return error.PeerShuttingDown;
+        }
+        
         self.last_recv = std.time.timestamp();
         try self.connection.receiveData(data);
     }
 
     /// Try to read next message
     pub fn readMessage(self: *Self) !?message_envelope.MessageEnvelope {
+        // Check if we're shutting down before accessing connection
+        if (self.is_shutting_down.load(.acquire)) {
+            return null; // Return null to stop message processing
+        }
+        
         const result = try self.connection.readMessage();
         if (result) |_| {
             self.last_recv = std.time.timestamp();
