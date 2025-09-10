@@ -493,4 +493,42 @@ pub const ChainState = struct {
         }
         return false;
     }
+
+    /// Calculate the Merkle root of all account states in the database
+    /// This creates a cryptographic commitment to the entire account state
+    /// Any change to any account balance or nonce will change the root
+    pub fn calculateStateRoot(self: *Self) ![32]u8 {
+        // Structure to collect account hashes
+        const AccountHashCollector = struct {
+            hashes: *std.ArrayList([32]u8),
+            
+            pub fn callback(account: types.Account, user_data: ?*anyopaque) bool {
+                const collector = @as(*@This(), @ptrCast(@alignCast(user_data.?)));
+                
+                // Hash the account state using our Merkle tree utility
+                const account_hash = util.MerkleTree.hashAccountState(account);
+                collector.hashes.append(account_hash) catch {
+                    return false; // Stop iteration on allocation error
+                };
+                
+                return true; // Continue iteration
+            }
+        };
+
+        // Collect all account hashes in deterministic order
+        var account_hashes = std.ArrayList([32]u8).init(self.allocator);
+        defer account_hashes.deinit();
+
+        var collector = AccountHashCollector{ .hashes = &account_hashes };
+        
+        try self.database.iterateAccounts(AccountHashCollector.callback, &collector);
+
+        // Calculate Merkle root from all account hashes
+        const root = try util.MerkleTree.calculateRoot(self.allocator, account_hashes.items);
+
+        const account_count = account_hashes.items.len;
+        log.info("🌳 [STATE ROOT] Calculated from {} accounts: {}", .{ account_count, std.fmt.fmtSliceHexLower(&root) });
+
+        return root;
+    }
 };

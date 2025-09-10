@@ -438,6 +438,90 @@ pub const Database = struct {
         }
     }
 
+    /// Iterator callback function type for account iteration
+    pub const AccountIteratorCallback = fn (account: Account, user_data: ?*anyopaque) bool;
+
+    /// Iterate over all accounts in the database in deterministic order (sorted by address)
+    /// The callback function should return true to continue iteration, false to stop
+    pub fn iterateAccounts(self: *Database, callback: AccountIteratorCallback, user_data: ?*anyopaque) !void {
+        const it = c.rocksdb_create_iterator(self.db, self.read_options);
+        defer c.rocksdb_iter_destroy(it);
+
+        // Collect all account keys first, then sort them for deterministic order
+        var account_keys = std.ArrayList([]const u8).init(self.allocator);
+        defer {
+            for (account_keys.items) |key| {
+                self.allocator.free(key);
+            }
+            account_keys.deinit();
+        }
+
+        // First pass: collect all account keys
+        const prefix = ACCOUNT_PREFIX;
+        c.rocksdb_iter_seek(it, prefix.ptr, prefix.len);
+        
+        while (c.rocksdb_iter_valid(it) == 1) {
+            var key_len: usize = 0;
+            const key_ptr = c.rocksdb_iter_key(it, &key_len);
+            const key = key_ptr[0..key_len];
+
+            if (!std.mem.startsWith(u8, key, prefix)) {
+                break;
+            }
+
+            // Store a copy of the key
+            const key_copy = try self.allocator.dupe(u8, key);
+            try account_keys.append(key_copy);
+
+            c.rocksdb_iter_next(it);
+        }
+
+        // Sort keys for deterministic order
+        std.mem.sort([]const u8, account_keys.items, {}, struct {
+            fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.order(u8, a, b) == .lt;
+            }
+        }.lessThan);
+
+        // Second pass: iterate in sorted order and call callback
+        for (account_keys.items) |key| {
+            var err: ?[*:0]u8 = null;
+            var val_len: usize = 0;
+            const val_ptr = c.rocksdb_get(
+                self.db,
+                self.read_options,
+                key.ptr,
+                key.len,
+                &val_len,
+                @ptrCast(&err),
+            );
+
+            if (err != null) {
+                c.rocksdb_free(@constCast(@ptrCast(err)));
+                continue; // Skip this account on error
+            }
+
+            if (val_ptr == null) {
+                continue; // Skip if no value
+            }
+            defer c.rocksdb_free(val_ptr);
+
+            const data = val_ptr[0..val_len];
+            var stream = std.io.fixedBufferStream(data);
+            const reader = stream.reader();
+            
+            const account = serialize.deserialize(reader, Account, self.allocator) catch {
+                continue; // Skip on deserialization error
+            };
+
+            // Call callback with account
+            const should_continue = callback(account, user_data);
+            if (!should_continue) {
+                break;
+            }
+        }
+    }
+
     pub fn getWalletPath(self: *Database, wallet_name: []const u8) ![]u8 {
         _ = try self.makeWalletKey(wallet_name);
         return std.fmt.allocPrint(self.allocator, "{s}/wallets/{s}.wallet", .{ self.base_path, wallet_name });
