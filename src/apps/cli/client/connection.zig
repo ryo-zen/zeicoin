@@ -31,13 +31,9 @@ pub const ClientConnection = struct {
     }
 
     pub fn readResponse(self: *ClientConnection, buffer: []u8) ![]const u8 {
-        const bytes_read = readWithTimeout(self.stream, buffer) catch |err| {
-            switch (err) {
-                error.ReadTimeout => {
-                    log.info("❌ Server response timeout (5s)", .{});
-                    return ConnectionError.ConnectionTimeout;
-                },
-            }
+        const bytes_read = readWithTimeout(self.stream, buffer) catch {
+            log.info("❌ Server response timeout (5s)", .{});
+            return ConnectionError.ConnectionTimeout;
         };
         return buffer[0..bytes_read];
     }

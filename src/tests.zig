@@ -146,7 +146,7 @@ test "transaction processing" {
         .amount = 10 * types.ZEI_COIN,
         .fee = types.ZenFees.STANDARD_FEE,
         .nonce = 0,
-        .timestamp = 1704067200,
+        .timestamp = 1757419151,
         .expiry_height = 10000, // Far future for test
         .sender_public_key = sender_keypair.public_key,
         .signature = std.mem.zeroes(types.Signature), // Will be replaced
