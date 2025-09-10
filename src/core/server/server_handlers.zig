@@ -30,6 +30,9 @@ pub const ServerHandlers = struct {
         
         return network.MessageHandler{
             .getHeight = getHeightGlobal,
+            .getBestBlockHash = getBestBlockHashGlobal,
+            .getGenesisHash = getGenesisHashGlobal,
+            .getCurrentDifficulty = getCurrentDifficultyGlobal,
             .onPeerConnected = onPeerConnectedGlobal,
             .onBlock = onBlockGlobal,
             .onTransaction = onTransactionGlobal,
@@ -45,16 +48,50 @@ pub const ServerHandlers = struct {
         return self.blockchain.getHeight();
     }
     
+    fn getBestBlockHash(self: *Self) ![32]u8 {
+        return self.blockchain.getBestBlockHash();
+    }
+    
+    fn getGenesisHash(self: *Self) ![32]u8 {
+        _ = self; // Not used, but required for interface
+        // Get the canonical genesis hash for the current network
+        const genesis = @import("../chain/genesis.zig");
+        return genesis.getCanonicalGenesisHash();
+    }
+    
+    fn getCurrentDifficulty(self: *Self) !u64 {
+        return self.blockchain.getCurrentDifficulty();
+    }
+    
     fn onPeerConnected(self: *Self, peer: *network.Peer) !void {
         const our_height = try self.blockchain.getHeight();
+        const our_best_hash = try self.blockchain.getBestBlockHash();
+        
         std.log.info("👥 [PEER CONNECT] Peer {any} connected at height {} (our height: {})", .{
             peer.address, peer.height, our_height
         });
         std.log.info("🔍 [PEER CONNECT] Peer state: {}, services: 0x{x}", .{peer.state, peer.services});
         std.log.info("🔍 [PEER CONNECT] Sync manager status: {}", .{self.blockchain.sync_manager != null});
         
+        // Check for chain divergence first
+        const has_diverged = (peer.height == our_height and !std.mem.eql(u8, &peer.best_block_hash, &our_best_hash));
+        if (has_diverged) {
+            std.log.warn("⚠️ [CHAIN DIVERGENCE] Detected at height {} - forcing sync!", .{our_height});
+            std.log.warn("📊 Peer hash: {s}, Our hash: {s}", .{
+                std.fmt.fmtSliceHexLower(&peer.best_block_hash),
+                std.fmt.fmtSliceHexLower(&our_best_hash),
+            });
+            // Force sync even at same height due to divergence
+            if (self.blockchain.sync_manager) |sync_manager| {
+                if (sync_manager.getSyncState().canStart()) {
+                    std.log.info("🔄 [DIVERGENCE] Starting sync to resolve chain divergence", .{});
+                    // We'll sync from height 0 to rebuild the correct chain
+                    try sync_manager.startSync(peer, peer.height);
+                }
+            }
+        }
         // Check if we need to sync from peer (they have more blocks)
-        if (peer.height > our_height) {
+        else if (peer.height > our_height) {
             const blocks_behind = peer.height - our_height;
             std.log.info("🚀 [PEER CONNECT] Peer has {} more blocks! Starting sync process...", .{blocks_behind});
             
@@ -180,6 +217,18 @@ pub const ServerHandlers = struct {
 // Global wrapper functions for function pointers
 fn getHeightGlobal() anyerror!u32 {
     return global_handler.?.getHeight();
+}
+
+fn getBestBlockHashGlobal() anyerror![32]u8 {
+    return global_handler.?.getBestBlockHash();
+}
+
+fn getGenesisHashGlobal() anyerror![32]u8 {
+    return global_handler.?.getGenesisHash();
+}
+
+fn getCurrentDifficultyGlobal() anyerror!u64 {
+    return global_handler.?.getCurrentDifficulty();
 }
 
 fn onPeerConnectedGlobal(peer: *network.Peer) anyerror!void {

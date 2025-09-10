@@ -258,6 +258,29 @@ pub const ZeiCoin = struct {
     pub fn getBlockByHeight(self: *ZeiCoin, height: u32) !Block {
         return try self.chain_query.getBlock(height);
     }
+    
+    pub fn getBlockHashAtHeight(self: *ZeiCoin, height: u32) ![32]u8 {
+        const block = try self.chain_query.getBlock(height);
+        return block.hash();
+    }
+    
+    pub fn getBestBlockHash(self: *ZeiCoin) ![32]u8 {
+        const current_height = try self.getHeight();
+        if (current_height == 0) {
+            // Return genesis block hash if at height 0
+            return genesis.getCanonicalGenesisHash();
+        }
+        return try self.getBlockHashAtHeight(current_height);
+    }
+    
+    pub fn getCurrentDifficulty(self: *ZeiCoin) !u64 {
+        // Calculate what the current difficulty should be for the next block
+        var difficulty_calc = DifficultyCalculator.init(self.allocator, self.database);
+        defer difficulty_calc.deinit();
+        
+        const difficulty_target = try difficulty_calc.calculateNextDifficulty();
+        return difficulty_target.toU64();
+    }
     fn getMedianTimePast(self: *ZeiCoin, height: u32) !u64 {
         return try self.chain_query.getMedianTimePast(height);
     }

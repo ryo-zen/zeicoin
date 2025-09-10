@@ -22,6 +22,12 @@ pub const HandshakeMessage = struct {
     start_height: u32,
     /// Network ID to prevent cross-network connections
     network_id: u32,
+    /// Hash of our best block at start_height
+    best_block_hash: [32]u8,
+    /// Current difficulty target for consensus compatibility checking
+    current_difficulty: u64,
+    /// Genesis block hash to ensure chain compatibility
+    genesis_hash: [32]u8,
     
     const Self = @This();
     const MAX_USER_AGENT_LEN = 256;
@@ -38,6 +44,9 @@ pub const HandshakeMessage = struct {
             .user_agent = agent_copy,
             .start_height = 0, // Set by caller
             .network_id = types.CURRENT_NETWORK.getNetworkId(),
+            .best_block_hash = [_]u8{0} ** 32, // Set by caller with actual best block hash
+            .current_difficulty = types.ZenMining.initialDifficultyTarget().toU64(), // Set by caller
+            .genesis_hash = [_]u8{0} ** 32, // Set by caller with genesis hash
         };
     }
     
@@ -65,6 +74,9 @@ pub const HandshakeMessage = struct {
         
         try writer.writeInt(u32, self.start_height, .little);
         try writer.writeInt(u32, self.network_id, .little);
+        try writer.writeAll(&self.best_block_hash);
+        try writer.writeInt(u64, self.current_difficulty, .little);
+        try writer.writeAll(&self.genesis_hash);
     }
     
     pub fn decode(allocator: std.mem.Allocator, reader: anytype) !Self {
@@ -87,6 +99,14 @@ pub const HandshakeMessage = struct {
         const start_height = try reader.readInt(u32, .little);
         const network_id = try reader.readInt(u32, .little);
         
+        var best_block_hash: [32]u8 = undefined;
+        try reader.readNoEof(&best_block_hash);
+        
+        const current_difficulty = try reader.readInt(u64, .little);
+        
+        var genesis_hash: [32]u8 = undefined;
+        try reader.readNoEof(&genesis_hash);
+        
         return Self{
             .version = version,
             .services = services,
@@ -96,13 +116,16 @@ pub const HandshakeMessage = struct {
             .user_agent = user_agent,
             .start_height = start_height,
             .network_id = network_id,
+            .best_block_hash = best_block_hash,
+            .current_difficulty = current_difficulty,
+            .genesis_hash = genesis_hash,
         };
     }
     
     pub fn estimateSize(self: Self) usize {
         return 2 + 8 + 8 + 2 + 8 + // Fixed fields
             2 + self.user_agent.len + // User agent
-            4 + 4; // Height and network
+            4 + 4 + 32 + 8 + 32; // Height, network, best block hash, difficulty, and genesis hash
     }
     
     /// Check if this node supports a specific service
@@ -159,6 +182,59 @@ pub const HandshakeMessage = struct {
         return protocol.ServiceFlags.supportsFastSync(self.services);
     }
     
+    /// Check genesis block compatibility with peer
+    pub fn checkGenesisCompatibility(self: Self, our_genesis_hash: [32]u8) !void {
+        if (!std.mem.eql(u8, &self.genesis_hash, &our_genesis_hash)) {
+            std.log.err("🚫 [CHAIN INCOMPATIBLE] Peer is on a different blockchain!", .{});
+            std.log.err("   ⛓️  Our genesis: {s}", .{std.fmt.fmtSliceHexLower(&our_genesis_hash)});
+            std.log.err("   ⛓️  Peer genesis: {s}", .{std.fmt.fmtSliceHexLower(&self.genesis_hash)});
+            std.log.err("   ℹ️  Cannot sync with this peer - incompatible chain", .{});
+            return error.IncompatibleGenesis;
+        }
+        std.log.info("✅ [GENESIS] Compatible genesis block with peer", .{});
+    }
+    
+    /// ENHANCED: Check difficulty consensus compatibility with peer
+    pub fn checkDifficultyConsensus(self: Self, our_difficulty: u64, our_height: u32) !void {
+        // Allow some tolerance for nodes at different heights
+        if (self.start_height == our_height) {
+            // Same height - difficulty must match exactly
+            if (self.current_difficulty != our_difficulty) {
+                // Extract threshold from difficulty for proper hex display
+                const our_threshold = @as(u32, @intCast(our_difficulty & 0xFFFFFFFF));
+                const peer_threshold = @as(u32, @intCast(self.current_difficulty & 0xFFFFFFFF));
+                
+                std.log.warn("❌ CONSENSUS: Peer difficulty mismatch at height {}", .{our_height});
+                std.log.warn("   📊 Our difficulty: {} (0x{X})", .{ our_difficulty, our_threshold });
+                std.log.warn("   📦 Peer difficulty: {} (0x{X})", .{ self.current_difficulty, peer_threshold });
+                std.log.warn("   🔍 Peer info: {s} at {}:{}", .{ self.user_agent, self.start_height, self.listen_port });
+                return error.DifficultyConsensusMismatch;
+            }
+            std.log.info("✅ CONSENSUS: Difficulty match with peer at height {} ({})", .{ our_height, our_difficulty });
+        } else if (@abs(@as(i64, @intCast(self.start_height)) - @as(i64, @intCast(our_height))) <= 1) {
+            // Within 1 block - log but allow connection
+            std.log.info("ℹ️ CONSENSUS: Peer height {} vs our height {}, difficulty {} vs {}", .{
+                self.start_height, our_height, self.current_difficulty, our_difficulty
+            });
+        } else {
+            // Different heights - difficulty comparison not meaningful
+            std.log.info("ℹ️ CONSENSUS: Peer at different height ({} vs {}), skipping difficulty check", .{
+                self.start_height, our_height
+            });
+        }
+    }
+
+    /// ENHANCED: Check overall peer compatibility including difficulty consensus
+    pub fn checkPeerCompatibility(self: Self, our_height: u32, our_difficulty: u64) !void {
+        // Run standard validation first
+        try self.validate();
+        
+        // Check difficulty consensus
+        try self.checkDifficultyConsensus(our_difficulty, our_height);
+        
+        std.log.info("✅ COMPATIBILITY: Peer {s} passed all compatibility checks", .{self.user_agent});
+    }
+
     /// Get quality score for peer selection (0-100)
     pub fn getQualityScore(self: Self, our_height: u32) u8 {
         var score: u32 = 0;
