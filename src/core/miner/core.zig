@@ -119,6 +119,10 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
     // Calculate difficulty for new block
     const next_difficulty_target = try ctx.blockchain.calculateNextDifficulty();
 
+    // Calculate current account state root before creating block
+    const account_state_root = try ctx.blockchain.chain_state.calculateStateRoot();
+    log.info("🌳 [MINING] Calculated state root for new block: {}", .{std.fmt.fmtSliceHexLower(&account_state_root)});
+
     // Create block with dynamic difficulty
     var new_block = Block{
         .header = BlockHeader{
@@ -129,7 +133,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
             .difficulty = next_difficulty_target.toU64(),
             .nonce = 0,
             .witness_root = std.mem.zeroes(Hash), // No witness data yet
-            .state_root = std.mem.zeroes(Hash), // No state yet
+            .state_root = account_state_root, // Account state commitment
             .extra_nonce = 0,
             .extra_data = blk: {
                 // Add randomness to prevent identical blocks between miners

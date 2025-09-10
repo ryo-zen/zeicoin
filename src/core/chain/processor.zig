@@ -115,7 +115,7 @@ pub const ChainProcessor = struct {
         log.info("📊 [BLOCK APPLY] Block applied at height {}, database now has {} blocks", .{ block_height, try self.database.getHeight() });
     }
 
-    /// Accept a block after validation (used in reorganization)
+    /// Accept a block after validation (used in reorganization and sync)
     pub fn acceptBlock(self: *ChainProcessor, block: types.Block) !void {
         const block_hash = block.hash();
         
@@ -126,13 +126,40 @@ pub const ChainProcessor = struct {
         }
 
         const current_height = try self.database.getHeight();
+        
+        // CRITICAL: Verify this block builds on our current chain tip
+        // The block's previous_hash must match our current tip's hash
+        if (current_height > 0) {
+            var current_tip = try self.database.getBlock(current_height);
+            defer current_tip.deinit(self.allocator);
+            const current_tip_hash = current_tip.hash();
+            
+            if (!std.mem.eql(u8, &block.header.previous_hash, &current_tip_hash)) {
+                log.warn("❌ [BLOCK REJECT] Block's previous_hash doesn't match our tip", .{});
+                log.warn("   📊 Our tip at height {}: {s}", .{ current_height, std.fmt.fmtSliceHexLower(&current_tip_hash) });
+                log.warn("   📦 Block's previous_hash: {s}", .{ std.fmt.fmtSliceHexLower(&block.header.previous_hash) });
+                log.warn("   ℹ️ This block belongs to a different chain or is from the future", .{});
+                return error.InvalidPreviousHash;
+            }
+        } else if (current_height == 0) {
+            // At height 0, we should only accept blocks that build on genesis OR are genesis
+            if (genesis.validateGenesis(block)) {
+                // This is a genesis block, which shouldn't be sent via acceptBlock
+                log.warn("❌ [BLOCK REJECT] Genesis block should not be processed via acceptBlock", .{});
+                return error.UnexpectedGenesisBlock;
+            }
+            
+            // Block at height 1 must reference genesis
+            const genesis_hash = genesis.getCanonicalGenesisHash();
+            if (!std.mem.eql(u8, &block.header.previous_hash, &genesis_hash)) {
+                log.warn("❌ [BLOCK REJECT] Block at height 1 must reference genesis", .{});
+                log.warn("   📊 Genesis hash: {s}", .{ std.fmt.fmtSliceHexLower(&genesis_hash) });
+                log.warn("   📦 Block's previous_hash: {s}", .{ std.fmt.fmtSliceHexLower(&block.header.previous_hash) });
+                return error.InvalidPreviousHash;
+            }
+        }
 
-        // Special case: if we're at height 0 (after rollback to genesis) and the incoming block
-        // is not a genesis block, we need to save it at height 1, not height 0
-        const target_height = if (current_height == 0 and !genesis.validateGenesis(block)) blk: {
-            log.info("🔄 Accepting non-genesis block after rollback - placing at height 1", .{});
-            break :blk @as(u32, 1);
-        } else current_height + 1;  // FIXED: Properly increment height for chain extension
+        const target_height = current_height + 1;
 
         // Secondary check: verify height is available (defensive programming)
         if (self.database.blockExistsByHeight(target_height)) {

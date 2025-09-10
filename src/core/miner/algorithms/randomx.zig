@@ -39,6 +39,7 @@ pub fn zenProofOfWorkRandomX(ctx: MiningContext, block: *types.Block) bool {
 
     var nonce: u32 = 0;
     const difficulty_target = block.header.getDifficultyTarget();
+    const mining_start_time = std.time.milliTimestamp();
     
     while (nonce < types.ZenMining.MAX_NONCE) {
         // Check if blockchain height changed (another miner found a block)
@@ -82,7 +83,19 @@ pub fn zenProofOfWorkRandomX(ctx: MiningContext, block: *types.Block) bool {
 
         // Progress indicator (every 10k tries for RandomX due to slower speed)
         if (nonce % types.PROGRESS.RANDOMX_REPORT_INTERVAL == 0) {
-            log.info("⛏️  RandomX mining... tried {} nonces ({d:.1} nonces/sec)", .{ nonce, @as(f64, @floatFromInt(nonce)) / (@as(f64, @floatFromInt(util.getTime() - starting_height)) + 1.0) });
+            const elapsed_ms = std.time.milliTimestamp() - mining_start_time;
+            const elapsed_sec = @as(f64, @floatFromInt(elapsed_ms)) / 1000.0;
+            const hash_rate = if (elapsed_sec > 0) @as(f64, @floatFromInt(nonce)) / elapsed_sec else 0;
+            const elapsed_min = @divFloor(elapsed_ms, 60000);
+            const elapsed_sec_remainder = @rem(@divFloor(elapsed_ms, 1000), 60);
+            
+            log.info("⛏️  Mining block #{} | {} hashes tried | {d:.1} H/s | {}m {}s elapsed", .{ 
+                starting_height + 1,
+                nonce, 
+                hash_rate,
+                elapsed_min,
+                elapsed_sec_remainder
+            });
         }
     }
 
