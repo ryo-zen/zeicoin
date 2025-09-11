@@ -119,6 +119,22 @@ pub const ZeiCoin = struct {
 
         instance_ptr.chain_processor = ChainProcessor.init(allocator, instance_ptr.database, &instance_ptr.chain_state, &instance_ptr.chain_validator, null);
         components_initialized = 4;
+        
+        // Initialize ReorgManager now that chain components are ready
+        // Note: ChainOperations is ChainProcessor in our architecture
+        instance_ptr.reorg_manager = ReorgManager.init(
+            allocator,
+            &instance_ptr.chain_state,
+            &instance_ptr.chain_validator,
+            &instance_ptr.chain_processor,
+        ) catch |err| blk: {
+            log.warn("Failed to initialize ReorgManager: {}, chain reorgs disabled", .{err});
+            break :blk null;
+        };
+        
+        // Pass reorg_manager to chain_processor
+        instance_ptr.chain_processor.reorg_manager = instance_ptr.reorg_manager;
+        components_initialized = 5;
 
 
         instance_ptr.difficulty_calculator = DifficultyCalculator.init(allocator, instance_ptr.database);

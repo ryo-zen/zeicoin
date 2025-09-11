@@ -41,6 +41,7 @@ pub const ServerHandlers = struct {
             .onPeers = onPeersGlobal,
             .onGetBlockHash = onGetBlockHashGlobal,
             .onBlockHash = onBlockHashGlobal,
+            .onPeerDisconnected = onPeerDisconnectedGlobal,
         };
     }
     
@@ -140,26 +141,98 @@ pub const ServerHandlers = struct {
         
         std.log.info("📋 [GET_BLOCKS] Current height: {}, peer requesting blocks", .{current_height});
         
-        // Send blocks starting from height 1 up to current height
-        // This handles the common case where peer is at genesis (height 0) and needs all blocks
-        var height: u32 = 1;
-        while (height <= current_height) : (height += 1) {
-            if (self.blockchain.database.getBlock(height)) |block| {
-                std.log.info("📤 [GET_BLOCKS] Sending block {} to peer {any}", .{ height, peer.address });
+        var blocks_sent: u32 = 0;
+        
+        // Process each requested hash - decode ZSP-001 height encoding if present
+        for (msg.hashes) |hash| {
+            const requested_height = if (isZSP001HeightEncoded(hash)) |height| blk: {
+                std.log.info("📋 [ZSP-001] Decoded height-encoded request: {}", .{height});
+                break :blk height;
+            } else blk: {
+                // Legacy hash-based request - look up block by hash
+                std.log.info("📋 [LEGACY] Hash-based request: {s}", .{std.fmt.fmtSliceHexLower(hash[0..8])});
+                // For now, fallback to old behavior for legacy requests
+                break :blk null;
+            };
+            
+            if (requested_height) |height| {
+                // ZSP-001 height-based request
+                if (height > current_height) {
+                    std.log.info("📋 [GET_BLOCKS] Requested height {} beyond current height {}", .{ height, current_height });
+                    continue;
+                }
                 
-                // Send block to peer
-                const block_msg = network.message_types.BlockMessage{ .block = block };
-                _ = peer.sendMessage(.block, block_msg) catch |err| {
-                    std.log.err("Failed to send block {} to peer: {}", .{ height, err });
-                    break;
-                };
-            } else |err| {
-                std.log.err("Failed to get block {}: {}", .{ height, err });
-                break;
+                if (self.blockchain.database.getBlock(height)) |block| {
+                    std.log.info("📤 [GET_BLOCKS] Sending block {} to peer {any}", .{ height, peer.address });
+                    
+                    // Send block to peer
+                    const block_msg = network.message_types.BlockMessage{ .block = block };
+                    _ = peer.sendMessage(.block, block_msg) catch |err| {
+                        std.log.err("Failed to send block {} to peer: {}", .{ height, err });
+                        std.log.info("📊 [GET_BLOCKS] Sent {} blocks before connection error", .{ blocks_sent });
+                        return;
+                    };
+                    blocks_sent += 1;
+                } else |err| {
+                    std.log.err("Failed to get block {}: {}", .{ height, err });
+                }
+            } else {
+                // Legacy hash-based request - fallback to old behavior
+                std.log.info("📋 [LEGACY] Processing hash-based request - sending all blocks from height 1", .{});
+                var height: u32 = 1;
+                while (height <= current_height) : (height += 1) {
+                    if (self.blockchain.database.getBlock(height)) |block| {
+                        const block_msg = network.message_types.BlockMessage{ .block = block };
+                        _ = peer.sendMessage(.block, block_msg) catch |err| {
+                            std.log.err("Failed to send block {} to peer: {}", .{ height, err });
+                            return;
+                        };
+                        blocks_sent += 1;
+                    } else |err| {
+                        std.log.err("Failed to get block {}: {}", .{ height, err });
+                        break;
+                    }
+                }
+                break; // Exit loop after processing legacy request
             }
         }
         
-        std.log.info("✅ [GET_BLOCKS] Sent {} blocks to peer {any}", .{ current_height, peer.address });
+        if (blocks_sent == current_height) {
+            std.log.info("✅ [GET_BLOCKS] Successfully sent all {} blocks to peer {any}", .{ blocks_sent, peer.address });
+        } else if (blocks_sent > 0) {
+            std.log.info("⚠️ [GET_BLOCKS] Sent {} of {} blocks to peer {any}", .{ blocks_sent, current_height, peer.address });
+        }
+    }
+
+    /// Decode ZSP-001 height-encoded hash and return the height if valid
+    /// Supports both encoding formats: batch sync and peer manager
+    /// Returns null if not a valid ZSP-001 height-encoded hash
+    fn isZSP001HeightEncoded(hash: [32]u8) ?u32 {
+        const ZSP_001_MAGIC: u32 = 0xDEADBEEF;
+        
+        // Check batch sync format: [0xDEADBEEF:4][height:4][zeros:24]
+        const batch_magic = std.mem.readInt(u32, hash[0..4], .little);
+        if (batch_magic == ZSP_001_MAGIC) {
+            const height = std.mem.readInt(u32, hash[4..8], .little);
+            // Verify remaining bytes are zero
+            for (hash[8..]) |byte| {
+                if (byte != 0) return null;
+            }
+            return height;
+        }
+        
+        // Check peer manager format: [height:4][0xDEADBEEF:4][zeros:24]
+        const peer_magic = std.mem.readInt(u32, hash[4..8], .little);
+        if (peer_magic == ZSP_001_MAGIC) {
+            const height = std.mem.readInt(u32, hash[0..4], .little);
+            // Verify remaining bytes are zero
+            for (hash[8..]) |byte| {
+                if (byte != 0) return null;
+            }
+            return height;
+        }
+        
+        return null; // Not a ZSP-001 encoded hash
     }
 
     fn onGetPeers(self: *Self, peer: *network.Peer, msg: network.message_types.GetPeersMessage) !void {
@@ -212,6 +285,31 @@ pub const ServerHandlers = struct {
         // Future: Store consensus response for verification logic
         _ = self; // Placeholder for future consensus implementation
     }
+    
+    fn onPeerDisconnected(self: *Self, peer: *network.Peer, err: anyerror) !void {
+        // If sync is active and we got a block validation error, reset sync state
+        if (self.blockchain.sync_manager) |sync_manager| {
+            const sync_state = sync_manager.getSyncState();
+            
+            // Check if this is a block validation error during sync
+            const is_block_error = switch (err) {
+                error.InvalidPreviousHash,
+                error.InvalidBlock,
+                error.InvalidDifficulty,
+                error.InvalidProofOfWork => true,
+                else => false,
+            };
+            
+            if (sync_state.isActive() and is_block_error) {
+                std.log.info("🔄 [SYNC] Resetting sync state due to block validation error: {}", .{err});
+                // Reset sync to allow retry with next peer
+                sync_manager.batch_sync.failSync("Block validation failed");
+                sync_manager.sync_state = .idle;  // Also reset manager state
+            }
+        }
+        
+        _ = peer;
+    }
 };
 
 // Global wrapper functions for function pointers
@@ -261,4 +359,10 @@ fn onGetBlockHashGlobal(peer: *network.Peer, msg: network.message_types.GetBlock
 
 fn onBlockHashGlobal(peer: *network.Peer, msg: network.message_types.BlockHashMessage) anyerror!void {
     return global_handler.?.onBlockHash(peer, msg);
+}
+
+fn onPeerDisconnectedGlobal(peer: *network.Peer, err: anyerror) anyerror!void {
+    if (global_handler) |handler| {
+        return handler.onPeerDisconnected(peer, err);
+    }
 }

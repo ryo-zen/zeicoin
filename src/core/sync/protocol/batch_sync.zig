@@ -903,7 +903,7 @@ pub const BatchSyncProtocol = struct {
 
     /// Fail the synchronization with a reason
     /// Cleans up state and allows for future retry attempts
-    fn failSync(self: *Self, reason: []const u8) void {
+    pub fn failSync(self: *Self, reason: []const u8) void {
         log.info("❌ [BATCH SYNC] Sync failed: {s}", .{reason});
 
         self.sync_state = .failed;

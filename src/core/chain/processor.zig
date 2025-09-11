@@ -19,6 +19,7 @@ pub const ChainProcessor = struct {
     // fork_manager removed - using modern reorganization system
     chain_validator: *ChainValidator,
     mempool_manager: ?*@import("../mempool/manager.zig").MempoolManager,
+    reorg_manager: ?*@import("reorganization/manager.zig").ReorgManager = null,
     // Reference to parent for network broadcasting
     network_callback: ?*const fn (block: types.Block) void = null,
 
@@ -135,11 +136,54 @@ pub const ChainProcessor = struct {
             const current_tip_hash = current_tip.hash();
             
             if (!std.mem.eql(u8, &block.header.previous_hash, &current_tip_hash)) {
-                log.warn("❌ [BLOCK REJECT] Block's previous_hash doesn't match our tip", .{});
+                log.warn("⚠️ [FORK DETECTED] Block doesn't connect to our chain tip", .{});
                 log.warn("   📊 Our tip at height {}: {s}", .{ current_height, std.fmt.fmtSliceHexLower(&current_tip_hash) });
                 log.warn("   📦 Block's previous_hash: {s}", .{ std.fmt.fmtSliceHexLower(&block.header.previous_hash) });
-                log.warn("   ℹ️ This block belongs to a different chain or is from the future", .{});
-                return error.InvalidPreviousHash;
+                log.warn("   🔀 Block hash: {s}", .{ std.fmt.fmtSliceHexLower(&block_hash) });
+                
+                // Check if we have a reorg manager to handle chain forks
+                if (self.reorg_manager) |reorg| {
+                    log.info("🔄 [REORG] Attempting chain reorganization...", .{});
+                    log.info("   📍 Current height: {}", .{current_height});
+                    log.info("   📦 New block attempting to fork chain", .{});
+                    
+                    // Attempt reorganization
+                    const result = reorg.executeReorganization(block, block_hash) catch |err| {
+                        log.err("❌ [REORG FAILED] Error during reorganization: {}", .{err});
+                        return error.InvalidPreviousHash;
+                    };
+                    
+                    if (result.success) {
+                        log.info("✅ [REORG SUCCESS] Chain reorganized!", .{});
+                        log.info("   ⬆️ Blocks reverted: {}", .{result.blocks_reverted});
+                        log.info("   ⬇️ Blocks applied: {}", .{result.blocks_applied});
+                        log.info("   🔄 Transactions replayed: {}", .{result.transactions_replayed});
+                        log.info("   ❌ Transactions orphaned: {}", .{result.transactions_orphaned});
+                        log.info("   ⏱️ Duration: {}ms", .{result.duration_ms});
+                        return; // Reorg successful, block accepted
+                    } else {
+                        log.warn("❌ [REORG FAILED] Could not reorganize to new chain", .{});
+                        if (result.error_message) |msg| {
+                            log.warn("   💬 Reason: {s}", .{msg});
+                        }
+                        
+                        // If reorganization failed but we found a fork point, 
+                        // we need to sync from that point to get the missing blocks
+                        if (result.fork_height) |fork_height| {
+                            log.info("🔄 [FORK SYNC] Need to sync from fork point at height {}", .{fork_height});
+                            log.info("   📥 Missing blocks: {}-{}", .{ fork_height + 1, current_height + 2 });
+                            
+                            // Store fork height for sync system to use
+                            // TODO: Implement custom sync start height
+                            // For now, the error will trigger normal sync retry
+                        }
+                        
+                        return error.InvalidPreviousHash;
+                    }
+                } else {
+                    log.warn("   ⚠️ No reorg manager available, rejecting block", .{});
+                    return error.InvalidPreviousHash;
+                }
             }
         } else if (current_height == 0) {
             // At height 0, we should only accept blocks that build on genesis OR are genesis

@@ -184,6 +184,13 @@ pub const NetworkManager = struct {
                 return;
             }
             
+            // Call disconnect handler if available
+            if (self.message_handler.onPeerDisconnected) |onDisconnect| {
+                onDisconnect(peer, err) catch |handler_err| {
+                    std.log.debug("Disconnect handler error: {}", .{handler_err});
+                };
+            }
+            
             // Format friendly error message
             const error_msg = switch (err) {
                 error.ConnectionResetByPeer => "connection reset by peer",
@@ -249,6 +256,12 @@ pub const NetworkManager = struct {
         conn.run() catch |err| {
             // Only log if still running
             if (self.running) {
+                // Call disconnect handler if available
+                if (self.message_handler.onPeerDisconnected) |onDisconnect| {
+                    onDisconnect(peer, err) catch |handler_err| {
+                        std.log.debug("Disconnect handler error: {}", .{handler_err});
+                    };
+                }
                 std.log.err("Incoming peer {} error: {}", .{ peer, err });
             }
         };

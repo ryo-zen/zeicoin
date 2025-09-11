@@ -383,6 +383,9 @@ pub const MessageHandler = struct {
 
     /// Handle block hash response (consensus verification)
     onBlockHash: *const fn (peer: *Peer, msg: message_types.BlockHashMessage) anyerror!void,
+    
+    /// Handle peer disconnect (optional)
+    onPeerDisconnected: ?*const fn (peer: *Peer, err: anyerror) anyerror!void = null,
 };
 
 /// TCP send callback function

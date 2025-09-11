@@ -68,8 +68,7 @@ pub const BlockIndex = struct {
 
         // Prevent duplicate blocks from being indexed - Important!
         if (self.hasBlock(block_hash)) {
-            const existing_height = self.getHeight(block_hash) orelse unreachable;
-            log.info("❌ [BLOCK INDEX] Duplicate block detected! Hash {s} already exists at height {}", .{ std.fmt.fmtSliceHexLower(block_hash[0..8]), existing_height });
+            // Duplicate block logging disabled - too verbose during reorganization
             return error.DuplicateBlock;
         }
 
@@ -160,7 +159,7 @@ pub const BlockIndex = struct {
 
         // Build index from all blocks
         for (0..current_height + 1) |height| {
-            const block = database.getBlock(@intCast(height)) catch |err| {
+            var block = database.getBlock(@intCast(height)) catch |err| {
                 log.info("⚠️ Failed to load block {} during rebuild: {}", .{ height, err });
                 continue; // Skip missing blocks, don't fail entirely
             };

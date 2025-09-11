@@ -5,8 +5,8 @@ const std = @import("std");
 const log = std.log.scoped(.reorg);
 const types = @import("../../types/types.zig");
 const ChainState = @import("../state.zig").ChainState;
-const ChainValidator = @import("../validator.zig").ChainValidator;
-const ChainOperations = @import("../operations.zig").ChainOperations;
+const ChainValidator = @import("../../validation/validator.zig").ChainValidator;
+const ChainProcessor = @import("../processor.zig").ChainProcessor;
 
 // Import local reorganization components
 const ChainSnapshot = @import("snapshot.zig").ChainSnapshot;
@@ -40,6 +40,7 @@ pub const ReorgResult = struct {
     transactions_orphaned: u32,
     duration_ms: u64,
     error_message: ?[]const u8,
+    fork_height: ?u32, // Height where chains diverged
 };
 
 /// Transaction replay result
@@ -55,7 +56,7 @@ pub const ReorgManager = struct {
     allocator: std.mem.Allocator,
     chain_state: *ChainState,
     chain_validator: *ChainValidator,
-    chain_operations: *ChainOperations,
+    chain_processor: *ChainProcessor,
     
     // Reorganization components
     snapshot_manager: ChainSnapshot,
@@ -82,7 +83,7 @@ pub const ReorgManager = struct {
         allocator: std.mem.Allocator,
         chain_state: *ChainState,
         chain_validator: *ChainValidator,
-        chain_operations: *ChainOperations,
+        chain_processor: *ChainProcessor,
     ) !*Self {
         // Allocate on heap for stable addresses
         const self = try allocator.create(Self);
@@ -92,7 +93,7 @@ pub const ReorgManager = struct {
             .allocator = allocator,
             .chain_state = chain_state,
             .chain_validator = chain_validator,
-            .chain_operations = chain_operations,
+            .chain_processor = chain_processor,
             .snapshot_manager = ChainSnapshot.init(allocator),
             .replay_engine = TxReplayEngine.init(allocator),
             .event_handler = ReorgEventHandler.init(allocator),
@@ -133,6 +134,7 @@ pub const ReorgManager = struct {
     pub fn executeReorganization(self: *Self, new_block: Block, new_chain_tip: Hash) !ReorgResult {
         // Ensure we're in idle state
         if (self.current_state != .idle) {
+            log.warn("⚠️ [REORG] Skipping reorganization - already in progress (state: {})", .{self.current_state});
             return ReorgResult{
                 .success = false,
                 .blocks_reverted = 0,
@@ -141,19 +143,20 @@ pub const ReorgManager = struct {
                 .transactions_orphaned = 0,
                 .duration_ms = 0,
                 .error_message = "Reorganization already in progress",
+                .fork_height = null,
             };
         }
         
         log.info("\n🔄 [CONSENSUS] === CHAIN REORGANIZATION STARTING ===", .{});
         log.info("   - New chain tip: {s}", .{std.fmt.fmtSliceHexLower(new_chain_tip[0..8])});
-        log.info("   - New block height: {}", .{new_block.header.timestamp});
+        log.info("   - New block height: calculated in analysis", .{});
         log.info("   - Current time: {}", .{std.time.milliTimestamp()});
         
         // Record operation start time
         self.operation_start_time = std.time.milliTimestamp();
         
         // Execute state machine
-        var result = self.executeStateMachine(new_block, new_chain_tip) catch |err| {
+        var result = self.executeStateMachine(new_block) catch |err| {
             log.info("❌ [CONSENSUS] Reorganization failed: {}", .{err});
             // Ensure cleanup on any error
             self.cleanup();
@@ -165,6 +168,7 @@ pub const ReorgManager = struct {
                 .transactions_orphaned = 0,
                 .duration_ms = @intCast(std.time.milliTimestamp() - self.operation_start_time),
                 .error_message = @errorName(err),
+                .fork_height = null,
             };
         };
         
@@ -183,7 +187,7 @@ pub const ReorgManager = struct {
     }
     
     /// State machine execution logic
-    fn executeStateMachine(self: *Self, new_block: Block, new_chain_tip: Hash) !ReorgResult {
+    fn executeStateMachine(self: *Self, new_block: Block) !ReorgResult {
         var result = ReorgResult{
             .success = false,
             .blocks_reverted = 0,
@@ -192,11 +196,23 @@ pub const ReorgManager = struct {
             .transactions_orphaned = 0,
             .duration_ms = 0,
             .error_message = null,
+            .fork_height = null,
         };
         
         // State machine progression
         try self.transitionTo(.analyzing);
-        const analysis = try self.analyzeReorganization(new_chain_tip);
+        const analysis = try self.analyzeReorganization(new_block);
+        
+        // Store fork height in result
+        result.fork_height = analysis.fork_height;
+        
+        // Skip reorganization if no depth (block extends chain)
+        if (analysis.depth == 0) {
+            result.success = true;
+            try self.transitionTo(.idle);
+            log.info("✅ No reorganization needed - block extends current chain", .{});
+            return result;
+        }
         
         try self.transitionTo(.capturing);
         try self.captureChainSnapshots(analysis.fork_height);
@@ -253,20 +269,87 @@ pub const ReorgManager = struct {
     }
     
     /// Analyze reorganization requirements and safety
-    fn analyzeReorganization(self: *Self, new_chain_tip: Hash) !struct { fork_height: u32, depth: u32 } {
+    fn analyzeReorganization(self: *Self, new_block: Block) !struct { fork_height: u32, depth: u32 } {
         const current_height = try self.chain_state.getHeight();
+        const new_block_hash = new_block.hash();
+        const new_block_prev_hash = new_block.header.previous_hash;
         
-        // Find common ancestor using existing binary search
-        const common_ancestor = self.findCommonAncestor(new_chain_tip) catch 0;
+        // Calculate the new block's height from its previous_hash
+        const new_block_height = if (self.chain_state.getBlockHeight(new_block_prev_hash)) |prev_height| 
+            prev_height + 1 
+        else 
+            0; // Genesis block case
         
-        const reorg_depth = current_height - common_ancestor;
+        log.info("🔍 [REORG] Fork Detection Analysis:", .{});
+        log.info("   Current height: {}, New block height: {}", .{current_height, new_block_height});
+        log.info("   New block hash: {s}", .{std.fmt.fmtSliceHexLower(new_block_hash[0..16])});
+        log.info("   New block prev:  {s}", .{std.fmt.fmtSliceHexLower(new_block_prev_hash[0..16])});
+        
+        // Check if we already have a block at the new block's height
+        const our_block_at_height = self.chain_state.getBlockHash(@intCast(new_block_height));
+        
+        if (our_block_at_height) |our_hash| {
+            // We have a block at this height - check if it's the same block
+            if (std.mem.eql(u8, &new_block_hash, &our_hash)) {
+                log.info("📊 [REORG] Duplicate block - same hash at height {}", .{new_block_height});
+                return error.DuplicateBlock;
+            } else {
+                // Different blocks at same height = FORK!
+                log.info("🔥 [REORG] FORK DETECTED at height {}!", .{new_block_height});
+                log.info("   Our block:  {s}", .{std.fmt.fmtSliceHexLower(our_hash[0..16])});
+                log.info("   New block:  {s}", .{std.fmt.fmtSliceHexLower(new_block_hash[0..16])});
+                
+                // Fork occurred at this height
+                const fork_height = new_block_height;
+                const depth = if (current_height >= fork_height) current_height - fork_height + 1 else 1;
+                
+                return .{ .fork_height = fork_height, .depth = depth };
+            }
+        } else {
+            // We don't have a block at this height yet
+            if (new_block_height == current_height + 1) {
+                // Check if this extends our current chain
+                const tip_block_index = if (current_height > 0) current_height - 1 else 0;
+                const current_tip = self.chain_state.getBlockHash(tip_block_index) orelse {
+                    log.info("❌ [REORG] Can't get current tip hash for extension check", .{});
+                    return error.NoBlockAtHeight;
+                };
+                
+                if (std.mem.eql(u8, &new_block_prev_hash, &current_tip)) {
+                    // This would be a normal extension - but we're in reorg analysis!
+                    log.info("⚠️ [REORG] Extension block received during reorganization analysis", .{});
+                    log.info("   This indicates a sync/protocol issue - extensions should go through normal acceptance", .{});
+                    return error.UnexpectedExtension;
+                }
+            }
+            
+            // Block doesn't extend our chain - find where it connects
+            log.info("🔍 [REORG] Block doesn't extend current chain - searching for connection point", .{});
+        }
+        
+        // Search backwards to find where this block connects
+        // Check if new_block_prev_hash exists in our chain
+        var fork_height: u32 = 0;
+        if (self.chain_state.getBlockHeight(new_block_prev_hash)) |height| {
+            fork_height = height;
+            log.info("🔍 Found fork point: new block connects at height {}", .{fork_height});
+            log.info("🔍 This creates a competing chain from height {} onwards", .{fork_height + 1});
+        } else {
+            // If we can't find where it connects, use conservative estimate
+            log.warn("⚠️ Cannot find where new block connects, using conservative fork point", .{});
+            fork_height = if (current_height > 0) current_height - 1 else 0;
+        }
+        
+        const reorg_depth = current_height - fork_height;
         
         // Safety check
         try self.safety_checker.validateReorganization(reorg_depth, current_height);
         
-        log.info("🔍 Reorganization analysis: depth={}, fork_height={}", .{ reorg_depth, common_ancestor });
+        log.info("🔍 Reorganization analysis: depth={}, fork_height={}", .{ reorg_depth, fork_height });
+        log.info("   Current chain height: {}, will revert to: {}", .{ current_height, fork_height });
+        log.info("   New block connects at: {s}", .{std.fmt.fmtSliceHexLower(new_block_prev_hash[0..8])});
         
-        return .{ .fork_height = common_ancestor, .depth = reorg_depth };
+        return .{ .fork_height = fork_height, .depth = reorg_depth };
     }
     
     /// Create snapshots of current chain state
@@ -291,12 +374,33 @@ pub const ReorgManager = struct {
     }
     
     /// Apply new chain blocks
-    fn applyNewChain(self: *Self, new_block: Block) !u32 {
-        // For now, just apply the single new block
-        // In a full implementation, this would apply all blocks in the new chain
-        try self.chain_operations.acceptBlock(new_block);
+    fn applyNewChain(self: *Self, new_block: Block) anyerror!u32 {
+        // First, check if this block now connects after reverting
+        const current_height = try self.chain_state.getHeight();
+        const tip_block_index = if (current_height > 0) current_height - 1 else 0;
+        const current_tip = self.chain_state.getBlockHash(tip_block_index) orelse return error.NoBlockAtHeight;
         
-        log.info("📈 Applied new chain block", .{});
+        log.info("📈 Attempting to apply new block after revert", .{});
+        log.info("   Current height after revert: {}", .{current_height});
+        log.info("   Current tip: {s}", .{std.fmt.fmtSliceHexLower(current_tip[0..8])});
+        log.info("   New block previous_hash: {s}", .{std.fmt.fmtSliceHexLower(new_block.header.previous_hash[0..8])});
+        
+        // Check if the new block connects to our current tip
+        if (!std.mem.eql(u8, &new_block.header.previous_hash, &current_tip)) {
+            log.warn("⚠️ New block still doesn't connect after revert!", .{});
+            log.warn("   Expected previous_hash: {s}", .{std.fmt.fmtSliceHexLower(current_tip[0..8])});
+            log.warn("   Got previous_hash: {s}", .{std.fmt.fmtSliceHexLower(new_block.header.previous_hash[0..8])});
+            // In a full implementation, we'd need to fetch intermediate blocks
+            return error.StillDoesntConnect;
+        }
+        
+        // Apply the new block directly without fork detection
+        self.chain_processor.applyBlock(new_block) catch |err| {
+            log.err("Failed to apply block during reorg: {}", .{err});
+            return err;
+        };
+        
+        log.info("✅ Successfully applied new chain block at height {}", .{current_height + 1});
         
         return 1; // Number of blocks applied
     }
@@ -335,15 +439,26 @@ pub const ReorgManager = struct {
         return result;
     }
     
-    /// Find common ancestor (simplified version using existing logic)
+    /// Find common ancestor by looking at actual block hashes
     fn findCommonAncestor(self: *Self, new_tip_hash: Hash) !u32 {
-        // Use existing binary search from reorganization.zig
-        // This is a simplified version - full implementation would be more sophisticated
+        const current_height = try self.chain_state.getHeight();
+        
+        // Start from current height and work backwards
+        // In a real implementation, we'd need the new chain's blocks to compare
+        // For now, we'll check if the new block connects to any recent block
+        
+        // Check last 10 blocks or until genesis
+        const max_reorg_depth: u32 = 10;
+        _ = max_reorg_depth; // Will be used in full implementation
+        
+        // Since we don't have the full new chain yet, we make a conservative estimate
+        // The fork is likely at height-1 (the previous block)
+        // This is because the new block's previous_hash doesn't match our tip
         _ = new_tip_hash;
         
-        // For now, assume shallow reorganization (1-2 blocks)
-        const current_height = try self.chain_state.getHeight();
-        return if (current_height > 2) current_height - 2 else 0;
+        // Return one block before current height as the likely fork point
+        // This assumes the fork happened at the last block
+        return if (current_height > 0) current_height - 1 else 0;
     }
     
     /// Cleanup on error

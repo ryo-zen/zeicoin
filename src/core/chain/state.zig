@@ -115,10 +115,7 @@ pub const ChainState = struct {
     pub fn getAccount(self: *Self, address: Address) !types.Account {
         // Try to load from database
         if (self.database.getAccount(address)) |account| {
-            const balance_zei = @as(f64, @floatFromInt(account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-            const addr_str = self.formatAddressForLogging(address);
-            defer self.allocator.free(addr_str);
-            log.info("🔍 [ACCOUNT LOAD] Found existing account {s}: balance={d:.8} ZEI, nonce={}", .{ addr_str, balance_zei, account.nonce });
+            // Account load logging disabled - too verbose during reorganization
             return account;
         } else |err| switch (err) {
             db.DatabaseError.NotFound => {
@@ -128,10 +125,7 @@ pub const ChainState = struct {
                     .balance = 0,
                     .nonce = 0,
                 };
-                const balance_zei = @as(f64, @floatFromInt(new_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-                const addr_str = self.formatAddressForLogging(address);
-                defer self.allocator.free(addr_str);
-                log.info("🔍 [ACCOUNT LOAD] Created new account {s}: balance={d:.8} ZEI, nonce={}", .{ addr_str, balance_zei, new_account.nonce });
+                // New account creation logging disabled - too verbose during reorganization
                 // Save to database immediately
                 try self.database.saveAccount(address, new_account);
                 return new_account;
@@ -327,8 +321,8 @@ pub const ChainState = struct {
 
             // Rebuild block index during replay
             const block_hash = block.hash();
-            self.indexBlock(@intCast(height), block_hash) catch |err| {
-                log.info("⚠️ Failed to rebuild block index at height {}: {}", .{ height, err });
+            self.indexBlock(@intCast(height), block_hash) catch {
+                // Block index rebuild failure logging disabled - too verbose during reorganization
             };
 
             // Process each transaction in the block
