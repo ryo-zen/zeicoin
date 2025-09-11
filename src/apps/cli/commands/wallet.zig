@@ -23,6 +23,42 @@ const WalletSubcommand = enum {
 // Note: We avoid returning errors to prevent stack traces
 // All error handling is done via print statements and early returns
 
+/// Validate wallet name according to rules:
+/// - Must be 1-64 characters long
+/// - Must start with a letter (a-z, A-Z)
+/// - Can contain letters, numbers, and underscores only
+/// - No spaces, special characters, or unicode
+fn validateWalletName(name: []const u8) bool {
+    // Check empty name
+    if (name.len == 0) {
+        print("❌ Wallet name cannot be empty\n", .{});
+        return false;
+    }
+    
+    // Check length (max 64 chars for filesystem compatibility)
+    if (name.len > 64) {
+        print("❌ Wallet name too long (max 64 characters)\n", .{});
+        return false;
+    }
+    
+    // Check first character (must be a letter)
+    if (!std.ascii.isAlphabetic(name[0])) {
+        print("❌ Wallet name must start with a letter\n", .{});
+        return false;
+    }
+    
+    // Check all characters (letters, numbers, underscores only)
+    for (name) |char| {
+        if (!std.ascii.isAlphanumeric(char) and char != '_') {
+            print("❌ Wallet name can only contain letters, numbers, and underscores\n", .{});
+            print("💡 Invalid character found: '{c}'\n", .{char});
+            return false;
+        }
+    }
+    
+    return true;
+}
+
 /// Handle wallet command with subcommands
 pub fn handleWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     if (args.len < 1) {
@@ -50,6 +86,11 @@ pub fn handleWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 /// Create a new HD wallet
 fn createWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const wallet_name = if (args.len > 0) args[0] else "default";
+    
+    // Validate wallet name
+    if (!validateWalletName(wallet_name)) {
+        return; // Error already printed by validateWalletName
+    }
 
     // Get data directory path
     const data_dir = switch (types.CURRENT_NETWORK) {
@@ -188,21 +229,34 @@ fn listWallets(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
 /// Restore HD wallet from mnemonic
 fn restoreWallet(allocator: std.mem.Allocator, args: [][:0]u8) !void {
-    if (args.len < 13) { // name + 12 words minimum
-        print("❌ Usage: zeicoin wallet restore <name> <12-or-24-word-mnemonic>\n", .{});
+    if (args.len < 2) { // name + at least one word
+        print("❌ Invalid usage: missing wallet name and mnemonic\n", .{});
+        print("💡 Usage: zeicoin wallet restore <name> <12-or-24-word-mnemonic>\n", .{});
         print("💡 Example: zeicoin wallet restore mywallet word1 word2 ... word12\n", .{});
-        print("💡 Example: zeicoin wallet restore mywallet word1 word2 ... word24\n", .{});
+        return;
+    }
+    
+    const wallet_name = args[0];
+    
+    // Validate wallet name
+    if (!validateWalletName(wallet_name)) {
+        return; // Error already printed by validateWalletName
+    }
+    
+    // Check if we have any mnemonic words
+    if (args.len < 2) {
+        print("❌ Invalid mnemonic: no words provided\n", .{});
+        print("💡 Provide 12 or 24 words for wallet restoration\n", .{});
         return;
     }
     
     // Validate word count (must be 12, 15, 18, 21, or 24)
     const word_count = args.len - 1; // subtract wallet name
     if (word_count != 12 and word_count != 15 and word_count != 18 and word_count != 21 and word_count != 24) {
-        print("❌ Invalid word count: {}. Must be 12, 15, 18, 21, or 24 words\n", .{word_count});
+        print("❌ Invalid mnemonic: wrong word count ({} words)\n", .{word_count});
+        print("💡 Mnemonic must be 12, 15, 18, 21, or 24 words\n", .{});
         return;
     }
-    
-    const wallet_name = args[0];
     
     // Join mnemonic words
     var mnemonic_list = std.ArrayList(u8).init(allocator);
