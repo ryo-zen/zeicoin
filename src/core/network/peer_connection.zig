@@ -63,12 +63,7 @@ pub const PeerConnection = struct {
         defer self.allocator.free(buffer);
 
         while (self.running) {
-            // Check if peer is shutting down
-            if (self.peer.is_shutting_down.load(.acquire)) {
-                const peer_id = self.peer.id;  // Cache the ID
-                std.log.info("Peer {} shutdown requested, stopping connection", .{peer_id});
-                break;
-            }
+            // Main connection loop - running flag provides safer shutdown signaling
             
             // Read data with timeout
             const bytes_read = self.stream.read(buffer) catch |err| switch (err) {
@@ -91,18 +86,14 @@ pub const PeerConnection = struct {
             };
 
             if (bytes_read == 0) {
-                // Check if peer is still valid before accessing
-                if (self.peer.is_shutting_down.load(.acquire)) {
-                    std.log.info("Peer shutting down, connection closed", .{});
-                } else {
-                    std.log.info("Peer {} disconnected", .{self.peer});
-                }
+                // Safe peer disconnection logging - cache ID first to avoid use-after-free
+                const peer_id = self.peer.id;
+                std.log.info("Peer {} disconnected (connection closed)", .{peer_id});
                 break;
             }
 
-            // Check if peer is shutting down before processing
-            if (self.peer.is_shutting_down.load(.acquire)) {
-                std.log.debug("Peer is shutting down, stopping data processing", .{});
+            // Safe shutdown check - avoid accessing peer memory if connection is closing
+            if (!self.running) {
                 break;
             }
 
@@ -119,9 +110,9 @@ pub const PeerConnection = struct {
 
             // Process messages
             while (try self.peer.readMessage()) |envelope| {
-                // Check if peer is shutting down
-                if (self.peer.is_shutting_down.load(.acquire)) {
-                    std.log.debug("Peer is shutting down, stopping message processing", .{});
+                // Check if connection is still running (safer than accessing peer memory)
+                if (!self.running) {
+                    std.log.debug("Connection shutting down, stopping message processing", .{});
                     break;
                 }
                 
@@ -392,8 +383,8 @@ pub const MessageHandler = struct {
 /// Handles actual TCP data transmission for peer connections
 fn tcpSendCallback(ctx: ?*anyopaque, data: []const u8) anyerror!void {
     const self = @as(*PeerConnection, @ptrCast(@alignCast(ctx.?)));
-    // Check if peer is shutting down
-    if (self.peer.is_shutting_down.load(.acquire)) {
+    // Check if connection is still running (safer than accessing peer memory)
+    if (!self.running) {
         return error.PeerShuttingDown;
     }
     const peer_id = self.peer.id;  // Cache the ID

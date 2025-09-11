@@ -341,11 +341,33 @@ pub const Peer = struct {
         }) catch "status error";
     }
 
-    /// Format peer for logging
+    /// Format peer for logging - safe version to prevent crashes
     pub fn format(self: Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = fmt;
         _ = options;
-        try writer.print("Peer[{}:{}:{}]", .{ self.id, self.address, self.state });
+        
+        // Safe address formatting to avoid std.net.Address crashes
+        switch (self.address.any.family) {
+            std.posix.AF.INET => {
+                const addr = self.address.in.sa.addr;
+                const port = std.mem.bigToNative(u16, self.address.in.sa.port);
+                try writer.print("Peer[{}:{}.{}.{}.{}:{}:{}]", .{
+                    self.id,
+                    (addr >> 0) & 0xFF,
+                    (addr >> 8) & 0xFF,
+                    (addr >> 16) & 0xFF,
+                    (addr >> 24) & 0xFF,
+                    port,
+                    self.state,
+                });
+            },
+            std.posix.AF.INET6 => {
+                try writer.print("Peer[{}:ipv6:{}]", .{ self.id, self.state });
+            },
+            else => {
+                try writer.print("Peer[{}:unknown:{}]", .{ self.id, self.state });
+            },
+        }
     }
 };
 
