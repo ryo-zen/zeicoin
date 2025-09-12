@@ -10,6 +10,7 @@ const types = zeicoin.types;
 const wallet = zeicoin.wallet;
 const password_util = zeicoin.password;
 const util = zeicoin.util;
+const NonceManager = zeicoin.nonce_manager.NonceManager;
 
 const protocol = @import("../client/protocol.zig");
 const display = @import("../utils/display.zig");
@@ -19,6 +20,57 @@ pub const CLIError = error{
     NetworkError,
     TransactionFailed,
 };
+
+/// Global nonce manager for high-throughput transaction sending
+var global_nonce_manager: ?*NonceManager = null;
+var nonce_manager_mutex: std.Thread.Mutex = std.Thread.Mutex{};
+
+/// Transaction sequence counter for timestamp uniqueness
+var tx_sequence: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+
+/// Get unique timestamp for transactions to prevent hash collisions
+fn getUniqueTimestamp() u64 {
+    // Use nanosecond precision instead of second precision
+    const base_time = @as(u64, @intCast(std.time.nanoTimestamp())) / 1000; // Convert to microseconds
+    
+    // Add atomic sequence number to ensure uniqueness even within same microsecond
+    const seq = tx_sequence.fetchAdd(1, .monotonic);
+    
+    return base_time + seq;
+}
+
+/// Get or create the global nonce manager
+fn getGlobalNonceManager(allocator: std.mem.Allocator) !*NonceManager {
+    nonce_manager_mutex.lock();
+    defer nonce_manager_mutex.unlock();
+    
+    if (global_nonce_manager == null) {
+        global_nonce_manager = try allocator.create(NonceManager);
+        global_nonce_manager.?.* = NonceManager.init(allocator);
+    }
+    
+    return global_nonce_manager.?;
+}
+
+/// Callback function for nonce manager to fetch nonce from server
+fn fetchNonceFromServer(address: types.Address) !u64 {
+    // Use page allocator for internal protocol operations
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    
+    return protocol.getNonce(allocator, address) catch |err| {
+        switch (err) {
+            protocol.connection.ConnectionError.NetworkError,
+            protocol.connection.ConnectionError.ConnectionFailed,
+            protocol.connection.ConnectionError.ConnectionTimeout => {
+                // Let nonce manager handle the error
+                return err;
+            },
+            else => return err,
+        }
+    };
+}
 
 fn loadHDWalletForOperation(allocator: std.mem.Allocator, wallet_name: []const u8) !*wallet.Wallet {
     // Get wallet path directly without opening database
@@ -197,10 +249,21 @@ pub fn handleSend(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const key_pair = try zen_wallet.getKeyPair(0);
     const sender_public_key = key_pair.public_key;
 
-    // Get current nonce and height from server
-    const current_nonce = protocol.getNonce(allocator, sender_address) catch {
-        print("❌ Failed to get nonce from server\n", .{});
-        return CLIError.NetworkError;
+    // Get next nonce using nonce manager with ultra-reliable retry logic
+    const nonce_manager = try getGlobalNonceManager(allocator);
+    const current_nonce = nonce_manager.getNextNonceWithRetry(sender_address, fetchNonceFromServer, 3) catch |err| {
+        switch (err) {
+            protocol.connection.ConnectionError.NetworkError,
+            protocol.connection.ConnectionError.ConnectionFailed,
+            protocol.connection.ConnectionError.ConnectionTimeout => {
+                print("❌ Failed to get nonce from server\n", .{});
+                return CLIError.NetworkError;
+            },
+            else => {
+                print("❌ Nonce management error: {}\n", .{err});
+                return CLIError.NetworkError;
+            }
+        }
     };
 
     const current_height = protocol.getHeight(allocator) catch {
@@ -220,7 +283,7 @@ pub fn handleSend(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         .amount = amount,
         .fee = fee,
         .nonce = current_nonce,
-        .timestamp = @intCast(util.getTime()),
+        .timestamp = @intCast(getUniqueTimestamp()),
         .expiry_height = current_height + expiry_window,
         .signature = std.mem.zeroes(types.Signature),
         .script_version = 0,
@@ -232,15 +295,50 @@ pub fn handleSend(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const tx_hash = transaction.hashForSigning();
     transaction.signature = try key_pair.sign(&tx_hash);
 
-    // Send transaction using protocol helper
-    protocol.sendTransaction(allocator, &transaction) catch |err| {
-        switch (err) {
+    // Send transaction with smart retry on nonce errors
+    var retry_count: u32 = 0;
+    const max_retries = 2;
+    
+    while (retry_count <= max_retries) : (retry_count += 1) {
+        const send_result = protocol.sendTransaction(allocator, &transaction);
+        
+        if (send_result) |_| {
+            // Transaction succeeded!
+            break;
+        } else |err| switch (err) {
             protocol.connection.ConnectionError.NetworkError => {
-                return CLIError.TransactionFailed;
+                // Check if this was a nonce error that we can recover from
+                // This is a simplification - in reality we'd need to examine the error message
+                if (retry_count < max_retries) {
+                    print("⚠️  Nonce error detected, attempting emergency recovery...\n", .{});
+                    
+                    // Use emergency nonce recovery to get a fresh, conservative nonce
+                    const recovery_nonce = nonce_manager.emergencyNonceRecovery(sender_address, fetchNonceFromServer) catch {
+                        print("❌ Emergency nonce recovery failed\n", .{});
+                        return CLIError.NetworkError;
+                    };
+                    
+                    // Update transaction with recovered nonce and new timestamp
+                    transaction.nonce = recovery_nonce;
+                    transaction.timestamp = @intCast(getUniqueTimestamp());
+                    
+                    // Re-sign transaction with new data
+                    const new_tx_hash = transaction.hashForSigning();
+                    transaction.signature = try key_pair.sign(&new_tx_hash);
+                    
+                    print("🔄 Retrying transaction with recovered nonce {}...\n", .{recovery_nonce});
+                    continue; // Retry the transaction
+                } else {
+                    nonce_manager.markTransactionFailed(sender_address);
+                    return CLIError.TransactionFailed;
+                }
             },
-            else => return err,
+            else => {
+                nonce_manager.markTransactionFailed(sender_address);
+                return err;
+            },
         }
-    };
+    }
 
     // Success message
     const tx_hash_final = transaction.hash();

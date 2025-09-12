@@ -56,6 +56,7 @@ pub const util = @import("core/util/util.zig");
 pub const clispinners = @import("core/util/clispinners.zig");
 pub const password = @import("core/util/password.zig");
 pub const dotenv = @import("core/util/dotenv.zig");
+pub const nonce_manager = @import("core/util/nonce_manager.zig");
 
 // Applications are separate executables and should not be part of the library API
 

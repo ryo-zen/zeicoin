@@ -90,4 +90,5 @@ scripts/test_l2_integration.sh
 /zeicoin_data_testnet_indexer_secondary
 /website
 /scripts
+/optimizations
 
