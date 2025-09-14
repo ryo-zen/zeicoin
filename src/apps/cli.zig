@@ -92,4 +92,7 @@ pub fn main() !void {
         .seed, .mnemonic => try wallet_commands.handleSeed(allocator, args[2..]),
         .help => display.printHelp(),
     }
+    
+    // Cleanup global resources
+    transaction_commands.cleanupGlobalNonceManager();
 }

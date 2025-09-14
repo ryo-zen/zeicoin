@@ -38,24 +38,24 @@ pub const NonceManager = struct {
             self.last_sync = std.time.timestamp();
         }
         
-        /// Check if sync with server is needed (adaptive strategy based on load)
+        /// Check if sync with server is needed (optimized for high throughput)
         fn needsSync(self: *const @This()) bool {
             const current_time = std.time.timestamp();
             const sync_age = current_time - self.last_sync;
             
-            // Adaptive sync intervals based on load
-            if (self.pending_count > 50) {
-                // Ultra-high load: sync every 2 seconds
-                return sync_age > 2;
-            } else if (self.pending_count > 20) {
-                // High load: sync every 5 seconds
-                return sync_age > 5;
-            } else if (self.pending_count > 10) {
-                // Medium load: sync every 10 seconds
+            // Optimized for high-throughput: less frequent syncs
+            if (self.pending_count > 100) {
+                // Ultra-high load: sync every 10 seconds (was 2)
                 return sync_age > 10;
-            } else {
-                // Low load: sync every 30 seconds
+            } else if (self.pending_count > 50) {
+                // High load: sync every 30 seconds (was 5)
                 return sync_age > 30;
+            } else if (self.pending_count > 20) {
+                // Medium load: sync every 60 seconds (was 10)
+                return sync_age > 60;
+            } else {
+                // Low load: sync every 120 seconds (was 30)
+                return sync_age > 120;
             }
         }
     };
@@ -110,33 +110,40 @@ pub const NonceManager = struct {
             const server_nonce = try getNonceCallback(address);
             gop.value_ptr.* = AddressNonceState{
                 .base_nonce = server_nonce,
-                .next_nonce = server_nonce + 1,
+                .next_nonce = server_nonce,  // Start at server nonce (not +1)
                 .pending_count = 0,
                 .last_sync = std.time.timestamp(),
             };
         } else if (gop.value_ptr.needsSync()) {
-            // Periodic sync or high pending count - refresh from server
-            const server_nonce = try getNonceCallback(address);
-            
-            // Only update if server nonce is higher (transactions confirmed)
-            if (server_nonce >= gop.value_ptr.base_nonce) {
-                const confirmed_transactions = server_nonce - gop.value_ptr.base_nonce;
-                gop.value_ptr.base_nonce = server_nonce;
+            // Periodic sync - but DON'T block on it for high throughput
+            // Just skip sync if we have pending nonces available
+            if (gop.value_ptr.pending_count < 100) {
+                // Only sync if not in burst mode
+                const server_nonce = getNonceCallback(address) catch {
+                    // If sync fails, continue with local nonces
+                    return gop.value_ptr.allocateNonce();
+                };
                 
-                // Adjust pending count based on confirmations
-                if (confirmed_transactions <= gop.value_ptr.pending_count) {
-                    gop.value_ptr.pending_count -= @intCast(confirmed_transactions);
-                } else {
-                    // More confirmations than expected - reset
-                    gop.value_ptr.pending_count = 0;
+                // Only update if server nonce is higher (transactions confirmed)
+                if (server_nonce > gop.value_ptr.base_nonce) {
+                    const confirmed_transactions = server_nonce - gop.value_ptr.base_nonce;
+                    gop.value_ptr.base_nonce = server_nonce;
+                    
+                    // Adjust pending count based on confirmations
+                    if (confirmed_transactions <= gop.value_ptr.pending_count) {
+                        gop.value_ptr.pending_count -= @intCast(confirmed_transactions);
+                    } else {
+                        // More confirmations than expected - reset
+                        gop.value_ptr.pending_count = 0;
+                    }
+                    
+                    // Ensure next_nonce is at least server_nonce
+                    if (gop.value_ptr.next_nonce < server_nonce) {
+                        gop.value_ptr.next_nonce = server_nonce;
+                    }
+                    
+                    gop.value_ptr.last_sync = std.time.timestamp();
                 }
-                
-                // Ensure next_nonce is at least server_nonce + 1
-                if (gop.value_ptr.next_nonce <= server_nonce) {
-                    gop.value_ptr.next_nonce = server_nonce + 1;
-                }
-                
-                gop.value_ptr.last_sync = std.time.timestamp();
             }
         }
         
@@ -274,13 +281,13 @@ test "NonceManager basic functionality" {
         }
     }.getNonce;
     
-    // First call should sync with server and return server_nonce + 1
+    // First call should sync with server and return server_nonce
     const nonce1 = try manager.getNextNonce(test_address, testCallback);
-    try testing.expectEqual(@as(u64, 101), nonce1);
+    try testing.expectEqual(@as(u64, 100), nonce1);
     
     // Second call should increment without server call
     const nonce2 = try manager.getNextNonce(test_address, testCallback);
-    try testing.expectEqual(@as(u64, 102), nonce2);
+    try testing.expectEqual(@as(u64, 101), nonce2);
 }
 
 test "NonceManager concurrent access simulation" {
@@ -304,11 +311,11 @@ test "NonceManager concurrent access simulation" {
     
     // First call syncs with server
     nonces[0] = try manager.getNextNonce(test_address, testCallback);
-    try testing.expectEqual(@as(u64, 201), nonces[0]);
+    try testing.expectEqual(@as(u64, 200), nonces[0]);
     
     // Subsequent calls should increment locally
     for (nonces[1..], 1..) |*nonce, i| {
         nonce.* = try manager.getNextNonce(test_address, testCallback);
-        try testing.expectEqual(@as(u64, 201 + i), nonce.*);
+        try testing.expectEqual(@as(u64, 200 + i), nonce.*);
     }
 }

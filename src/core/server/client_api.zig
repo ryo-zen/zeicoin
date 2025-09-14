@@ -127,6 +127,10 @@ pub const ClientApiServer = struct {
                 self.handleTransaction(connection, message, &transaction_count) catch |err| {
                     std.log.err("Failed to process transaction: {}", .{err});
                 };
+            } else if (std.mem.startsWith(u8, message, "BATCH_TX:")) {
+                self.handleBatchTransactions(connection, message, &transaction_count) catch |err| {
+                    std.log.err("Failed to process batch transactions: {}", .{err});
+                };
             } else if (std.mem.startsWith(u8, message, "TRIGGER_SYNC")) {
                 self.handleTriggerSync(connection) catch |err| {
                     std.log.err("Failed to trigger sync: {}", .{err});
@@ -582,6 +586,107 @@ pub const ClientApiServer = struct {
         std.log.info("Processed transaction {} from client", .{
             std.fmt.fmtSliceHexLower(&tx_hash)
         });
+    }
+    
+    fn handleBatchTransactions(
+        self: *Self,
+        connection: net.Server.Connection,
+        message: []const u8,
+        transaction_count: *u32,
+    ) !void {
+        // Format: BATCH_TX:<count>:<serialized_tx1><serialized_tx2>...
+        const batch_data = message[9..]; // Skip "BATCH_TX:"
+        
+        // Parse batch count
+        const count_end = std.mem.indexOf(u8, batch_data, ":") orelse {
+            _ = try connection.stream.write("ERROR: Invalid batch format\n");
+            return;
+        };
+        
+        const batch_count = std.fmt.parseInt(u32, batch_data[0..count_end], 10) catch {
+            _ = try connection.stream.write("ERROR: Invalid batch count\n");
+            return;
+        };
+        
+        if (batch_count == 0 or batch_count > 100) {
+            _ = try connection.stream.write("ERROR: Batch count must be between 1 and 100\n");
+            return;
+        }
+        
+        // Check transaction limit
+        if (transaction_count.* + batch_count > MAX_TRANSACTIONS_PER_SESSION) {
+            _ = try connection.stream.write("ERROR: Transaction limit would be exceeded\n");
+            return;
+        }
+        
+        var tx_data = batch_data[count_end + 1..]; // Skip count and colon
+        var results = std.ArrayList(u8).init(self.allocator);
+        defer results.deinit();
+        
+        // Process each transaction in the batch
+        var success_count: u32 = 0;
+        var i: u32 = 0;
+        while (i < batch_count) : (i += 1) {
+            // Get transaction size (first 4 bytes)
+            if (tx_data.len < 4) {
+                try results.appendSlice("ERROR:Incomplete transaction data\n");
+                break;
+            }
+            
+            const tx_size = std.mem.readInt(u32, tx_data[0..4], .little);
+            tx_data = tx_data[4..];
+            
+            if (tx_data.len < tx_size) {
+                try results.appendSlice("ERROR:Incomplete transaction data\n");
+                break;
+            }
+            
+            // Deserialize transaction
+            var stream = std.io.fixedBufferStream(tx_data[0..tx_size]);
+            var tx = serialize.deserialize(stream.reader(), types.Transaction, self.allocator) catch |err| {
+                try results.writer().print("ERROR:Failed to deserialize: {}\n", .{err});
+                tx_data = tx_data[tx_size..];
+                continue;
+            };
+            defer tx.deinit(self.allocator);
+            
+            // Process transaction
+            self.blockchain.addTransaction(tx) catch |err| {
+                const error_msg = switch (err) {
+                    error.InsufficientBalance => "Insufficient balance",
+                    error.FeeTooLow => "Fee too low",
+                    error.InvalidNonce => "Invalid nonce",
+                    error.TransactionExpired => "Transaction expired",
+                    error.DuplicateTransaction => "Duplicate transaction",
+                    error.MempoolFull => "Mempool full",
+                    else => "Unknown error",
+                };
+                try results.writer().print("ERROR:{s}\n", .{error_msg});
+                tx_data = tx_data[tx_size..];
+                continue;
+            };
+            
+            // Success - add hash to results
+            const tx_hash = tx.hash();
+            try results.writer().print("OK:{}\n", .{std.fmt.fmtSliceHexLower(&tx_hash)});
+            success_count += 1;
+            
+            tx_data = tx_data[tx_size..];
+        }
+        
+        transaction_count.* += success_count;
+        
+        // Send batch response with all results
+        const response = try std.fmt.allocPrint(
+            self.allocator,
+            "BATCH_RESULT:{}:{}\n{s}",
+            .{ batch_count, success_count, results.items }
+        );
+        defer self.allocator.free(response);
+        
+        _ = try connection.stream.write(response);
+        
+        std.log.info("Processed batch of {} transactions ({} successful)", .{ batch_count, success_count });
     }
     
     fn handleClientTransaction(

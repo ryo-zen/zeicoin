@@ -77,7 +77,7 @@ pub const Database = struct {
 
         self.db = c.rocksdb_open(self.options, db_path.ptr, @ptrCast(&err));
         if (err != null) {
-            log.info("RocksDB open error: {s}", .{err.?});
+            log.err("Failed to open RocksDB at '{s}': {s}", .{db_path, err.?});
             c.rocksdb_free(@constCast(@ptrCast(err)));
             // Clean up partially constructed Database on failure
             self.deinit();
@@ -134,7 +134,7 @@ pub const Database = struct {
         );
 
         if (err != null) {
-            log.info("RocksDB secondary open error: {s}", .{err.?});
+            log.err("Failed to open RocksDB secondary instance at '{s}' -> '{s}': {s}", .{primary_db_path, secondary_db_path, err.?});
             c.rocksdb_free(@constCast(@ptrCast(err)));
             self.deinit();
             return DatabaseError.OpenFailed;

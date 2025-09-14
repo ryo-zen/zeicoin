@@ -24,6 +24,7 @@ pub const CLIError = error{
 /// Global nonce manager for high-throughput transaction sending
 var global_nonce_manager: ?*NonceManager = null;
 var nonce_manager_mutex: std.Thread.Mutex = std.Thread.Mutex{};
+var global_allocator: ?std.mem.Allocator = null;
 
 /// Transaction sequence counter for timestamp uniqueness
 var tx_sequence: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
@@ -47,9 +48,25 @@ fn getGlobalNonceManager(allocator: std.mem.Allocator) !*NonceManager {
     if (global_nonce_manager == null) {
         global_nonce_manager = try allocator.create(NonceManager);
         global_nonce_manager.?.* = NonceManager.init(allocator);
+        global_allocator = allocator;
     }
     
     return global_nonce_manager.?;
+}
+
+/// Cleanup global nonce manager resources
+pub fn cleanupGlobalNonceManager() void {
+    nonce_manager_mutex.lock();
+    defer nonce_manager_mutex.unlock();
+    
+    if (global_nonce_manager) |nonce_manager| {
+        if (global_allocator) |allocator| {
+            nonce_manager.deinit();
+            allocator.destroy(nonce_manager);
+            global_nonce_manager = null;
+            global_allocator = null;
+        }
+    }
 }
 
 /// Callback function for nonce manager to fetch nonce from server

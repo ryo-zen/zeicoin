@@ -50,7 +50,15 @@ pub fn main() !void {
     defer config.deinit();
     
     // Initialize node components
-    var components = try initialization.initializeNode(allocator, config);
+    var components = initialization.initializeNode(allocator, config) catch |err| switch (err) {
+        error.OpenFailed => {
+            std.debug.print("❌ Database is locked or in use by another process\n", .{});
+            std.debug.print("💡 Stop any running ZeiCoin servers and try again\n", .{});
+            std.debug.print("💡 Or remove the lock file: rm zeicoin_data_*/rocksdb/LOCK\n", .{});
+            return;
+        },
+        else => return err,
+    };
     defer components.deinit();
     
     // Start client API if not disabled

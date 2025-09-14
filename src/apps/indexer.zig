@@ -304,9 +304,10 @@ fn updateLastIndexedHeight(pool: *Pool, height: u32) !void {
     const height_str = try std.fmt.bufPrint(&buf, "{}", .{height});
 
     _ = try pool.exec(
-        \\UPDATE indexer_state 
-        \\SET value = $1, updated_at = CURRENT_TIMESTAMP 
-        \\WHERE key = 'last_indexed_height'
+        \\INSERT INTO indexer_state (key, value, updated_at) 
+        \\VALUES ('last_indexed_height', $1, CURRENT_TIMESTAMP)
+        \\ON CONFLICT (key) 
+        \\DO UPDATE SET value = $1, updated_at = CURRENT_TIMESTAMP
     , .{height_str});
 }
 
@@ -340,8 +341,11 @@ fn indexBlock(pool: *Pool, allocator: std.mem.Allocator, indexer: *Indexer, heig
     }
 
     // Create timestamp string for PostgreSQL
-    const timestamp_str = try std.fmt.allocPrint(allocator, "{}", .{block.header.timestamp});
+    // Convert nanoseconds to seconds for PostgreSQL
+    const timestamp_seconds = block.header.timestamp / 1_000_000_000;
+    const timestamp_str = try std.fmt.allocPrint(allocator, "{}", .{timestamp_seconds});
     defer allocator.free(timestamp_str);
+
 
     // Insert block using standard PostgreSQL approach (TimescaleDB best practice)
     _ = try pool.exec(
@@ -440,9 +444,11 @@ fn indexTransaction(
     @memcpy(recipient_str[0..recipient_bech32.len], recipient_bech32);
     recipient_str[recipient_bech32.len] = 0;
 
-    // Create timestamp string for transaction
-    const tx_timestamp_str = try std.fmt.allocPrint(allocator, "{}", .{tx.timestamp});
+    // Create timestamp string for transaction (convert nanoseconds to seconds)
+    const tx_timestamp_seconds = tx.timestamp / 1_000_000_000;
+    const tx_timestamp_str = try std.fmt.allocPrint(allocator, "{}", .{tx_timestamp_seconds});
     defer allocator.free(tx_timestamp_str);
+
 
     // Insert transaction (TimescaleDB hypertable)
     _ = try pool.exec(

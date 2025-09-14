@@ -27,7 +27,8 @@ pub fn getTime() i64 {
 
 /// Format Unix timestamp to human-readable string
 pub fn formatTime(timestamp: u64) [23]u8 {
-    const seconds = timestamp;
+    // Convert nanoseconds to seconds
+    const seconds = timestamp / 1_000_000_000;
     
     var buf: [23]u8 = undefined;
     const fmt = "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2} UTC";

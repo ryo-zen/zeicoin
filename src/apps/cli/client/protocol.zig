@@ -220,3 +220,79 @@ pub fn sendTransaction(allocator: std.mem.Allocator, transaction: *const types.T
         return connection.ConnectionError.NetworkError;
     }
 }
+
+/// Send batch of transactions
+pub fn sendBatchTransactions(allocator: std.mem.Allocator, transactions: []const types.Transaction) ![]bool {
+    const serialize_module = @import("zeicoin").serialize;
+    
+    // Calculate total size needed for batch message
+    var total_size: usize = 0;
+    for (transactions) |tx| {
+        // Each transaction needs 4 bytes for size + serialized data
+        total_size += 4 + serialize_module.calculateSize(tx);
+    }
+    
+    // Create batch message
+    var batch_data = try allocator.alloc(u8, total_size);
+    defer allocator.free(batch_data);
+    
+    // Serialize all transactions
+    var offset: usize = 0;
+    for (transactions) |tx| {
+        const tx_size = serialize_module.calculateSize(tx);
+        
+        // Write transaction size (4 bytes)
+        std.mem.writeInt(u32, batch_data[offset..][0..4], @intCast(tx_size), .little);
+        offset += 4;
+        
+        // Serialize transaction
+        var stream = std.io.fixedBufferStream(batch_data[offset..]);
+        try serialize_module.serialize(stream.writer(), tx);
+        offset += tx_size;
+    }
+    
+    // Format batch message
+    const batch_message = try std.fmt.allocPrint(
+        allocator, 
+        "BATCH_TX:{}:{s}", 
+        .{ transactions.len, batch_data }
+    );
+    defer allocator.free(batch_message);
+    
+    // Send batch request (need larger buffer for response)
+    var buffer: [65536]u8 = undefined; // 64KB buffer for batch response
+    const response = try connection.sendRequest(allocator, batch_message, &buffer);
+    
+    // Parse batch response
+    if (!std.mem.startsWith(u8, response, "BATCH_RESULT:")) {
+        print("❌ Batch transaction failed: {s}\n", .{response});
+        return connection.ConnectionError.NetworkError;
+    }
+    
+    // Parse results - format: BATCH_RESULT:<total>:<success>\n<individual results>
+    const result_data = response[13..]; // Skip "BATCH_RESULT:"
+    
+    // Find the counts
+    const first_colon = std.mem.indexOf(u8, result_data, ":") orelse return error.InvalidResponse;
+    const second_newline = std.mem.indexOf(u8, result_data[first_colon + 1..], "\n") orelse return error.InvalidResponse;
+    
+    const total_count = try std.fmt.parseInt(u32, result_data[0..first_colon], 10);
+    const success_count_str = result_data[first_colon + 1..first_colon + 1 + second_newline];
+    const success_count = try std.fmt.parseInt(u32, success_count_str, 10);
+    
+    print("📊 Batch Result: {}/{} transactions successful\n", .{ success_count, total_count });
+    
+    // Create result array
+    var results = try allocator.alloc(bool, transactions.len);
+    
+    // Parse individual results
+    const individual_results = result_data[first_colon + 1 + second_newline + 1..];
+    var lines = std.mem.splitScalar(u8, individual_results, '\n');
+    var i: usize = 0;
+    while (lines.next()) |line| : (i += 1) {
+        if (i >= transactions.len) break;
+        results[i] = std.mem.startsWith(u8, line, "OK:");
+    }
+    
+    return results;
+}
