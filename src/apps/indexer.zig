@@ -255,8 +255,12 @@ pub fn main() !void {
     }
 
     // Get last indexed height
-    const last_height = try getLastIndexedHeight(pool);
-    std.log.info("📈 Last indexed height: {}", .{last_height});
+    const last_height_opt = try getLastIndexedHeight(pool);
+    if (last_height_opt) |h| {
+        std.log.info("📈 Last indexed height: {}", .{h});
+    } else {
+        std.log.info("📈 Last indexed height: none (starting from genesis)", .{});
+    }
 
     // Initialize indexer
     var indexer = try Indexer.init(allocator, blockchain_path, config);
@@ -266,11 +270,14 @@ pub fn main() !void {
     const current_height = try indexer.getBlockchainHeight();
     std.log.info("📊 Current blockchain height: {}", .{current_height});
 
-    if (last_height < current_height) {
-        std.log.info("🔄 Indexing blocks {} to {}...", .{ last_height + 1, current_height });
+    // Determine starting height (0 for genesis, last_height + 1 for continuation)
+    const start_height = if (last_height_opt) |h| h + 1 else 0;
+
+    if (start_height <= current_height) {
+        std.log.info("🔄 Indexing blocks {} to {}...", .{ start_height, current_height });
 
         // Index new blocks
-        var height = last_height + 1;
+        var height = start_height;
         while (height <= current_height) : (height += 1) {
             try indexBlock(pool, allocator, &indexer, height);
 
@@ -287,7 +294,7 @@ pub fn main() !void {
     try showStats(pool);
 }
 
-fn getLastIndexedHeight(pool: *Pool) !u32 {
+fn getLastIndexedHeight(pool: *Pool) !?u32 {
     var result = try pool.query("SELECT value FROM indexer_state WHERE key = 'last_indexed_height'", .{});
     defer result.deinit();
 
@@ -296,7 +303,7 @@ fn getLastIndexedHeight(pool: *Pool) !u32 {
         return try std.fmt.parseInt(u32, value_str, 10);
     }
 
-    return 0;
+    return null; // No previous indexing - need to start from genesis
 }
 
 fn updateLastIndexedHeight(pool: *Pool, height: u32) !void {
@@ -341,8 +348,8 @@ fn indexBlock(pool: *Pool, allocator: std.mem.Allocator, indexer: *Indexer, heig
     }
 
     // Create timestamp string for PostgreSQL
-    // Convert nanoseconds to seconds for PostgreSQL
-    const timestamp_seconds = block.header.timestamp / 1_000_000_000;
+    // Block timestamps are already in seconds (from util.getTime())
+    const timestamp_seconds = block.header.timestamp;
     const timestamp_str = try std.fmt.allocPrint(allocator, "{}", .{timestamp_seconds});
     defer allocator.free(timestamp_str);
 
@@ -444,8 +451,8 @@ fn indexTransaction(
     @memcpy(recipient_str[0..recipient_bech32.len], recipient_bech32);
     recipient_str[recipient_bech32.len] = 0;
 
-    // Create timestamp string for transaction (convert nanoseconds to seconds)
-    const tx_timestamp_seconds = tx.timestamp / 1_000_000_000;
+    // Create timestamp string for transaction (convert milliseconds to seconds)
+    const tx_timestamp_seconds = tx.timestamp / 1_000;
     const tx_timestamp_str = try std.fmt.allocPrint(allocator, "{}", .{tx_timestamp_seconds});
     defer allocator.free(tx_timestamp_str);
 

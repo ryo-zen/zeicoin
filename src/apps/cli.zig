@@ -64,18 +64,23 @@ pub fn main() !void {
         return;
     };
     
+    // Ensure cleanup happens even on early returns
+    defer transaction_commands.cleanupGlobalNonceManager();
+
     // Delegate to appropriate command handler
     switch (command) {
         .wallet => try wallet_commands.handleWallet(allocator, args[2..]),
         .balance => transaction_commands.handleBalance(allocator, args[2..]) catch |err| {
             switch (err) {
                 TransactionCLIError.TransactionFailed => std.process.exit(1),
+                TransactionCLIError.NetworkError => std.process.exit(1),
                 else => return err,
             }
         },
         .send => transaction_commands.handleSend(allocator, args[2..]) catch |err| {
             switch (err) {
                 TransactionCLIError.TransactionFailed => std.process.exit(1),
+                TransactionCLIError.NetworkError => std.process.exit(1),
                 else => return err,
             }
         },
@@ -86,13 +91,11 @@ pub fn main() !void {
         .history => transaction_commands.handleHistory(allocator, args[2..]) catch |err| {
             switch (err) {
                 TransactionCLIError.TransactionFailed => std.process.exit(1),
+                TransactionCLIError.NetworkError => std.process.exit(1),
                 else => return err,
             }
         },
         .seed, .mnemonic => try wallet_commands.handleSeed(allocator, args[2..]),
         .help => display.printHelp(),
     }
-    
-    // Cleanup global resources
-    transaction_commands.cleanupGlobalNonceManager();
 }

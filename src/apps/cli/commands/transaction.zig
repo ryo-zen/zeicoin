@@ -31,12 +31,12 @@ var tx_sequence: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
 
 /// Get unique timestamp for transactions to prevent hash collisions
 fn getUniqueTimestamp() u64 {
-    // Use nanosecond precision instead of second precision
-    const base_time = @as(u64, @intCast(std.time.nanoTimestamp())) / 1000; // Convert to microseconds
-    
-    // Add atomic sequence number to ensure uniqueness even within same microsecond
+    // Use millisecond precision for transaction timestamps
+    const base_time = @as(u64, @intCast(std.time.milliTimestamp()));
+
+    // Add atomic sequence number to ensure uniqueness even within same millisecond
     const seq = tx_sequence.fetchAdd(1, .monotonic);
-    
+
     return base_time + seq;
 }
 

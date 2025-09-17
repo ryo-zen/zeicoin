@@ -137,11 +137,11 @@ pub const TESTNET_DISTRIBUTION = [_]struct {
     address_hex: []const u8, // Bech32 address from HD wallet
     amount: u64,
 }{
-    .{ .name = "alice", .address_hex = "tzei1qzhrhfgcdpz4gldle6zlk0q8kcd2elhfwumf0ejs", .amount = 1000 * types.ZEI_COIN },
-    .{ .name = "bob", .address_hex = "tzei1qpgmfkzc4mu9xtljtyvpnrcesjnq7wv4f5ley9hu", .amount = 1000 * types.ZEI_COIN },
-    .{ .name = "charlie", .address_hex = "tzei1qz5rc4ru98ht33uu2w03rc57n32gekzmycd692tz", .amount = 1000 * types.ZEI_COIN },
-    .{ .name = "david", .address_hex = "tzei1qpc7xkcg52w7txsce6ad8scnyg2v54z9ec0hhcdv", .amount = 1000 * types.ZEI_COIN },
-    .{ .name = "eve", .address_hex = "tzei1qpdg0wzte5966248hcekh298sz526pzjw5r8wxlf", .amount = 1000 * types.ZEI_COIN },
+    .{ .name = "alice", .address_hex = "tzei1qzhrhfgcdpz4gldle6zlk0q8kcd2elhfwumf0ejs", .amount = 480000 * types.ZEI_COIN },
+    .{ .name = "bob", .address_hex = "tzei1qpgmfkzc4mu9xtljtyvpnrcesjnq7wv4f5ley9hu", .amount = 480000 * types.ZEI_COIN },
+    .{ .name = "charlie", .address_hex = "tzei1qz5rc4ru98ht33uu2w03rc57n32gekzmycd692tz", .amount = 480000 * types.ZEI_COIN },
+    .{ .name = "david", .address_hex = "tzei1qpc7xkcg52w7txsce6ad8scnyg2v54z9ec0hhcdv", .amount = 480000 * types.ZEI_COIN },
+    .{ .name = "eve", .address_hex = "tzei1qpdg0wzte5966248hcekh298sz526pzjw5r8wxlf", .amount = 480000 * types.ZEI_COIN },
 };
 
 /// Get deterministic address for a test account

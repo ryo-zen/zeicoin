@@ -12,6 +12,9 @@ const log = std.log.scoped(.types);
 pub const ZEI_COIN: u64 = 100000000; // 1 Zeicoin = 100,000,000 zei
 pub const ZEI_CENT: u64 = 1000000; // 1 cent = 1,000,000 zei
 
+// Supply constraints
+pub const MAX_SUPPLY: u64 = 24000000 * ZEI_COIN; // 24 million ZEI total supply cap
+
 // Timing constants - Common intervals used throughout the codebase
 pub const TIMING = struct {
     pub const PEER_TIMEOUT_SECONDS: i64 = 60;
@@ -1147,7 +1150,7 @@ pub const NetworkConfig = struct {
                 .randomx_mode = false, // Light mode (256MB RAM)
                 .target_block_time = 10, // 10 seconds
                 .max_nonce = 1_000_000, // Reasonable limit for testing
-                .block_reward = 1 * ZEI_COIN, // 1 ZEI per block
+                .block_reward = 10 * ZEI_COIN, // 10 ZEI per block
                 .min_fee = 1000, // 0.00001 ZEI minimum fee
             },
             .mainnet => NetworkConfig{
