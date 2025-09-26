@@ -228,13 +228,24 @@ pub const NetworkManager = struct {
                 else => return err,
             };
             
+            // Check connection limit for incoming connections too
+            const current_connections = self.active_connections.load(.acquire);
+            if (current_connections >= MAX_ACTIVE_CONNECTIONS) {
+                std.log.warn("Too many active connections ({}), rejecting incoming connection from {}", .{ current_connections, connection.address });
+                connection.stream.close();
+                continue;
+            }
+
             // Add peer
             const peer = self.peer_manager.addPeer(connection.address) catch |err| {
                 std.log.warn("Failed to add peer {}: {}", .{ connection.address, err });
                 connection.stream.close();
                 continue;
             };
-            
+
+            // Increment active connections counter for incoming connections
+            _ = self.active_connections.fetchAdd(1, .acq_rel);
+
             // Handle in thread
             const thread = try std.Thread.spawn(.{}, handleIncomingConnection, .{
                 self, peer, connection.stream
@@ -244,6 +255,7 @@ pub const NetworkManager = struct {
     }
     
     fn handleIncomingConnection(self: *Self, peer: *Peer, stream: net.Stream) void {
+        defer _ = self.active_connections.fetchSub(1, .acq_rel);
         // Check if shutting down
         if (!self.running) {
             stream.close();
