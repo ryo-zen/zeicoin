@@ -1083,13 +1083,13 @@ pub const Genesis = struct {
     pub fn getConfig() GenesisConfig {
         return switch (CURRENT_NETWORK) {
             .testnet => GenesisConfig{
-                .timestamp = 1757419151, // January 1, 2024 00:00:00 UTC
+                .timestamp = 1757419151000, // January 1, 2024 00:00:00 UTC in milliseconds
                 .message = "ZeiCoin TestNet Genesis - A minimal digital currency written in ⚡Zig",
                 .reward = 50 * ZEI_COIN,
                 .nonce = 0x7E57DE7,
             },
             .mainnet => GenesisConfig{
-                .timestamp = 1736150400, // January 6, 2025 00:00:00 UTC (PLACEHOLDER)
+                .timestamp = 1736150400000, // January 6, 2025 00:00:00 UTC (PLACEHOLDER) in milliseconds
                 .message = "ZeiCoin MainNet Launch - [Quote]",
                 .reward = 50 * ZEI_COIN,
                 .nonce = 0x3A1F1E7,
@@ -1313,7 +1313,7 @@ test "transaction validation" {
         .amount = 100 * ZEI_COIN,
         .fee = ZenFees.STANDARD_FEE,
         .nonce = 1,
-        .timestamp = 1757419151,
+        .timestamp = 1757419151000,
         .expiry_height = 10000,
         .sender_public_key = alice_public_key,
         .signature = std.mem.zeroes(Signature),
@@ -1356,7 +1356,7 @@ test "block validation" {
         .amount = 100 * ZEI_COIN,
         .fee = ZenFees.STANDARD_FEE,
         .nonce = 1,
-        .timestamp = 1757419151,
+        .timestamp = 1757419151000,
         .expiry_height = 10000,
         .sender_public_key = alice_public_key,
         .signature = std.mem.zeroes(Signature),
@@ -1372,7 +1372,7 @@ test "block validation" {
             .version = 0, // Block version 0 for current protocol
             .previous_hash = std.mem.zeroes(BlockHash),
             .merkle_root = std.mem.zeroes(Hash),
-            .timestamp = 1757419151,
+            .timestamp = 1757419151000,
             .difficulty = ZenMining.initialDifficultyTarget().toU64(),
             .nonce = 0,
             .witness_root = std.mem.zeroes(Hash),
@@ -1415,7 +1415,7 @@ test "transaction hash" {
         .amount = 1000000000,
         .fee = ZenFees.STANDARD_FEE,
         .nonce = 0,
-        .timestamp = 1234567890,
+        .timestamp = 1234567890000,
         .expiry_height = 10000,
         .sender_public_key = public_key,
         .signature = std.mem.zeroes(Signature),
@@ -1433,7 +1433,7 @@ test "transaction hash" {
         .amount = 1000000000,
         .fee = ZenFees.STANDARD_FEE,
         .nonce = 0,
-        .timestamp = 1234567890,
+        .timestamp = 1234567890000,
         .expiry_height = 10000,
         .sender_public_key = public_key,
         .signature = std.mem.zeroes(Signature),
@@ -1456,7 +1456,7 @@ test "transaction hash" {
         .amount = 2000000000, // Different amount
         .fee = ZenFees.STANDARD_FEE,
         .nonce = 0,
-        .timestamp = 1234567890,
+        .timestamp = 1234567890000,
         .expiry_height = 10000,
         .sender_public_key = public_key,
         .signature = std.mem.zeroes(Signature),
@@ -1476,7 +1476,7 @@ test "block header hash consistency" {
         .version = 0, // Block version 0 for current protocol
         .previous_hash = std.mem.zeroes(Hash),
         .merkle_root = [_]u8{1} ++ std.mem.zeroes([31]u8),
-        .timestamp = 1757419151,
+        .timestamp = 1757419151000,
         .difficulty = test_difficulty,
         .nonce = 42,
         .witness_root = std.mem.zeroes(Hash),
@@ -1490,7 +1490,7 @@ test "block header hash consistency" {
         .version = 0, // Block version 0 for current protocol
         .previous_hash = std.mem.zeroes(Hash),
         .merkle_root = [_]u8{1} ++ std.mem.zeroes([31]u8),
-        .timestamp = 1757419151,
+        .timestamp = 1757419151000,
         .difficulty = test_difficulty,
         .nonce = 42,
         .witness_root = std.mem.zeroes(Hash),
@@ -1515,7 +1515,7 @@ test "block header hash uniqueness" {
         .version = 0, // Block version 0 for current protocol
         .previous_hash = std.mem.zeroes(Hash),
         .merkle_root = std.mem.zeroes(Hash),
-        .timestamp = 1757419151,
+        .timestamp = 1757419151000,
         .difficulty = test_difficulty,
         .nonce = 0,
         .witness_root = std.mem.zeroes(Hash),
@@ -1536,9 +1536,9 @@ test "block header hash uniqueness" {
 
     // Different timestamp should produce different hash
     var header_time1 = base_header;
-    header_time1.timestamp = 1757419151;
+    header_time1.timestamp = 1757419151000;
     var header_time2 = base_header;
-    header_time2.timestamp = 1704067300;
+    header_time2.timestamp = 1704067300000;
 
     const hash_time1 = header_time1.hash();
     const hash_time2 = header_time2.hash();
@@ -1574,7 +1574,7 @@ test "block hash delegated to header hash" {
         .amount = 100 * ZEI_COIN,
         .fee = ZenFees.STANDARD_FEE,
         .nonce = 1,
-        .timestamp = 1757419151,
+        .timestamp = 1757419151000,
         .expiry_height = 10000,
         .sender_public_key = alice_public_key,
         .signature = std.mem.zeroes(Signature),
@@ -1590,7 +1590,7 @@ test "block hash delegated to header hash" {
             .version = 0, // Block version 0 for current protocol
             .previous_hash = std.mem.zeroes(BlockHash),
             .merkle_root = std.mem.zeroes(Hash),
-            .timestamp = 1757419151,
+            .timestamp = 1757419151000,
             .difficulty = ZenMining.initialDifficultyTarget().toU64(),
             .nonce = 12345,
             .witness_root = std.mem.zeroes(Hash),

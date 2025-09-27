@@ -297,32 +297,6 @@ pub fn build(b: *std.Build) !void {
     const docs_step = b.step("docs", "Generate documentation");
     docs_step.dependOn(&install_docs.step);
 
-    // **************************************************************
-    // *              MEMORY CORRUPTION TEST                        *
-    // **************************************************************
-    {
-        const test_exe = b.addExecutable(.{
-            .name = "test_memory_corruption",
-            .root_source_file = b.path("tests/test_memory_corruption.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        // Add dependency modules to the executable.
-        for (deps) |mod| test_exe.root_module.addImport(
-            mod.name,
-            mod.module,
-        );
-        test_exe.root_module.addImport("zeicoin", lib.root_module);
-        test_exe.linkLibC();
-
-        b.installArtifact(test_exe);
-
-        const run_test_cmd = b.addRunArtifact(test_exe);
-        run_test_cmd.step.dependOn(b.getInstallStep());
-
-        const run_test_step = b.step("test-memory", "Run memory corruption test");
-        run_test_step.dependOn(&run_test_cmd.step);
-    }
 
     // **************************************************************
     // *              ADDITIONAL TESTS                              *

@@ -45,7 +45,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
         .amount = miner_reward, // 💰 Block reward + all transaction fees
         .fee = 0, // Coinbase has no fee
         .nonce = 0, // Coinbase always nonce 0
-        .timestamp = @intCast(util.getTime()),
+        .timestamp = @intCast(std.time.milliTimestamp()),
         .expiry_height = std.math.maxInt(u64), // Coinbase transactions never expire
         .signature = std.mem.zeroes(types.Signature), // No signature needed for coinbase
         .script_version = 0,
@@ -129,7 +129,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
             .version = types.CURRENT_BLOCK_VERSION,
             .previous_hash = previous_hash,
             .merkle_root = std.mem.zeroes(Hash), // Zen simplicity
-            .timestamp = @intCast(util.getTime()),
+            .timestamp = @intCast(std.time.milliTimestamp()),
             .difficulty = next_difficulty_target.toU64(),
             .nonce = 0,
             .witness_root = std.mem.zeroes(Hash), // No witness data yet

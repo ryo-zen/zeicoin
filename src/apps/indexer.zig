@@ -348,18 +348,19 @@ fn indexBlock(pool: *Pool, allocator: std.mem.Allocator, indexer: *Indexer, heig
     }
 
     // Create timestamp string for PostgreSQL
-    // Block timestamps are already in seconds (from util.getTime())
-    const timestamp_seconds = block.header.timestamp;
-    const timestamp_str = try std.fmt.allocPrint(allocator, "{}", .{timestamp_seconds});
+    // Block timestamps are in milliseconds, store directly
+    const timestamp_ms = block.header.timestamp;
+    const timestamp_str = try std.fmt.allocPrint(allocator, "{}", .{timestamp_ms});
     defer allocator.free(timestamp_str);
 
 
     // Insert block using standard PostgreSQL approach (TimescaleDB best practice)
     _ = try pool.exec(
-        \\INSERT INTO blocks (timestamp, height, hash, previous_hash, difficulty, nonce, tx_count, total_fees, size)
-        \\VALUES (to_timestamp($1), $2, $3, $4, $5, $6, $7, $8, $9)
+        \\INSERT INTO blocks (timestamp, timestamp_ms, height, hash, previous_hash, difficulty, nonce, tx_count, total_fees, size)
+        \\VALUES (to_timestamp($1/1000.0), $2, $3, $4, $5, $6, $7, $8, $9, $10)
     , .{
         timestamp_str,
+        timestamp_ms,
         height,
         &hash_hex,
         &prev_hash_hex,
@@ -451,18 +452,19 @@ fn indexTransaction(
     @memcpy(recipient_str[0..recipient_bech32.len], recipient_bech32);
     recipient_str[recipient_bech32.len] = 0;
 
-    // Create timestamp string for transaction (convert milliseconds to seconds)
-    const tx_timestamp_seconds = tx.timestamp / 1_000;
-    const tx_timestamp_str = try std.fmt.allocPrint(allocator, "{}", .{tx_timestamp_seconds});
+    // Create timestamp string for transaction (store milliseconds directly)
+    const tx_timestamp_ms = tx.timestamp;
+    const tx_timestamp_str = try std.fmt.allocPrint(allocator, "{}", .{tx_timestamp_ms});
     defer allocator.free(tx_timestamp_str);
 
 
     // Insert transaction (TimescaleDB hypertable)
     _ = try pool.exec(
-        \\INSERT INTO transactions (block_timestamp, hash, block_height, block_hash, position, sender, recipient, amount, fee, nonce)
-        \\VALUES (to_timestamp($1), $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        \\INSERT INTO transactions (block_timestamp, timestamp_ms, hash, block_height, block_hash, position, sender, recipient, amount, fee, nonce)
+        \\VALUES (to_timestamp($1/1000.0), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
     , .{
         tx_timestamp_str,
+        tx_timestamp_ms,
         &tx_hash_hex,
         block_height,
         block_hash,
@@ -478,7 +480,7 @@ fn indexTransaction(
     if (!tx.sender.isZero()) {
         // Deduct from sender
         _ = try pool.exec(
-            \\SELECT update_account_balance_simple($1, $2, $3, to_timestamp($4), true)
+            \\SELECT update_account_balance_simple($1, $2, $3, to_timestamp($4/1000.0), true)
         , .{
             std.mem.sliceTo(&sender_str, 0),
             @as(i64, 0) - @as(i64, @intCast(tx.amount + tx.fee)),
@@ -489,7 +491,7 @@ fn indexTransaction(
 
     // Add to recipient
     _ = try pool.exec(
-        \\SELECT update_account_balance_simple($1, $2, $3, to_timestamp($4), false)
+        \\SELECT update_account_balance_simple($1, $2, $3, to_timestamp($4/1000.0), false)
     , .{
         std.mem.sliceTo(&recipient_str, 0),
         @as(i64, @intCast(tx.amount)),
