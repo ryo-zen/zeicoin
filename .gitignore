@@ -25,8 +25,8 @@ randomx/randomx_build/
 randomx/randomx_install/
 randomx/randomx_helper
 
-# Test Folder
-tests/
+# Test Folder - Allow specific test scripts for public repo
+tests_dev/
 
 # Docs Folder
 /docs
@@ -91,4 +91,5 @@ scripts/test_l2_integration.sh
 /website
 /scripts
 /optimizations
+test_analytics.sh
 

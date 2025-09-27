@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const testing = std.testing;
-const log = std.log.scoped(.test);
+const log = std.log.scoped(.tests);
 
 // Import the zeicoin module
 const zei = @import("zeicoin");
