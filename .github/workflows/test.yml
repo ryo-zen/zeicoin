@@ -34,26 +34,20 @@ jobs:
       with:
         version: 0.14.1
 
-    - name: Cache Zig dependencies
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cache/zig
-          .zig-cache
-          zig-cache
-        key: ${{ runner.os }}-zig-${{ hashFiles('build.zig', 'build.zig.zon') }}
-        restore-keys: |
-          ${{ runner.os }}-zig-
-
-    - name: Initialize Zig cache and fetch dependencies
+    - name: Prepare Zig environment
       run: |
-        # Ensure all cache directories exist
-        mkdir -p ~/.cache/zig/{b,h,o,p,tmp,z}
+        # Clear any existing cache to avoid corruption
+        rm -rf ~/.cache/zig
+        rm -rf .zig-cache
+        rm -rf zig-cache
+
+        # Create fresh cache directories
+        mkdir -p ~/.cache/zig
         mkdir -p .zig-cache
         mkdir -p zig-cache
         chmod -R 755 ~/.cache/zig
 
-        # Fetch dependencies to populate cache
+        # Fetch dependencies fresh
         echo "Fetching Zig dependencies..."
         zig build --fetch 2>/dev/null || true
 
