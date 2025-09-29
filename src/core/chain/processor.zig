@@ -186,13 +186,7 @@ pub const ChainProcessor = struct {
                 }
             }
         } else if (current_height == 0) {
-            // At height 0, we should only accept blocks that build on genesis OR are genesis
-            if (genesis.validateGenesis(block)) {
-                // This is a genesis block, which shouldn't be sent via acceptBlock
-                log.warn("❌ [BLOCK REJECT] Genesis block should not be processed via acceptBlock", .{});
-                return error.UnexpectedGenesisBlock;
-            }
-            
+            // At height 0, we're waiting for block 1 which must reference genesis
             // Block at height 1 must reference genesis
             const genesis_hash = genesis.getCanonicalGenesisHash();
             if (!std.mem.eql(u8, &block.header.previous_hash, &genesis_hash)) {
@@ -211,8 +205,9 @@ pub const ChainProcessor = struct {
             return; // Skip processing but don't error - this is expected during sync replay
         }
 
-        // During reorganization, use reorganization-specific validation (skips hash chain checks)
-        if (!try self.chain_validator.validateReorgBlock(&block, target_height)) {
+        // Use sync validation for blocks received during normal operation
+        // (validateSyncBlock is more appropriate for network-received blocks)
+        if (!try self.chain_validator.validateSyncBlock(&block, target_height)) {
             return error.BlockValidationFailed;
         }
 

@@ -535,10 +535,12 @@ pub const BlockSyncProtocol = struct {
 
         // Timestamp validation for sync blocks (more lenient than normal validation)
         const current_time = util.getTime();
+        // Block timestamps are in milliseconds, convert to seconds for comparison
+        const block_time_seconds = @divFloor(@as(i64, @intCast(block.header.timestamp)), 1000);
         // Allow more future time during sync (network time differences)
         const sync_future_allowance = types.TimestampValidation.MAX_FUTURE_TIME * 2; // 4 hours
-        if (@as(i64, @intCast(block.header.timestamp)) > current_time + sync_future_allowance) {
-            const future_seconds = @as(i64, @intCast(block.header.timestamp)) - current_time;
+        if (block_time_seconds > current_time + sync_future_allowance) {
+            const future_seconds = block_time_seconds - current_time;
             log.info("❌ Sync block timestamp too far in future: {} seconds ahead", .{future_seconds});
             return false;
         }

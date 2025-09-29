@@ -257,7 +257,7 @@ pub const ChainState = struct {
         log.info("🔍 [COINBASE TX] =============================================", .{});
         const miner_addr = self.formatAddressForLogging(miner_address);
         defer self.allocator.free(miner_addr);
-        log.info("🔍 [COINBASE TX] Processing coinbase transaction to miner: {s}", .{miner_addr});
+        log.info("🔍 [COINBASE TX] Processing coinbase transaction to prefunded account: {s}", .{miner_addr});
         log.info("🔍 [COINBASE TX] Coinbase amount: {} ZEI, height: {}", .{ coinbase_tx.amount, current_height });
 
         // Get or create miner account
@@ -269,7 +269,6 @@ pub const ChainState = struct {
 
         const balance_before = @as(f64, @floatFromInt(miner_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
         const immature_before = @as(f64, @floatFromInt(miner_account.immature_balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-        log.info("🔍 [COINBASE TX] Miner account BEFORE: balance={d:.8} ZEI, immature={d:.8} ZEI, nonce={}", .{ balance_before, immature_before, miner_account.nonce });
 
         // Check if this is a genesis block (height 0) transaction
         if (current_height == 0) {
@@ -284,7 +283,6 @@ pub const ChainState = struct {
 
         const balance_after = @as(f64, @floatFromInt(miner_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
         const immature_after = @as(f64, @floatFromInt(miner_account.immature_balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-        log.info("🔍 [COINBASE TX] Miner account AFTER: balance={d:.8} ZEI, immature={d:.8} ZEI, nonce={}", .{ balance_after, immature_after, miner_account.nonce });
 
         // Log coinbase reward account change
         const reward_zei = @as(f64, @floatFromInt(coinbase_tx.amount)) / @as(f64, @floatFromInt(types.ZEI_COIN));
@@ -298,7 +296,6 @@ pub const ChainState = struct {
 
         // Save miner account
         try self.database.saveAccount(miner_address, miner_account);
-        log.info("🔍 [COINBASE TX] Miner account saved to database", .{});
     }
 
     /// Clear all account state for rebuild

@@ -480,7 +480,7 @@ fn indexTransaction(
     if (!tx.sender.isZero()) {
         // Deduct from sender
         _ = try pool.exec(
-            \\SELECT update_account_balance_simple($1, $2, $3, to_timestamp($4/1000.0), true)
+            \\SELECT update_account_balance_simple($1, $2, $3, to_timestamp($4/1000.0)::timestamp, true)
         , .{
             std.mem.sliceTo(&sender_str, 0),
             @as(i64, 0) - @as(i64, @intCast(tx.amount + tx.fee)),
@@ -491,7 +491,7 @@ fn indexTransaction(
 
     // Add to recipient
     _ = try pool.exec(
-        \\SELECT update_account_balance_simple($1, $2, $3, to_timestamp($4/1000.0), false)
+        \\SELECT update_account_balance_simple($1, $2, $3, to_timestamp($4/1000.0)::timestamp, false)
     , .{
         std.mem.sliceTo(&recipient_str, 0),
         @as(i64, @intCast(tx.amount)),

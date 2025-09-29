@@ -9,15 +9,15 @@ const util = @import("../util/util.zig");
 /// These are the canonical genesis blocks that define each ZeiCoin network
 pub const GenesisBlocks = struct {
     /// TestNet Genesis Block (for development and testing)
-    /// Created: 2024-01-01 00:00:00 UTC
+    /// Created: 2025-09-09 09:09:09.090 UTC
     /// Purpose: Development, testing, and experimentation
     pub const TESTNET = struct {
-        pub const HASH: [32]u8 = [_]u8{ 0x36, 0x60, 0xde, 0x42, 0x29, 0xdc, 0xa4, 0xd5, 0xcd, 0x3c, 0xe3, 0xa2, 0x60, 0x38, 0x77, 0xf3, 0xc9, 0xe6, 0xb5, 0xea, 0xef, 0x7d, 0x7f, 0x3e, 0xe1, 0x8e, 0x35, 0x3c, 0x22, 0x8c, 0x41, 0x9e };
+        pub const HASH: [32]u8 = [_]u8{ 0xa2, 0xa1, 0x90, 0x54, 0x5e, 0x15, 0x73, 0x41, 0xa8, 0xa3, 0x5b, 0x74, 0x91, 0x2e, 0x2c, 0xc5, 0xd5, 0x9b, 0xa5, 0x35, 0x67, 0x48, 0xae, 0x39, 0x09, 0x3e, 0x2d, 0xaf, 0xc4, 0x6a, 0x3d, 0x84 };
 
         pub const MESSAGE = "ZeiCoin TestNet Genesis - A minimal digital currency written in ⚡Zig";
-        pub const TIMESTAMP: u64 = 1757408949090;
+        pub const TIMESTAMP: u64 = 1757408949090; // September 9, 2025 09:09:09.090 UTC
         pub const NONCE: u64 = 0x7E57DE7;
-        pub const MINER_REWARD: u64 = 50 * types.ZEI_COIN; // 50 ZEI initial distribution
+        pub const MINER_REWARD: u64 = 0; // No miner reward in genesis
 
         /// Get the hardcoded TestNet genesis block
         /// Returns a block with a static empty transactions slice.
@@ -54,7 +54,7 @@ pub const GenesisBlocks = struct {
         pub const MESSAGE = "ZeiCoin MainNet Launch - [INSERT_LAUNCH_HEADLINE]";
         pub const TIMESTAMP: u64 = 0; // TBD - will be set to exact launch time
         pub const NONCE: u64 = 0x3A1F1E7;
-        pub const MINER_REWARD: u64 = 21 * types.ZEI_COIN; // 21 ZEI initial distribution
+        pub const MINER_REWARD: u64 = 0; // No miner reward in genesis
 
         /// Get the hardcoded MainNet genesis block
         /// Returns a block with a static empty transactions slice.
@@ -159,60 +159,27 @@ pub fn getTestAccountAddress(name: []const u8) ?types.Address {
 pub fn createGenesis(allocator: std.mem.Allocator) !types.Block {
     const canonical = getCanonicalGenesis();
 
-    // Determine which network we're on
-    const network_seed = switch (types.CURRENT_NETWORK) {
-        .testnet => "TESTNET_GENESIS",
-        .mainnet => "MAINNET_GENESIS",
-    };
-
-    const miner_reward = switch (types.CURRENT_NETWORK) {
-        .testnet => GenesisBlocks.TESTNET.MINER_REWARD,
-        .mainnet => GenesisBlocks.MAINNET.MINER_REWARD,
-    };
-
     const timestamp = switch (types.CURRENT_NETWORK) {
         .testnet => GenesisBlocks.TESTNET.TIMESTAMP,
         .mainnet => GenesisBlocks.MAINNET.TIMESTAMP,
     };
 
-    // Create genesis public key from network identifier
-    const genesis_public_key = createGenesisPublicKey(network_seed);
-    const genesis_address = types.Address.fromPublicKey(genesis_public_key);
-
     // Calculate number of transactions
     const tx_count = switch (types.CURRENT_NETWORK) {
-        .testnet => 1 + TESTNET_DISTRIBUTION.len, // Coinbase + distributions
-        .mainnet => 1, // Just coinbase for now
+        .testnet => TESTNET_DISTRIBUTION.len, // Only distributions, no coinbase
+        .mainnet => 0, // No transactions in mainnet genesis
     };
 
     // Allocate memory for transactions array
     const transactions = try allocator.alloc(types.Transaction, tx_count);
 
-    // Create coinbase transaction
-    transactions[0] = types.Transaction{
-        .version = 0,
-        .flags = .{},
-        .sender = types.Address.zero(),
-        .sender_public_key = std.mem.zeroes([32]u8),
-        .recipient = genesis_address,
-        .amount = miner_reward,
-        .fee = 0,
-        .nonce = 0,
-        .timestamp = timestamp,
-        .expiry_height = std.math.maxInt(u64),
-        .signature = std.mem.zeroes(types.Signature),
-        .script_version = 0,
-        .witness_data = &[_]u8{},
-        .extra_data = &[_]u8{},
-    };
-
-    // Add TestNet distribution transactions
+    // Add TestNet distribution transactions (no coinbase)
     if (types.CURRENT_NETWORK == .testnet) {
         for (TESTNET_DISTRIBUTION, 0..) |account, i| {
             // Parse the bech32 address from the account
             const account_address = types.Address.fromString(std.heap.page_allocator, account.address_hex) catch unreachable;
 
-            transactions[i + 1] = types.Transaction{
+            transactions[i] = types.Transaction{
                 .version = 0,
                 .flags = .{},
                 .sender = types.Address.zero(),
@@ -254,8 +221,8 @@ test "Genesis block validation" {
     var created_genesis = try createGenesis(allocator);
     defer created_genesis.deinit(allocator);
 
-    // TestNet should have 6 transactions (1 coinbase + 5 distributions)
-    const expected_tx_count = if (types.CURRENT_NETWORK == .testnet) 6 else 1;
+    // TestNet should have 5 transactions (5 distributions, no coinbase)
+    const expected_tx_count = if (types.CURRENT_NETWORK == .testnet) 5 else 0;
     try std.testing.expect(created_genesis.transactions.len == expected_tx_count);
 
     // All transactions should be coinbase (genesis funding)

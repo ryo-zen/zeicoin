@@ -70,7 +70,7 @@ fn createTestTransaction(
         .amount = amount,
         .fee = fee,
         .nonce = nonce,
-        .timestamp = @intCast(util.getTime()),
+        .timestamp = @intCast(std.time.milliTimestamp()),
         .expiry_height = 10000,
         .sender_public_key = keypair.public_key,
         .signature = std.mem.zeroes(types.Signature),
@@ -227,7 +227,7 @@ test "block validation" {
         .script_version = 0,
         .witness_data = &[_]u8{},
         .extra_data = &[_]u8{},
-        .timestamp = @intCast(util.getTime()),
+        .timestamp = @intCast(std.time.milliTimestamp()),
         .expiry_height = std.math.maxInt(u64), // Coinbase never expires
         .signature = std.mem.zeroes(types.Signature),
     };
@@ -237,7 +237,7 @@ test "block validation" {
         .header = createTestBlockHeader(
             prev_block.hash(),
             std.mem.zeroes(types.Hash),
-            @intCast(util.getTime()),
+            @intCast(std.time.milliTimestamp()),
             types.ZenMining.initialDifficultyTarget().toU64(),
             0
         ),
@@ -312,7 +312,7 @@ test "mempool cleaning after block application" {
         .amount = 10 * types.ZEI_COIN,
         .fee = types.ZenFees.STANDARD_FEE,
         .nonce = 0,
-        .timestamp = @intCast(util.getTime()),
+        .timestamp = @intCast(std.time.milliTimestamp()),
         .expiry_height = 10000,
         .sender_public_key = sender_keypair.public_key,
         .signature = std.mem.zeroes(types.Signature),
@@ -356,7 +356,7 @@ test "block broadcasting integration" {
         .header = createTestBlockHeader(
             std.mem.zeroes(types.Hash),
             std.mem.zeroes(types.Hash),
-            @intCast(util.getTime()),
+            @intCast(std.time.milliTimestamp()),
             types.ZenMining.initialDifficultyTarget().toU64(),
             0
         ),
@@ -379,7 +379,7 @@ test "timestamp validation - future blocks rejected" {
     defer std.fs.cwd().deleteTree("test_zeicoin_timestamp_future") catch {};
 
     // Create a block with timestamp too far in future
-    const future_time = @as(u64, @intCast(util.getTime())) + @as(u64, @intCast(types.TimestampValidation.MAX_FUTURE_TIME)) + 3600; // 1 hour beyond limit
+    const future_time = @as(u64, @intCast(std.time.milliTimestamp())) + @as(u64, @intCast(types.TimestampValidation.MAX_FUTURE_TIME * 1000)) + 3600000; // 1 hour beyond limit in milliseconds
 
     var transactions = [_]types.Transaction{};
     const future_block = types.Block{
@@ -526,7 +526,7 @@ test "mempool limits enforcement" {
             .amount = 1,
             .fee = types.ZenFees.MIN_FEE,
             .nonce = i,
-            .timestamp = @intCast(util.getTime()),
+            .timestamp = @intCast(std.time.milliTimestamp()),
             .expiry_height = 10000,
             .signature = std.mem.zeroes(types.Signature),
             .script_version = 0,
@@ -568,7 +568,7 @@ test "mempool limits enforcement" {
         .amount = 1 * types.ZEI_COIN,
         .fee = types.ZenFees.MIN_FEE,
         .nonce = 0,
-        .timestamp = @intCast(util.getTime()),
+        .timestamp = @intCast(std.time.milliTimestamp()),
         .expiry_height = 10000,
         .signature = undefined,
         .script_version = 0,
@@ -625,7 +625,7 @@ test "mempool limits enforcement" {
         .amount = 1 * types.ZEI_COIN,
         .fee = types.ZenFees.MIN_FEE,
         .nonce = 0,
-        .timestamp = @intCast(util.getTime()),
+        .timestamp = @intCast(std.time.milliTimestamp()),
         .expiry_height = 10000,
         .signature = undefined,
         .script_version = 0,
@@ -679,7 +679,7 @@ test "transaction expiration" {
         .amount = 10 * types.ZEI_COIN,
         .fee = types.ZenFees.MIN_FEE,
         .nonce = 0,
-        .timestamp = @intCast(util.getTime()),
+        .timestamp = @intCast(std.time.milliTimestamp()),
         .expiry_height = current_height + 100, // Expires in 100 blocks
         .signature = undefined,
         .script_version = 0,
@@ -706,7 +706,7 @@ test "transaction expiration" {
         .amount = 10 * types.ZEI_COIN,
         .fee = types.ZenFees.MIN_FEE,
         .nonce = 0,
-        .timestamp = @intCast(util.getTime()),
+        .timestamp = @intCast(std.time.milliTimestamp()),
         .expiry_height = current_height, // Already expired
         .signature = undefined,
         .script_version = 0,
@@ -732,7 +732,7 @@ test "transaction expiration" {
         .amount = 10 * types.ZEI_COIN,
         .fee = types.ZenFees.MIN_FEE,
         .nonce = 0,
-        .timestamp = @intCast(util.getTime()),
+        .timestamp = @intCast(std.time.milliTimestamp()),
         .expiry_height = current_height + 2, // Expires in 2 blocks
         .signature = undefined,
         .script_version = 0,
@@ -826,7 +826,7 @@ test "reorganization with coinbase maturity" {
         .amount = types.ZenMining.BLOCK_REWARD / 2, // Spend half
         .fee = types.ZenFees.MIN_FEE,
         .nonce = 0,
-        .timestamp = @intCast(util.getTime()),
+        .timestamp = @intCast(std.time.milliTimestamp()),
         .expiry_height = 10000,
         .signature = undefined,
         .script_version = 0,
@@ -923,7 +923,7 @@ test "transaction size limit" {
         .amount = 100 * types.ZEI_COIN,
         .fee = types.ZenFees.MIN_FEE,
         .nonce = 0,
-        .timestamp = @intCast(std.time.timestamp()),
+        .timestamp = @intCast(std.time.milliTimestamp()),
         .expiry_height = try zeicoin.getHeight() + types.TransactionExpiry.getExpiryWindow(),
         .sender_public_key = alice.public_key,
         .signature = std.mem.zeroes(types.Signature),
@@ -952,7 +952,7 @@ test "transaction size limit" {
         .amount = 50 * types.ZEI_COIN,
         .fee = types.ZenFees.MIN_FEE,
         .nonce = 0,
-        .timestamp = @intCast(std.time.timestamp()),
+        .timestamp = @intCast(std.time.milliTimestamp()),
         .expiry_height = try zeicoin.getHeight() + types.TransactionExpiry.getExpiryWindow(),
         .sender_public_key = alice.public_key,
         .signature = std.mem.zeroes(types.Signature),
@@ -1088,7 +1088,7 @@ test "genesis distribution validation" {
         .amount = 100 * types.ZEI_COIN,
         .fee = types.ZenFees.MIN_FEE,
         .nonce = 0,
-        .timestamp = @intCast(util.getTime()),
+        .timestamp = @intCast(std.time.milliTimestamp()),
         .expiry_height = 10000,
         .signature = undefined,
         .script_version = 0,
@@ -1185,7 +1185,7 @@ test "memory leak detection - block operations" {
             .amount = types.ZenMining.BLOCK_REWARD,
             .fee = 0,
             .nonce = 0,
-            .timestamp = @intCast(std.time.timestamp()),
+            .timestamp = @intCast(std.time.milliTimestamp()),
             .expiry_height = 0,
             .sender_public_key = std.mem.zeroes([32]u8),
             .signature = std.mem.zeroes(types.Signature),
@@ -1207,7 +1207,7 @@ test "memory leak detection - block operations" {
             .amount = types.ZenMining.BLOCK_REWARD / 2,
             .fee = types.ZenFees.MIN_FEE,
             .nonce = 0,
-            .timestamp = @intCast(std.time.timestamp()),
+            .timestamp = @intCast(std.time.milliTimestamp()),
             .expiry_height = 10000,
             .sender_public_key = miner.public_key,
             .signature = std.mem.zeroes(types.Signature),
@@ -1221,7 +1221,7 @@ test "memory leak detection - block operations" {
             .header = createTestBlockHeader(
                 std.mem.zeroes(types.Hash),
                 std.mem.zeroes(types.Hash),
-                @intCast(util.getTime()),
+                @intCast(std.time.milliTimestamp()),
                 types.ZenMining.initialDifficultyTarget().toU64(),
                 0
             ),

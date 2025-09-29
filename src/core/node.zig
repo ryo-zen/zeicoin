@@ -191,6 +191,7 @@ pub const ZeiCoin = struct {
 
         // Genesis block is at height 0, so this is normal
         log.info("🔗 Blockchain initialized at height {}, ready for network sync", .{current_height});
+        log.info("", .{});
     }
 
     pub fn deinit(self: *ZeiCoin) void {
@@ -244,14 +245,15 @@ pub const ZeiCoin = struct {
         // Genesis initialization handled by chain state
         // Modern reorganization system doesn't require explicit genesis setup
 
-        log.info("\n🎉 ===============================================", .{});
+        log.info("", .{});
+        log.info("🎉 ===============================================", .{});
         log.info("🎉 GENESIS BLOCK CREATED SUCCESSFULLY!", .{});
         log.info("🎉 ===============================================", .{});
         log.info("📦 Block Height: 0", .{});
         log.info("📦 Transactions: {}", .{genesis_block.txCount()});
         log.info("🌐 Network: {s} (Canonical Genesis)", .{types.NetworkConfig.networkName()});
         log.info("🔗 Fork manager initialized with genesis chain", .{});
-        log.info("✅ Blockchain ready for operation!\n", .{});
+        log.info("✅ Blockchain ready for operation!", .{});
     }
 
     fn createGenesis(self: *ZeiCoin) !void {

@@ -108,7 +108,7 @@ pub const SyncManager = struct {
         // Initialize batch sync protocol
         const batch_sync = BatchSyncProtocol.init(allocator, batch_context);
 
-        log.info("ZSP-001 sync manager initialized successfully", .{});
+        log.info("🔄 ZSP-001 sync manager initialized successfully", .{});
 
         return .{
             .allocator = allocator,
@@ -210,34 +210,38 @@ pub const SyncManager = struct {
             log.info("STEP 4 RESULT: Using ZSP-001 batch synchronization", .{});
             log.info("Performance: Up to 50x faster than sequential sync", .{});
 
-            // Transition sync state and set timeout timer
-            log.debug("STATE TRANSITION: {} → syncing", .{self.sync_state});
-            const old_state = self.sync_state;
-            self.sync_state = .syncing;
+            // Set timeout timer
             self.sync_start_time = std.time.timestamp();
-            log.debug("State transition completed: {} → {}", .{ old_state, self.sync_state });
             log.info("🕒 [SYNC TIMEOUT] Started timeout timer (max {} seconds)", .{SYNC_CONFIG.SYNC_TIMEOUT});
 
             // Start ZSP-001 batch synchronization
             log.debug("STEP 5: Delegating to ZSP-001 batch sync...", .{});
             try self.batch_sync.startSync(peer, target_height);
+
+            // Update our state AFTER batch sync has successfully started
+            log.debug("STATE TRANSITION: {} → syncing", .{self.sync_state});
+            const old_state = self.sync_state;
+            self.sync_state = .syncing;
+            log.debug("State transition completed: {} → {}", .{ old_state, self.sync_state });
             log.info("STEP 5 COMPLETED: ZSP-001 batch sync activated", .{});
         } else {
             log.warn("STEP 4 RESULT: Peer lacks batch sync capabilities", .{});
             log.info("Falling back to sequential synchronization", .{});
             log.warn("Performance: Standard speed (up to 50x slower than batch)", .{});
 
-            // Transition sync state for sequential mode and set timeout timer
-            log.debug("STATE TRANSITION: {} → syncing (sequential)", .{self.sync_state});
-            const old_state = self.sync_state;
-            self.sync_state = .syncing;
+            // Set timeout timer
             self.sync_start_time = std.time.timestamp();
-            log.debug("State transition completed: {} → {}", .{ old_state, self.sync_state });
             log.info("🕒 [SYNC TIMEOUT] Started timeout timer (max {} seconds)", .{SYNC_CONFIG.SYNC_TIMEOUT});
 
             // Use sequential sync utilities for legacy peers
             log.debug("STEP 5: Starting sequential sync fallback...", .{});
             try self.startSequentialSync(peer, target_height);
+
+            // Update our state AFTER sequential sync has started
+            log.debug("STATE TRANSITION: {} → syncing (sequential)", .{self.sync_state});
+            const old_state = self.sync_state;
+            self.sync_state = .syncing;
+            log.debug("State transition completed: {} → {}", .{ old_state, self.sync_state });
             log.info("STEP 5 COMPLETED: Sequential sync activated", .{});
         }
 

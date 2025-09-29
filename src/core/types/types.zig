@@ -1083,7 +1083,7 @@ pub const Genesis = struct {
     pub fn getConfig() GenesisConfig {
         return switch (CURRENT_NETWORK) {
             .testnet => GenesisConfig{
-                .timestamp = 1757419151000, // January 1, 2024 00:00:00 UTC in milliseconds
+                .timestamp = 1757408949090, // September 9, 2025 09:09:09.090 UTC in milliseconds
                 .message = "ZeiCoin TestNet Genesis - A minimal digital currency written in ⚡Zig",
                 .reward = 50 * ZEI_COIN,
                 .nonce = 0x7E57DE7,
@@ -1279,8 +1279,9 @@ pub const TimestampValidation = struct {
 
     /// Validate a block timestamp against current time
     pub fn isTimestampValid(timestamp: u64, current_time: i64) bool {
-        const block_time = @as(i64, @intCast(timestamp));
-        return block_time <= current_time + MAX_FUTURE_TIME;
+        // Block timestamps are in milliseconds, convert to seconds
+        const block_time_seconds = @divFloor(@as(i64, @intCast(timestamp)), 1000);
+        return block_time_seconds <= current_time + MAX_FUTURE_TIME;
     }
 
     /// Check if timestamp is not too far in the past
