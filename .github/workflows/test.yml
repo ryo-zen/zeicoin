@@ -29,17 +29,33 @@ jobs:
           libc6-dev \
           ca-certificates
 
-    - name: Initialize Zig cache directories
+    - name: Setup Zig
+      uses: goto-bus-stop/setup-zig@v2
+      with:
+        version: 0.14.1
+
+    - name: Cache Zig dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/zig
+          .zig-cache
+          zig-cache
+        key: ${{ runner.os }}-zig-${{ hashFiles('build.zig', 'build.zig.zon') }}
+        restore-keys: |
+          ${{ runner.os }}-zig-
+
+    - name: Initialize Zig cache and fetch dependencies
       run: |
+        # Ensure all cache directories exist
         mkdir -p ~/.cache/zig/{b,h,o,p,tmp,z}
         mkdir -p .zig-cache
         mkdir -p zig-cache
         chmod -R 755 ~/.cache/zig
 
-    - name: Setup Zig
-      uses: goto-bus-stop/setup-zig@v2
-      with:
-        version: 0.14.1
+        # Fetch dependencies to populate cache
+        echo "Fetching Zig dependencies..."
+        zig build --fetch 2>/dev/null || true
 
     - name: Build RandomX
       run: |
@@ -62,22 +78,6 @@ jobs:
         gcc -o randomx/randomx_helper randomx/randomx_helper.c randomx/wrapper.c \
           -Irandomx/randomx_build/randomx_install/include \
           -Lrandomx/randomx_build/randomx_install/lib -lrandomx -lstdc++ -lm
-
-    - name: Cache Zig dependencies
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cache/zig
-          .zig-cache
-          zig-cache
-        key: ${{ runner.os }}-zig-${{ hashFiles('build.zig', 'build.zig.zon') }}
-        restore-keys: |
-          ${{ runner.os }}-zig-
-
-    - name: Fetch dependencies
-      run: |
-        echo "Fetching Zig dependencies..."
-        zig build --fetch 2>/dev/null || true
 
     - name: Build project
       run: zig build
