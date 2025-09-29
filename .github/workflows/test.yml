@@ -34,39 +34,12 @@ jobs:
       with:
         version: 0.14.1
 
-    - name: Prepare Zig environment
+    - name: Verify Zig installation
       run: |
-        # Clear any existing cache to avoid corruption
-        echo "Clearing existing cache..."
-        rm -rf ~/.cache/zig
-        rm -rf .zig-cache
-        rm -rf zig-cache
-
-        # Create fresh cache directories
-        echo "Creating cache directories..."
-        mkdir -p ~/.cache/zig
-        mkdir -p .zig-cache
-        mkdir -p zig-cache
-        chmod -R 755 ~/.cache/zig
-
-        # Show Zig version and environment
         echo "Zig version:"
         zig version
         echo "Zig environment:"
         zig env
-
-        # Fetch dependencies fresh with verbose output
-        echo "Fetching Zig dependencies..."
-        zig build --fetch --verbose 2>&1 || echo "Fetch failed with exit code $?, continuing anyway..."
-
-        # Show what was created
-        echo "Cache directory structure:"
-        ls -la ~/.cache/zig/ || echo "No cache directory"
-
-        # Try to create the missing directory manually
-        echo "Creating potentially missing directories..."
-        mkdir -p ~/.cache/zig/b
-        mkdir -p ~/.cache/zig/p
 
     - name: Build RandomX
       run: |
@@ -93,20 +66,7 @@ jobs:
     - name: Build project
       run: |
         echo "Starting build..."
-        echo "Cache contents before build:"
-        ls -la ~/.cache/zig/ 2>/dev/null || echo "No cache dir"
-        echo "---"
-
-        # Run build with verbose output to see what's happening
-        zig build --verbose 2>&1 || {
-          EXIT_CODE=$?
-          echo "Build failed with exit code: $EXIT_CODE"
-          echo "Cache contents after failed build:"
-          ls -la ~/.cache/zig/ 2>/dev/null || echo "No cache dir"
-          echo "Checking if specific directory exists:"
-          ls -la ~/.cache/zig/b/ 2>/dev/null || echo "No b directory"
-          exit $EXIT_CODE
-        }
+        zig build
 
     - name: Run tests
       run: zig build test
