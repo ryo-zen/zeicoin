@@ -1,0 +1,11 @@
+[Unit]
+Description=Run ZeiCoin Indexer every 30 seconds
+Requires=zeicoin-indexer.service
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
