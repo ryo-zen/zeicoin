@@ -1,0 +1,19 @@
+[Unit]
+Description=ZeiCoin Blockchain Server
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/zeicoin
+Environment="ZEICOIN_SERVER=127.0.0.1"
+Environment="ZEICOIN_BOOTSTRAP=209.38.31.77:10801,134.199.170.129:10801"
+ExecStart=/root/zeicoin/zig-out/bin/zen_server --mine miner
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

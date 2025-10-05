@@ -1,0 +1,21 @@
+[Unit]
+Description=ZeiCoin REST API Service
+After=postgresql.service zeicoin-server.service
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/zeicoin
+Environment="ZEICOIN_DB_PASSWORD=your_password_here"
+Environment="ZEICOIN_DB_HOST=127.0.0.1"
+Environment="ZEICOIN_DB_NAME=zeicoin_testnet"
+Environment="ZEICOIN_DB_USER=zeicoin"
+ExecStart=/root/zeicoin/zig-out/bin/analytics_api
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

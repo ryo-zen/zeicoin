@@ -1,0 +1,18 @@
+[Unit]
+Description=ZeiCoin CLI Bridge Service
+After=zeicoin-server.service
+Requires=zeicoin-server.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/zeicoin
+Environment="ZEICOIN_SERVER=127.0.0.1"
+ExecStart=/root/zeicoin/zig-out/bin/cli_bridge
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
