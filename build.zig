@@ -307,15 +307,22 @@ pub fn build(b: *std.Build) !void {
     // **************************************************************
     // *              DOCUMENTATION                                 *
     // **************************************************************
-    // Add documentation generation step
-    const install_docs = b.addInstallDirectory(.{
-        .source_dir = lib.getEmittedDocs(),
-        .install_dir = .prefix,
-        .install_subdir = "docs",
-    });
-
+    // Only enable documentation generation if explicitly requested
+    // This avoids cache issues on GitHub runners
     const docs_step = b.step("docs", "Generate documentation");
-    docs_step.dependOn(&install_docs.step);
+
+    // Check if we're in CI environment or if docs are explicitly requested
+    const enable_docs = b.option(bool, "enable-docs", "Enable documentation generation") orelse false;
+
+    if (enable_docs) {
+        // Add documentation generation step
+        const install_docs = b.addInstallDirectory(.{
+            .source_dir = lib.getEmittedDocs(),
+            .install_dir = .prefix,
+            .install_subdir = "docs",
+        });
+        docs_step.dependOn(&install_docs.step);
+    }
 
 
     // **************************************************************

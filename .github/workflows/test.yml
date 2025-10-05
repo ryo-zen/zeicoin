@@ -1,0 +1,72 @@
+name: Test
+
+on:
+  push:
+    branches: [ main, feature/* ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install system dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y \
+          build-essential \
+          cmake \
+          git \
+          curl \
+          wget \
+          unzip \
+          pkg-config \
+          librocksdb-dev \
+          libc6-dev \
+          ca-certificates
+
+    - name: Setup Zig
+      uses: goto-bus-stop/setup-zig@v2
+      with:
+        version: 0.14.1
+
+    - name: Verify Zig installation
+      run: |
+        echo "Zig version:"
+        zig version
+        echo "Zig environment:"
+        zig env
+
+    - name: Build RandomX
+      run: |
+        echo "Building RandomX..."
+        mkdir -p randomx/randomx_build
+        cd randomx/randomx_build
+        if [ ! -d "RandomX" ]; then
+          git clone https://github.com/tevador/RandomX.git
+          cd RandomX
+          git checkout v1.2.1
+          cd ..
+        fi
+        cd RandomX
+        mkdir -p build
+        cd build
+        cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="../../randomx_install"
+        make -j$(nproc)
+        make install
+        cd ../../../..
+        gcc -o randomx/randomx_helper randomx/randomx_helper.c randomx/wrapper.c \
+          -Irandomx/randomx_build/randomx_install/include \
+          -Lrandomx/randomx_build/randomx_install/lib -lrandomx -lstdc++ -lm
+
+    - name: Build project
+      run: |
+        echo "Starting build..."
+        zig build
+
+    - name: Run tests
+      run: zig build test
