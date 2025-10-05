@@ -1,0 +1,382 @@
+# ⚡ ZeiCoin ⚡
+
+A minimalist cryptocurrency blockchain written in Zig with longest chain consensus, RandomX mining, and peer-to-peer networking.
+
+## Overview
+
+ZeiCoin is a modern from-scratch cryptocurrency implementation designed for clarity, security, and performance. Built in Zig while taking inspiration from Ethereum, Monero and Bitcoin, it features a clean modular network protocol, automatic multi-node synchronization, and a Layer 2 messaging system.
+
+### Current Use Cases
+- **Educational**: Learning blockchain development and consensus algorithms
+- **Research**: Experimenting with cryptocurrency protocols and network behavior
+- **Development**: Testing multi-node synchronization and P2P networking
+
+### Not Production Ready
+**TestNet Only**! This cryptocurrency is currently in testnet phase and not ready for mainnet production use. The network has been tested with 3-node consensus configurations.
+
+### Key Features
+
+- **Longest Chain Consensus** - Cumulative proof-of-work with configurable peer verification
+- **RandomX Mining** - ASIC-resistant with Light (256MB) and Fast (2GB) modes
+- **HD Wallets** - BIP39/BIP32 hierarchical deterministic wallets with mnemonic recovery
+- **Modern Cryptography** - ChaCha20-Poly1305 encryption, Argon2id key derivation, Ed25519 signatures
+- **Analytics Platform** - TimescaleDB integration with REST API
+- **P2P Networking** - Custom binary protocol with CRC32 integrity
+- **High Performance** - ~15 tps, concurrent indexing, efficient sync protocols
+- **Layer 2 Messaging** - Rich transaction metadata with PostgreSQL indexing (In Development)
+
+## Quick Start
+
+### Prerequisites
+
+- **Zig** 0.14.1
+- **RandomX** proof-of-work mining algorithm
+- **RocksDB** libraries (`librocksdb-dev` on Ubuntu/Debian)
+
+### Optional
+- **PostgreSQL** 12+ (optional, for analytics and L2 messaging)
+
+### Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/ryo-zen/zeicoin.git
+cd zeicoin
+
+# Configure environment
+cp .env.example .env
+# Edit .env with your settings
+
+# Build (debug mode)
+zig build
+
+# Build (optimized mode)
+zig build -Doptimize=ReleaseFast
+```
+
+### Running a Sync Only Node
+
+```bash
+# Start server (no mining)
+ZEICOIN_SERVER=127.0.0.1 ./zig-out/bin/zen_server
+```
+
+### Running a Mining Node
+
+```bash
+# Create a miner wallet (interactive password prompt)
+ZEICOIN_SERVER=127.0.0.1 ./zig-out/bin/zeicoin wallet create miner
+
+# Start with mining enabled
+ZEICOIN_SERVER=127.0.0.1 ./zig-out/bin/zen_server --mine miner
+
+# Connect to bootstrap nodes (automatic from .env)
+# Default bootstrap: 209.38.31.77:10801, 134.199.170.129:10801
+```
+
+### CLI Usage
+
+```bash
+# Create a wallet (interactive password prompt)
+ZEICOIN_SERVER=127.0.0.1 ./zig-out/bin/zeicoin wallet create alice
+
+# Check balance
+ZEICOIN_SERVER=127.0.0.1 ./zig-out/bin/zeicoin balance alice
+
+# Get wallet address
+ZEICOIN_SERVER=127.0.0.1 ./zig-out/bin/zeicoin address alice
+
+# Send transaction
+ZEICOIN_SERVER=127.0.0.1 ./zig-out/bin/zeicoin send 100 <address> alice
+
+# View transaction history
+ZEICOIN_SERVER=127.0.0.1 ./zig-out/bin/zeicoin history alice
+
+# Get blockchain status
+ZEICOIN_SERVER=127.0.0.1 ./zig-out/bin/zeicoin status
+
+# Backup wallet (show 12-word mnemonic)
+ZEICOIN_SERVER=127.0.0.1 ./zig-out/bin/zeicoin seed alice
+
+# Restore wallet from mnemonic
+ZEICOIN_SERVER=127.0.0.1 ./zig-out/bin/zeicoin wallet restore recovered word1 word2 ... word12
+```
+
+## Architecture
+
+### Project Structure
+
+```
+zeicoin/
+├── src/
+│   ├── core/              # Core blockchain components (relative imports)
+│   │   ├── types/         # Data structures and constants
+│   │   ├── crypto/        # Cryptography (Ed25519, Bech32, RandomX, BIP39)
+│   │   ├── storage/       # RocksDB persistence and serialization
+│   │   ├── network/       # P2P networking and protocol
+│   │   ├── chain/         # Chain management and validation
+│   │   ├── mempool/       # Transaction pool management
+│   │   ├── miner/         # Mining subsystem
+│   │   ├── sync/          # Synchronization protocols
+│   │   ├── wallet/        # Wallet management
+│   │   └── server/        # Server components
+│   ├── apps/              # Applications (use zeicoin module)
+│   │   ├── main.zig       # Server entry point
+│   │   ├── cli.zig        # Command-line interface
+│   │   ├── indexer.zig    # PostgreSQL blockchain indexer
+│   │   └── rest.zig       # REST API service
+│   └── lib.zig            # Public API (zeicoin module)
+├── sql/                   # Database schemas
+├── randomx/               # RandomX C library
+└── tests/                 # Test suite
+```
+
+### Core Components
+
+#### Consensus
+- Longest chain rule with cumulative proof-of-work
+- Configurable peer block hash consensus (disabled/optional/enforced)
+- Difficulty adjustment every block
+- Coinbase maturity: 100 blocks
+
+#### Mining
+- **RandomX Algorithm**: ASIC-resistant proof-of-work
+- **TestNet**: Light mode (256MB RAM), difficulty threshold: 0xF0000000
+- **MainNet**: Fast mode (2GB RAM), difficulty threshold: 0x00008000
+- Mining rewards locked for 100 blocks (coinbase maturity)
+
+#### Network Protocol
+- **Ports**: P2P (10801), Client API (10802), UDP Discovery (10800)
+- **Bootstrap Nodes**: 209.38.31.77:10801, 134.199.170.129:10801 (might add more in future)
+- **Address Format**: Bech32 with BLAKE3 hashing (tzei1... for TestNet, zei1... for MainNet)
+- **Message Types**: Handshake, Ping/Pong, Block, Transaction, GetBlocks, GetPeers, BlockHash
+- **Integrity**: CRC32 checksums on all messages
+
+#### Wallet Security
+- **Encryption**: ChaCha20-Poly1305 AEAD (Authenticated Encryption)
+- **Key Derivation**: Argon2id (64MB memory, 3 iterations)
+- **HD Wallets**: BIP39 (12-word mnemonic) + BIP32 derivation
+- **Signatures**: Ed25519 for transaction signing
+- **Password Requirements**: Minimum 8 characters
+- **Memory Protection**: Passwords cleared after use
+
+## Layer 2 Messaging System (In Developement)
+
+ZeiCoin will feature a Layer 2 messaging layer that adds rich metadata to blockchain transactions. Currently still in development.
+
+### Features
+- **Transaction Enhancement**: Add messages, categories, and metadata to ZEI transactions
+- **Auto-Linking**: Indexer automatically links L2 messages to confirmed blockchain transactions
+- **Web Interface**: Full-featured web UI for sending enhanced transactions
+- **REST API**: Complete API for L2 message management and querying
+
+### Future L2 Workflow
+1. Create enhancement with message/metadata (draft status)
+2. Update to pending before sending transaction
+3. Send actual ZEI transaction on blockchain
+4. Indexer automatically confirms L2 message with tx_hash
+
+## Analytics & Data Infrastructure 
+
+### Concurrent Indexer
+
+ZeiCoin features a concurrent indexer that runs simultaneously with the mining node without database conflicts:
+
+```bash
+# Start mining node
+ZEICOIN_SERVER=127.0.0.1 ./zig-out/bin/zen_server --mine miner &
+
+# Run indexer (indexes new blocks and exits)
+ZEICOIN_DB_PASSWORD=testpass123 ./zig-out/bin/zeicoin_indexer
+
+# Or run continuously (automated monitoring)
+while true; do
+    ZEICOIN_DB_PASSWORD=testpass123 ./zig-out/bin/zeicoin_indexer
+    sleep 30
+done &
+```
+
+**Architecture**:
+- Primary Database: RocksDB (mining node, exclusive write)
+- Secondary Database: RocksDB secondary instance (indexer, concurrent read)
+- Analytics Database: PostgreSQL/TimescaleDB (indexed data)
+- Zero conflicts between mining and indexing
+
+### TimescaleDB Analytics
+
+High-performance analytics system with continuous aggregates:
+
+- **Hypertables**: Time-partitioned tables (7-day chunks)
+- **Continuous Aggregates**: Real-time materialized views
+- **Compression**: 90%+ space savings on older data
+- **Performance**: 1000x faster than raw blockchain queries
+
+**REST API Endpoints**:
+- `GET /health` - Service health check
+- `GET /api/network/health` - Network metrics (24h)
+- `GET /api/transactions/volume` - Transaction volume (30d)
+- Port: 8080, CORS enabled
+
+## Configuration
+
+Key environment variables (see `.env.example` for all options):
+
+```bash
+# Network Configuration
+ZEICOIN_NETWORK=testnet                    # testnet or mainnet
+ZEICOIN_BOOTSTRAP=209.38.31.77:10801       # Bootstrap nodes
+ZEICOIN_SERVER=127.0.0.1                   # Server address
+
+# Consensus Configuration
+ZEICOIN_CONSENSUS_MODE=optional             # disabled, optional, enforced
+ZEICOIN_CONSENSUS_THRESHOLD=0.5             # 50% peer agreement required
+ZEICOIN_CONSENSUS_MIN_PEERS=0               # Minimum peer responses
+
+# Mining Configuration
+ZEICOIN_MINE_ENABLED=false                  # Enable mining
+ZEICOIN_MINER_WALLET=miner                  # Mining wallet name
+
+# Database Configuration
+ZEICOIN_DB_PASSWORD=***                     # PostgreSQL password
+ZEICOIN_DATA_DIR=zeicoin_data               # Data directory
+
+# Wallet Security
+ZEICOIN_WALLET_PASSWORD=***                 # Optional: for automation only
+```
+
+## Testnet Deployment
+
+### Systemd Services
+
+For automatic startup and management on testnet servers, use the included systemd service files:
+
+```bash
+# Install services
+sudo cp systemd/*.service /etc/systemd/system/
+sudo cp systemd/*.timer /etc/systemd/system/
+sudo cp systemd/*.target /etc/systemd/system/
+sudo systemctl daemon-reload
+
+# Enable and start all services
+sudo systemctl enable zeicoin.target
+sudo systemctl start zeicoin.target
+
+# Check status
+sudo systemctl status zeicoin.target
+```
+
+**Available Services**:
+- `zeicoin-mining.service` - Main mining server with auto-restart
+- `zeicoin-server.service` - Non-mining blockchain server
+- `zeicoin-cli-bridge.service` - CLI bridge for client connections
+- `zeicoin-indexer.timer` - Automatic indexing every 30 seconds
+- `zeicoin-rest-api.service` - REST API for analytics
+- `zeicoin.target` - Start/stop all services together
+
+See [systemd/README.md](systemd/README.md) for detailed installation and configuration instructions.
+
+## Testing
+
+```bash
+# Run all tests
+zig build test
+
+# Run specific module tests
+zig build test-crypto
+zig build test-blockchain
+zig build test-network
+
+# Fast compilation check
+zig build check
+
+# Clean build artifacts
+zig build clean
+```
+
+## Network Information
+
+### TestNet
+- **Address Prefix**: `tzei1...`
+- **Mining Mode**: Light (256MB RAM)
+- **Difficulty**: 0xF0000000 (easy)
+- **Bootstrap Nodes**: 209.38.31.77:10801, 134.199.170.129:10801
+- **Database**: `zeicoin_testnet`
+
+### MainNet (Future)
+- **Address Prefix**: `zei1...`
+- **Mining Mode**: Fast (2GB RAM)
+- **Difficulty**: 0x00008000 (hard)
+- **Database**: `zeicoin_mainnet`
+
+### Network Limits
+- Block size: 16MB hard limit, 2MB soft limit (mining)
+- Transaction size: 100KB maximum
+- Message field: 512 bytes maximum
+- Mempool: 10,000 transactions, 50MB total size
+
+## Development
+
+### Build Commands
+
+```bash
+zig build                          # Debug build
+zig build -Doptimize=ReleaseFast   # Optimized Fbuild
+zig build test                     # Run tests
+zig build check                    # Fast compilation check
+zig build docs                     # Generate documentation
+zig build clean                    # Clean artifacts
+```
+
+## Security Features
+
+### Implemented Protections
+- ✅ Difficulty validation (prevents difficulty spoofing attacks)
+- ✅ Peer block hash consensus (prevents chain forks)
+- ✅ Signature verification (Ed25519)
+- ✅ Wallet encryption (ChaCha20-Poly1305 + Argon2id)
+- ✅ Coinbase maturity (100 blocks)
+- ✅ Transaction size limits
+- ✅ Mempool limits and validation
+
+## Current Status
+
+**Feature Freeze Active** - The codebase is feature-complete for testnet validation.
+
+**Focus Areas**:
+
+- Multi-node mining and sync testing
+- Bug fixes and stability improvements
+- Documentation improvements
+- Performance optimization
+- Website docs
+
+**Next Steps**:
+
+- Complete testnet validation
+- Community feedback
+- Mainnet preparation
+
+## Contributing
+
+Contributions are welcome! Please:
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/fire-feature`)
+3. Test your changes
+4. Commit your changes (`git commit -m 'feature: fire feature'`)
+5. Push to the branch (`git push origin feature/fire-feature`)
+6. Open a Pull Request
+
+**Development Guidelines**:
+- Follow Zig best practices
+- Add tests for new features
+- Update documentation
+- Ensure all tests pass (`zig build test`)
+
+## License
+
+MIT License - See [LICENSE](LICENSE) file for details.
+
+---
+
+**ZeiCoin v0.0.1-testnet** (pronounced ZEE-koyn; IPA: /ziː kɔɪn/)
