@@ -41,6 +41,8 @@ pub const ServerHandlers = struct {
             .onPeers = onPeersGlobal,
             .onGetBlockHash = onGetBlockHashGlobal,
             .onBlockHash = onBlockHashGlobal,
+            .onGetMempool = onGetMempoolGlobal,
+            .onMempoolInv = onMempoolInvGlobal,
             .onPeerDisconnected = onPeerDisconnectedGlobal,
         };
     }
@@ -115,6 +117,41 @@ pub const ServerHandlers = struct {
         } else {
             std.log.info("✅ [PEER CONNECT] Both nodes at same height {}, no sync needed", .{our_height});
         }
+
+        // After blockchain sync check, request mempool from peer
+        std.log.info("📋 [MEMPOOL SYNC] Requesting mempool from peer {}", .{peer.id});
+        const get_mempool = network.message_types.GetMempoolMessage.init();
+        _ = peer.sendMessage(.get_mempool, get_mempool) catch |err| {
+            std.log.debug("Failed to request mempool from peer: {}", .{err});
+        };
+
+        // Also send our mempool to the new peer
+        {
+            const mempool = self.blockchain.mempool_manager;
+            const transactions = mempool.storage.getAllTransactions() catch |err| {
+                std.log.debug("Failed to get mempool transactions: {}", .{err});
+                return;
+            };
+            defer mempool.storage.freeTransactionArray(transactions);
+
+            if (transactions.len > 0) {
+                std.log.info("📤 [MEMPOOL SYNC] Sending {} transactions to new peer {}", .{ transactions.len, peer.id });
+
+                // Send each transaction individually
+                for (transactions) |tx| {
+                    const tx_msg = network.message_types.TransactionMessage{
+                        .transaction = tx,
+                    };
+                    _ = peer.sendMessage(.transaction, tx_msg) catch |err| {
+                        std.log.debug("Failed to send transaction to peer: {}", .{err});
+                    };
+                }
+
+                std.log.info("✅ [MEMPOOL SYNC] Sent {} mempool transactions to peer {}", .{ transactions.len, peer.id });
+            } else {
+                std.log.info("📋 [MEMPOOL SYNC] No transactions to send to peer {}", .{peer.id});
+            }
+        }
     }
 
     fn onBlock(self: *Self, peer: *network.Peer, msg: network.message_types.BlockMessage) !void {
@@ -124,7 +161,9 @@ pub const ServerHandlers = struct {
 
     fn onTransaction(self: *Self, peer: *network.Peer, msg: network.message_types.TransactionMessage) !void {
         std.log.info("💳 [TX] Received transaction from {any}", .{peer.address});
-        _ = self.blockchain.mempool_manager.addTransaction(msg.transaction) catch |err| {
+        // Use handleIncomingTransaction for network-received transactions
+        // This prevents re-broadcasting and duplicate additions
+        _ = self.blockchain.mempool_manager.handleIncomingTransaction(msg.transaction) catch |err| {
             std.log.debug("Failed to add transaction to mempool: {}", .{err});
         };
     }
@@ -286,6 +325,71 @@ pub const ServerHandlers = struct {
         _ = self; // Placeholder for future consensus implementation
     }
     
+    fn onGetMempool(self: *Self, peer: *network.Peer) !void {
+        // Send mempool inventory to requesting peer
+        std.log.info("📋 [MEMPOOL] Peer {} requesting mempool inventory", .{peer.id});
+
+        {
+            const mempool = self.blockchain.mempool_manager;
+            // Get all transaction hashes from mempool
+            const transactions = try mempool.storage.getAllTransactions();
+            defer mempool.storage.freeTransactionArray(transactions);
+
+            // Create array of hashes
+            const tx_hashes = try self.blockchain.allocator.alloc(types.Hash, transactions.len);
+            defer self.blockchain.allocator.free(tx_hashes);
+
+            for (transactions, tx_hashes) |tx, *hash| {
+                hash.* = tx.hash();
+            }
+
+            // Send mempool inventory message
+            const mempool_inv = try network.message_types.MempoolInvMessage.init(
+                self.blockchain.allocator,
+                tx_hashes
+            );
+            defer {
+                var mut_inv = mempool_inv;
+                mut_inv.deinit();
+            }
+
+            _ = try peer.sendMessage(.mempool_inv, mempool_inv);
+            std.log.info("📤 [MEMPOOL] Sent {} transaction hashes to peer {}", .{ tx_hashes.len, peer.id });
+        }
+    }
+
+    fn onMempoolInv(self: *Self, peer: *network.Peer, msg: network.message_types.MempoolInvMessage) !void {
+        std.log.info("📥 [MEMPOOL] Received {} transaction hashes from peer {}", .{ msg.tx_hashes.len, peer.id });
+
+        {
+            const mempool = self.blockchain.mempool_manager;
+            var requested_count: usize = 0;
+
+            // Request transactions we don't have
+            for (msg.tx_hashes) |tx_hash| {
+                // Check if we already have this transaction
+                if (mempool.getTransaction(tx_hash) == null) {
+                    // We don't have it, request it from the peer
+                    // For now, we'll log this. In a full implementation, we'd send a
+                    // getdata message or similar to request the full transaction
+                    requested_count += 1;
+
+                    // TODO: Send request for full transaction data
+                    // This would require implementing a getdata/inv protocol similar to Bitcoin
+                    std.log.debug("📋 [MEMPOOL] Need to request transaction {s}", .{
+                        std.fmt.fmtSliceHexLower(&tx_hash)
+                    });
+                }
+            }
+
+            if (requested_count > 0) {
+                std.log.info("📋 [MEMPOOL] Need to request {} transactions from peer {}", .{ requested_count, peer.id });
+            } else {
+                std.log.info("✅ [MEMPOOL] Already have all transactions from peer {}", .{peer.id});
+            }
+        }
+    }
+
     fn onPeerDisconnected(self: *Self, peer: *network.Peer, err: anyerror) !void {
         // If sync is active and we got a block validation error, reset sync state
         if (self.blockchain.sync_manager) |sync_manager| {
@@ -359,6 +463,14 @@ fn onGetBlockHashGlobal(peer: *network.Peer, msg: network.message_types.GetBlock
 
 fn onBlockHashGlobal(peer: *network.Peer, msg: network.message_types.BlockHashMessage) anyerror!void {
     return global_handler.?.onBlockHash(peer, msg);
+}
+
+fn onGetMempoolGlobal(peer: *network.Peer) anyerror!void {
+    return global_handler.?.onGetMempool(peer);
+}
+
+fn onMempoolInvGlobal(peer: *network.Peer, msg: network.message_types.MempoolInvMessage) anyerror!void {
+    return global_handler.?.onMempoolInv(peer, msg);
 }
 
 fn onPeerDisconnectedGlobal(peer: *network.Peer, err: anyerror) anyerror!void {

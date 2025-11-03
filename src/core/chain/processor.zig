@@ -224,6 +224,9 @@ pub const ChainProcessor = struct {
         const old_height = self.chain_state.getHeight() catch 0;
         log.info("📦 [BLOCK PROCESS] Block #{} accepted - chain height: {} → {}", .{ target_height, old_height, target_height });
 
+        // Clean mempool of transactions that are now confirmed in this block
+        self.cleanMempool(block);
+
         // Broadcast to network if callback is set
         if (self.network_callback) |callback| {
             util.logSuccess("🚀 Broadcasting newly mined block #{} to P2P network", .{target_height});

@@ -26,6 +26,10 @@ pub const PeerAddress = @import("peers.zig").PeerAddress;
 pub const GetBlockHashMessage = @import("get_block_hash.zig").GetBlockHashMessage;
 pub const BlockHashMessage = @import("block_hash.zig").BlockHashMessage;
 
+// Mempool synchronization messages
+pub const GetMempoolMessage = @import("get_mempool.zig").GetMempoolMessage;
+pub const MempoolInvMessage = @import("mempool_inv.zig").MempoolInvMessage;
+
 /// Union of all message types - clean batch sync protocol
 pub const Message = union(protocol.MessageType) {
     handshake: HandshakeMessage,
@@ -49,7 +53,11 @@ pub const Message = union(protocol.MessageType) {
     // Consensus verification
     get_block_hash: GetBlockHashMessage,
     block_hash: BlockHashMessage,
-    
+
+    // Mempool synchronization
+    get_mempool: GetMempoolMessage,
+    mempool_inv: MempoolInvMessage,
+
     /// Encode any message type
     pub fn encode(self: Message, writer: anytype) !void {
         switch (self) {
@@ -87,7 +95,11 @@ pub const Message = union(protocol.MessageType) {
             // Consensus verification
             .get_block_hash => .{ .get_block_hash = try GetBlockHashMessage.deserialize(reader) },
             .block_hash => .{ .block_hash = try BlockHashMessage.deserialize(reader) },
-            
+
+            // Mempool synchronization
+            .get_mempool => .{ .get_mempool = try GetMempoolMessage.decode(reader) },
+            .mempool_inv => .{ .mempool_inv = try MempoolInvMessage.decode(allocator, reader) },
+
             _ => error.UnknownMessageType,
         };
     }
@@ -105,6 +117,7 @@ pub const Message = union(protocol.MessageType) {
     pub fn deinit(self: *Message, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .handshake_ack, .blocks => {},
+            .mempool_inv => |*msg| msg.deinit(),
             inline else => |*msg| {
                 if (@hasDecl(@TypeOf(msg.*), "deinit")) {
                     msg.deinit(allocator);

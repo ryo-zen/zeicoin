@@ -92,3 +92,6 @@ scripts/test_l2_integration.sh
 /optimizations
 test_analytics.sh
 
+docker-compose.3node-mempool-test.yml
+
+/deployment

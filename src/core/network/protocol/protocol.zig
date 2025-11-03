@@ -49,10 +49,14 @@ pub const MessageType = enum(u8) {
     get_block_hash = 10,
     block_hash = 11,
 
+    // Mempool synchronization
+    get_mempool = 12,
+    mempool_inv = 13,
+
     _,
 
     pub fn isValid(self: MessageType) bool {
-        return @intFromEnum(self) <= @intFromEnum(MessageType.block_hash);
+        return @intFromEnum(self) <= @intFromEnum(MessageType.mempool_inv);
     }
 };
 

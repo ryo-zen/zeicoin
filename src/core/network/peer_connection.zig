@@ -186,6 +186,8 @@ pub const PeerConnection = struct {
             .peers => |peers| try self.handlePeers(peers),
             .get_block_hash => |get_block_hash| try self.handleGetBlockHash(get_block_hash),
             .block_hash => |block_hash| try self.handleBlockHash(block_hash),
+            .get_mempool => |get_mempool| try self.handleGetMempool(get_mempool),
+            .mempool_inv => |mempool_inv| try self.handleMempoolInv(mempool_inv),
         }
     }
 
@@ -334,6 +336,15 @@ pub const PeerConnection = struct {
     fn handleBlockHash(self: *Self, msg: message_types.BlockHashMessage) !void {
         try self.message_handler.onBlockHash(self.peer, msg);
     }
+
+    fn handleGetMempool(self: *Self, msg: message_types.GetMempoolMessage) !void {
+        _ = msg; // No payload to use
+        try self.message_handler.onGetMempool(self.peer);
+    }
+
+    fn handleMempoolInv(self: *Self, msg: message_types.MempoolInvMessage) !void {
+        try self.message_handler.onMempoolInv(self.peer, msg);
+    }
 };
 
 /// Message handler interface
@@ -374,7 +385,13 @@ pub const MessageHandler = struct {
 
     /// Handle block hash response (consensus verification)
     onBlockHash: *const fn (peer: *Peer, msg: message_types.BlockHashMessage) anyerror!void,
-    
+
+    /// Handle get mempool request
+    onGetMempool: *const fn (peer: *Peer) anyerror!void,
+
+    /// Handle mempool inventory message
+    onMempoolInv: *const fn (peer: *Peer, msg: message_types.MempoolInvMessage) anyerror!void,
+
     /// Handle peer disconnect (optional)
     onPeerDisconnected: ?*const fn (peer: *Peer, err: anyerror) anyerror!void = null,
 };
