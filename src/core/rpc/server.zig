@@ -32,7 +32,7 @@ pub const RPCServer = struct {
         const secondary_path = try std.fmt.allocPrint(allocator, "{s}_indexer_secondary", .{blockchain_path});
         errdefer allocator.free(secondary_path);
 
-        const address = try net.Address.parseIp4("127.0.0.1", port);
+        const address = try net.Address.parseIp4("0.0.0.0", port);
         const server = try address.listen(.{
             .reuse_address = true,
             .reuse_port = true,
@@ -87,7 +87,7 @@ pub const RPCServer = struct {
 
     pub fn start(self: *RPCServer) !void {
         self.running.store(true, .release);
-        log.info("🔌 RPC Server listening on 127.0.0.1:{d}", .{self.port});
+        log.info("🔌 RPC Server listening on 0.0.0.0:{d}", .{self.port});
 
         while (self.running.load(.acquire)) {
             // Accept connection with timeout
