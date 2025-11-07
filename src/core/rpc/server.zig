@@ -3,13 +3,18 @@ const net = std.net;
 const rpc_types = @import("types.zig");
 const format = @import("format.zig");
 const zen = @import("../node.zig");
+const db = @import("../storage/db.zig");
 
 const log = std.log.scoped(.rpc_server);
 
 /// Minimal JSON-RPC 2.0 server for blockchain operations
+/// Uses secondary RocksDB instance for concurrent reads during mining
 pub const RPCServer = struct {
     allocator: std.mem.Allocator,
     blockchain: *zen.ZeiCoin,
+    secondary_db: ?db.Database,
+    blockchain_path: []const u8,
+    secondary_path: []const u8,
     server: net.Server,
     port: u16,
     running: std.atomic.Value(bool),
@@ -17,10 +22,15 @@ pub const RPCServer = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         blockchain: *zen.ZeiCoin,
+        blockchain_path: []const u8,
         port: u16,
     ) !*RPCServer {
         const self = try allocator.create(RPCServer);
         errdefer allocator.destroy(self);
+
+        // Reuse same secondary path as indexer for efficiency
+        const secondary_path = try std.fmt.allocPrint(allocator, "{s}_indexer_secondary", .{blockchain_path});
+        errdefer allocator.free(secondary_path);
 
         const address = try net.Address.parseIp4("127.0.0.1", port);
         const server = try address.listen(.{
@@ -31,6 +41,9 @@ pub const RPCServer = struct {
         self.* = RPCServer{
             .allocator = allocator,
             .blockchain = blockchain,
+            .secondary_db = null,
+            .blockchain_path = blockchain_path,
+            .secondary_path = secondary_path,
             .server = server,
             .port = port,
             .running = std.atomic.Value(bool).init(false),
@@ -41,8 +54,35 @@ pub const RPCServer = struct {
 
     pub fn deinit(self: *RPCServer) void {
         self.stop();
+        if (self.secondary_db) |*secondary| {
+            secondary.deinit();
+        }
+        self.allocator.free(self.secondary_path);
         self.server.deinit();
         self.allocator.destroy(self);
+    }
+
+    /// Initialize secondary database for concurrent reads
+    fn ensureSecondaryDb(self: *RPCServer) !*db.Database {
+        if (self.secondary_db != null) {
+            // Sync with primary before returning
+            try self.secondary_db.?.catchUpWithPrimary();
+            return &self.secondary_db.?;
+        }
+
+        // Try to initialize secondary instance
+        self.secondary_db = db.Database.initSecondary(
+            self.allocator,
+            self.blockchain_path,
+            self.secondary_path,
+        ) catch |err| {
+            log.warn("Secondary DB failed, falling back to primary: {}", .{err});
+            // Fallback to primary if secondary fails (single-node testing)
+            return self.blockchain.database;
+        };
+
+        log.info("✅ RPC using secondary database: {s}", .{self.secondary_path});
+        return &self.secondary_db.?;
     }
 
     pub fn start(self: *RPCServer) !void {
@@ -367,7 +407,8 @@ pub const RPCServer = struct {
     }
 
     fn handleGetHeight(self: *RPCServer) ![]const u8 {
-        const height = try self.blockchain.getHeight();
+        const database = try self.ensureSecondaryDb();
+        const height = try database.getHeight();
         const response = rpc_types.GetHeightResponse{ .height = height };
         return try format.formatResult(self.allocator, rpc_types.GetHeightResponse, response);
     }
@@ -380,7 +421,8 @@ pub const RPCServer = struct {
 
     fn handleGetInfo(self: *RPCServer) ![]const u8 {
         const types = @import("../types/types.zig");
-        const height = try self.blockchain.getHeight();
+        const database = try self.ensureSecondaryDb();
+        const height = try database.getHeight();
         const mempool_size = self.blockchain.mempool_manager.getTransactionCount();
         const is_mining = self.blockchain.mining_manager != null;
         const peer_count: u32 = 0; // TODO: Get from network manager
@@ -422,8 +464,9 @@ pub const RPCServer = struct {
             );
         };
 
-        const nonce = try self.blockchain.getNextAvailableNonce(addr);
-        const response = rpc_types.GetNonceResponse{ .nonce = nonce };
+        const database = try self.ensureSecondaryDb();
+        const account = try database.getAccount(addr);
+        const response = rpc_types.GetNonceResponse{ .nonce = account.nonce };
         return try format.formatResult(self.allocator, rpc_types.GetNonceResponse, response);
     }
 
@@ -451,7 +494,8 @@ pub const RPCServer = struct {
             );
         };
 
-        const account = try self.blockchain.getAccount(addr);
+        const database = try self.ensureSecondaryDb();
+        const account = try database.getAccount(addr);
 
         const response = rpc_types.GetBalanceResponse{
             .balance = account.balance,
@@ -483,37 +527,58 @@ pub const RPCServer = struct {
             );
         };
 
-        // Get transaction from blockchain
-        const result = self.blockchain.getTransaction(tx_hash) catch {
-            return try format.formatError(
-                self.allocator,
-                rpc_types.ErrorCode.invalid_params,
-                "Transaction not found",
-                null,
-            );
+        // Get transaction from secondary database
+        const database = try self.ensureSecondaryDb();
+        const tx = database.getTransactionByHash(tx_hash) catch {
+            // Check mempool if not found in database
+            const mempool_tx = self.blockchain.mempool_manager.getTransaction(tx_hash) orelse {
+                return try format.formatError(
+                    self.allocator,
+                    rpc_types.ErrorCode.invalid_params,
+                    "Transaction not found",
+                    null,
+                );
+            };
+
+            const types = @import("../types/types.zig");
+            const sender_bech32 = try mempool_tx.sender.toBech32(self.allocator, types.CURRENT_NETWORK);
+            defer self.allocator.free(sender_bech32);
+            const recipient_bech32 = try mempool_tx.recipient.toBech32(self.allocator, types.CURRENT_NETWORK);
+            defer self.allocator.free(recipient_bech32);
+
+            const response = rpc_types.GetTransactionResponse{
+                .sender = sender_bech32,
+                .recipient = recipient_bech32,
+                .amount = mempool_tx.amount,
+                .fee = mempool_tx.fee,
+                .nonce = mempool_tx.nonce,
+                .timestamp = mempool_tx.timestamp,
+                .expiry_height = mempool_tx.expiry_height,
+                .status = "pending",
+                .block_height = null,
+            };
+            return try format.formatResult(self.allocator, rpc_types.GetTransactionResponse, response);
         };
 
         const types = @import("../types/types.zig");
 
-        // Convert addresses to bech32
-        const sender_bech32 = try result.transaction.sender.toBech32(self.allocator, types.CURRENT_NETWORK);
+        // Convert addresses to bech32 (confirmed transaction from database)
+        const sender_bech32 = try tx.sender.toBech32(self.allocator, types.CURRENT_NETWORK);
         defer self.allocator.free(sender_bech32);
 
-        const recipient_bech32 = try result.transaction.recipient.toBech32(self.allocator, types.CURRENT_NETWORK);
+        const recipient_bech32 = try tx.recipient.toBech32(self.allocator, types.CURRENT_NETWORK);
         defer self.allocator.free(recipient_bech32);
-
-        const status_str = if (result.status == .pending) "pending" else "confirmed";
 
         const response = rpc_types.GetTransactionResponse{
             .sender = sender_bech32,
             .recipient = recipient_bech32,
-            .amount = result.transaction.amount,
-            .fee = result.transaction.fee,
-            .nonce = result.transaction.nonce,
-            .timestamp = result.transaction.timestamp,
-            .expiry_height = result.transaction.expiry_height,
-            .status = status_str,
-            .block_height = result.block_height,
+            .amount = tx.amount,
+            .fee = tx.fee,
+            .nonce = tx.nonce,
+            .timestamp = tx.timestamp,
+            .expiry_height = tx.expiry_height,
+            .status = "confirmed",
+            .block_height = null, // TODO: Get block height from transaction metadata
         };
         return try format.formatResult(self.allocator, rpc_types.GetTransactionResponse, response);
     }

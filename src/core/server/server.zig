@@ -74,9 +74,11 @@ pub fn main() !void {
     }
     defer if (api_server) |*server| server.deinit();
 
-    // Start RPC server
+    // Start RPC server with secondary database support
     const RPC_PORT = 10803;
-    var rpc_server = try RPCServer.init(allocator, components.blockchain, RPC_PORT);
+    const types = @import("../types/types.zig");
+    const data_dir = types.CURRENT_NETWORK.getDataDir();
+    var rpc_server = try RPCServer.init(allocator, components.blockchain, data_dir, RPC_PORT);
     defer rpc_server.deinit();
 
     const rpc_thread = try std.Thread.spawn(.{}, RPCServer.start, .{rpc_server});
