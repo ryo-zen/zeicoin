@@ -7,6 +7,7 @@ const print = std.debug.print;
 const command_line = @import("command_line.zig");
 const initialization = @import("initialization.zig");
 const client_api = @import("client_api.zig");
+const RPCServer = @import("../rpc/server.zig").RPCServer;
 
 // Signal handling for graceful shutdown
 var running = std.atomic.Value(bool).init(true);
@@ -65,13 +66,21 @@ pub fn main() !void {
     var api_server: ?client_api.ClientApiServer = null;
     if (!config.client_api_disabled) {
         api_server = client_api.ClientApiServer.init(allocator, components.blockchain, config.bind_address);
-        
+
         const api_thread = try std.Thread.spawn(.{}, client_api.ClientApiServer.start, .{&api_server.?});
         api_thread.detach();
-        
+
         std.log.info("✅ Client API started on {s}:{}", .{config.bind_address, client_api.CLIENT_API_PORT});
     }
     defer if (api_server) |*server| server.deinit();
+
+    // Start RPC server
+    const RPC_PORT = 10803;
+    var rpc_server = try RPCServer.init(allocator, components.blockchain, RPC_PORT);
+    defer rpc_server.deinit();
+
+    const rpc_thread = try std.Thread.spawn(.{}, RPCServer.start, .{rpc_server});
+    rpc_thread.detach();
     
     // Setup signal handlers
     _ = std.posix.sigaction(std.posix.SIG.INT, &.{

@@ -58,6 +58,13 @@ pub const password = @import("core/util/password.zig");
 pub const dotenv = @import("core/util/dotenv.zig");
 pub const nonce_manager = @import("core/util/nonce_manager.zig");
 
+// RPC components
+pub const rpc = struct {
+    pub const types = @import("core/rpc/types.zig");
+    pub const format = @import("core/rpc/format.zig");
+    pub const server = @import("core/rpc/server.zig");
+};
+
 // Applications are separate executables and should not be part of the library API
 
 // Re-export commonly used types for convenience
