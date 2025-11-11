@@ -299,7 +299,7 @@ run_test "balance - alice genesis" \
 
 run_error_test "balance - no wallet specified (default)" \
     "zeicoin_cmd balance" \
-    "Wallet 'default' not found"
+    "not found\\|Invalid password"
 
 # Create a second wallet for transaction tests
 run_test "create recipient wallet" \

@@ -273,9 +273,14 @@ pub const TransactionValidator = struct {
     /// Validate transaction signature
     pub fn validateSignature(self: *Self, tx: Transaction) bool {
         _ = self;
-        
-        // Use the transaction's built-in signature validation
-        return tx.isValid();
+
+        // Verify Ed25519 signature
+        const tx_hash = tx.hashForSigning();
+        if (!key.verify(tx.sender_public_key, &tx_hash, tx.signature)) {
+            log.warn("❌ Invalid signature: transaction not signed by sender", .{});
+            return false;
+        }
+        return true;
     }
     
     /// Mark transaction as processed (for replay protection)

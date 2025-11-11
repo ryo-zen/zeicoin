@@ -290,7 +290,33 @@ pub const ZeiCoin = struct {
         }
         return try self.getBlockHashAtHeight(current_height);
     }
-    
+
+    /// Get transaction by hash - checks mempool first, then database
+    pub fn getTransaction(self: *ZeiCoin, tx_hash: Hash) !struct {
+        transaction: Transaction,
+        status: enum { pending, confirmed },
+        block_height: ?u32,
+    } {
+        // Check mempool first for pending transactions
+        if (self.mempool_manager.getTransaction(tx_hash)) |tx| {
+            return .{
+                .transaction = tx,
+                .status = .pending,
+                .block_height = null,
+            };
+        }
+
+        // Check database for confirmed transactions
+        const tx = try self.database.getTransactionByHash(tx_hash);
+        // TODO: Get block height where transaction was included
+        // For now, return confirmed with unknown height
+        return .{
+            .transaction = tx,
+            .status = .confirmed,
+            .block_height = null, // Would need to scan blocks to find this
+        };
+    }
+
     pub fn getCurrentDifficulty(self: *ZeiCoin) !u64 {
         // Calculate what the current difficulty should be for the next block
         var difficulty_calc = DifficultyCalculator.init(self.allocator, self.database);
