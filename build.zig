@@ -170,69 +170,16 @@ pub fn build(b: *std.Build) !void {
     }
 
     // **************************************************************
-    // *              ANALYTICS REST API AS AN EXECUTABLE          *
+    // *           TRANSACTION API AS AN EXECUTABLE                 *
     // **************************************************************
     {
         const exe = b.addExecutable(.{
-            .name = "analytics_api",
-            .root_source_file = b.path("src/apps/rest.zig"),
+            .name = "transaction_api",
+            .root_source_file = b.path("src/apps/transaction_api.zig"),
             .target = target,
             .optimize = optimize,
         });
-        // Add dependency modules to the executable.
-        for (deps) |mod| exe.root_module.addImport(
-            mod.name,
-            mod.module,
-        );
-        exe.root_module.addImport("zeicoin", lib.root_module);
-        exe.linkLibC();
-        // Link RocksDB
-        exe.linkSystemLibrary("rocksdb");
-
-        b.installArtifact(exe);
-
-        const run_cmd = b.addRunArtifact(exe);
-        run_cmd.step.dependOn(b.getInstallStep());
-
-        if (b.args) |args| {
-            run_cmd.addArgs(args);
-        }
-
-        const run_step = b.step("run-analytics", "Run the analytics REST API");
-        run_step.dependOn(&run_cmd.step);
-    }
-
-    // **************************************************************
-    // *            GENESIS CALCULATOR AS AN EXECUTABLE            *
-    // **************************************************************
-    {
-        const exe = b.addExecutable(.{
-            .name = "calculate_genesis",
-            .root_source_file = b.path("src/core/util/calculate_genesis.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        exe.root_module.addImport("zeicoin", lib.root_module);
-        b.installArtifact(exe);
-
-        const run_cmd = b.addRunArtifact(exe);
-        run_cmd.step.dependOn(b.getInstallStep());
-
-        const run_step = b.step("calc-genesis", "Calculate genesis hash");
-        run_step.dependOn(&run_cmd.step);
-    }
-
-    // **************************************************************
-    // *              CLI BRIDGE AS AN EXECUTABLE                  *
-    // **************************************************************
-    {
-        const exe = b.addExecutable(.{
-            .name = "cli_bridge",
-            .root_source_file = b.path("src/apps/cli_bridge.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        // Add dependency modules to the executable.
+        // Add dependency modules
         for (deps) |mod| exe.root_module.addImport(
             mod.name,
             mod.module,
@@ -244,12 +191,10 @@ pub fn build(b: *std.Build) !void {
 
         const run_cmd = b.addRunArtifact(exe);
         run_cmd.step.dependOn(b.getInstallStep());
-        if (b.args) |args| {
-            run_cmd.addArgs(args);
-        }
-        const run_step = b.step("run-cli-bridge", "Run the CLI bridge service");
+        const run_step = b.step("run-transaction-api", "Run the transaction API server (port 8080)");
         run_step.dependOn(&run_cmd.step);
     }
+
 
     // **************************************************************
     // *              CHECK FOR FAST FEEDBACK LOOP                  *
@@ -530,6 +475,7 @@ pub fn build(b: *std.Build) !void {
         const network_fuzz_step = b.step("fuzz-network", "Run network protocol fuzz tests");
         network_fuzz_step.dependOn(&run_network_fuzz.step);
     }
+
 
     // **************************************************************
     // *              CLEAN                                         *
