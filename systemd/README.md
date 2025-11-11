@@ -1,16 +1,16 @@
 # ZeiCoin Systemd Service Setup
 
-This directory contains systemd service files for running ZeiCoin testnet.
+This directory contains systemd service files for running ZeiCoin as a production service.
 
 ## Service Files
 
-- **zeicoin-mining.service**        - Main mining server with auto-restart
-- **zeicoin-server.service**        - Blockchain server (non-mining mode)
-- **zeicoin-cli-bridge.service**    - CLI bridge for client connections
-- **zeicoin-indexer.service**       - Blockchain indexer (one-shot execution)
-- **zeicoin-indexer.timer**         - Timer to run indexer every 30 seconds
-- **zeicoin-rest-api.service**      - REST API for analytics
-- **zeicoin.target**                - Combined target for all services
+- **zeicoin-mining.service** - Main mining server with auto-restart
+- **zeicoin-server.service** - Blockchain server (non-mining mode)
+- **zeicoin-cli-bridge.service** - CLI bridge for client connections
+- **zeicoin-indexer.service** - Blockchain indexer (one-shot execution)
+- **zeicoin-indexer.timer** - Auto-indexer timer (runs every 30 seconds)
+- **zeicoin-rest-api.service** - REST API for analytics
+- **zeicoin.target** - Combined target for all services
 
 ## Prerequisites
 
@@ -67,6 +67,53 @@ sudo systemctl start zeicoin-rest-api.service
 
 # Start indexer timer (runs every 30s)
 sudo systemctl start zeicoin-indexer.timer
+```
+
+## 🚀 Auto-Indexer Quick Start
+
+The auto-indexer keeps PostgreSQL in sync with the blockchain for the REST API.
+
+### Setup (One-time)
+
+```bash
+# 1. Copy service files to systemd
+sudo cp /home/max/zeicoin/systemd/zeicoin-indexer.* /etc/systemd/system/
+
+# 2. Update database password in service file
+sudo nano /etc/systemd/system/zeicoin-indexer.service
+# Change: Environment="ZEICOIN_DB_PASSWORD=your_password_here"
+
+# 3. Enable and start timer
+sudo systemctl daemon-reload
+sudo systemctl enable zeicoin-indexer.timer
+sudo systemctl start zeicoin-indexer.timer
+```
+
+### Monitor
+
+```bash
+# Check timer status
+systemctl status zeicoin-indexer.timer
+
+# View indexer logs
+journalctl -u zeicoin-indexer.service -f
+
+# Check last run
+systemctl status zeicoin-indexer.service
+```
+
+### Verify It's Working
+
+```bash
+# Check database sync
+ZEICOIN_DB_PASSWORD=yourpass psql -h localhost -U zeicoin -d zeicoin_testnet \
+  -c "SELECT MAX(height) FROM blocks"
+
+# Compare with blockchain
+ZEICOIN_SERVER=127.0.0.1 ./zig-out/bin/zeicoin status | grep Height
+
+# Test API
+curl http://localhost:8080/api/transactions/YOUR_ADDRESS
 ```
 
 ### Start All Services
@@ -128,7 +175,7 @@ ZEICOIN_MINE_ENABLED=true
 ZEICOIN_MINER_WALLET=miner
 
 # Database (for indexer/API)
-ZEICOIN_DB_PASSWORD=your_password_here
+ZEICOIN_DB_PASSWORD=your_secure_password_here
 ZEICOIN_DB_HOST=127.0.0.1
 ZEICOIN_DB_NAME=zeicoin_testnet
 ZEICOIN_DB_USER=zeicoin
@@ -182,7 +229,7 @@ sudo systemctl status zeicoin-mining.service
 
 ```bash
 # Test PostgreSQL connection
-PGPASSWORD=your_password_here psql -h localhost -U zeicoin -d zeicoin_testnet
+PGPASSWORD=your_password psql -h localhost -U zeicoin -d zeicoin_testnet
 
 # Check if PostgreSQL is running
 sudo systemctl status postgresql

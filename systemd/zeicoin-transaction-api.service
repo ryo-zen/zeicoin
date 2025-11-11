@@ -1,14 +1,15 @@
 [Unit]
-Description=ZeiCoin CLI Bridge Service (Wallet Operations via HTTP)
-After=zeicoin-server.service zeicoin-mining.service
-Wants=zeicoin-server.service
+Description=ZeiCoin Transaction API Service (Hybrid RPC + PostgreSQL)
+After=zeicoin-server.service postgresql.service
+Wants=postgresql.service
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/root/zeicoin
+EnvironmentFile=-/root/zeicoin/.env
 Environment="ZEICOIN_SERVER=127.0.0.1"
-ExecStart=/root/zeicoin/zig-out/bin/cli_bridge
+ExecStart=/root/zeicoin/zig-out/bin/transaction_api
 Restart=always
 RestartSec=5
 StandardOutput=journal
