@@ -188,7 +188,7 @@ pub const Address = extern struct {
 
     /// Create a P2PKH address from a public key
     pub fn fromPublicKey(public_key: [32]u8) Address {
-        const full_hash = util.hash256(&public_key);
+        const full_hash = util.blake3Hash(&public_key);
         var addr = Address{
             .version = @intFromEnum(AddressVersion.P2PKH),
             .hash = undefined,
@@ -363,7 +363,7 @@ pub const Transaction = struct {
         writer.writeAll(self.extra_data) catch unreachable;
 
         const data = stream.getWritten();
-        return util.hash256(data);
+        return util.blake3Hash(data);
     }
 
     /// Check if this is a coinbase transaction (created from thin air)
@@ -762,7 +762,7 @@ pub const BlockHeader = struct {
         self.serialize(writer) catch unreachable;
 
         const data = stream.getWritten();
-        return util.hash256(data);
+        return util.blake3Hash(data);
     }
 
     /// Calculate the work contribution of this block

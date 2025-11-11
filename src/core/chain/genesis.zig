@@ -12,7 +12,7 @@ pub const GenesisBlocks = struct {
     /// Created: 2025-09-09 09:09:09.090 UTC
     /// Purpose: Development, testing, and experimentation
     pub const TESTNET = struct {
-        pub const HASH: [32]u8 = [_]u8{ 0xa2, 0xa1, 0x90, 0x54, 0x5e, 0x15, 0x73, 0x41, 0xa8, 0xa3, 0x5b, 0x74, 0x91, 0x2e, 0x2c, 0xc5, 0xd5, 0x9b, 0xa5, 0x35, 0x67, 0x48, 0xae, 0x39, 0x09, 0x3e, 0x2d, 0xaf, 0xc4, 0x6a, 0x3d, 0x84 };
+        pub const HASH: [32]u8 = [_]u8{ 0x6d, 0x31, 0xc6, 0x04, 0x14, 0x24, 0x5f, 0xdb, 0x41, 0x87, 0x9c, 0xd2, 0xa3, 0x62, 0x4f, 0xb3, 0x6e, 0xb4, 0x96, 0x3b, 0x9b, 0x07, 0x21, 0xf5, 0x24, 0x69, 0x7d, 0xd3, 0x9b, 0xff, 0x7f, 0x0a };
 
         pub const MESSAGE = "ZeiCoin TestNet Genesis - A minimal digital currency written in ⚡Zig";
         pub const TIMESTAMP: u64 = 1757408949090; // September 9, 2025 09:09:09.090 UTC
@@ -131,17 +131,17 @@ pub fn validateGenesis(block: types.Block) bool {
     return true;
 }
 
-/// TestNet pre-funded accounts for testing (HD Wallet addresses)
+/// TestNet pre-funded accounts for testing (HD Wallet addresses with coin type 882)
 pub const TESTNET_DISTRIBUTION = [_]struct {
     name: []const u8,
-    address_hex: []const u8, // Bech32 address from HD wallet
+    address_hex: []const u8, // Bech32 address from HD wallet (BLAKE3-based)
     amount: u64,
 }{
-    .{ .name = "alice", .address_hex = "tzei1qzhrhfgcdpz4gldle6zlk0q8kcd2elhfwumf0ejs", .amount = 480000 * types.ZEI_COIN },
-    .{ .name = "bob", .address_hex = "tzei1qpgmfkzc4mu9xtljtyvpnrcesjnq7wv4f5ley9hu", .amount = 480000 * types.ZEI_COIN },
-    .{ .name = "charlie", .address_hex = "tzei1qz5rc4ru98ht33uu2w03rc57n32gekzmycd692tz", .amount = 480000 * types.ZEI_COIN },
-    .{ .name = "david", .address_hex = "tzei1qpc7xkcg52w7txsce6ad8scnyg2v54z9ec0hhcdv", .amount = 480000 * types.ZEI_COIN },
-    .{ .name = "eve", .address_hex = "tzei1qpdg0wzte5966248hcekh298sz526pzjw5r8wxlf", .amount = 480000 * types.ZEI_COIN },
+    .{ .name = "alice", .address_hex = "tzei1qqdewjya5ckmcz9pmr0duwrzx04jdvysdyw8ykl0", .amount = 480000 * types.ZEI_COIN },
+    .{ .name = "bob", .address_hex = "tzei1qr95qtsgvya69f5p5le5dat9dd3vtce6yyu8cdrq", .amount = 480000 * types.ZEI_COIN },
+    .{ .name = "charlie", .address_hex = "tzei1qqkm8tjf79shzyn6eda4vuk9n05hcu7ngggu57ty", .amount = 480000 * types.ZEI_COIN },
+    .{ .name = "david", .address_hex = "tzei1qp84f35wddrrqc78g39dn6vf0pre307czssqedaf", .amount = 480000 * types.ZEI_COIN },
+    .{ .name = "eve", .address_hex = "tzei1qpplaup4xn3wyc3huxc3y8kwhar5n0c3cs9vylm7", .amount = 480000 * types.ZEI_COIN },
 };
 
 /// Get deterministic address for a test account

@@ -37,7 +37,7 @@ pub const HDError = error{
 /// BIP32-style path levels
 pub const PathLevel = enum {
     purpose,     // 44' for BIP44
-    coin_type,   // 501' for ZeiCoin  
+    coin_type,   // 882' for ZeiCoin
     account,     // Account number
     change,      // 0 = external, 1 = internal
     address,     // Address index
@@ -167,7 +167,7 @@ pub const HDKey = struct {
     }
 };
 
-/// Parse HD derivation path like "m/44'/501'/0'/0/0"
+/// Parse HD derivation path like "m/44'/882'/0'/0/0"
 pub fn parsePath(path: []const u8) ![]u32 {
     var parts = std.ArrayList(u32).init(std.heap.page_allocator);
     defer parts.deinit();
@@ -217,23 +217,23 @@ pub fn derivePath(master: *const HDKey, path: []const u32) !HDKey {
 }
 
 /// Common derivation paths
-pub const COIN_TYPE_ZEICOIN: u32 = 501; // Proposed coin type for ZeiCoin
+pub const COIN_TYPE_ZEICOIN: u32 = 882; // ZeiCoin coin type (single type for both testnet and mainnet)
 
 pub fn getAccountPath(account: u32) [3]u32 {
     return [3]u32{
-        44 | 0x80000000,              // purpose: BIP44
-        COIN_TYPE_ZEICOIN | 0x80000000, // coin_type: ZeiCoin
-        account | 0x80000000,         // account (hardened)
+        44 | 0x80000000,                    // purpose: BIP44
+        COIN_TYPE_ZEICOIN | 0x80000000,     // coin_type: 882
+        account | 0x80000000,               // account (hardened)
     };
 }
 
 pub fn getAddressPath(account: u32, change: u32, index: u32) [5]u32 {
     return [5]u32{
-        44 | 0x80000000,              // purpose: BIP44
-        COIN_TYPE_ZEICOIN | 0x80000000, // coin_type: ZeiCoin  
-        account | 0x80000000,         // account (hardened)
-        change,                       // change (0 or 1)
-        index,                        // address index
+        44 | 0x80000000,                    // purpose: BIP44
+        COIN_TYPE_ZEICOIN | 0x80000000,     // coin_type: 882
+        account | 0x80000000,               // account (hardened)
+        change,                             // change (0 or 1)
+        index,                              // address index
     };
 }
 
@@ -260,13 +260,13 @@ test "child key derivation" {
 }
 
 test "path parsing" {
-    const path_str = "m/44'/501'/0'/0/0";
+    const path_str = "m/44'/882'/0'/0/0";
     const path = try parsePath(path_str);
     defer std.heap.page_allocator.free(path);
-    
+
     try testing.expectEqual(@as(usize, 5), path.len);
     try testing.expectEqual(@as(u32, 44 | 0x80000000), path[0]);
-    try testing.expectEqual(@as(u32, 501 | 0x80000000), path[1]);
+    try testing.expectEqual(@as(u32, 882 | 0x80000000), path[1]);
     try testing.expectEqual(@as(u32, 0 | 0x80000000), path[2]);
     try testing.expectEqual(@as(u32, 0), path[3]);
     try testing.expectEqual(@as(u32, 0), path[4]);
