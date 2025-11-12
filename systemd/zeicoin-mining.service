@@ -8,8 +8,7 @@ Type=simple
 User=root
 Group=root
 WorkingDirectory=/root/zeicoin
-EnvironmentFile=-/root/zeicoin/.env
-EnvironmentFile=-/root/zeicoin/.env.local
+EnvironmentFile=/root/zeicoin/.env
 Environment="ZEICOIN_SERVER=127.0.0.1"
 Environment="ZEICOIN_BIND_IP=0.0.0.0"
 Environment="ZEICOIN_MINE_ENABLED=true"
@@ -17,6 +16,9 @@ Environment="ZEICOIN_MINER_WALLET=miner"
 ExecStart=/root/zeicoin/zig-out/bin/zen_server --mine miner
 Restart=on-failure
 RestartSec=10
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=10
 StandardOutput=journal
 StandardError=journal
 

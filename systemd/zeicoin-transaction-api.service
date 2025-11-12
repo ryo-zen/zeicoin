@@ -12,6 +12,9 @@ Environment="ZEICOIN_SERVER=127.0.0.1"
 ExecStart=/root/zeicoin/zig-out/bin/transaction_api
 Restart=always
 RestartSec=5
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=10
 StandardOutput=journal
 StandardError=journal
 

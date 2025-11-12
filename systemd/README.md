@@ -6,10 +6,9 @@ This directory contains systemd service files for running ZeiCoin as a productio
 
 - **zeicoin-mining.service** - Main mining server with auto-restart
 - **zeicoin-server.service** - Blockchain server (non-mining mode)
-- **zeicoin-cli-bridge.service** - CLI bridge for client connections
 - **zeicoin-indexer.service** - Blockchain indexer (one-shot execution)
 - **zeicoin-indexer.timer** - Auto-indexer timer (runs every 30 seconds)
-- **zeicoin-rest-api.service** - REST API for analytics
+- **zeicoin-transaction-api.service** - Transaction API for RPC operations
 - **zeicoin.target** - Combined target for all services
 
 ## Prerequisites
@@ -20,7 +19,7 @@ This directory contains systemd service files for running ZeiCoin as a productio
    zig build -Doptimize=ReleaseFast
    ```
 
-2. Set up PostgreSQL (for indexer and REST API):
+2. Set up PostgreSQL (for indexer):
    ```bash
    ./scripts/setup_analytics.sh
    ```
@@ -59,11 +58,8 @@ This directory contains systemd service files for running ZeiCoin as a productio
 # Start mining server
 sudo systemctl start zeicoin-mining.service
 
-# Start CLI bridge (requires server running)
-sudo systemctl start zeicoin-cli-bridge.service
-
-# Start REST API (requires PostgreSQL)
-sudo systemctl start zeicoin-rest-api.service
+# Start transaction API
+sudo systemctl start zeicoin-transaction-api.service
 
 # Start indexer timer (runs every 30s)
 sudo systemctl start zeicoin-indexer.timer
@@ -128,8 +124,7 @@ sudo systemctl start zeicoin.target
 ```bash
 # Enable individual services
 sudo systemctl enable zeicoin-mining.service
-sudo systemctl enable zeicoin-cli-bridge.service
-sudo systemctl enable zeicoin-rest-api.service
+sudo systemctl enable zeicoin-transaction-api.service
 sudo systemctl enable zeicoin-indexer.timer
 
 # Or enable all via target
@@ -184,9 +179,8 @@ ZEICOIN_DB_USER=zeicoin
 ### Service Dependencies
 
 - **zeicoin-server.service** - Independent, starts first
-- **zeicoin-cli-bridge.service** - Requires zeicoin-server
 - **zeicoin-indexer.service** - Requires PostgreSQL and zeicoin-server
-- **zeicoin-rest-api.service** - Requires PostgreSQL
+- **zeicoin-transaction-api.service** - Independent, provides RPC interface
 - **zeicoin-indexer.timer** - Requires zeicoin-indexer.service
 
 ## Firewall Configuration
@@ -198,8 +192,8 @@ Open required ports:
 sudo ufw allow 10800/udp comment "ZeiCoin UDP Discovery"
 sudo ufw allow 10801/tcp comment "ZeiCoin P2P"
 sudo ufw allow 10802/tcp comment "ZeiCoin Client API"
-sudo ufw allow 10803/tcp comment "ZeiCoin Metrics"
-sudo ufw allow 8080/tcp comment "ZeiCoin REST API"
+sudo ufw allow 10803/tcp comment "ZeiCoin JSON-RPC"
+sudo ufw allow 8080/tcp comment "ZeiCoin Transaction API"
 
 # Firewalld (CentOS/RHEL)
 sudo firewall-cmd --permanent --add-port=10800/udp
@@ -271,10 +265,8 @@ sudo journalctl -u zeicoin.target -f
 zeicoin.target
 ├── zeicoin-mining.service (or zeicoin-server.service)
 │   └── zen_server --mine miner
-├── zeicoin-cli-bridge.service
-│   └── cli_bridge
-├── zeicoin-rest-api.service
-│   └── analytics_api
+├── zeicoin-transaction-api.service
+│   └── transaction_api (port 8080)
 └── zeicoin-indexer.timer
     └── zeicoin_indexer (every 30s)
 ```

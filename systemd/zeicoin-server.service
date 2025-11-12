@@ -12,6 +12,9 @@ Environment="ZEICOIN_BOOTSTRAP=209.38.31.77:10801,134.199.170.129:10801"
 ExecStart=/root/zeicoin/zig-out/bin/zen_server --mine miner
 Restart=always
 RestartSec=10
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=10
 StandardOutput=journal
 StandardError=journal
 

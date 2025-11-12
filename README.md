@@ -121,10 +121,10 @@ zeicoin/
 │   │   ├── wallet/        # Wallet management
 │   │   └── server/        # Server components
 │   ├── apps/              # Applications (use zeicoin module)
-│   │   ├── main.zig       # Server entry point
-│   │   ├── cli.zig        # Command-line interface
-│   │   ├── indexer.zig    # PostgreSQL blockchain indexer
-│   │   └── rest.zig       # REST API service
+│   │   ├── main.zig            # Server entry point
+│   │   ├── cli.zig             # Command-line interface
+│   │   ├── indexer.zig         # PostgreSQL blockchain indexer
+│   │   └── transaction_api.zig # Transaction API service
 │   └── lib.zig            # Public API (zeicoin module)
 ├── sql/                   # Database schemas
 ├── randomx/               # RandomX C library
