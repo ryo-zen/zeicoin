@@ -10,8 +10,11 @@ pub const WireReader = struct {
     allocator: std.mem.Allocator,
     buffer: std.ArrayList(u8),
     read_pos: usize,
-    
+
     const Self = @This();
+
+    /// Maximum buffer size to prevent memory exhaustion attacks (16MB)
+    const MAX_BUFFER_SIZE: usize = 16 * 1024 * 1024;
     
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
@@ -27,6 +30,10 @@ pub const WireReader = struct {
     
     /// Add data from network to buffer
     pub fn addData(self: *Self, data: []const u8) !void {
+        // SECURITY: Prevent memory exhaustion via unbounded buffer growth
+        if (self.buffer.items.len + data.len > MAX_BUFFER_SIZE) {
+            return error.BufferOverflow;
+        }
         try self.buffer.appendSlice(data);
     }
     

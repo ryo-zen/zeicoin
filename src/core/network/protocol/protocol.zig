@@ -14,7 +14,7 @@ pub const DEFAULT_PORT: u16 = 10801;
 // Message size limits
 pub const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024; // 16MB
 pub const MAX_HEADERS_PER_MESSAGE: usize = 2000;
-pub const MAX_BLOCKS_PER_MESSAGE: usize = 500;
+pub const MAX_BLOCKS_PER_MESSAGE: usize = 50; // Reduced from 500 to prevent amplification attacks
 
 // Connection limits
 pub const MAX_PEERS: usize = 125;
