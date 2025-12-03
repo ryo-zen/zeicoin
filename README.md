@@ -143,7 +143,7 @@ zeicoin/
 #### Consensus
 - Longest chain rule with cumulative proof-of-work
 - Configurable peer block hash consensus (disabled/optional/enforced)
-- Difficulty adjustment every block
+- Difficulty adjustment every 3 blocks
 - Coinbase maturity: 100 blocks
 
 #### Mining
@@ -153,7 +153,7 @@ zeicoin/
 - Mining rewards locked for 100 blocks (coinbase maturity)
 
 #### Network Protocol
-- **Ports**: P2P (10801), Client API (10802), UDP Discovery (10800)
+- **Ports**: P2P (10801), Client API (10802), JSON-RPC (10803), REST API (8080)
 - **Bootstrap Nodes**: 209.38.31.77:10801, 134.199.170.129:10801 (might add more in future)
 - **Address Format**: Bech32 with BLAKE3 hashing (tzei1... for TestNet, zei1... for MainNet)
 - **Message Types**: Handshake, Ping/Pong, Block, Transaction, GetBlocks, GetPeers, BlockHash
@@ -169,7 +169,8 @@ zeicoin/
 
 ## Layer 2 Messaging System (In Development)
 
-> **Note**: Layer 2 is an optional feature currently in development. Running a ZeiCoin node does **not** require PostgreSQL or any L2 components. The core blockchain operates independently with just RocksDB.
+> [!NOTE]
+> Layer 2 is an optional feature currently in development. Running a ZeiCoin node does **not** require PostgreSQL or any L2 components. The core blockchain operates independently with just RocksDB.
 
 ZeiCoin will feature an optional Layer 2 messaging layer that adds rich metadata to blockchain transactions.
 
@@ -192,7 +193,9 @@ ZeiCoin will feature an optional Layer 2 messaging layer that adds rich metadata
 
 ## Analytics & Data Infrastructure (Optional)
 
-> **Note**: Analytics and indexing are optional features. You can run a fully functional mining or sync node without any of these components.
+> [!IMPORTANT]
+>
+> Analytics and indexing are optional features. You can run a fully functional mining or sync node without any of these components.
 
 ### Concurrent Indexer
 
@@ -284,7 +287,6 @@ sudo systemctl status zeicoin.target
 **Available Services**:
 - `zeicoin-mining.service` - Main mining server with auto-restart
 - `zeicoin-server.service` - Non-mining blockchain server
-- `zeicoin-cli-bridge.service` - CLI bridge for client connections
 - `zeicoin-indexer.timer` - Automatic indexing every 30 seconds
 - `zeicoin-rest-api.service` - REST API for analytics
 - `zeicoin.target` - Start/stop all services together
@@ -336,7 +338,7 @@ zig build clean
 
 ```bash
 zig build                          # Debug build
-zig build -Doptimize=ReleaseFast   # Optimized Fbuild
+zig build -Doptimize=ReleaseFast   # Optimized build
 zig build test                     # Run tests
 zig build check                    # Fast compilation check
 zig build docs                     # Generate documentation
