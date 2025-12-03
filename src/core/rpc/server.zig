@@ -18,6 +18,10 @@ pub const RPCServer = struct {
     server: net.Server,
     port: u16,
     running: std.atomic.Value(bool),
+    active_connections: std.atomic.Value(u32),
+
+    /// Maximum concurrent connections to prevent DoS
+    const MAX_CONNECTIONS: u32 = 100;
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -47,6 +51,7 @@ pub const RPCServer = struct {
             .server = server,
             .port = port,
             .running = std.atomic.Value(bool).init(false),
+            .active_connections = std.atomic.Value(u32).init(0),
         };
 
         return self;
@@ -97,9 +102,21 @@ pub const RPCServer = struct {
                 continue;
             };
 
+            // SECURITY: Check connection limit before spawning thread
+            const current = self.active_connections.load(.acquire);
+            if (current >= MAX_CONNECTIONS) {
+                log.warn("⚠️ RPC connection limit reached ({}/{}), rejecting", .{ current, MAX_CONNECTIONS });
+                connection.stream.close();
+                continue;
+            }
+
+            // Increment active connections
+            _ = self.active_connections.fetchAdd(1, .acq_rel);
+
             // Handle in new thread
             const thread = std.Thread.spawn(.{}, handleConnection, .{ self, connection }) catch |err| {
                 log.err("Failed to spawn thread: {}", .{err});
+                _ = self.active_connections.fetchSub(1, .acq_rel);
                 connection.stream.close();
                 continue;
             };
@@ -135,7 +152,10 @@ pub const RPCServer = struct {
     }
 
     fn handleConnection(self: *RPCServer, connection: net.Server.Connection) void {
-        defer connection.stream.close();
+        defer {
+            connection.stream.close();
+            _ = self.active_connections.fetchSub(1, .acq_rel);
+        }
 
         var buffer: [8192]u8 = undefined;
         const bytes_read = connection.stream.read(&buffer) catch |err| {

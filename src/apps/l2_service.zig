@@ -114,15 +114,22 @@ pub const L2Service = struct {
         var conn = try self.pool.acquire();
         defer self.pool.release(conn);
 
-        // Convert tags to PostgreSQL array format
+        // Convert tags to PostgreSQL array format with proper escaping
         var tags_array = std.ArrayList(u8).init(self.allocator);
         defer tags_array.deinit();
-        
+
         try tags_array.append('{');
         for (tags, 0..) |tag, i| {
             if (i > 0) try tags_array.append(',');
             try tags_array.append('"');
-            try tags_array.appendSlice(tag);
+            // SECURITY: Escape special characters to prevent SQL injection
+            for (tag) |c| {
+                switch (c) {
+                    '"' => try tags_array.appendSlice("\\\""), // Escape double quotes
+                    '\\' => try tags_array.appendSlice("\\\\"), // Escape backslashes
+                    else => try tags_array.append(c),
+                }
+            }
             try tags_array.append('"');
         }
         try tags_array.append('}');
