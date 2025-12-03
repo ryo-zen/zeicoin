@@ -24,6 +24,30 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
     _ = miner_keypair; // Coinbase transactions don't need signatures
     log.info("⛏️ ZenMineBlock: Starting to mine new block", .{});
 
+    // Get current height to calculate proper block reward with halving
+    const current_height = try ctx.blockchain.getHeight();
+    const new_block_height = current_height + 1;
+
+    // SECURITY: Check supply cap before mining
+    const current_supply = ctx.database.getTotalSupply();
+    const base_reward = types.ZenMining.calculateBlockReward(new_block_height);
+
+    if (current_supply >= types.MAX_SUPPLY) {
+        log.warn("⛔ [SUPPLY CAP] Cannot mine: MAX_SUPPLY ({} ZEI) already reached", .{types.MAX_SUPPLY / types.ZEI_COIN});
+        return error.SupplyCapReached;
+    }
+
+    // Log halving info
+    const halving_epoch = new_block_height / types.ZenMining.HALVING_INTERVAL;
+    const blocks_until_halving = types.ZenMining.HALVING_INTERVAL - (new_block_height % types.ZenMining.HALVING_INTERVAL);
+    if (blocks_until_halving <= 10 or new_block_height % types.ZenMining.HALVING_INTERVAL == 0) {
+        log.info("📉 [HALVING] Epoch {}: {} blocks until next halving, current reward: {} zei", .{
+            halving_epoch,
+            blocks_until_halving,
+            base_reward,
+        });
+    }
+
     // Get transactions from mempool manager
     const mempool_transactions = try ctx.mempool_manager.getTransactionsForMining();
     defer ctx.mempool_manager.freeTransactionArray(mempool_transactions);
@@ -34,8 +58,24 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
         total_fees += tx.fee;
     }
 
-    // Create coinbase transaction (miner reward + fees)
-    const miner_reward = types.ZenMining.BLOCK_REWARD + total_fees;
+    // Create coinbase transaction (miner reward + fees) using height-based reward
+    const miner_reward = base_reward + total_fees;
+
+    // SECURITY: Final supply cap check with exact reward
+    if (current_supply + miner_reward > types.MAX_SUPPLY) {
+        // Cap the reward to not exceed MAX_SUPPLY
+        const capped_reward = types.MAX_SUPPLY - current_supply;
+        log.warn("⚠️ [SUPPLY CAP] Capping miner reward from {} to {} to respect MAX_SUPPLY", .{
+            miner_reward,
+            capped_reward,
+        });
+        // Can't reduce below fees (miners deserve their fees)
+        if (capped_reward < total_fees) {
+            log.warn("⛔ [SUPPLY CAP] Cannot mine: would exceed MAX_SUPPLY even with fees only", .{});
+            return error.SupplyCapReached;
+        }
+    }
+
     const coinbase_tx = Transaction{
         .version = 0, // Version 0 for coinbase
         .flags = .{}, // Default flags
@@ -54,7 +94,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
     };
 
     // Format miner reward display
-    const base_reward_display = util.formatZEI(ctx.allocator, types.ZenMining.BLOCK_REWARD) catch "? ZEI";
+    const base_reward_display = util.formatZEI(ctx.allocator, base_reward) catch "? ZEI";
     defer if (!std.mem.eql(u8, base_reward_display, "? ZEI")) ctx.allocator.free(base_reward_display);
     const fees_display = util.formatZEI(ctx.allocator, total_fees) catch "? ZEI";
     defer if (!std.mem.eql(u8, fees_display, "? ZEI")) ctx.allocator.free(fees_display);
@@ -89,10 +129,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
     const all_transactions = try transactions_to_include.toOwnedSlice();
     defer ctx.allocator.free(all_transactions);
 
-    // Get previous block hash and calculate next difficulty
-    const current_height = try ctx.blockchain.getHeight();
-
-    // Update mining state height before mining
+    // Update mining state height before mining (current_height already fetched above)
     ctx.mining_state.current_height.store(current_height, .release);
     log.info("🔍 zenMineBlock: storing current_height = {} to atomic", .{current_height});
 
@@ -176,8 +213,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
 
     if (found_nonce) {
         // Process coinbase transaction (create new coins!)
-        // Note: new block height = current_height + 1
-        const new_block_height = current_height + 1;
+        // Note: new_block_height was already calculated at function start
         try ctx.blockchain.chain_state.processCoinbaseTransaction(coinbase_tx, mining_address, new_block_height);
 
         // Process regular transactions
@@ -186,7 +222,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
         }
 
         // Save block to database at next height
-        const block_height = current_height + 1;
+        const block_height = new_block_height;
         const block_hash_hex = std.fmt.fmtSliceHexLower(&new_block.hash());
         const prev_hash_hex = std.fmt.fmtSliceHexLower(&new_block.header.previous_hash);
         log.info("💾 Saving block {} with hash {} and previous_hash {}", .{ block_height, block_hash_hex, prev_hash_hex });
@@ -201,7 +237,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
         // Clean mempool of confirmed transactions
         try ctx.mempool_manager.cleanAfterBlock(new_block);
 
-        log.info("⛏️  ZEN BLOCK #{} MINED! ({} txs, {} ZEI reward, {}s)", .{ block_height, new_block.txCount(), types.ZenMining.BLOCK_REWARD / types.ZEI_COIN, mining_time });
+        log.info("⛏️  ZEN BLOCK #{} MINED! ({} txs, {} ZEI reward, {}s)", .{ block_height, new_block.txCount(), base_reward / types.ZEI_COIN, mining_time });
 
         // Chain state updates handled by modern reorganization system
         // Fork manager updateBestChain call removed - handled internally

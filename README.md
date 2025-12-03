@@ -348,13 +348,13 @@ zig build clean                    # Clean artifacts
 ## Security Features
 
 ### Implemented Protections
-- ✅ Difficulty validation (prevents difficulty spoofing attacks)
-- ✅ Peer block hash consensus (prevents chain forks)
-- ✅ Signature verification (Ed25519)
-- ✅ Wallet encryption (ChaCha20-Poly1305 + Argon2id)
-- ✅ Coinbase maturity (100 blocks)
-- ✅ Transaction size limits
-- ✅ Mempool limits and validation
+- Difficulty validation (prevents difficulty spoofing attacks)
+- Peer block hash consensus (prevents chain forks)
+- Signature verification (Ed25519)
+- Wallet encryption (ChaCha20-Poly1305 + Argon2id)
+- Coinbase maturity (100 blocks)
+- Transaction size limits
+- Mempool limits and validation
 
 ## Current Status
 

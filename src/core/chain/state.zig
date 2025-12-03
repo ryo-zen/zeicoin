@@ -254,6 +254,17 @@ pub const ChainState = struct {
             return; // Skip processing duplicate coinbase transaction
         }
 
+        // SECURITY: Validate supply cap before processing coinbase
+        const current_supply = self.database.getTotalSupply();
+        if (current_supply + coinbase_tx.amount > types.MAX_SUPPLY) {
+            log.err("❌ [SUPPLY CAP] Coinbase would exceed MAX_SUPPLY: {} + {} > {}", .{
+                current_supply,
+                coinbase_tx.amount,
+                types.MAX_SUPPLY,
+            });
+            return error.SupplyCapExceeded;
+        }
+
         log.info("🔍 [COINBASE TX] =============================================", .{});
         const miner_addr = self.formatAddressForLogging(miner_address);
         defer self.allocator.free(miner_addr);
@@ -275,11 +286,16 @@ pub const ChainState = struct {
             log.info("🔍 [COINBASE TX] Genesis block - adding {} ZEI to mature balance", .{coinbase_tx.amount});
             // Genesis block pre-mine allocations are immediately mature
             miner_account.balance += coinbase_tx.amount;
+            // Genesis pre-mine is immediately circulating
+            try self.database.addToCirculatingSupply(coinbase_tx.amount);
         } else {
             log.info("🔍 [COINBASE TX] Regular block - adding {} ZEI to immature balance", .{coinbase_tx.amount});
             // Regular mining rewards go to immature balance (100 block maturity)
             miner_account.immature_balance += coinbase_tx.amount;
         }
+
+        // Update total supply (includes both mature and immature coins)
+        try self.database.addToTotalSupply(coinbase_tx.amount);
 
         const balance_after = @as(f64, @floatFromInt(miner_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
         const immature_after = @as(f64, @floatFromInt(miner_account.immature_balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
@@ -293,6 +309,15 @@ pub const ChainState = struct {
         } else {
             log.info("💰 [COINBASE UPDATE] MINER {s}: immature {d:.8} → {d:.8} ZEI (+{d:.8} immature reward)", .{ miner_addr_update, immature_before, immature_after, reward_zei });
         }
+
+        // Log supply tracking
+        const new_total_supply = self.database.getTotalSupply();
+        const supply_pct = @as(f64, @floatFromInt(new_total_supply)) / @as(f64, @floatFromInt(types.MAX_SUPPLY)) * 100.0;
+        log.info("📊 [SUPPLY] Total: {} / {} ({d:.4}% of max)", .{
+            new_total_supply / types.ZEI_COIN,
+            types.MAX_SUPPLY / types.ZEI_COIN,
+            supply_pct,
+        });
 
         // Save miner account
         try self.database.saveAccount(miner_address, miner_account);
@@ -426,6 +451,10 @@ pub const ChainState = struct {
                     miner_account.immature_balance -= tx.amount;
                     miner_account.balance += tx.amount;
                     try self.database.saveAccount(tx.recipient, miner_account);
+
+                    // Update circulating supply when coinbase matures
+                    try self.database.addToCirculatingSupply(tx.amount);
+
                     log.info("💰 Coinbase reward matured: {} ZEI for block {} (recipient: {})", .{ tx.amount, maturity_height, std.fmt.fmtSliceHexLower(tx.recipient.hash[0..8]) });
                 }
             }

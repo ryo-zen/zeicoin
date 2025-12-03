@@ -38,6 +38,8 @@ pub const Database = struct {
     const METADATA_PREFIX = "meta:";
     const HEIGHT_KEY = "meta:height";
     const ACCOUNT_COUNT_KEY = "meta:account_count";
+    const TOTAL_SUPPLY_KEY = "meta:total_supply";
+    const CIRCULATING_SUPPLY_KEY = "meta:circulating_supply";
 
     pub fn init(allocator: std.mem.Allocator, base_path: []const u8) !Database {
         var self = Database{
@@ -436,6 +438,136 @@ pub const Database = struct {
             c.rocksdb_free(@constCast(@ptrCast(err)));
             return DatabaseError.SaveFailed;
         }
+    }
+
+    // ============================================
+    // Supply Tracking Functions
+    // ============================================
+
+    /// Get current total supply (all minted coins including immature)
+    pub fn getTotalSupply(self: *Database) u64 {
+        var err: ?[*:0]u8 = null;
+        var val_len: usize = 0;
+        const val_ptr = c.rocksdb_get(
+            self.db,
+            self.read_options,
+            TOTAL_SUPPLY_KEY.ptr,
+            TOTAL_SUPPLY_KEY.len,
+            &val_len,
+            @ptrCast(&err),
+        );
+
+        if (err != null) {
+            c.rocksdb_free(@constCast(@ptrCast(err)));
+            return 0;
+        }
+
+        if (val_ptr == null) {
+            return 0;
+        }
+        defer c.rocksdb_free(val_ptr);
+
+        const data = val_ptr[0..val_len];
+        return std.fmt.parseInt(u64, data, 10) catch 0;
+    }
+
+    /// Update total supply (called when coinbase is processed)
+    pub fn updateTotalSupply(self: *Database, new_supply: u64) !void {
+        const supply_str = try std.fmt.allocPrint(self.allocator, "{}", .{new_supply});
+        defer self.allocator.free(supply_str);
+
+        var err: ?[*:0]u8 = null;
+        c.rocksdb_put(
+            self.db,
+            self.write_options,
+            TOTAL_SUPPLY_KEY.ptr,
+            TOTAL_SUPPLY_KEY.len,
+            supply_str.ptr,
+            supply_str.len,
+            @ptrCast(&err),
+        );
+
+        if (err != null) {
+            c.rocksdb_free(@constCast(@ptrCast(err)));
+            return DatabaseError.SaveFailed;
+        }
+    }
+
+    /// Add to total supply atomically
+    pub fn addToTotalSupply(self: *Database, amount: u64) !void {
+        const current = self.getTotalSupply();
+        const new_supply = current + amount;
+
+        // Check for overflow
+        if (new_supply < current) {
+            log.err("Supply overflow detected: {} + {} would overflow", .{ current, amount });
+            return DatabaseError.SaveFailed;
+        }
+
+        try self.updateTotalSupply(new_supply);
+    }
+
+    /// Get circulating supply (mature coins only, excludes immature coinbase)
+    pub fn getCirculatingSupply(self: *Database) u64 {
+        var err: ?[*:0]u8 = null;
+        var val_len: usize = 0;
+        const val_ptr = c.rocksdb_get(
+            self.db,
+            self.read_options,
+            CIRCULATING_SUPPLY_KEY.ptr,
+            CIRCULATING_SUPPLY_KEY.len,
+            &val_len,
+            @ptrCast(&err),
+        );
+
+        if (err != null) {
+            c.rocksdb_free(@constCast(@ptrCast(err)));
+            return 0;
+        }
+
+        if (val_ptr == null) {
+            return 0;
+        }
+        defer c.rocksdb_free(val_ptr);
+
+        const data = val_ptr[0..val_len];
+        return std.fmt.parseInt(u64, data, 10) catch 0;
+    }
+
+    /// Update circulating supply (called when coinbase matures)
+    pub fn updateCirculatingSupply(self: *Database, new_supply: u64) !void {
+        const supply_str = try std.fmt.allocPrint(self.allocator, "{}", .{new_supply});
+        defer self.allocator.free(supply_str);
+
+        var err: ?[*:0]u8 = null;
+        c.rocksdb_put(
+            self.db,
+            self.write_options,
+            CIRCULATING_SUPPLY_KEY.ptr,
+            CIRCULATING_SUPPLY_KEY.len,
+            supply_str.ptr,
+            supply_str.len,
+            @ptrCast(&err),
+        );
+
+        if (err != null) {
+            c.rocksdb_free(@constCast(@ptrCast(err)));
+            return DatabaseError.SaveFailed;
+        }
+    }
+
+    /// Add to circulating supply (when coinbase matures)
+    pub fn addToCirculatingSupply(self: *Database, amount: u64) !void {
+        const current = self.getCirculatingSupply();
+        const new_supply = current + amount;
+
+        // Check for overflow
+        if (new_supply < current) {
+            log.err("Circulating supply overflow detected: {} + {} would overflow", .{ current, amount });
+            return DatabaseError.SaveFailed;
+        }
+
+        try self.updateCirculatingSupply(new_supply);
     }
 
     /// Iterator callback function type for account iteration

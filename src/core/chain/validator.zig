@@ -294,6 +294,12 @@ pub const ChainValidator = struct {
         }
         log.info("✅ [STATE ROOT] Account state root verified: {}", .{std.fmt.fmtSliceHexLower(&expected_state_root)});
 
+        // SECURITY: Validate coinbase transaction
+        if (!try self.validateCoinbase(block, expected_height)) {
+            log.warn("❌ Coinbase validation failed for block {}", .{expected_height});
+            return false;
+        }
+
         // Validate all transactions in block
         for (block.transactions, 0..) |tx, i| {
             // Skip coinbase transaction (first one) - it doesn't need signature validation
@@ -436,6 +442,12 @@ pub const ChainValidator = struct {
         //    - Balance checks during transaction application
         // State root validation is only meaningful for blocks we're creating, not syncing
         log.warn("ℹ️ [SYNC] Skipping state root validation (validated after transaction application)", .{});
+
+        // SECURITY: Validate coinbase transaction during sync
+        if (!try self.validateCoinbaseSync(block, expected_height)) {
+            log.warn("❌ [SYNC] Coinbase validation failed for block {}", .{expected_height});
+            return false;
+        }
 
         log.warn("🔍 validateSyncBlock: Checking previous hash links for height {}", .{expected_height});
 
@@ -714,5 +726,132 @@ pub const ChainValidator = struct {
         
         const new_difficulty = current_difficulty.adjustFixed(adjustment_factor_fixed, FIXED_POINT_MULTIPLIER, types.CURRENT_NETWORK);
         log.warn("     📈 Calculated new difficulty: {} (base_bytes={}, threshold=0x{X})", .{ new_difficulty.toU64(), new_difficulty.base_bytes, new_difficulty.threshold });
+    }
+
+    // ============================================
+    // Coinbase Validation Functions
+    // ============================================
+
+    /// Validate coinbase transaction in a block
+    /// Checks: correct amount (reward + fees), supply cap not exceeded
+    fn validateCoinbase(self: *Self, block: Block, height: u32) !bool {
+        // Genesis block has special handling - no coinbase validation
+        if (height == 0) {
+            return true;
+        }
+
+        // Block must have at least one transaction (coinbase)
+        if (block.transactions.len == 0) {
+            log.warn("❌ [COINBASE] Block {} has no transactions", .{height});
+            return false;
+        }
+
+        const coinbase_tx = block.transactions[0];
+
+        // First transaction must be a coinbase
+        if (!coinbase_tx.isCoinbase()) {
+            log.warn("❌ [COINBASE] First transaction is not coinbase at height {}", .{height});
+            return false;
+        }
+
+        // Calculate expected block reward using halving schedule
+        const expected_reward = types.ZenMining.calculateBlockReward(height);
+
+        // Calculate total fees from other transactions
+        var total_fees: u64 = 0;
+        for (block.transactions[1..]) |tx| {
+            total_fees += tx.fee;
+        }
+
+        // Maximum allowed coinbase = reward + fees
+        const max_coinbase = expected_reward + total_fees;
+
+        // Validate coinbase amount
+        if (coinbase_tx.amount > max_coinbase) {
+            log.warn("❌ [COINBASE] Amount {} exceeds maximum {} (reward: {}, fees: {}) at height {}", .{
+                coinbase_tx.amount,
+                max_coinbase,
+                expected_reward,
+                total_fees,
+                height,
+            });
+            return false;
+        }
+
+        // Check supply cap
+        const current_supply = self.chain_state.database.getTotalSupply();
+        if (current_supply + coinbase_tx.amount > types.MAX_SUPPLY) {
+            log.warn("❌ [COINBASE] Would exceed MAX_SUPPLY: current {} + coinbase {} > max {}", .{
+                current_supply,
+                coinbase_tx.amount,
+                types.MAX_SUPPLY,
+            });
+            return false;
+        }
+
+        log.info("✅ [COINBASE] Valid: {} ZEI (reward: {}, fees: {}) at height {}", .{
+            coinbase_tx.amount / types.ZEI_COIN,
+            expected_reward / types.ZEI_COIN,
+            total_fees,
+            height,
+        });
+
+        return true;
+    }
+
+    /// Validate coinbase during sync (uses block pointer)
+    fn validateCoinbaseSync(_: *Self, block: *const Block, height: u32) !bool {
+        // Genesis block has special handling
+        if (height == 0) {
+            return true;
+        }
+
+        // Block must have at least one transaction (coinbase)
+        if (block.transactions.len == 0) {
+            log.warn("❌ [COINBASE SYNC] Block {} has no transactions", .{height});
+            return false;
+        }
+
+        const coinbase_tx = block.transactions[0];
+
+        // First transaction must be a coinbase
+        if (!coinbase_tx.isCoinbase()) {
+            log.warn("❌ [COINBASE SYNC] First transaction is not coinbase at height {}", .{height});
+            return false;
+        }
+
+        // Calculate expected block reward using halving schedule
+        const expected_reward = types.ZenMining.calculateBlockReward(height);
+
+        // Calculate total fees from other transactions
+        var total_fees: u64 = 0;
+        for (block.transactions[1..]) |tx| {
+            total_fees += tx.fee;
+        }
+
+        // Maximum allowed coinbase = reward + fees
+        const max_coinbase = expected_reward + total_fees;
+
+        // Validate coinbase amount
+        if (coinbase_tx.amount > max_coinbase) {
+            log.warn("❌ [COINBASE SYNC] Amount {} exceeds maximum {} (reward: {}, fees: {}) at height {}", .{
+                coinbase_tx.amount,
+                max_coinbase,
+                expected_reward,
+                total_fees,
+                height,
+            });
+            return false;
+        }
+
+        // During sync, we trust the chain's supply tracking
+        // The supply cap will be enforced when processing the coinbase transaction
+        log.warn("✅ [COINBASE SYNC] Valid coinbase at height {}: {} (max: {})", .{
+            height,
+            coinbase_tx.amount,
+            max_coinbase,
+        });
+
+        return true;
     }
 };

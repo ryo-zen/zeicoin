@@ -1185,20 +1185,81 @@ pub const NetworkConfig = struct {
 
 /// Zeicoin mining configuration - network-aware
 pub const ZenMining = struct {
+    /// Initial block reward (before any halvings)
+    pub const INITIAL_BLOCK_REWARD: u64 = NetworkConfig.current().block_reward;
+
+    /// Legacy constant for backwards compatibility - use calculateBlockReward() instead
     pub const BLOCK_REWARD: u64 = NetworkConfig.current().block_reward;
+
     pub const TARGET_BLOCK_TIME: u64 = NetworkConfig.current().target_block_time;
     pub const MAX_NONCE: u32 = NetworkConfig.current().max_nonce;
     pub const RANDOMX_MODE: bool = NetworkConfig.current().randomx_mode;
-    pub const DIFFICULTY_ADJUSTMENT_PERIOD: u64 = 3; // Adjust every 3 blocks (temporary for testing, will be 20 in production)
+    pub const DIFFICULTY_ADJUSTMENT_PERIOD: u64 = 20; // Adjust every 20 blocks (balanced security vs responsiveness)
     pub const MAX_ADJUSTMENT_FACTOR: f64 = 2.0; // Maximum 2x change per adjustment
     pub const COINBASE_MATURITY: u32 = switch (CURRENT_NETWORK) {
-        .testnet => 10,  // TestNet: 10 blocks for faster testing
+        .testnet => 10, // TestNet: 10 blocks for faster testing
         .mainnet => 100, // MainNet: 100 blocks for security
     };
+
+    /// Halving interval - blocks between each reward halving
+    /// TestNet: 100 blocks (~17 minutes at 10s blocks) for fast testing
+    /// MainNet: 525,600 blocks (~2 years at 2-minute blocks)
+    pub const HALVING_INTERVAL: u32 = switch (CURRENT_NETWORK) {
+        .testnet => 100, // Fast halving for testing
+        .mainnet => 525_600, // ~2 years at 2-min blocks
+    };
+
+    /// Minimum block reward (tail emission) - prevents reward from going to zero
+    /// This ensures miners always have incentive to secure the network
+    pub const MINIMUM_BLOCK_REWARD: u64 = switch (CURRENT_NETWORK) {
+        .testnet => 1000, // 0.00001 ZEI minimum
+        .mainnet => 1000, // 0.00001 ZEI minimum
+    };
+
+    /// Calculate block reward for a given height with halving schedule
+    /// Reward halves every HALVING_INTERVAL blocks until MINIMUM_BLOCK_REWARD
+    pub fn calculateBlockReward(height: u32) u64 {
+        // Genesis block (height 0) has no mining reward - only pre-mine distributions
+        if (height == 0) {
+            return 0;
+        }
+
+        // Calculate number of halvings that have occurred
+        const halvings = height / HALVING_INTERVAL;
+
+        // Cap halvings to prevent shift overflow (max 63 halvings)
+        const capped_halvings: u6 = @intCast(@min(halvings, 63));
+
+        // Calculate reward: initial_reward >> halvings
+        const reward = INITIAL_BLOCK_REWARD >> capped_halvings;
+
+        // Enforce minimum reward (tail emission)
+        return @max(reward, MINIMUM_BLOCK_REWARD);
+    }
 
     /// Get initial difficulty target for current network
     pub fn initialDifficultyTarget() DifficultyTarget {
         return DifficultyTarget.initial(CURRENT_NETWORK);
+    }
+
+    /// Calculate total theoretical supply from mining (not including pre-mine)
+    /// This is the maximum supply that could be mined given the halving schedule
+    pub fn calculateTheoreticalMiningSupply() u64 {
+        var total: u64 = 0;
+        var reward = INITIAL_BLOCK_REWARD;
+        const blocks_at_reward: u64 = HALVING_INTERVAL;
+
+        // Sum rewards for each halving epoch until minimum reward
+        while (reward > MINIMUM_BLOCK_REWARD) {
+            total += reward * blocks_at_reward;
+            reward = reward >> 1;
+        }
+
+        // Add tail emission (continues indefinitely, but we cap at reasonable estimate)
+        // For practical purposes, estimate 10 more halving periods at minimum reward
+        total += MINIMUM_BLOCK_REWARD * HALVING_INTERVAL * 10;
+
+        return total;
     }
 };
 
@@ -1269,7 +1330,8 @@ pub const TransactionExpiry = struct {
 /// ⏰ Timestamp validation configuration - prevents time-based attacks
 pub const TimestampValidation = struct {
     /// Maximum allowed timestamp in the future (seconds)
-    pub const MAX_FUTURE_TIME: i64 = 2 * 60 * 60; // 2 hours
+    /// Reduced from 2 hours to 10 minutes to prevent time-warp attacks
+    pub const MAX_FUTURE_TIME: i64 = 10 * 60; // 10 minutes
 
     /// Minimum blocks for median time past calculation
     pub const MTP_BLOCK_COUNT: u32 = 11; // Use last 11 blocks for median
