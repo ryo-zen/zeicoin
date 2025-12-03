@@ -42,11 +42,12 @@ pub const WORDLIST = wordlist.WORDLIST;
 /// Generate a new mnemonic phrase
 pub fn generateMnemonic(allocator: std.mem.Allocator, word_count: WordCount) ![]u8 {
     const entropy_bytes = word_count.entropyBits() / 8;
-    
+
     // Generate random entropy
     var entropy: [32]u8 = undefined; // Max 256 bits
+    defer std.crypto.utils.secureZero(u8, &entropy); // Clear entropy from stack
     std.crypto.random.bytes(entropy[0..entropy_bytes]);
-    
+
     // Generate mnemonic from entropy
     return entropyToMnemonic(allocator, entropy[0..entropy_bytes]);
 }
@@ -144,25 +145,26 @@ fn extractBits(data: []const u8, bit_offset: usize, n_bits: u8) u16 {
 /// This replaces PBKDF2-SHA512 with a modern approach
 pub fn mnemonicToSeed(mnemonic: []const u8, passphrase: ?[]const u8) [64]u8 {
     var kdf = std.crypto.hash.Blake3.init(.{});
-    
+
     // Domain separation
     kdf.update("zeicoin-mnemonic-v1");
-    
+
     // Add mnemonic
     kdf.update(mnemonic);
-    
+
     // Add passphrase (or empty string)
     if (passphrase) |p| {
         if (p.len > 0) {
             kdf.update(p);
         }
     }
-    
+
     // For key stretching (replaces PBKDF2's 2048 iterations)
     // We'll use BLAKE3's built-in key derivation
     var derived: [32]u8 = undefined;
+    defer std.crypto.utils.secureZero(u8, &derived); // Clear intermediate key material
     kdf.final(&derived);
-    
+
     // Additional rounds for computational cost
     var seed: [64]u8 = undefined;
     var i: u32 = 0;
@@ -172,25 +174,27 @@ pub fn mnemonicToSeed(mnemonic: []const u8, passphrase: ?[]const u8) [64]u8 {
         round_kdf.update(std.mem.asBytes(&i));
         round_kdf.final(&derived);
     }
-    
+
     // Expand to 64 bytes
     var final_kdf = std.crypto.hash.Blake3.init(.{});
     final_kdf.update("zeicoin-seed-expansion");
     final_kdf.update(&derived);
     var expanded: [32]u8 = undefined;
+    defer std.crypto.utils.secureZero(u8, &expanded); // Clear intermediate expansion
     final_kdf.final(&expanded);
-    
+
     @memcpy(seed[0..32], expanded[0..32]);
-    
+
     // Second round for last 32 bytes
     var second_kdf = std.crypto.hash.Blake3.init(.{});
     second_kdf.update("zeicoin-seed-expansion-2");
     second_kdf.update(&derived);
     var expanded2: [32]u8 = undefined;
+    defer std.crypto.utils.secureZero(u8, &expanded2); // Clear intermediate expansion
     second_kdf.final(&expanded2);
-    
+
     @memcpy(seed[32..64], expanded2[0..32]);
-    
+
     return seed;
 }
 

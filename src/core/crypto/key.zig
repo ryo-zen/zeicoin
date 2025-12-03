@@ -40,8 +40,12 @@ pub const KeyPair = struct {
 
     /// Create keypair from existing secret key
     pub fn fromPrivateKey(private_key: [64]u8) KeyPair {
+        // Make mutable copy for secure clearing after use
+        var mutable_key = private_key;
+        defer std.crypto.utils.secureZero(u8, &mutable_key); // Clear input copy from stack
+
         const Ed25519 = std.crypto.sign.Ed25519;
-        const secret_key = Ed25519.SecretKey.fromBytes(private_key) catch {
+        const secret_key = Ed25519.SecretKey.fromBytes(mutable_key) catch {
             // If creation fails, return zero keypair
             return KeyPair{
                 .private_key = std.mem.zeroes([64]u8),
@@ -58,7 +62,7 @@ pub const KeyPair = struct {
         };
 
         return KeyPair{
-            .private_key = private_key, // Keep original expanded format
+            .private_key = mutable_key, // Keep original expanded format
             .public_key = keypair.public_key.bytes,
         };
     }

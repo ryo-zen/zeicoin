@@ -20,10 +20,10 @@ ZeiCoin is a modern from-scratch cryptocurrency implementation designed for clar
 - **RandomX Mining** - ASIC-resistant with Light (256MB) and Fast (2GB) modes
 - **HD Wallets** - BIP39/BIP32 hierarchical deterministic wallets with mnemonic recovery
 - **Modern Cryptography** - ChaCha20-Poly1305 encryption, Argon2id key derivation, Ed25519 signatures
-- **Analytics Platform** - TimescaleDB integration with REST API
+- **Analytics Platform** - TimescaleDB integration with REST API (optional)
 - **P2P Networking** - Custom binary protocol with CRC32 integrity
 - **High Performance** - ~15 tps, concurrent indexing, efficient sync protocols
-- **Layer 2 Messaging** - Rich transaction metadata with PostgreSQL indexing (In Development)
+- **Layer 2 Messaging** - Rich transaction metadata with PostgreSQL indexing (in development, optional)
 
 ## Quick Start
 
@@ -33,8 +33,8 @@ ZeiCoin is a modern from-scratch cryptocurrency implementation designed for clar
 - **RandomX** proof-of-work mining algorithm
 - **RocksDB** libraries (`librocksdb-dev` on Ubuntu/Debian)
 
-### Optional
-- **PostgreSQL** 12+ (optional, for analytics and L2 messaging)
+### Optional (Not Required for Running a Node)
+- **PostgreSQL** 12+ (only for analytics and L2 messaging features)
 
 ### Installation
 
@@ -160,15 +160,22 @@ zeicoin/
 - **Password Requirements**: Minimum 8 characters
 - **Memory Protection**: Passwords cleared after use
 
-## Layer 2 Messaging System (In Developement)
+## Layer 2 Messaging System (In Development)
 
-ZeiCoin will feature a Layer 2 messaging layer that adds rich metadata to blockchain transactions. Currently still in development.
+> **Note**: Layer 2 is an optional feature currently in development. Running a ZeiCoin node does **not** require PostgreSQL or any L2 components. The core blockchain operates independently with just RocksDB.
 
-### Features
+ZeiCoin will feature an optional Layer 2 messaging layer that adds rich metadata to blockchain transactions.
+
+### Features (Planned)
 - **Transaction Enhancement**: Add messages, categories, and metadata to ZEI transactions
 - **Auto-Linking**: Indexer automatically links L2 messages to confirmed blockchain transactions
 - **Web Interface**: Full-featured web UI for sending enhanced transactions
 - **REST API**: Complete API for L2 message management and querying
+
+### Requirements
+- **Core Node**: RocksDB only (no additional dependencies)
+- **L2 Features**: PostgreSQL 12+ (optional, only if you want L2 messaging)
+- **Analytics**: TimescaleDB (optional, only if you want analytics dashboards)
 
 ### Future L2 Workflow
 1. Create enhancement with message/metadata (draft status)
@@ -176,11 +183,13 @@ ZeiCoin will feature a Layer 2 messaging layer that adds rich metadata to blockc
 3. Send actual ZEI transaction on blockchain
 4. Indexer automatically confirms L2 message with tx_hash
 
-## Analytics & Data Infrastructure 
+## Analytics & Data Infrastructure (Optional)
+
+> **Note**: Analytics and indexing are optional features. You can run a fully functional mining or sync node without any of these components.
 
 ### Concurrent Indexer
 
-ZeiCoin features a concurrent indexer that runs simultaneously with the mining node without database conflicts:
+ZeiCoin features an optional concurrent indexer that runs simultaneously with the mining node without database conflicts:
 
 ```bash
 # Start mining node

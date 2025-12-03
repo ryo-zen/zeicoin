@@ -58,20 +58,25 @@ pub const HDKey = struct {
     
     /// Create master key from seed
     pub fn fromSeed(seed: [64]u8) HDKey {
+        // Make mutable copy of seed for secure clearing
+        var mutable_seed = seed;
+        defer std.crypto.utils.secureZero(u8, &mutable_seed); // Clear seed copy from stack
+
         // Use BLAKE3 with domain separation
         var hasher = std.crypto.hash.Blake3.init(.{});
         hasher.update("zeicoin-hd-master");
-        hasher.update(&seed);
-        
+        hasher.update(&mutable_seed);
+
         var output: [64]u8 = undefined;
+        defer std.crypto.utils.secureZero(u8, &output); // Clear intermediate key material
         hasher.final(output[0..32]);
-        
+
         // Second round for chain code
         var hasher2 = std.crypto.hash.Blake3.init(.{});
         hasher2.update("zeicoin-hd-chain");
-        hasher2.update(&seed);
+        hasher2.update(&mutable_seed);
         hasher2.final(output[32..64]);
-        
+
         return HDKey{
             .key = output[0..32].*,
             .chain_code = output[32..64].*,
@@ -86,40 +91,42 @@ pub const HDKey = struct {
     pub fn deriveChild(self: *const HDKey, index: u32) !HDKey {
         // For Ed25519, we'll treat all derivation as hardened-style
         // This is a design choice for ZeiCoin HD wallets
-        
+
         // Check depth limit
         if (self.depth >= 255) {
             return HDError.InvalidDepth;
         }
-        
-        // Prepare data for derivation
+
+        // Prepare data for derivation (contains private key material)
         var data: [37]u8 = undefined;
+        defer std.crypto.utils.secureZero(u8, &data); // Clear derivation data containing key
         data[0] = 0x00; // Hardened derivation marker
         @memcpy(data[1..33], &self.key);
         std.mem.writeInt(u32, data[33..37], index, .big);
-        
+
         // Derive using BLAKE3
         var hasher = std.crypto.hash.Blake3.init(.{});
         hasher.update(&self.chain_code);
         hasher.update(&data);
-        
+
         var output: [64]u8 = undefined;
+        defer std.crypto.utils.secureZero(u8, &output); // Clear intermediate key material
         hasher.final(output[0..32]);
-        
+
         // Second round for new chain code
         var hasher2 = std.crypto.hash.Blake3.init(.{});
         hasher2.update("zeicoin-hd-child-chain");
         hasher2.update(&self.chain_code);
         hasher2.update(&data);
         hasher2.final(output[32..64]);
-        
+
         // Calculate parent fingerprint
         const parent_pubkey = self.getPublicKey();
         var fp_hasher = std.crypto.hash.Blake3.init(.{});
         fp_hasher.update(&parent_pubkey);
         var fp_hash: [32]u8 = undefined;
         fp_hasher.final(&fp_hash);
-        
+
         return HDKey{
             .key = output[0..32].*,
             .chain_code = output[32..64].*,
@@ -134,14 +141,15 @@ pub const HDKey = struct {
         // For deterministic key generation, we need to convert our key material
         // into a proper Ed25519 seed format
         var seed: [32]u8 = undefined;
+        defer std.crypto.utils.secureZero(u8, &seed); // Clear private key material from stack
         @memcpy(&seed, &self.key);
-        
+
         // Use the standard Ed25519 key generation from seed
         const Ed25519 = std.crypto.sign.Ed25519;
         const kp = Ed25519.KeyPair.generateDeterministic(seed) catch {
             return [_]u8{0} ** 32;
         };
-        
+
         return kp.public_key.bytes;
     }
     
@@ -149,11 +157,12 @@ pub const HDKey = struct {
     pub fn toKeyPair(self: *const HDKey) !key.KeyPair {
         // Use the same seed-based generation
         var seed: [32]u8 = undefined;
+        defer std.crypto.utils.secureZero(u8, &seed); // Clear private key material from stack
         @memcpy(&seed, &self.key);
-        
+
         const Ed25519 = std.crypto.sign.Ed25519;
         const kp = try Ed25519.KeyPair.generateDeterministic(seed);
-        
+
         return key.KeyPair{
             .private_key = kp.secret_key.bytes,
             .public_key = kp.public_key.bytes,
