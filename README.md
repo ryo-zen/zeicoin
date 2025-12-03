@@ -2,9 +2,14 @@
 
 A minimalist cryptocurrency blockchain written in Zig with longest chain consensus, RandomX mining, and peer-to-peer networking.
 
+> **Warning!**
+> ZeiCoin is under active development for educational and research purposes. The software is in **TestNet phase** and breaking changes may occur between releases. Do not use for real value transfers.
+
 ## Overview
 
-ZeiCoin is a modern from-scratch cryptocurrency implementation designed for clarity, security, and performance. Built in Zig while taking inspiration from Ethereum, Monero and Bitcoin, it features a clean modular network protocol, automatic multi-node synchronization, and a Layer 2 messaging system.
+ZeiCoin is a cryptocurrency implemented from scratch in Zig, a modern systems programming language with explicit error handling, no hidden control flow, and compile-time memory safety. The core implementation totals approximately 20,000 lines of code.
+
+Key features include an account-based transaction model, concurrent blockchain analytics via RocksDB secondary instances, and a modular 14-message network protocol. The cryptographic stack comprises RandomX ASIC-resistant mining, Ed25519 signatures, BLAKE3 hashing, and ChaCha20-Poly1305 wallet encryption.
 
 ### Current Use Cases
 - **Educational**: Learning blockchain development and consensus algorithms
@@ -12,7 +17,8 @@ ZeiCoin is a modern from-scratch cryptocurrency implementation designed for clar
 - **Development**: Testing multi-node synchronization and P2P networking
 
 ### Not Production Ready
-**TestNet Only**! This cryptocurrency is currently in testnet phase and not ready for mainnet production use. The network has been tested with 3-node consensus configurations.
+> **TestNet Only!** 
+> This cryptocurrency is currently in testnet phase and not ready for mainnet production use. The network has only been tested with 3-node consensus configurations.
 
 ### Key Features
 
