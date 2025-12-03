@@ -165,11 +165,10 @@ pub fn requestBlockRange(
 /// Used to determine if we should use batch or sequential sync
 pub fn supportsBatchRequests(peer: *Peer) bool {
     // Check peer capabilities for batch support
-    // Check for ZSP-001 batch sync capability flags from protocol
     const protocol = @import("../../network/protocol/protocol.zig");
     const has_parallel_download = (peer.services & protocol.ServiceFlags.PARALLEL_DOWNLOAD) != 0;
     const has_fast_sync = (peer.services & protocol.ServiceFlags.FAST_SYNC) != 0;
-    
+
     return has_parallel_download or has_fast_sync;
 }
 

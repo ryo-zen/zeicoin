@@ -834,6 +834,42 @@ pub const BatchSyncProtocol = struct {
         }
     }
 
+    /// Notify that a block was received and applied via onBlock handler
+    /// This is called when blocks arrive individually rather than through handleBatchBlocks
+    pub fn notifyBlockReceived(self: *Self, height: u32) void {
+        if (!self.sync_state.isActive()) return;
+
+        // Update completed height if this block advances our progress
+        if (height > self.batch_tracker.completed_height and height <= self.target_height) {
+            // Check if this is the next expected block (sequential)
+            if (height == self.batch_tracker.completed_height + 1) {
+                self.batch_tracker.completed_height = height;
+                log.debug("📦 [BATCH SYNC] Block {} received via onBlock, progress: {}/{}", .{
+                    height,
+                    self.batch_tracker.completed_height,
+                    self.target_height,
+                });
+
+                // If we've reached target height, clear active batches
+                // (they were fulfilled via individual block reception)
+                if (height >= self.target_height) {
+                    log.info("✅ [BATCH SYNC] Target height {} reached via onBlock", .{height});
+                    self.batch_tracker.active_batches.clearRetainingCapacity();
+                }
+            }
+        }
+
+        // Check if sync is now complete
+        self.checkSyncCompletion() catch |err| {
+            log.warn("⚠️ [BATCH SYNC] Error checking completion: {}", .{err});
+        };
+    }
+
+    /// Check if batch sync has completed
+    pub fn isComplete(self: *const Self) bool {
+        return self.sync_state == .complete;
+    }
+
     /// Handle sync timeout and stalled requests
     /// Implements retry logic and peer failover as specified in ZSP-001
     pub fn handleTimeouts(self: *Self) !void {

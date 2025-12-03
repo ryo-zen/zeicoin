@@ -157,6 +157,17 @@ pub const ServerHandlers = struct {
     fn onBlock(self: *Self, peer: *network.Peer, msg: network.message_types.BlockMessage) !void {
         std.log.info("📦 [BLOCK] Received block from {any}", .{peer.address});
         try self.blockchain.chain_processor.acceptBlock(msg.block);
+
+        // Notify sync manager if actively syncing - allows sync completion detection
+        if (self.blockchain.sync_manager) |sync_manager| {
+            if (sync_manager.isActive()) {
+                // Get current height after block was applied
+                const height = self.blockchain.getHeight() catch 0;
+                if (height > 0) {
+                    sync_manager.notifyBlockReceived(height);
+                }
+            }
+        }
     }
 
     fn onTransaction(self: *Self, peer: *network.Peer, msg: network.message_types.TransactionMessage) !void {

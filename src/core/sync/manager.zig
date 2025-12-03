@@ -336,35 +336,26 @@ pub const SyncManager = struct {
 
     /// Complete synchronization process
     pub fn completeSync(self: *Self) !void {
-        log.info("\n🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆", .{});
-        log.info("🎉 [SYNC MANAGER] COMPLETING SYNCHRONIZATION SESSION", .{});
-        log.info("🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆", .{});
-
-        log.info("📊 [SYNC MANAGER] Final session statistics:", .{});
-        log.info("   └─ Current state: {}", .{self.sync_state});
-        log.info("   └─ Progress: {d:.1}%", .{self.getProgress()});
-        log.info("   └─ Failed peers handled: {}", .{self.failed_peers.items.len});
-        log.info("   └─ Session duration: {} seconds", .{self.getTime() - self.last_state_save});
+        log.info("[SYNC] Completing synchronization session", .{});
+        log.info("[SYNC] Final statistics: state={}, progress={d:.1}%, failed_peers={}, duration={}s", .{
+            self.sync_state,
+            self.getProgress(),
+            self.failed_peers.items.len,
+            self.getTime() - self.last_state_save,
+        });
 
         // Update sync state
-        log.info("🔄 [SYNC MANAGER] FINAL STATE TRANSITION: {} → complete", .{self.sync_state});
         const old_state = self.sync_state;
         self.sync_state = .complete;
-        log.info("✅ [SYNC MANAGER] State transition successful: {} → {}", .{ old_state, self.sync_state });
+        log.debug("[SYNC] State transition: {} -> {}", .{ old_state, self.sync_state });
 
         // Clear failed peers list on successful completion
-        log.info("🧹 [SYNC MANAGER] Clearing failed peers list ({} entries)...", .{self.failed_peers.items.len});
         self.failed_peers.clearRetainingCapacity();
-        log.info("✅ [SYNC MANAGER] Failed peers list cleared", .{});
 
         // Final state cleanup
-        log.info("🧹 [SYNC MANAGER] Performing final state cleanup...", .{});
         self.clearSyncState();
-        log.info("✅ [SYNC MANAGER] State cleanup completed", .{});
 
-        log.info("\n🎊 [SYNC MANAGER] SYNCHRONIZATION COMPLETED SUCCESSFULLY!", .{});
-        log.info("🎊 [SYNC MANAGER] Blockchain is now fully synchronized", .{});
-        log.info("🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆🏆", .{});
+        log.info("[SYNC] Synchronization completed successfully - blockchain is fully synchronized", .{});
     }
 
     /// Get current synchronization progress
@@ -381,7 +372,23 @@ pub const SyncManager = struct {
     pub fn isActive(self: *const Self) bool {
         return self.sync_state.isActive();
     }
-    
+
+    /// Notify sync manager that a block was received and applied
+    /// Called from onBlock handler when blocks arrive during active sync
+    pub fn notifyBlockReceived(self: *Self, height: u32) void {
+        if (!self.sync_state.isActive()) return;
+
+        // Notify batch sync of the received block
+        self.batch_sync.notifyBlockReceived(height);
+
+        // Update our state if batch sync completed
+        if (self.batch_sync.isComplete()) {
+            log.info("✅ [SYNC MANAGER] Batch sync completed, updating state", .{});
+            self.sync_state = .complete;
+            self.sync_start_time = 0;
+        }
+    }
+
     /// Check if sync has timed out and reset state if needed
     pub fn checkTimeout(self: *Self) void {
         if (self.sync_state.isActive() and self.sync_start_time > 0) {
