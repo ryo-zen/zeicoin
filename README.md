@@ -2,7 +2,7 @@
 
 A minimalist cryptocurrency blockchain written in Zig with longest chain consensus, RandomX mining, and peer-to-peer networking.
 
-> **Warning!**
+> [!WARNING]
 > ZeiCoin is under active development for educational and research purposes. The software is in **TestNet phase** and breaking changes may occur between releases. Do not use for real value transfers.
 
 ## Overview
@@ -17,8 +17,9 @@ Key features include an account-based transaction model, concurrent blockchain a
 - **Development**: Testing multi-node synchronization and P2P networking
 
 ### Not Production Ready
-> **TestNet Only!** 
-> This cryptocurrency is currently in testnet phase and not ready for mainnet production use. The network has only been tested with 3-node consensus configurations.
+
+> [!CAUTION]
+> **TestNet Only!** This cryptocurrency is currently in testnet phase and not ready for mainnet production use. The network has only been tested with 3-node consensus configurations.
 
 ### Key Features
 
