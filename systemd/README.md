@@ -189,20 +189,20 @@ Open required ports:
 
 ```bash
 # UFW (Ubuntu/Debian)
-sudo ufw allow 10800/udp comment "ZeiCoin UDP Discovery"
 sudo ufw allow 10801/tcp comment "ZeiCoin P2P"
 sudo ufw allow 10802/tcp comment "ZeiCoin Client API"
 sudo ufw allow 10803/tcp comment "ZeiCoin JSON-RPC"
 sudo ufw allow 8080/tcp comment "ZeiCoin Transaction API"
 
 # Firewalld (CentOS/RHEL)
-sudo firewall-cmd --permanent --add-port=10800/udp
 sudo firewall-cmd --permanent --add-port=10801/tcp
 sudo firewall-cmd --permanent --add-port=10802/tcp
 sudo firewall-cmd --permanent --add-port=10803/tcp
 sudo firewall-cmd --permanent --add-port=8080/tcp
 sudo firewall-cmd --reload
 ```
+
+**Note:** Port 10800 is reserved for future QUIC transport implementation.
 
 ## Troubleshooting
 

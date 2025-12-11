@@ -279,7 +279,18 @@ pub const RPCClient = struct {
             return error.EmptyResponse;
         }
 
-        return try self.allocator.dupe(u8, buffer[0..bytes_read]);
+        // Strip HTTP headers if present (server returns HTTP/1.1 200 OK...)
+        const response = buffer[0..bytes_read];
+
+        // Look for HTTP header separator "\r\n\r\n"
+        if (std.mem.indexOf(u8, response, "\r\n\r\n")) |header_end| {
+            // JSON body starts after the headers
+            const json_body = response[header_end + 4..];
+            return try self.allocator.dupe(u8, json_body);
+        }
+
+        // No HTTP headers, return as-is
+        return try self.allocator.dupe(u8, response);
     }
 };
 

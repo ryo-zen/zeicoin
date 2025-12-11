@@ -97,3 +97,4 @@ docker-compose.3node-mempool-test.yml
 /deployment
 SECURITY_AUDIT.md
 PLAN.md
+/monitoring

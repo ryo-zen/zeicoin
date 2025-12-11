@@ -904,7 +904,8 @@ pub const ClientApiServer = struct {
         defer transactions.deinit();
         
         // Scan through all blocks for transactions involving this address
-        var height: u64 = 1;
+        // Start from height 0 to include genesis block transactions
+        var height: u64 = 0;
         while (height <= chain_height) : (height += 1) {
             const block = self.blockchain.database.getBlock(@intCast(height)) catch {
                 continue;

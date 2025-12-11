@@ -18,7 +18,6 @@ pub const MAX_SUPPLY: u64 = 24000000 * ZEI_COIN; // 24 million ZEI total supply 
 // Timing constants - Common intervals used throughout the codebase
 pub const TIMING = struct {
     pub const PEER_TIMEOUT_SECONDS: i64 = 60;
-    pub const DISCOVERY_INTERVAL_SECONDS: i64 = 300; // 5 minutes
     pub const HEIGHT_CHECK_INTERVAL_SECONDS: i64 = 120; // 2 minutes - less frequent
     pub const MAINTENANCE_CYCLE_SECONDS: u64 = 10;
     pub const SERVER_SLEEP_MS: u64 = 10;
@@ -149,7 +148,7 @@ pub fn freeBootstrapNodes(allocator: std.mem.Allocator, nodes: [][]const u8) voi
 pub const NETWORK_PORTS = struct {
     pub const P2P: u16 = 10801; // Peer-to-peer network
     pub const CLIENT_API: u16 = 10802; // Client API
-    pub const DISCOVERY: u16 = 10800; // UDP discovery
+    // Port 10800 reserved for future QUIC transport implementation
 };
 
 // Node types for asymmetric networking
