@@ -195,7 +195,6 @@ pub fn build(b: *std.Build) !void {
         run_step.dependOn(&run_cmd.step);
     }
 
-
     // **************************************************************
     // *              CHECK FOR FAST FEEDBACK LOOP                  *
     // **************************************************************
@@ -269,11 +268,10 @@ pub fn build(b: *std.Build) !void {
         docs_step.dependOn(&install_docs.step);
     }
 
-
     // **************************************************************
     // *              ADDITIONAL TESTS                              *
     // **************************************************************
-    
+
     // Block security tests
     {
         const security_tests = b.addTest(.{
@@ -283,42 +281,42 @@ pub fn build(b: *std.Build) !void {
             .optimize = optimize,
         });
         security_tests.root_module.addImport("zeicoin", lib.root_module);
-        
+
         const run_security_tests = b.addRunArtifact(security_tests);
         const security_test_step = b.step("test-security", "Run security tests");
         security_test_step.dependOn(&run_security_tests.step);
     }
-    
+
     // Bech32 address tests
     {
         const bech32_tests = b.addTest(.{
-            .name = "bech32_tests", 
+            .name = "bech32_tests",
             .root_source_file = b.path("tests/test_bech32_addresses.zig"),
             .target = target,
             .optimize = optimize,
         });
         bech32_tests.root_module.addImport("zeicoin", lib.root_module);
-        
+
         const run_bech32_tests = b.addRunArtifact(bech32_tests);
         const bech32_test_step = b.step("test-bech32", "Run Bech32 address tests");
         bech32_test_step.dependOn(&run_bech32_tests.step);
     }
-    
+
     // Address versioning tests
     {
         const versioning_tests = b.addTest(.{
             .name = "versioning_tests",
-            .root_source_file = b.path("tests/test_address_versioning.zig"), 
+            .root_source_file = b.path("tests/test_address_versioning.zig"),
             .target = target,
             .optimize = optimize,
         });
         versioning_tests.root_module.addImport("zeicoin", lib.root_module);
-        
+
         const run_versioning_tests = b.addRunArtifact(versioning_tests);
         const versioning_test_step = b.step("test-versioning", "Run address versioning tests");
         versioning_test_step.dependOn(&run_versioning_tests.step);
     }
-    
+
     // Transaction signing tests
     {
         const tx_tests = b.addExecutable(.{
@@ -329,27 +327,27 @@ pub fn build(b: *std.Build) !void {
         });
         tx_tests.root_module.addImport("zeicoin", lib.root_module);
         tx_tests.linkLibC();
-        
+
         const run_tx_tests = b.addRunArtifact(tx_tests);
         const tx_test_step = b.step("test-tx-signing", "Run transaction signing tests");
         tx_test_step.dependOn(&run_tx_tests.step);
     }
-    
+
     // CLI spinner tests
     {
         const spinner_tests = b.addExecutable(.{
             .name = "spinner_test",
             .root_source_file = b.path("tests/testcli.zig"),
-            .target = target, 
+            .target = target,
             .optimize = optimize,
         });
         spinner_tests.root_module.addImport("zeicoin", lib.root_module);
-        
+
         const run_spinner_tests = b.addRunArtifact(spinner_tests);
         const spinner_test_step = b.step("test-spinners", "Run CLI spinner tests");
         spinner_test_step.dependOn(&run_spinner_tests.step);
     }
-    
+
     // Creative spinner tests
     {
         const creative_tests = b.addExecutable(.{
@@ -359,12 +357,12 @@ pub fn build(b: *std.Build) !void {
             .optimize = optimize,
         });
         creative_tests.root_module.addImport("zeicoin", lib.root_module);
-        
+
         const run_creative_tests = b.addRunArtifact(creative_tests);
         const creative_test_step = b.step("test-creative", "Run creative spinner tests");
         creative_test_step.dependOn(&run_creative_tests.step);
     }
-    
+
     // Network protocol tests
     {
         const protocol_tests = b.addTest(.{
@@ -374,12 +372,12 @@ pub fn build(b: *std.Build) !void {
             .optimize = optimize,
         });
         protocol_tests.root_module.addImport("zeicoin", lib.root_module);
-        
+
         const run_protocol_tests = b.addRunArtifact(protocol_tests);
         const protocol_test_step = b.step("test-protocol", "Run network protocol tests");
         protocol_test_step.dependOn(&run_protocol_tests.step);
     }
-    
+
     // Server component tests
     {
         const server_tests = b.addTest(.{
@@ -389,12 +387,12 @@ pub fn build(b: *std.Build) !void {
             .optimize = optimize,
         });
         server_tests.root_module.addImport("zeicoin", lib.root_module);
-        
+
         const run_server_tests = b.addRunArtifact(server_tests);
         const server_test_step = b.step("test-server", "Run server component tests");
         server_test_step.dependOn(&run_server_tests.step);
     }
-    
+
     // Parallel download tests
     {
         const download_tests = b.addTest(.{
@@ -404,12 +402,12 @@ pub fn build(b: *std.Build) !void {
             .optimize = optimize,
         });
         download_tests.root_module.addImport("zeicoin", lib.root_module);
-        
+
         const run_download_tests = b.addRunArtifact(download_tests);
         const download_test_step = b.step("test-download", "Run parallel download tests");
         download_test_step.dependOn(&run_download_tests.step);
     }
-    
+
     // Address validation test (executable)
     {
         const addr_validation_test = b.addExecutable(.{
@@ -420,12 +418,12 @@ pub fn build(b: *std.Build) !void {
         });
         addr_validation_test.root_module.addImport("zeicoin", lib.root_module);
         addr_validation_test.linkLibC();
-        
+
         const run_addr_test = b.addRunArtifact(addr_validation_test);
         const addr_test_step = b.step("test-address-validation", "Run address validation test");
         addr_test_step.dependOn(&run_addr_test.step);
     }
-    
+
     // Mempool flood test (executable)
     {
         const mempool_flood_test = b.addExecutable(.{
@@ -436,16 +434,32 @@ pub fn build(b: *std.Build) !void {
         });
         mempool_flood_test.root_module.addImport("zeicoin", lib.root_module);
         mempool_flood_test.linkLibC();
-        
+
         const run_mempool_test = b.addRunArtifact(mempool_flood_test);
         const mempool_test_step = b.step("test-mempool-flood", "Run mempool flood test");
         mempool_test_step.dependOn(&run_mempool_test.step);
     }
 
+    // Negative timestamp attack test (executable)
+    {
+        const timestamp_attack_test = b.addExecutable(.{
+            .name = "test_negative_timestamp_attack",
+            .root_source_file = b.path("tests_dev/test_negative_timestamp_attack.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        timestamp_attack_test.root_module.addImport("zeicoin", lib.root_module);
+        timestamp_attack_test.linkLibC();
+
+        const run_timestamp_attack = b.addRunArtifact(timestamp_attack_test);
+        const timestamp_attack_step = b.step("test-timestamp-attack", "Run negative timestamp attack test");
+        timestamp_attack_step.dependOn(&run_timestamp_attack.step);
+    }
+
     // **************************************************************
     // *              FUZZ TESTS                                    *
     // **************************************************************
-    
+
     // Bech32 fuzz tests
     {
         const bech32_fuzz_tests = b.addTest(.{
@@ -455,13 +469,13 @@ pub fn build(b: *std.Build) !void {
             .optimize = optimize,
         });
         bech32_fuzz_tests.root_module.addImport("zeicoin", lib.root_module);
-        
+
         const run_bech32_fuzz = b.addRunArtifact(bech32_fuzz_tests);
         const bech32_fuzz_step = b.step("fuzz-bech32", "Run Bech32 fuzz tests");
         bech32_fuzz_step.dependOn(&run_bech32_fuzz.step);
     }
-    
-    // Network message fuzz tests  
+
+    // Network message fuzz tests
     {
         const network_fuzz_tests = b.addTest(.{
             .name = "network_message_fuzz_tests",
@@ -470,12 +484,26 @@ pub fn build(b: *std.Build) !void {
             .optimize = optimize,
         });
         network_fuzz_tests.root_module.addImport("zeicoin", lib.root_module);
-        
+
         const run_network_fuzz = b.addRunArtifact(network_fuzz_tests);
         const network_fuzz_step = b.step("fuzz-network", "Run network protocol fuzz tests");
         network_fuzz_step.dependOn(&run_network_fuzz.step);
     }
 
+    // Transaction validator fuzz tests (randomized, 10k+ iterations)
+    {
+        const validator_fuzz_tests = b.addTest(.{
+            .name = "validator_fuzz_tests",
+            .root_source_file = b.path("fuzz/validator_fuzz.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        validator_fuzz_tests.root_module.addImport("zeicoin", lib.root_module);
+
+        const run_validator_fuzz = b.addRunArtifact(validator_fuzz_tests);
+        const validator_fuzz_step = b.step("fuzz-validator", "Run transaction validator fuzz tests (10k iterations)");
+        validator_fuzz_step.dependOn(&run_validator_fuzz.step);
+    }
 
     // **************************************************************
     // *              CLEAN                                         *

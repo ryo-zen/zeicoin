@@ -27,7 +27,7 @@ pub const TIMING = struct {
 
 // Progress reporting constants
 pub const PROGRESS = struct {
-    pub const RANDOMX_REPORT_INTERVAL: u32 = 5_000;  // More frequent updates for better feedback
+    pub const RANDOMX_REPORT_INTERVAL: u32 = 5_000; // More frequent updates for better feedback
     // SHA256_REPORT_INTERVAL removed - SHA256 mining no longer supported
     pub const DECIMAL_PRECISION_MULTIPLIER: u64 = 100_000;
 };
@@ -50,24 +50,24 @@ pub const SYNC = struct {
 
 // Consensus configuration
 pub const ConsensusMode = enum {
-    disabled,     // No consensus checking (single node, testing)
-    optional,     // Check consensus but only warn on failure
-    enforced,     // Require consensus or reject block (production)
+    disabled, // No consensus checking (single node, testing)
+    optional, // Check consensus but only warn on failure
+    enforced, // Require consensus or reject block (production)
 };
 
 pub const CONSENSUS = struct {
     // Current consensus mode - can be changed via environment variable
     pub var mode: ConsensusMode = .optional; // Default to optional for gradual rollout
-    
+
     // Minimum percentage of peers that must agree (0.5 = 50%, 0.67 = 67%, etc)
     pub var threshold: f32 = 0.5; // Simple majority by default
-    
+
     // Timeout for peer responses in seconds
     pub const PEER_RESPONSE_TIMEOUT: i64 = 5;
-    
+
     // Minimum number of peer responses required (0 = no minimum)
     pub var min_peer_responses: u32 = 0; // Start with no minimum
-    
+
     // Whether to query peers during normal operation or only during sync
     pub var check_during_normal_operation: bool = false; // Only during sync initially
 };
@@ -84,7 +84,7 @@ pub const CURRENT_BLOCK_VERSION: u32 = @intFromEnum(BlockVersion.V0);
 
 // Mining constants - Network-specific coinbase maturity
 pub const COINBASE_MATURITY: u32 = switch (CURRENT_NETWORK) {
-    .testnet => 10,  // TestNet: 10 blocks for faster testing
+    .testnet => 10, // TestNet: 10 blocks for faster testing
     .mainnet => 100, // MainNet: 100 blocks for security
 };
 
@@ -420,8 +420,23 @@ pub const Transaction = struct {
             log.warn("❌ Transaction invalid: timestamp is 0", .{});
             return false;
         }
+
+        // Reject timestamps beyond year 2222 (catches bitcast negative i64 values)
+        const MAX_REASONABLE_TIMESTAMP: u64 = 7952422942;
+        if (self.timestamp > MAX_REASONABLE_TIMESTAMP) {
+            log.warn("❌ Transaction invalid: timestamp {} exceeds year 2222", .{self.timestamp});
+            return false;
+        }
+
         if (self.sender.equals(self.recipient)) {
             log.warn("❌ Transaction invalid: sender equals recipient", .{});
+            return false;
+        }
+
+        // Prevent arithmetic overflow when calculating total cost
+        const total_cost = @addWithOverflow(self.amount, self.fee);
+        if (total_cost[1] != 0) {
+            log.warn("❌ Transaction invalid: amount + fee would overflow (amount={}, fee={})", .{ self.amount, self.fee });
             return false;
         }
 
@@ -612,16 +627,16 @@ pub const DifficultyTarget = struct {
     /// @param network: Network type for constraint validation
     pub fn adjustFixed(self: DifficultyTarget, factor_fixed: u64, fixed_point_multiplier: u64, network: NetworkType) DifficultyTarget {
         const debug_log = std.log.scoped(.chain);
-        
+
         // DETERMINISTIC: Clamp factor to prevent extreme changes using integer math
         // Convert bounds to fixed-point: 0.5 -> (0.5 * multiplier), 2.0 -> (2.0 * multiplier)
         const min_factor_fixed = fixed_point_multiplier / 2; // 0.5 in fixed-point
         const max_factor_fixed = fixed_point_multiplier * 2; // 2.0 in fixed-point
-        const clamped_factor_fixed = if (factor_fixed < min_factor_fixed) 
-            min_factor_fixed 
-        else if (factor_fixed > max_factor_fixed) 
-            max_factor_fixed 
-        else 
+        const clamped_factor_fixed = if (factor_fixed < min_factor_fixed)
+            min_factor_fixed
+        else if (factor_fixed > max_factor_fixed)
+            max_factor_fixed
+        else
             factor_fixed;
 
         // DEBUG: Log factor clamping
@@ -632,16 +647,16 @@ pub const DifficultyTarget = struct {
         // So we DIVIDE by the factor: new_threshold = (current_threshold * multiplier) / factor
         const threshold_u64 = @as(u64, self.threshold);
         const new_threshold_u64 = (threshold_u64 * fixed_point_multiplier) / clamped_factor_fixed;
-        
+
         // DEBUG: Log threshold calculation
         debug_log.info("   🎯 Threshold calc: {} * {} / {} = {}", .{ threshold_u64, fixed_point_multiplier, clamped_factor_fixed, new_threshold_u64 });
-        
+
         // Ensure result fits in u32
-        var new_threshold = if (new_threshold_u64 > 0xFFFFFFFF) 
-            0xFFFFFFFF 
-        else if (new_threshold_u64 == 0) 
-            1 
-        else 
+        var new_threshold = if (new_threshold_u64 > 0xFFFFFFFF)
+            0xFFFFFFFF
+        else if (new_threshold_u64 == 0)
+            1
+        else
             @as(u32, @intCast(new_threshold_u64));
 
         // DETERMINISTIC: Network constraints using simple integer comparison
@@ -658,7 +673,7 @@ pub const DifficultyTarget = struct {
         const unconstrained_threshold = new_threshold;
         if (new_threshold < min_threshold) new_threshold = min_threshold;
         if (new_threshold > max_threshold) new_threshold = max_threshold;
-        
+
         // DEBUG: Log network constraints
         debug_log.info("   🌐 Network constraints: {} -> {} (min: 0x{X}, max: 0x{X})", .{ unconstrained_threshold, new_threshold, min_threshold, max_threshold });
 
