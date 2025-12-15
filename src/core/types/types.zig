@@ -422,7 +422,8 @@ pub const Transaction = struct {
         }
 
         // Reject timestamps beyond year 2222 (catches bitcast negative i64 values)
-        const MAX_REASONABLE_TIMESTAMP: u64 = 7952422942;
+        // Timestamp is in milliseconds, so multiply seconds by 1000
+        const MAX_REASONABLE_TIMESTAMP: u64 = 7952422942 * 1000;
         if (self.timestamp > MAX_REASONABLE_TIMESTAMP) {
             log.warn("❌ Transaction invalid: timestamp {} exceeds year 2222", .{self.timestamp});
             return false;

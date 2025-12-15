@@ -616,7 +616,7 @@ pub fn handleAddress(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     while (i < args.len) {
         if (std.mem.eql(u8, args[i], "--index") and i + 1 < args.len) {
             index = std.fmt.parseInt(u32, args[i + 1], 10) catch {
-                log.info("❌ Invalid index: {s}", .{args[i + 1]});
+                print("❌ Invalid index: {s}\n", .{args[i + 1]});
                 return;
             };
             break;

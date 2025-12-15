@@ -98,3 +98,4 @@ docker-compose.3node-mempool-test.yml
 SECURITY_AUDIT.md
 PLAN.md
 /monitoring
+new-miner.md
