@@ -3,8 +3,7 @@
 A minimalist blockchain written in Zig with longest chain consensus, RandomX mining, and peer-to-peer networking.
 
 > [!WARNING]
-> ZeiCoin is under active development for educational and research purposes. The software is in **TestNet phase** and breaking changes (HARD FORKS) may occur between releases. Full consenus has not been reached between nodes! Do not use for real value transfers.
-
+> ZeiCoin is under active development for educational and research purposes. The software is in **TestNet phase** and breaking changes may occur between releases. Do not use for real value transfers.
 
 ## Overview
 
@@ -20,7 +19,7 @@ Key features include an account-based transaction model, concurrent blockchain a
 ### Not Production Ready
 
 > [!CAUTION]
-> **TestNet Only!** This blockchain is currently in testnet phase and not ready for any production use. The blockchain has only been tested with a small 3-node network configuration. Do not use for anything else other then testing.
+> **TestNet Only!** This blockchain is currently in testnet phase and not ready for production use.
 
 ### Key Features
 
@@ -142,7 +141,7 @@ zeicoin/
 ### Core Components
 
 #### Consensus
-- Longest chain rule with cumulative proof-of-work
+- Cumulative proof-of-work
 - Configurable peer block hash consensus (disabled/optional/enforced)
 - Difficulty adjustment every 3 blocks
 - Coinbase maturity: 100 blocks
