@@ -28,6 +28,9 @@ pub const PeerConnection = struct {
         stream: net.Stream,
         handler: MessageHandler,
     ) Self {
+        // Increment peer reference count to ensure it stays alive during connection lifetime
+        peer.addRef();
+        
         return .{
             .allocator = allocator,
             .peer = peer,
@@ -40,7 +43,22 @@ pub const PeerConnection = struct {
     /// Clean up peer connection resources
     pub fn deinit(self: *Self) void {
         self.running = false;
+        // Clear the callback BEFORE closing the stream
+        self.peer.setTcpSendCallback(null, null);
         self.stream.close();
+        
+        // Release peer reference
+        self.peer.release();
+    }
+
+    /// Compare two block hashes lexicographically
+    /// Returns: -1 if hash_a < hash_b, 0 if equal, 1 if hash_a > hash_b
+    fn compareHashesLexicographic(hash_a: []const u8, hash_b: []const u8) i8 {
+        for (hash_a, hash_b) |byte_a, byte_b| {
+            if (byte_a < byte_b) return -1;
+            if (byte_a > byte_b) return 1;
+        }
+        return 0;
     }
 
     /// Run the peer connection (blocking)
@@ -64,7 +82,7 @@ pub const PeerConnection = struct {
 
         while (self.running) {
             // Main connection loop - running flag provides safer shutdown signaling
-            
+
             // Read data with timeout
             const bytes_read = self.stream.read(buffer) catch |err| switch (err) {
                 error.WouldBlock => {
@@ -98,7 +116,7 @@ pub const PeerConnection = struct {
             }
 
             // Process received data
-            const peer_id = self.peer.id;  // Cache the ID in case peer becomes invalid
+            const peer_id = self.peer.id; // Cache the ID in case peer becomes invalid
             std.log.debug("Peer {} received {} bytes from network", .{ peer_id, bytes_read });
             self.peer.receiveData(buffer[0..bytes_read]) catch |err| {
                 if (err == error.PeerShuttingDown) {
@@ -115,13 +133,26 @@ pub const PeerConnection = struct {
                     std.log.debug("Connection shutting down, stopping message processing", .{});
                     break;
                 }
-                
+
                 var env = envelope;
                 defer env.deinit();
-                const msg_peer_id = self.peer.id;  // Cache the ID
-                std.log.debug("Peer {} processing message type: {}", .{ msg_peer_id, env.header.message_type });
+                const msg_peer_id = self.peer.id; // Cache the ID
+
+                // Log message type with extra detail for get_blocks
+                if (env.header.message_type == .get_blocks) {
+                    std.log.info("📥 [RECEIVE] Peer {d} received GET_BLOCKS message!", .{msg_peer_id});
+                    std.log.info("📥 [RECEIVE] Payload size: {d} bytes", .{env.payload.len});
+                } else {
+                    std.log.debug("Peer {d} processing message type: {}", .{ msg_peer_id, env.header.message_type });
+                }
+
                 try self.handleMessage(env);
-                std.log.debug("Peer {} completed processing message", .{msg_peer_id});
+
+                if (env.header.message_type == .get_blocks) {
+                    std.log.info("📥 [RECEIVE] ✅ GET_BLOCKS message processing completed", .{});
+                } else {
+                    std.log.debug("Peer {d} completed processing message", .{msg_peer_id});
+                }
             }
         }
 
@@ -140,12 +171,8 @@ pub const PeerConnection = struct {
         handshake.genesis_hash = try self.message_handler.getGenesisHash();
         handshake.current_difficulty = try self.message_handler.getCurrentDifficulty();
 
-        const peer_id = self.peer.id;  // Cache the ID
-        std.log.info("Sending handshake to peer {} with height {} and best block hash {s}", .{ 
-            peer_id, 
-            handshake.start_height,
-            std.fmt.fmtSliceHexLower(&handshake.best_block_hash)
-        });
+        const peer_id = self.peer.id; // Cache the ID
+        std.log.info("Sending handshake to peer {} with height {} and best block hash {s}", .{ peer_id, handshake.start_height, std.fmt.fmtSliceHexLower(&handshake.best_block_hash) });
         std.log.info("   ⛓️  Genesis hash: {s}", .{std.fmt.fmtSliceHexLower(&handshake.genesis_hash)});
         std.log.info("   📊 Current difficulty: {} (0x{X})", .{ handshake.current_difficulty, @as(u32, @intCast(handshake.current_difficulty & 0xFFFFFFFF)) });
         _ = try self.peer.sendMessage(.handshake, handshake);
@@ -188,6 +215,10 @@ pub const PeerConnection = struct {
             .block_hash => |block_hash| try self.handleBlockHash(block_hash),
             .get_mempool => |get_mempool| try self.handleGetMempool(get_mempool),
             .mempool_inv => |mempool_inv| try self.handleMempoolInv(mempool_inv),
+            .get_missing_blocks => |get_missing_blocks| try self.handleGetMissingBlocks(get_missing_blocks),
+            .missing_blocks_response => |missing_blocks_response| try self.handleMissingBlocksResponse(missing_blocks_response),
+            .get_chain_work => |get_chain_work| try self.handleGetChainWork(get_chain_work),
+            .chain_work_response => |chain_work_response| try self.handleChainWorkResponse(chain_work_response),
         }
     }
 
@@ -195,13 +226,13 @@ pub const PeerConnection = struct {
         const our_height = try self.message_handler.getHeight();
         const our_best_hash = try self.message_handler.getBestBlockHash();
         const our_genesis_hash = try self.message_handler.getGenesisHash();
-        const peer_id = self.peer.id;  // Cache the ID
+        const peer_id = self.peer.id; // Cache the ID
         std.log.info("🤝 [HANDSHAKE] Received from peer {} - their height: {}, our height: {}", .{ peer_id, handshake.start_height, our_height });
         std.log.info("📊 [HANDSHAKE] Block hashes - theirs: {s}, ours: {s}", .{
             std.fmt.fmtSliceHexLower(&handshake.best_block_hash),
             std.fmt.fmtSliceHexLower(&our_best_hash),
         });
-        
+
         // Check genesis compatibility first - reject incompatible chains immediately
         handshake.checkGenesisCompatibility(our_genesis_hash) catch |err| {
             std.log.err("🚫 [CHAIN INCOMPATIBLE] Disconnecting peer {} - different genesis block", .{peer_id});
@@ -215,10 +246,36 @@ pub const PeerConnection = struct {
         handshake.checkPeerCompatibility(our_height, our_difficulty) catch |err| {
             switch (err) {
                 error.DifficultyConsensusMismatch => {
-                    std.log.warn("❌ [CONSENSUS ERROR] Disconnecting peer {} due to difficulty mismatch", .{peer_id});
-                    std.log.warn("   💡 This indicates the peer is using different consensus rules", .{});
-                    std.log.warn("   💡 Both nodes may need to reset to a common genesis state", .{});
-                    return err;
+                    // FORK RESOLUTION: Check if this is an equal-height fork scenario
+                    if (handshake.start_height == our_height and
+                        !std.mem.eql(u8, &handshake.best_block_hash, &our_best_hash))
+                    {
+                        std.log.warn("⚠️ [FORK DETECTED] Equal-height fork with peer {} at height {}", .{ peer_id, our_height });
+                        std.log.warn("   🔀 Our block hash: {s}", .{std.fmt.fmtSliceHexLower(&our_best_hash)});
+                        std.log.warn("   🔀 Peer block hash: {s}", .{std.fmt.fmtSliceHexLower(&handshake.best_block_hash)});
+
+                        // ETHEREUM-STYLE TIE-BREAKER: Compare hashes lexicographically
+                        const hash_comparison = compareHashesLexicographic(&handshake.best_block_hash, &our_best_hash);
+                        if (hash_comparison > 0) {
+                            std.log.warn("   🏆 [TIE-BREAKER] Peer's chain wins (higher hash)", .{});
+                            std.log.warn("   🔄 [TIE-BREAKER] We should reorganize to peer's chain", .{});
+                        } else if (hash_comparison < 0) {
+                            std.log.warn("   🏆 [TIE-BREAKER] Our chain wins (higher hash)", .{});
+                            std.log.warn("   💡 [TIE-BREAKER] Peer should reorganize to our chain", .{});
+                        } else {
+                            std.log.warn("   ⚠️ [TIE-BREAKER] Identical hashes (should never happen!)", .{});
+                        }
+
+                        std.log.info("   💡 FORK RESOLUTION: Allowing connection - tie-breaker determined winner", .{});
+
+                        // Allow connection - fork will be resolved via tie-breaker
+                        // Don't disconnect! Connection needed for reorganization
+                    } else {
+                        std.log.warn("❌ [CONSENSUS ERROR] Disconnecting peer {} due to difficulty mismatch", .{peer_id});
+                        std.log.warn("   💡 This indicates the peer is using different consensus rules", .{});
+                        std.log.warn("   💡 Both nodes may need to reset to a common genesis state", .{});
+                        return err;
+                    }
                 },
                 error.IncompatibleProtocolVersion => {
                     std.log.warn("❌ [PROTOCOL ERROR] Peer {} has incompatible protocol version {}", .{ peer_id, handshake.version });
@@ -233,22 +290,27 @@ pub const PeerConnection = struct {
                 else => {
                     std.log.warn("❌ [HANDSHAKE ERROR] Peer {} failed compatibility check: {}", .{ peer_id, err });
                     return err;
-                }
+                },
             }
         };
 
         // Update peer info
+        std.log.info("🔧 [HANDSHAKE] Updating peer {d} info:", .{peer_id});
+        std.log.info("   📊 Setting height: {d} -> {d}", .{self.peer.height, handshake.start_height});
+        std.log.info("   🔧 Setting version: {d}", .{handshake.version});
+        std.log.info("   🔧 Setting services: 0x{x}", .{handshake.services});
         self.peer.version = handshake.version;
         self.peer.services = handshake.services;
         self.peer.height = handshake.start_height;
         self.peer.best_block_hash = handshake.best_block_hash;
+        std.log.info("   ✅ Peer {d} height now set to: {d}", .{peer_id, self.peer.height});
         if (self.peer.user_agent.len > 0) {
             self.allocator.free(self.peer.user_agent);
         }
         self.peer.user_agent = try self.allocator.dupe(u8, handshake.user_agent);
 
         // Send handshake ack with our current height
-        const cached_peer_id = self.peer.id;  // Cache the ID
+        const cached_peer_id = self.peer.id; // Cache the ID
         std.log.info("📤 [HANDSHAKE] Sending ack to peer {} (we are at height {})", .{ cached_peer_id, our_height });
         const ack_msg = message_types.HandshakeAckMessage.init(our_height);
         _ = try self.peer.sendMessage(.handshake_ack, ack_msg);
@@ -267,18 +329,21 @@ pub const PeerConnection = struct {
 
         // Call handler - THIS is where sync should be triggered
         std.log.info("🔄 [HANDSHAKE] Calling onPeerConnected to check sync requirements", .{});
+        std.log.info("🔄 [HANDSHAKE] Peer height before onPeerConnected: {d}", .{self.peer.height});
+        std.log.info("🔄 [HANDSHAKE] Peer hash before onPeerConnected: {s}", .{std.fmt.fmtSliceHexLower(&self.peer.best_block_hash)});
         try self.message_handler.onPeerConnected(self.peer);
+        std.log.info("🔄 [HANDSHAKE] onPeerConnected completed", .{});
     }
 
     fn handleHandshakeAck(self: *Self, ack_msg: message_types.HandshakeAckMessage) !void {
         if (self.peer.state == .handshaking) {
             const our_height = try self.message_handler.getHeight();
-            
+
             // CRITICAL FIX: Update peer height with the height from handshake_ack
-            const peer_id = self.peer.id;  // Cache the ID
+            const peer_id = self.peer.id; // Cache the ID
             std.log.info("🔧 [HANDSHAKE ACK] Updating peer {} height from {} to {}", .{ peer_id, self.peer.height, ack_msg.current_height });
             self.peer.height = ack_msg.current_height;
-            
+
             std.log.info("✅ [HANDSHAKE ACK] Received - peer height: {}, our height: {}", .{ self.peer.height, our_height });
 
             self.peer.state = .connected;
@@ -313,7 +378,10 @@ pub const PeerConnection = struct {
     }
 
     fn handleGetBlocks(self: *Self, get_blocks: message_types.GetBlocksMessage) !void {
+        std.log.info("🔀 [DISPATCH GET_BLOCKS] Peer {d} dispatching to onGetBlocks handler", .{self.peer.id});
+        std.log.info("🔀 [DISPATCH GET_BLOCKS] Message has {d} hashes", .{get_blocks.hashes.len});
         try self.message_handler.onGetBlocks(self.peer, get_blocks);
+        std.log.info("🔀 [DISPATCH GET_BLOCKS] ✅ Handler completed successfully", .{});
     }
 
     fn handleBlocks(self: *Self, blocks: void) !void {
@@ -345,6 +413,22 @@ pub const PeerConnection = struct {
     fn handleMempoolInv(self: *Self, msg: message_types.MempoolInvMessage) !void {
         try self.message_handler.onMempoolInv(self.peer, msg);
     }
+
+    fn handleGetMissingBlocks(self: *Self, msg: message_types.GetMissingBlocksMessage) !void {
+        try self.message_handler.onGetMissingBlocks(self.peer, msg);
+    }
+
+    fn handleMissingBlocksResponse(self: *Self, msg: message_types.MissingBlocksResponseMessage) !void {
+        try self.message_handler.onMissingBlocksResponse(self.peer, msg);
+    }
+
+    fn handleGetChainWork(self: *Self, msg: message_types.GetChainWorkMessage) !void {
+        try self.message_handler.onGetChainWork(self.peer, msg);
+    }
+
+    fn handleChainWorkResponse(self: *Self, msg: message_types.ChainWorkResponseMessage) !void {
+        try self.message_handler.onChainWorkResponse(self.peer, msg);
+    }
 };
 
 /// Message handler interface
@@ -352,13 +436,13 @@ pub const PeerConnection = struct {
 pub const MessageHandler = struct {
     /// Get current blockchain height
     getHeight: *const fn () anyerror!u32,
-    
+
     /// Get best block hash
     getBestBlockHash: *const fn () anyerror![32]u8,
-    
+
     /// Get genesis block hash
     getGenesisHash: *const fn () anyerror![32]u8,
-    
+
     /// Get current difficulty target
     getCurrentDifficulty: *const fn () anyerror!u64,
 
@@ -392,6 +476,18 @@ pub const MessageHandler = struct {
     /// Handle mempool inventory message
     onMempoolInv: *const fn (peer: *Peer, msg: message_types.MempoolInvMessage) anyerror!void,
 
+    /// Handle get missing blocks request (Fix 3: Orphan block resolution)
+    onGetMissingBlocks: *const fn (peer: *Peer, msg: message_types.GetMissingBlocksMessage) anyerror!void,
+
+    /// Handle missing blocks response (Fix 3: Orphan block resolution)
+    onMissingBlocksResponse: *const fn (peer: *Peer, msg: message_types.MissingBlocksResponseMessage) anyerror!void,
+
+    /// Handle get chain work request (for reorganization decisions)
+    onGetChainWork: *const fn (peer: *Peer, msg: message_types.GetChainWorkMessage) anyerror!void,
+
+    /// Handle chain work response (for reorganization decisions)
+    onChainWorkResponse: *const fn (peer: *Peer, msg: message_types.ChainWorkResponseMessage) anyerror!void,
+
     /// Handle peer disconnect (optional)
     onPeerDisconnected: ?*const fn (peer: *Peer, err: anyerror) anyerror!void = null,
 };
@@ -404,7 +500,7 @@ fn tcpSendCallback(ctx: ?*anyopaque, data: []const u8) anyerror!void {
     if (!self.running) {
         return error.PeerShuttingDown;
     }
-    const peer_id = self.peer.id;  // Cache the ID
+    const peer_id = self.peer.id; // Cache the ID
     std.log.debug("Peer {} writing {} bytes to TCP stream", .{ peer_id, data.len });
     try self.stream.writeAll(data);
     std.log.debug("Peer {} TCP write completed", .{peer_id});

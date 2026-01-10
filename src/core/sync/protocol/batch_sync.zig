@@ -174,7 +174,8 @@ const BatchTracker = struct {
         while (iter.next()) |entry| {
             if (entry.value_ptr.isTimedOut()) {
                 try timed_out.append(entry.value_ptr.*);
-                log.info("⏰ [BATCH TRACKER] Batch timeout detected: {s}", .{entry.value_ptr.describe(&[_]u8{0} ** 64)});
+                var buf: [64]u8 = [_]u8{0} ** 64;
+                log.info("⏰ [BATCH TRACKER] Batch timeout detected: {s}", .{entry.value_ptr.describe(&buf)});
             }
         }
 
@@ -409,6 +410,7 @@ pub const BatchSyncProtocol = struct {
     /// Synchronization states for the batch sync protocol
     pub const SyncState = enum {
         idle, // Not synchronizing
+        analyzing, // Performing fork detection/work comparison
         syncing, // Active batch synchronization in progress
         applying, // Applying validated blocks to blockchain
         complete, // Synchronization completed successfully
@@ -416,7 +418,7 @@ pub const BatchSyncProtocol = struct {
 
         /// Check if sync is actively running
         pub fn isActive(self: SyncState) bool {
-            return self == .syncing or self == .applying;
+            return self == .analyzing or self == .syncing or self == .applying;
         }
 
         /// Check if sync can be started
@@ -472,10 +474,9 @@ pub const BatchSyncProtocol = struct {
         // Validate sync can be started
         log.info("🔍 [BATCH SYNC] STEP 1: Validating sync prerequisites...", .{});
         if (!self.sync_state.canStart()) {
-            log.info("❌ [BATCH SYNC] STEP 1 FAILED: Cannot start sync in current state", .{});
-            log.info("❌ [BATCH SYNC] Current State: {} (expected: idle, failed, or complete)", .{self.sync_state});
-            log.info("❌ [BATCH SYNC] Sync session aborted", .{});
-            return error.SyncAlreadyActive;
+            log.warn("⚠️ [BATCH SYNC] Sync already active - state: {}", .{self.sync_state});
+            log.warn("💡 [BATCH SYNC] Forcing state reset to allow new sync session", .{});
+            self.resetSyncState();
         }
         log.info("✅ [BATCH SYNC] STEP 1 PASSED: Sync state validation successful", .{});
 
@@ -502,6 +503,13 @@ pub const BatchSyncProtocol = struct {
         // Initialize sync session
         log.info("🔍 [BATCH SYNC] STEP 4: Initializing sync session state...", .{});
         self.sync_state = .syncing;
+
+        // CRITICAL: Reset state on any error during initialization
+        errdefer {
+            log.warn("⚠️ [BATCH SYNC ERROR] Session initialization failed - resetting state", .{});
+            self.resetSyncState();
+        }
+
         self.sync_peer = peer;
         self.target_height = target_height;
         self.start_height = current_height;
@@ -529,6 +537,79 @@ pub const BatchSyncProtocol = struct {
         log.info("✅ [BATCH SYNC] STEP 6 COMPLETED: Pipeline started successfully", .{});
 
         log.info("🎉 [BATCH SYNC] ZSP-001 SYNC SESSION ACTIVE!", .{});
+    }
+
+    /// Start batch synchronization from a custom start height (for reorganization)
+    /// This allows syncing a specific block range instead of from current height
+    pub fn syncFromHeight(self: *Self, peer: *Peer, start_height: u32, target_height: u32) !void {
+        log.info("🚀 [BATCH SYNC CUSTOM] ========================================", .{});
+        log.info("🚀 [BATCH SYNC CUSTOM] STARTING CUSTOM HEIGHT SYNC FOR REORG", .{});
+        log.info("🚀 [BATCH SYNC CUSTOM] ========================================", .{});
+        log.info("📊 [BATCH SYNC CUSTOM] Start Height: {}", .{start_height});
+        log.info("📊 [BATCH SYNC CUSTOM] Target Height: {}", .{target_height});
+        log.info("📊 [BATCH SYNC CUSTOM] Blocks to sync: {}", .{target_height - start_height + 1});
+        log.info("📊 [BATCH SYNC CUSTOM] Target Peer: {any}", .{peer.address});
+        log.info("📊 [BATCH SYNC CUSTOM] Current State: {}", .{self.sync_state});
+
+        // Validate parameters
+        log.info("🔍 [BATCH SYNC CUSTOM] STEP 1: Validating parameters...", .{});
+        if (start_height > target_height) {
+            log.err("❌ [BATCH SYNC CUSTOM] Invalid range: start {} > target {}", .{start_height, target_height});
+            return error.InvalidSyncRange;
+        }
+        if (start_height == 0) {
+            log.err("❌ [BATCH SYNC CUSTOM] Cannot sync from genesis (height 0)", .{});
+            return error.InvalidSyncRange;
+        }
+        log.info("✅ [BATCH SYNC CUSTOM] STEP 1 PASSED: Parameters valid", .{});
+
+        // Validate sync can be started
+        log.info("🔍 [BATCH SYNC CUSTOM] STEP 2: Validating sync state...", .{});
+        if (!self.sync_state.canStart()) {
+            log.warn("⚠️ [BATCH SYNC CUSTOM] Sync already active - state: {}", .{self.sync_state});
+            log.warn("💡 [BATCH SYNC CUSTOM] Forcing state reset for range sync", .{});
+            self.resetSyncState();
+        }
+        log.info("✅ [BATCH SYNC CUSTOM] STEP 2 PASSED: Sync state validated", .{});
+
+        // Initialize sync session with custom start height
+        log.info("🔍 [BATCH SYNC CUSTOM] STEP 3: Initializing custom sync session...", .{});
+        self.sync_state = .syncing;
+
+        // CRITICAL: Reset state on any error during initialization
+        errdefer {
+            log.warn("⚠️ [BATCH SYNC CUSTOM ERROR] Session initialization failed - resetting state", .{});
+            self.resetSyncState();
+        }
+
+        self.sync_peer = peer;
+        self.target_height = target_height;
+        self.start_height = start_height - 1;  // Set to one before start to maintain consistency
+        self.metrics = SyncMetrics.init();
+        log.info("✅ [BATCH SYNC CUSTOM] STEP 3 COMPLETED: Session initialized", .{});
+
+        // Configure batch tracker to start from custom height
+        log.info("🔍 [BATCH SYNC CUSTOM] STEP 4: Configuring batch tracker for custom range...", .{});
+        self.batch_tracker.next_batch_start = start_height;
+        self.batch_tracker.completed_height = start_height - 1;
+        log.info("   └─ Batch tracker next start: {}", .{self.batch_tracker.next_batch_start});
+        log.info("   └─ Batch tracker completed: {}", .{self.batch_tracker.completed_height});
+        log.info("✅ [BATCH SYNC CUSTOM] STEP 4 COMPLETED: Tracker configured", .{});
+
+        const blocks_needed = target_height - start_height + 1;
+        const estimated_batches = (blocks_needed + BATCH_CONFIG.BATCH_SIZE - 1) / BATCH_CONFIG.BATCH_SIZE;
+        log.info("📊 [BATCH SYNC CUSTOM] Sync plan:", .{});
+        log.info("   └─ Blocks to fetch: {}", .{blocks_needed});
+        log.info("   └─ Estimated batches: {} (@ {} blocks each)", .{ estimated_batches, BATCH_CONFIG.BATCH_SIZE });
+        log.info("   └─ Expected speedup: up to {}x vs sequential", .{BATCH_CONFIG.BATCH_SIZE});
+
+        // Start the batch download pipeline
+        log.info("🔍 [BATCH SYNC CUSTOM] STEP 5: Starting batch pipeline...", .{});
+        try self.fillBatchPipeline();
+        log.info("✅ [BATCH SYNC CUSTOM] STEP 5 COMPLETED: Pipeline started", .{});
+
+        log.info("🎉 [BATCH SYNC CUSTOM] CUSTOM HEIGHT SYNC SESSION ACTIVE!", .{});
+        log.info("⏳ [BATCH SYNC CUSTOM] Fetching blocks {} to {}", .{start_height, target_height});
     }
 
     /// Fill the batch request pipeline with concurrent requests
@@ -870,6 +951,72 @@ pub const BatchSyncProtocol = struct {
         return self.sync_state == .complete;
     }
 
+    /// Retrieve pending blocks from peer's received_blocks cache
+    /// This is called periodically to poll for blocks that have arrived via network
+    pub fn retrievePendingBlocks(self: *Self) !void {
+        if (!self.sync_state.isActive()) return;
+
+        const peer = self.sync_peer orelse return;
+
+        log.debug("🔍 [BLOCK RETRIEVAL] Checking peer cache for pending blocks", .{});
+
+        var blocks_retrieved: u32 = 0;
+        var batch_blocks = std.ArrayList(Block).init(self.allocator);
+        defer {
+            // Clean up any blocks we couldn't process
+            for (batch_blocks.items) |*block| {
+                block.deinit(self.allocator);
+            }
+            batch_blocks.deinit();
+        }
+
+        // Check each active batch for available blocks
+        var iter = self.batch_tracker.active_batches.iterator();
+        while (iter.next()) |entry| {
+            const batch_request = entry.value_ptr;
+            const start_height = batch_request.start_height;
+            const batch_size = batch_request.batch_size;
+
+            log.debug("🔍 [BLOCK RETRIEVAL] Checking batch starting at height {}", .{start_height});
+
+            // Try to retrieve all blocks in this batch
+            batch_blocks.clearRetainingCapacity();
+            var all_blocks_available = true;
+
+            for (0..batch_size) |i| {
+                const height = start_height + @as(u32, @intCast(i));
+
+                if (peer.getReceivedBlockByHeight(height)) |block| {
+                    try batch_blocks.append(block);
+                    log.debug("✅ [BLOCK RETRIEVAL] Retrieved block {} from peer cache", .{height});
+                } else {
+                    all_blocks_available = false;
+                    log.debug("⏳ [BLOCK RETRIEVAL] Block {} not yet available", .{height});
+                    break;
+                }
+            }
+
+            // If we have all blocks for this batch, process them
+            if (all_blocks_available and batch_blocks.items.len == batch_size) {
+                log.info("✅ [BLOCK RETRIEVAL] Complete batch retrieved: {} blocks starting at height {}", .{
+                    batch_blocks.items.len,
+                    start_height,
+                });
+
+                // Pass the blocks to handleBatchBlocks for processing
+                try self.handleBatchBlocks(batch_blocks.items, start_height);
+                blocks_retrieved += batch_size;
+
+                // Don't clean up blocks in defer - they're now owned by handleBatchBlocks
+                batch_blocks.clearRetainingCapacity();
+            }
+        }
+
+        if (blocks_retrieved > 0) {
+            log.info("📦 [BLOCK RETRIEVAL] Retrieved {} blocks from peer cache", .{blocks_retrieved});
+        }
+    }
+
     /// Handle sync timeout and stalled requests
     /// Implements retry logic and peer failover as specified in ZSP-001
     pub fn handleTimeouts(self: *Self) !void {
@@ -951,6 +1098,36 @@ pub const BatchSyncProtocol = struct {
         self.pending_queue = PendingQueue.init(self.allocator);
 
         log.info("🧹 [BATCH SYNC] Sync state cleaned up for potential retry", .{});
+    }
+
+    /// Reset sync state to idle and clean up resources
+    /// Called when forcing state reset or on initialization errors
+    fn resetSyncState(self: *Self) void {
+        log.warn("🔄 [BATCH SYNC RESET] Resetting sync state to idle", .{});
+        log.warn("   Previous state: {}", .{self.sync_state});
+
+        // Reset state machine
+        self.sync_state = .idle;
+        self.sync_peer = null;
+        self.target_height = 0;
+        self.start_height = 0;
+
+        // Clean up active batches
+        const active_count = self.batch_tracker.active_batches.count();
+        if (active_count > 0) {
+            log.warn("   Clearing {} active batch requests", .{active_count});
+            self.batch_tracker.active_batches.clearRetainingCapacity();
+        }
+
+        // Clean up pending queue
+        const pending_count = self.pending_queue.size();
+        if (pending_count > 0) {
+            log.warn("   Clearing {} pending blocks", .{pending_count});
+            self.pending_queue.deinit();
+            self.pending_queue = PendingQueue.init(self.allocator);
+        }
+
+        log.info("✅ [BATCH SYNC RESET] State reset complete - ready for new sync", .{});
     }
 
     /// Get current sync state

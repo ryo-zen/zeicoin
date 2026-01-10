@@ -22,6 +22,11 @@ pub const DifficultyCalculator = struct {
     }
     
     pub fn calculateNextDifficulty(self: *DifficultyCalculator) !types.DifficultyTarget {
+        // FOR TESTING: Disable adjustment on TestNet to keep mining speed predictable
+        if (types.CURRENT_NETWORK == .testnet) {
+            return types.ZenMining.initialDifficultyTarget();
+        }
+
         const current_height = try self.database.getHeight();
         // The next block height is current_height + 1
         const next_height = current_height + 1;
@@ -67,20 +72,14 @@ pub const DifficultyCalculator = struct {
         defer prev_block.deinit(self.allocator);
         const current_difficulty = prev_block.header.getDifficultyTarget();
 
-        // Calculate actual time for last adjustment period blocks (all timestamps MUST be in seconds)
-        // CRITICAL: Handle potential timestamp issues gracefully
-        const actual_time_raw: i64 = if (newest_timestamp >= oldest_timestamp)
-            @as(i64, @intCast(newest_timestamp - oldest_timestamp))
-        else blk: {
-            // Timestamps are out of order - this shouldn't happen but handle gracefully
-            log.warn("⚠️ [DIFFICULTY] Timestamp inversion detected: newest {} < oldest {}", .{ newest_timestamp, oldest_timestamp });
-            log.warn("⚠️ [DIFFICULTY] This may indicate corrupted blockchain data or sync issues", .{});
-            // Use a safe default: target time to avoid extreme adjustments
-            break :blk @as(i64, @intCast(types.ZenMining.TARGET_BLOCK_TIME * lookback_blocks));
-        };
+        // Calculate actual time for last adjustment period blocks (Convert ms to seconds)
+        const actual_time_ms = if (newest_timestamp >= oldest_timestamp)
+            newest_timestamp - oldest_timestamp
+        else
+            types.ZenMining.TARGET_BLOCK_TIME * lookback_blocks * 1000;
         
-        // Ensure actual_time is always positive
-        const actual_time = @as(u64, @intCast(@max(1, actual_time_raw)));
+        // Ensure actual_time is at least 1 second to avoid division by zero
+        const actual_time = @max(1, actual_time_ms / 1000);
             
         const target_time = lookback_blocks * types.ZenMining.TARGET_BLOCK_TIME;
 

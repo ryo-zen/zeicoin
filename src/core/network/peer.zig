@@ -36,7 +36,12 @@ pub const NetworkManager = struct {
     owns_bootstrap_nodes: bool,
     last_reconnect_attempt: i64,
     active_connections: std.atomic.Value(u32),
-    
+
+    // Exponential backoff for reconnections
+    reconnect_backoff_seconds: u32,
+    reconnect_consecutive_failures: u32,
+    last_successful_connection: i64,
+
     const Self = @This();
     const MAX_ACTIVE_CONNECTIONS = 100;
     
@@ -56,6 +61,9 @@ pub const NetworkManager = struct {
             .owns_bootstrap_nodes = false,
             .last_reconnect_attempt = 0,
             .active_connections = std.atomic.Value(u32).init(0),
+            .reconnect_backoff_seconds = 5,
+            .reconnect_consecutive_failures = 0,
+            .last_successful_connection = 0,
         };
     }
     
@@ -404,6 +412,14 @@ pub const NetworkManager = struct {
         self.owns_bootstrap_nodes = true;
     }
     
+    /// Calculate exponential backoff delay
+    fn calculateBackoff(consecutive_failures: u32) u32 {
+        const base: u32 = 5; // 5 seconds base
+        const max_backoff: u32 = 300; // 5 minutes max
+        const backoff = base * std.math.pow(u32, 2, consecutive_failures);
+        return @min(backoff, max_backoff);
+    }
+
     /// Clean up timed out connections and handle auto-reconnect
     pub fn maintenance(self: *Self) void {
         // Skip maintenance if we're shutting down
@@ -412,44 +428,47 @@ pub const NetworkManager = struct {
         // Clean up timed out peers first
         self.peer_manager.cleanupTimedOut();
         
-        // Auto-reconnect logic
+        // Auto-reconnect logic with exponential backoff
         const now = std.time.timestamp();
         const peer_stats = self.getPeerStats();
         const connected_peers = peer_stats.connected;
-        
+
         // If no connected peers and we have bootstrap nodes, try to reconnect
         if (connected_peers == 0 and self.bootstrap_nodes.len > 0) {
-            // Only attempt reconnect every 30 seconds to avoid spam
-            if (now - self.last_reconnect_attempt >= 30) {
-                std.log.info("🔄 Auto-reconnect: No peers connected, attempting to reconnect to bootstrap nodes", .{});
+            // Calculate exponential backoff: 5s, 10s, 20s, 40s, 80s, max 300s (5min)
+            const backoff = calculateBackoff(self.reconnect_consecutive_failures);
+
+            if (now - self.last_reconnect_attempt >= backoff) {
                 self.last_reconnect_attempt = now;
-                
-                // Try to connect to each bootstrap node
+                std.log.info("🔄 [RECONNECT] Attempting reconnection (backoff: {}s, failures: {})", .{ backoff, self.reconnect_consecutive_failures });
+
+                var connection_succeeded = false;
                 for (self.bootstrap_nodes) |node| {
                     const address = std.net.Address.parseIp(node.ip, node.port) catch |err| {
                         std.log.warn("Failed to parse bootstrap node {s}:{} - {}", .{ node.ip, node.port, err });
                         continue;
                     };
-                    
+
                     self.connectToPeer(address) catch |err| {
-                        // Log specific error types for better debugging
-                        switch (err) {
-                            error.TooManyConnections => {
-                                std.log.warn("Too many active connections ({}), skipping bootstrap node", .{self.active_connections.load(.acquire)});
-                                break;
-                            },
-                            else => {
-                                // Log the error with details
-                                std.log.warn("Auto-reconnect failed to {any} - {}", .{ address, err });
-                                // If we see file descriptor errors in the log, stop trying
-                                if (std.mem.indexOf(u8, @errorName(err), "ProcessFdQuotaExceeded") != null or
-                                    std.mem.indexOf(u8, @errorName(err), "SystemFdQuotaExceeded") != null) {
-                                    std.log.err("File descriptor limit reached - cannot create new connections. Consider increasing ulimit -n", .{});
-                                    break;
-                                }
-                            },
-                        }
+                        std.log.debug("Failed to connect to {any}: {}", .{ address, err });
+                        continue;
                     };
+
+                    connection_succeeded = true;
+                    break;
+                }
+
+                if (connection_succeeded) {
+                    // Reset backoff on successful connection
+                    self.reconnect_consecutive_failures = 0;
+                    self.reconnect_backoff_seconds = 5;
+                    self.last_successful_connection = now;
+                    std.log.info("✅ [RECONNECT] Connection successful, backoff reset", .{});
+                } else {
+                    // Increment failure count
+                    self.reconnect_consecutive_failures += 1;
+                    self.reconnect_backoff_seconds = calculateBackoff(self.reconnect_consecutive_failures);
+                    std.log.warn("❌ [RECONNECT] All connections failed, backoff increased to {}s", .{self.reconnect_backoff_seconds});
                 }
             }
         }

@@ -73,11 +73,12 @@ pub const BlockIndex = struct {
         }
 
         // Ensure height_to_hash array is large enough
-        if (height >= self.height_to_hash.items.len) {
+        const old_len = self.height_to_hash.items.len;
+        if (height >= old_len) {
             try self.height_to_hash.resize(height + 1);
 
             // Initialize new slots to zero hash
-            for (self.height_to_hash.items[self.height_to_hash.items.len - (height + 1 - self.height_to_hash.items.len) ..]) |*slot| {
+            for (self.height_to_hash.items[old_len..]) |*slot| {
                 slot.* = std.mem.zeroes([32]u8);
             }
         }

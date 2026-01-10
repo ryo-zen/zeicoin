@@ -41,6 +41,7 @@ pub const GenesisBlocks = struct {
             return types.Block{
                 .header = header,
                 .transactions = &[_]types.Transaction{}, // Empty static slice
+                .height = 0, // Fix 2: Genesis block is always at height 0
             };
         }
     };
@@ -78,6 +79,7 @@ pub const GenesisBlocks = struct {
             return types.Block{
                 .header = header,
                 .transactions = &[_]types.Transaction{}, // Empty static slice
+                .height = 0, // Fix 2: Genesis block is always at height 0
             };
         }
     };
@@ -201,6 +203,7 @@ pub fn createGenesis(allocator: std.mem.Allocator) !types.Block {
     return types.Block{
         .header = canonical.header,
         .transactions = transactions,
+        .height = 0, // Fix 2: Genesis block is always at height 0
     };
 }
 

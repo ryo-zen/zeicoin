@@ -83,26 +83,60 @@ pub const MessageDispatcher = struct {
     /// Handle request for block hash at specific height
     pub fn handleGetBlockHash(self: *Self, height: u32) !?types.Hash {
         // Query blockchain for block at height
-        const chain = self.blockchain.chain_manager;
-        
+        const chain = &self.blockchain.chain_query;
+
         // Check if we have the block at this height
-        const chain_height = chain.getChainHeight() catch |err| {
+        const chain_height = chain.getHeight() catch |err| {
             log.warn("Error getting chain height: {}", .{err});
             return null;
         };
-        
+
         if (height > chain_height) {
             // We don't have this block yet
             return null;
         }
-        
+
         // Get the block at this height and return its hash
-        const block = chain.getBlockAtHeight(height) catch |err| {
+        var block = chain.getBlock(height) catch |err| {
             log.warn("Error getting block at height {}: {}", .{ height, err });
             return null;
         };
-        
+        defer block.deinit(self.allocator);
+
         return block.hash();
+    }
+
+    /// Handle request for cumulative chain work for a range of blocks
+    pub fn handleGetChainWork(self: *Self, start_height: u32, end_height: u32) !types.ChainWork {
+        log.debug("📤 [CHAIN WORK] Request for work from height {} to {}", .{ start_height, end_height });
+
+        // Validate request
+        if (start_height > end_height) {
+            log.warn("❌ [CHAIN WORK] Invalid request: start > end", .{});
+            return error.InvalidRequest;
+        }
+
+        const chain = &self.blockchain.chain_query;
+        const chain_height = try chain.getHeight();
+
+        if (end_height > chain_height) {
+            log.warn("❌ [CHAIN WORK] Request exceeds chain height: {} > {}", .{ end_height, chain_height });
+            return error.HeightTooHigh;
+        }
+
+        // Calculate cumulative work for the range
+        var total_work: types.ChainWork = 0;
+        var height = start_height;
+
+        while (height <= end_height) : (height += 1) {
+            var block = try chain.getBlock(height);
+            defer block.deinit(self.allocator);
+            const block_work = block.header.getWork();
+            total_work += block_work;
+        }
+
+        log.debug("✅ [CHAIN WORK] Calculated work: {} for range {}-{}", .{ total_work, start_height, end_height });
+        return total_work;
     }
     
     /// Broadcast new block to network peers (delegates to blockchain's network coordinator)

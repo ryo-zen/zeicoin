@@ -654,6 +654,114 @@ pub const Database = struct {
         }
     }
 
+    /// Delete all accounts from the database (used for chain rollback/replay)
+    /// This fixes the state corruption bug where reverted accounts would persist
+    pub fn deleteAllAccounts(self: *Database) !void {
+        const it = c.rocksdb_create_iterator(self.db, self.read_options);
+        defer c.rocksdb_iter_destroy(it);
+
+        // Collect all account keys to delete
+        var keys_to_delete = std.ArrayList([]u8).init(self.allocator);
+        defer {
+            for (keys_to_delete.items) |key| {
+                self.allocator.free(key);
+            }
+            keys_to_delete.deinit();
+        }
+
+        const prefix = ACCOUNT_PREFIX;
+        c.rocksdb_iter_seek(it, prefix.ptr, prefix.len);
+
+        while (c.rocksdb_iter_valid(it) == 1) {
+            var key_len: usize = 0;
+            const key_ptr = c.rocksdb_iter_key(it, &key_len);
+            const key = key_ptr[0..key_len];
+
+            // Stop if we've moved past the account prefix
+            if (!std.mem.startsWith(u8, key, prefix)) {
+                break;
+            }
+
+            // Copy key to safely delete later
+            const key_copy = try self.allocator.dupe(u8, key);
+            try keys_to_delete.append(key_copy);
+
+            c.rocksdb_iter_next(it);
+        }
+
+        if (keys_to_delete.items.len == 0) {
+            return; // Nothing to delete
+        }
+
+        log.info("🗑️ Deleting {} accounts for state rollback", .{keys_to_delete.items.len});
+
+        // Batch delete all collected keys
+        const batch = c.rocksdb_writebatch_create();
+        defer c.rocksdb_writebatch_destroy(batch);
+
+        for (keys_to_delete.items) |key| {
+            c.rocksdb_writebatch_delete(batch, key.ptr, key.len);
+        }
+
+        // Reset account count
+        const count_key = ACCOUNT_COUNT_KEY;
+        const zero_count = "0";
+        c.rocksdb_writebatch_put(batch, count_key.ptr, count_key.len, zero_count.ptr, zero_count.len);
+
+        // Commit batch
+        var err: ?[*:0]u8 = null;
+        c.rocksdb_write(self.db, self.write_options, batch, @ptrCast(&err));
+
+        if (err != null) {
+            log.err("RocksDB batch delete error: {s}", .{err.?});
+            c.rocksdb_free(@constCast(@ptrCast(err)));
+            return DatabaseError.DeletionFailed;
+        }
+    }
+
+    pub fn resetTotalSupply(self: *Database) !void {
+        const batch = c.rocksdb_writebatch_create();
+        defer c.rocksdb_writebatch_destroy(batch);
+
+        const zero_val = [_]u8{0} ** 8;
+        c.rocksdb_writebatch_put(batch, TOTAL_SUPPLY_KEY.ptr, TOTAL_SUPPLY_KEY.len, &zero_val, zero_val.len);
+        c.rocksdb_writebatch_put(batch, CIRCULATING_SUPPLY_KEY.ptr, CIRCULATING_SUPPLY_KEY.len, &zero_val, zero_val.len);
+
+        var err: ?[*:0]u8 = null;
+        c.rocksdb_write(self.db, self.write_options, batch, @ptrCast(&err));
+
+        if (err != null) {
+            c.rocksdb_free(@constCast(@ptrCast(err)));
+            return DatabaseError.SaveFailed;
+        }
+        
+        log.info("📊 Supply metrics reset to 0", .{});
+    }
+
+    pub fn deleteBlocksFromHeight(self: *Database, from_height: u32, current_height: u32) !void {
+        if (from_height > current_height) return;
+
+        log.info("🗑️ Deleting blocks from height {} to {} from database", .{from_height, current_height});
+
+        const batch = c.rocksdb_writebatch_create();
+        defer c.rocksdb_writebatch_destroy(batch);
+
+        var height = from_height;
+        while (height <= current_height) : (height += 1) {
+            const key = try self.makeBlockKey(height);
+            defer self.allocator.free(key);
+            c.rocksdb_writebatch_delete(batch, key.ptr, key.len);
+        }
+
+        var err: ?[*:0]u8 = null;
+        c.rocksdb_write(self.db, self.write_options, batch, @ptrCast(&err));
+
+        if (err != null) {
+            c.rocksdb_free(@constCast(@ptrCast(err)));
+            return DatabaseError.DeletionFailed;
+        }
+    }
+
     pub fn getWalletPath(self: *Database, wallet_name: []const u8) ![]u8 {
         _ = try self.makeWalletKey(wallet_name);
         return std.fmt.allocPrint(self.allocator, "{s}/wallets/{s}.wallet", .{ self.base_path, wallet_name });

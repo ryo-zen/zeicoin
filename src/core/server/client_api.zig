@@ -264,7 +264,7 @@ pub const ClientApiServer = struct {
             
             if (best_peer) |peer| {
                 // Start sync with the best peer
-                sync_manager.startSync(peer, peer.height) catch |err| {
+                sync_manager.startSync(peer, peer.height, false) catch |err| {
                     std.log.err("Failed to start sync: {}", .{err});
                     _ = try connection.stream.write("ERROR: Failed to start synchronization\n");
                     return;

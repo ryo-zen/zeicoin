@@ -4,16 +4,12 @@
 // Core blockchain components
 pub const blockchain = @import("core/node.zig");
 pub const genesis = @import("core/chain/genesis.zig");
-pub const reorganization = @import("core/chain/reorganization/manager.zig");
 pub const miner = @import("core/miner/main.zig");
 
 // Chain management components
 pub const chain = struct {
-    pub const manager = @import("core/chain/manager.zig");
     pub const state = @import("core/chain/state.zig");
     pub const validator = @import("core/chain/validator.zig");
-    pub const operations = @import("core/chain/operations.zig");
-    pub const reorganization = @import("core/chain/reorganization/manager.zig");
 };
 
 // Mempool management components

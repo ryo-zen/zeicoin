@@ -98,10 +98,6 @@ test "blockchain initialization" {
     const height = try zeicoin.getHeight();
     try testing.expect(height >= 0);
 
-    // Test that fork manager was initialized during genesis creation
-    const active_chain = zeicoin.fork_manager.getActiveChain();
-    try testing.expect(active_chain != null);
-
     // Clean up test data
     std.fs.cwd().deleteTree("test_zeicoin_data_init") catch {};
 }
@@ -242,6 +238,7 @@ test "block validation" {
             0
         ),
         .transactions = transactions,
+        .height = 1, // Test block at height 1
     };
 
     // Find a valid nonce for the block
@@ -361,6 +358,7 @@ test "block broadcasting integration" {
             0
         ),
         .transactions = transactions,
+        .height = 0, // Test block at height 0
     };
 
     // Should not crash when no network is available
@@ -391,6 +389,7 @@ test "timestamp validation - future blocks rejected" {
             0
         ),
         .transactions = &transactions,
+        .height = 1, // Test block at height 1
     };
 
     // Block should be rejected
@@ -423,6 +422,7 @@ test "timestamp validation - median time past" {
                 0
             ),
             .transactions = &transactions,
+            .height = i, // Test block at height i
         };
 
         // Process block directly (bypass validation for test setup)
@@ -445,6 +445,7 @@ test "timestamp validation - median time past" {
             0
         ),
         .transactions = &bad_transactions,
+        .height = 15, // Test block at height 15
     };
 
     // This should fail MTP validation
@@ -1226,6 +1227,7 @@ test "memory leak detection - block operations" {
                 0
             ),
             .transactions = transactions,
+            .height = 1, // Test block at height 1
         };
         
         // Serialize and deserialize the block multiple times

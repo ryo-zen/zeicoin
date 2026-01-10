@@ -50,10 +50,9 @@ pub const ChainValidator = struct {
     }
     
     pub fn validateBlockStructure(self: *Self, block: Block) !bool {
-        _ = self;
         if (!block.isValid()) return false;
-        
-        const calculated_merkle = block.calculateMerkleRoot();
+
+        const calculated_merkle = try block.calculateMerkleRoot(self.allocator);
         return std.mem.eql(u8, &block.header.merkle_root, &calculated_merkle);
     }
     
