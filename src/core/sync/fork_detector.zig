@@ -159,6 +159,14 @@ pub fn shouldReorganize(
     log.info("   Our blocks after fork: {}", .{our_height - fork_point});
     log.info("   Peer blocks after fork: {}", .{peer_height - fork_point});
 
+    // CRITICAL FIX: If fork_point == our_height, we are a prefix of the peer's chain.
+    // We have 0 divergent work (our_work is 0), but this is NOT a reorg scenario.
+    // We should just sync forward (append blocks) instead of triggering a heavy reorg.
+    if (fork_point == our_height) {
+        log.info("   Decision: Chain is prefix (fork_point == tip), sync forward ⛔", .{});
+        return false;
+    }
+
     // Calculate our cumulative work from fork point to tip
     const our_work = try calculateChainWork(allocator, database, fork_point + 1, our_height);
 

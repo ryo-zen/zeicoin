@@ -902,7 +902,11 @@ pub const Block = struct {
 
         // Build merkle tree from transaction hashes
         var current_level = try allocator.alloc(Hash, self.transactions.len);
-        defer allocator.free(current_level);
+        
+        // Use a flag to track if we need to manually free on error
+        // This is safer than nested errdefers during reassignment
+        var success = false;
+        defer if (!success) allocator.free(current_level);
 
         // First level: transaction hashes
         for (self.transactions, 0..) |tx, i| {
@@ -938,12 +942,17 @@ pub const Block = struct {
                 hasher2.final(&next_level[i / 2]);
             }
 
+            // Free the previous level as we're done with it
             allocator.free(current_level);
+            // Update to the new level
             current_level = next_level;
         }
 
         const root = current_level[0];
+        // Clean up the final level
         allocator.free(current_level);
+        // Mark as successful so the defer doesn't free it again
+        success = true;
         return root;
     }
 

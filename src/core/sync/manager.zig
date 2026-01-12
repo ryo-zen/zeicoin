@@ -311,20 +311,29 @@ pub const SyncManager = struct {
                     self.sync_state = .idle; // executeBulkReorg finishes sync
                     return;
                 } else {
-                    log.info("ℹ️  [REORG DECISION] Our chain has equal or more work - keeping our chain", .{});
-                    
-                    // If heights are equal but we didn't reorg, we stay on our fork.
-                    // If peer was behind, they might sync from us.
-                    if (target_height > current_height) {
-                        // Normal sync case: peer has more blocks but less work (e.g. difficulty attack)
-                        // In Bitcoin, we would just ignore this peer for now or wait for more work.
-                        log.warn("⚠️  Peer has MORE blocks ({}) but LESS work. Ignoring sync request.", .{target_height});
-                        self.sync_state = .idle;
-                        return;
+                    // PREFIX CASE: If fork_point == our tip, we're a prefix of peer's chain
+                    // This means NO divergence - just sync forward normally
+                    const is_prefix = (fork_point == current_height);
+
+                    if (is_prefix) {
+                        log.info("ℹ️  [REORG DECISION] Chain is prefix - continuing with normal sync", .{});
+                        // Fall through to normal sync below
+                    } else {
+                        log.info("ℹ️  [REORG DECISION] Our chain has equal or more work - keeping our chain", .{});
+
+                        // If heights are equal but we didn't reorg, we stay on our fork.
+                        // If peer was behind, they might sync from us.
+                        if (target_height > current_height) {
+                            // Competing chain: peer has more blocks but less work (e.g. difficulty attack)
+                            // In Bitcoin, we would just ignore this peer for now or wait for more work.
+                            log.warn("⚠️  Peer has MORE blocks ({}) but LESS work. Ignoring sync request.", .{target_height});
+                            self.sync_state = .idle;
+                            return;
+                        }
+
+                        // If chains are divergent but we have more work, we don't reorg.
+                        // Normal sync will continue if we decide to just extend our chain.
                     }
-                    
-                    // If chains are divergent but we have more work, we don't reorg.
-                    // Normal sync will continue if we decide to just extend our chain.
                 }
             } else {
                 log.debug("STEP 2.5 PASSED: Chains are compatible, proceeding with normal sync", .{});
