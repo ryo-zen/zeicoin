@@ -22,10 +22,7 @@ const Address = types.Address;
 /// Mine a new block with transactions from mempool
 pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_address: Address) !types.Block {
     _ = miner_keypair; // Coinbase transactions don't need signatures
-    log.info("⛏️ ZenMineBlock: Starting to mine new block (Slowing down for TEST - 2s delay)", .{});
-    
-    // TEMPORARY DELAY FOR REORG TESTING
-    std.time.sleep(2 * std.time.ns_per_s);
+    log.info("⛏️ ZenMineBlock: Starting to mine new block", .{});
 
     // Get current height to calculate proper block reward with halving
     const current_height = try ctx.blockchain.getHeight();

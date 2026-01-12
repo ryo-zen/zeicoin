@@ -565,8 +565,8 @@ pub const DifficultyTarget = struct {
     pub fn initial(network: NetworkType) DifficultyTarget {
         return switch (network) {
             .testnet => DifficultyTarget{
-                .base_bytes = 0, // No leading zeros required for Docker testing
-                .threshold = 0x7FFFFFFF, // Very easy for testing
+                .base_bytes = 1,
+                .threshold = 0xFFFFFFF0, // EXTREMELY easy difficulty - instant blocks for low-end hardware
             },
             .mainnet => DifficultyTarget{
                 .base_bytes = 2,
