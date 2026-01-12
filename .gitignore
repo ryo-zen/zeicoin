@@ -1,101 +1,94 @@
-# Zig build artifacts
+# === Zig build artifacts ===
 zig-out/
 zig-cache/
 .zig-cache/
+zig_docs
+zig_docs_std
 
-# ZeiCoin data directories
+# === ZeiCoin data & databases ===
 zeicoin_data/
 zeicoin_data_testnet/
 zeicoin_data_mainnet/
+/zeicoin_data_testnet_indexer_secondary
 
-# Config Folder
-/config
-
-# Claude
-.CLAUDE.md
-CLAUDE.md
-.claude
-server.log
-.vscode
-logs
-
-# RandomX build files
-randomx/randomx_build/
-randomx/randomx_install/
-randomx/randomx_helper
-
-# Test Folder - Allow specific test scripts for public repo
-tests_dev/
-
-# Docs Folder
-/docs
-
-#MCP
-
-/mcp
-
-# SQL Scripts
-/sql
-
-# Reference repositories
-/reference
-
-scripts/deploy_files_only.sh
-.dockerignore
-docker-compose.debug.yml
-docker-compose.randomx.yml
-DOCKER.md
-Dockerfile.debug
-Dockerfile.randomx
-.gitignore
+# === Configuration & Environment ===
 .env
-GEMINI.md
+.env.local
+.env.mainnet
+.env.testnet
+.env.example
+/config
+.gitignore
+
+# === IDEs, Tools & Logs ===
+.vscode
+.vscode/settings.json
 launch.json
 tasks.json
-.vscode/settings.json
-fuzz/bech32_fuzz.zig
-.gitignore
-fuzz/bech32_simple_fuzz.zig
-fuzz/network_message_fuzz.zig
-docker-compose.sync-proof-test.yml
-Dockerfile
-docker-compose.libp2p-test.yml
+.claude
 .mcp.json
+server.log
+logs
+
+# === Documentation & Markdown ===
+.CLAUDE.md
+CLAUDE.md
+CLAUDE.local.md
+GEMINI.md
+DOCKER.md
+todo.md
+TODO.md
+PLAN.md
+SECURITY_AUDIT.md
+new-miner.md
+
+# === Docker ===
+Dockerfile.debug
+Dockerfile.randomx
+docker-compose.debug.yml
+docker-compose.randomx.yml
+docker-compose.sync-proof-test.yml
+docker-compose.libp2p-test.yml
 docker-compose.mempool-gossip-test.yml
 docker-compose.single-test.yml
-run-mempool-gossip-test.sh
-zig_docs
-zig_docs_std
-scripts/deploy_files_simple.sh
 docker-compose.sync-mining-test.yml
-.gitignore
 docker-compose.stress-sync-test.yml
 docker-compose.crash-test.yml
 docker-compose.consensus-test.yml
 docker-compose.consensus-debug.yml
-todo.md
-TODO.md
-.env.example
-/deprecated
-.env.local
-.env.mainnet
-.gitignore
-.env.testnet
-web/l2-test-app.html
+docker-compose.3node-mempool-test.yml
+
+# === RandomX build files ===
+randomx/randomx_build/
+randomx/randomx_install/
+randomx/randomx_helper
+
+# === Scripts & Automation ===
+scripts/deploy_files_only.sh
+scripts/deploy_files_simple.sh
 scripts/check_l2_tables.sh
-.gitignore
 scripts/check_tx_table.sh
 scripts/test_l2_integration.sh
-/zeicoin_data_testnet_indexer_secondary
+run-mempool-gossip-test.sh
+test_analytics.sh
+
+# === Fuzz Testing ===
+fuzz/bech32_fuzz.zig
+fuzz/bech32_simple_fuzz.zig
+fuzz/network_message_fuzz.zig
+
+# === Folders & Repositories ===
+/docs
+/mcp
+/sql
+/reference
+/deprecated
 /website
 /scripts
 /optimizations
-test_analytics.sh
-
-docker-compose.3node-mempool-test.yml
-
 /deployment
-SECURITY_AUDIT.md
-PLAN.md
 /monitoring
-new-miner.md
+tests_dev/
+
+# === Other ===
+web/l2-test-app.html

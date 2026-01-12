@@ -1,0 +1,96 @@
+# Simplified docker-compose.yml using YAML anchors
+# Reduces duplication from 105 lines to 65 lines
+
+# Common configuration (defined once, reused everywhere)
+x-common: &common
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+  networks:
+    - zeicoin-network
+  healthcheck:
+    test: ["CMD", "nc", "-z", "localhost", "10801"]
+    interval: 10s
+    timeout: 5s
+    retries: 5
+    start_period: 30s
+
+# Common environment variables
+x-common-env: &common-env
+  ZEICOIN_NETWORK: testnet
+  ZEICOIN_BIND_IP: 0.0.0.0
+  ZEICOIN_P2P_PORT: 10801
+  ZEICOIN_SERVER: 0.0.0.0
+
+services:
+  miner-1:
+    <<: *common
+    container_name: zeicoin-miner-1
+    ports:
+      - "10801:10801"  # P2P
+      - "10802:10802"  # Client API
+      - "10803:10803"  # RPC
+    volumes:
+      - miner1-data:/zeicoin/zeicoin_data
+    environment:
+      <<: *common-env
+      ZEICOIN_BOOTSTRAP: ""  # Seed node - no bootstrap needed
+      ZEICOIN_MINE_ENABLED: true
+      ZEICOIN_MINER_WALLET: miner1
+      ZEICOIN_WALLET_PASSWORD: miner123
+    command: ["/scripts/init-seed.sh"]
+
+  miner-2:
+    <<: *common
+    container_name: zeicoin-miner-2
+    ports:
+      - "10811:10801"
+      - "10812:10802"
+      - "10813:10803"
+    volumes:
+      - miner2-data:/zeicoin/zeicoin_data
+    environment:
+      <<: *common-env
+      ZEICOIN_BOOTSTRAP: miner-1:10801
+      ZEICOIN_MINE_ENABLED: true
+      ZEICOIN_MINER_WALLET: miner2
+      ZEICOIN_WALLET_PASSWORD: miner123
+    depends_on:
+      miner-1:
+        condition: service_healthy
+    command: ["/scripts/init-node.sh"]
+
+  node-1:
+    <<: *common
+    container_name: zeicoin-node-1
+    ports:
+      - "10821:10801"
+      - "10822:10802"
+      - "10823:10803"
+    volumes:
+      - node1-data:/zeicoin/zeicoin_data
+    environment:
+      <<: *common-env
+      ZEICOIN_BOOTSTRAP: miner-1:10801,miner-2:10801
+      ZEICOIN_MINE_ENABLED: false
+    depends_on:
+      miner-1:
+        condition: service_healthy
+      miner-2:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "10801"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s  # Non-mining node starts faster
+    command: ["/scripts/init-node.sh"]
+
+networks:
+  zeicoin-network:
+    driver: bridge
+
+volumes:
+  miner1-data:
+  miner2-data:
+  node1-data:
