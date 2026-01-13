@@ -219,11 +219,11 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
     if (found_nonce) {
         // Process coinbase transaction (create new coins!)
         // Note: new_block_height was already calculated at function start
-        try ctx.blockchain.chain_state.processCoinbaseTransaction(coinbase_tx, mining_address, new_block_height);
+        try ctx.blockchain.chain_state.processCoinbaseTransaction(coinbase_tx, mining_address, new_block_height, false);
 
         // Process regular transactions
         for (new_block.transactions[1..]) |tx| {
-            try ctx.blockchain.chain_state.processTransaction(tx);
+            try ctx.blockchain.chain_state.processTransaction(tx, false);
         }
 
         // Calculate cumulative chain work before saving (critical for reorganization)
