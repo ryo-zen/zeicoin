@@ -16,12 +16,8 @@ var running = std.atomic.Value(bool).init(true);
 fn signalHandler(sig: c_int) callconv(.C) void {
     _ = sig;
     running.store(false, .release);
-    log.info("\nReceived Ctrl+C, shutting down gracefully...", .{});
-    
-    // Give a moment for cleanup, then force exit if needed
-    std.time.sleep(2 * std.time.ns_per_s);
-    log.info("Force exit after 2 seconds...", .{});
-    std.process.exit(0);
+    // Signal received - main loop will exit and trigger defer cleanup
+    // systemd's TimeoutStopSec=10 acts as emergency timeout if cleanup hangs
 }
 
 pub fn main() !void {
@@ -85,13 +81,21 @@ pub fn main() !void {
     const rpc_thread = try std.Thread.spawn(.{}, RPCServer.start, .{rpc_server});
     rpc_thread.detach();
     
-    // Setup signal handlers
+    // Setup signal handlers for graceful shutdown
+    // Handle SIGINT (Ctrl+C)
     _ = std.posix.sigaction(std.posix.SIG.INT, &.{
         .handler = .{ .handler = signalHandler },
         .mask = std.posix.empty_sigset,
         .flags = 0,
     }, null);
-    
+
+    // Handle SIGTERM (systemd stop, kill command)
+    _ = std.posix.sigaction(std.posix.SIG.TERM, &.{
+        .handler = .{ .handler = signalHandler },
+        .mask = std.posix.empty_sigset,
+        .flags = 0,
+    }, null);
+
     std.log.info("✅ ZeiCoin node started successfully", .{});
     std.log.info("Press Ctrl+C to shutdown", .{});
     

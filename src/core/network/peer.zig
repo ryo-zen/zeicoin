@@ -328,10 +328,30 @@ pub const NetworkManager = struct {
         
         // CRITICAL: Must wait for all detached threads to finish
         // Network threads check self.running before accessing peer_manager
-        // 3 seconds should be enough for all threads to exit cleanly
+        // Poll active_connections with timeout to ensure clean shutdown
         std.log.info("Waiting for network threads to finish...", .{});
-        std.time.sleep(3000 * std.time.ns_per_ms);
-        std.log.info("Network shutdown complete", .{});
+
+        const max_wait_ms: u32 = 5000;  // 5 second timeout
+        const poll_interval_ms: u32 = 100;  // Check every 100ms
+        var waited_ms: u32 = 0;
+
+        while (waited_ms < max_wait_ms) {
+            const active = self.active_connections.load(.acquire);
+            if (active == 0) {
+                std.log.info("All {} network threads finished cleanly after {}ms", .{0, waited_ms});
+                break;
+            }
+            std.time.sleep(poll_interval_ms * std.time.ns_per_ms);
+            waited_ms += poll_interval_ms;
+        }
+
+        // Verify shutdown completed successfully
+        const remaining = self.active_connections.load(.acquire);
+        if (remaining > 0) {
+            std.log.warn("Shutdown timeout: {} threads still active after {}ms (possible memory leak)", .{remaining, max_wait_ms});
+        } else {
+            std.log.info("Network shutdown complete", .{});
+        }
     }
     
     /// Broadcast to all peers
