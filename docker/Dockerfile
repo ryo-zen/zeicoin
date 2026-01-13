@@ -1,7 +1,7 @@
 # Dockerfile - Complete build (Base + App)
 # Combined from Dockerfile.base and Dockerfile.fast for single-step build
 
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y \
     librocksdb-dev \
     libhwloc-dev \
     ca-certificates \
-    netcat \
+    netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Zig 0.14.1

@@ -280,6 +280,65 @@ environment:
   - ZEICOIN_WALLET_PASSWORD=password123
 ```
 
+## Multi-Node Reorganization Testing
+
+The environment is specifically tuned for rapid blockchain consensus testing. Blocks are generated approximately every 2 seconds on standard hardware.
+
+### Automated Test Scripts
+
+Automated scripts are available in `docker/scripts/` to verify complex consensus scenarios:
+
+```bash
+# 1. Standard Reorganization Test
+# Wipes data, mines 5 blocks on isolated nodes, reconnects, and verifies convergence.
+./docker/scripts/verify_reorg.sh
+
+# 2. Deep Reorganization Test
+# Similar to above but forces a 50+ block reorganization to test batch syncing and state rollbacks.
+./docker/scripts/verify_deep_reorg.sh
+```
+
+### High-Speed Parameters
+The following optimizations are active in the Docker environment to facilitate rapid consensus testing:
+- **Zero-Byte Difficulty**: Mining requires no leading zero bytes on TestNet (`src/core/types/types.zig`).
+- **Resilient Network Timeouts**: Fork detection timeouts are set to `15s` with `6` retries to handle high CPU load.
+- **Controlled Mining Speed**: A artificial `2s` delay is added to mining to prevent racing during reorganization.
+- **Empty Block Allowance**: `min_batch_size` is set to `0` to allow the chain to grow even without transactions.
+
+## Development Reference (Reorg Testing Optimizations)
+
+To enable near-instant mining and robust reorganization testing under high load, the following code modifications were performed in the core blockchain logic:
+
+### 1. Mining Difficulty (`src/core/types/types.zig`)
+Optimized for ~2s block times on local hardware:
+```zig
+// DifficultyTarget.initial(.testnet)
+.base_bytes = 0,          // Reduced from 1 (removes leading zero requirement)
+.threshold = 0x7FFFFFFF,  // Reduced from 0x80000000
+
+// COINBASE_MATURITY
+.testnet => 10,           // Reduced from 100 for faster reward spending
+```
+
+### 2. Fork Detection Resilience (`src/core/sync/fork_detector.zig`)
+Increased tolerance to prevent `error.Timeout` when the CPU is pegged at 100% by RandomX mining:
+```zig
+// requestBlockHashAtHeight
+const max_retries = 6;    // Increased from 3
+const timeout_ms = 15000; // Increased from 5000 (15 seconds per attempt)
+```
+
+### 3. Mining Thread Controls (`src/core/miner/manager.zig` & `core.zig`)
+Artificially slows down the mining loop and allows chain growth without transactions:
+```zig
+// src/core/miner/manager.zig
+const min_batch_size = 0; // Allow empty blocks for testing (normally 1)
+
+// src/core/miner/core.zig
+log.info("⛏️ ZenMineBlock: Starting to mine new block (Slowing down for TEST - 2s delay)", .{});
+std.time.sleep(2 * std.time.ns_per_s); // Artificial delay
+```
+
 ## Troubleshooting
 
 ### Nodes Not Connecting
@@ -305,10 +364,56 @@ docker-compose restart node-1
 sleep 5
 docker-compose restart node-2
 
-# Force rebuild if needed
+# Force complete rebuild (if restart doesn't fix issues)
+# This is the CORRECT way to rebuild Docker from scratch
+docker-compose down -v                    # Stop containers and remove volumes
+docker-compose rm -f -v                   # Remove lingering containers
+docker-compose down --rmi all             # Remove images
+docker builder prune -a -f                # Clear build cache (CRITICAL!)
+docker-compose build --no-cache --pull    # Rebuild with fresh base images
+docker-compose up -d                      # Start fresh containers
+
+# One-liner version (for efficiency)
+docker-compose down -v && docker-compose rm -f -v && docker-compose down --rmi all && docker builder prune -a -f && docker-compose build --no-cache --pull && docker-compose up -d
+```
+
+**Why each step matters:**
+- `docker-compose down -v` - Stops containers and removes named volumes
+- `docker-compose rm -f -v` - Removes any lingering stopped containers and anonymous volumes
+- `docker-compose down --rmi all` - Removes the actual Docker images (not just containers)
+- `docker builder prune -a -f` - **CRITICAL**: Clears BuildKit cache (343MB+ of stale build layers)
+- `--no-cache` - Forces rebuild of every layer without using cache
+- `--pull` - Pulls fresh base images from Docker Hub
+
+### RocksDB Corruption / "Unknown Footer version" Error
+
+If you see errors like:
+```
+error(storage): Failed to open RocksDB at 'zeicoin_data_testnet/rocksdb': Corruption: Unknown Footer version
+❌ Database is locked or in use by another process
+```
+
+This means old RocksDB database files are baked into Docker images from previous builds. **Solution:**
+
+```bash
+# Complete Docker cleanup (this fixes RocksDB version mismatches)
 docker-compose down -v
-docker-compose build --no-cache
+docker-compose rm -f -v
+docker-compose down --rmi all
+docker builder prune -a -f          # This step is CRITICAL for RocksDB issues!
+docker-compose build --no-cache --pull
 docker-compose up -d
+```
+
+**Why this happens:**
+- Docker's BuildKit caches intermediate build layers
+- If zeicoin_data directory exists during Docker build, it gets cached
+- Subsequent builds reuse this cached layer with old RocksDB files
+- The `docker builder prune -a -f` command clears this stale cache
+
+**Nuclear option** (if above doesn't work):
+```bash
+docker system prune -a --volumes -f  # WARNING: Removes ALL Docker data!
 ```
 
 ### Wallet Creation Fails
