@@ -199,7 +199,8 @@ pub const ReorgExecutor = struct {
     /// Apply a single block to the chain
     fn applyBlock(self: *Self, block: *const Block, height: u32) !void {
         // Process all transactions in the block using ChainState
-        try self.chain_state.processBlockTransactions(block.transactions, height);
+        // Force processing = true because we might be reapplying blocks that exist in DB
+        try self.chain_state.processBlockTransactions(block.transactions, height, true);
 
         // Save block to database
         try self.db.saveBlock(height, block.*);

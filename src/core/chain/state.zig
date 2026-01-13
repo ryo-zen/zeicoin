@@ -162,10 +162,10 @@ pub const ChainState = struct {
     }
 
     /// Process a regular transaction and update account states
-    pub fn processTransaction(self: *Self, tx: Transaction) !void {
+    pub fn processTransaction(self: *Self, tx: Transaction, force_processing: bool) !void {
         // CRITICAL: Check for duplicate transaction before processing
         const tx_hash = tx.hash();
-        if (self.database.hasTransaction(tx_hash)) {
+        if (!force_processing and self.database.hasTransaction(tx_hash)) {
             const tx_hash_hex = std.fmt.fmtSliceHexLower(tx_hash[0..8]);
             log.info("🚫 [DUPLICATE TX] Transaction {s} already exists in blockchain - SKIPPING to prevent double-spend", .{tx_hash_hex});
             return; // Skip processing duplicate transaction
@@ -261,10 +261,10 @@ pub const ChainState = struct {
     }
 
     /// Process a coinbase transaction (mining reward)
-    pub fn processCoinbaseTransaction(self: *Self, coinbase_tx: Transaction, miner_address: Address, current_height: u32) !void {
+    pub fn processCoinbaseTransaction(self: *Self, coinbase_tx: Transaction, miner_address: Address, current_height: u32, force_processing: bool) !void {
         // CRITICAL: Check for duplicate coinbase transaction before processing
         const tx_hash = coinbase_tx.hash();
-        if (self.database.hasTransaction(tx_hash)) {
+        if (!force_processing and self.database.hasTransaction(tx_hash)) {
             const tx_hash_hex = std.fmt.fmtSliceHexLower(tx_hash[0..8]);
             log.info("🚫 [DUPLICATE COINBASE] Coinbase transaction {s} already exists in blockchain - SKIPPING to prevent double-spend", .{tx_hash_hex});
             return; // Skip processing duplicate coinbase transaction
@@ -366,10 +366,10 @@ pub const ChainState = struct {
             for (block.transactions) |tx| {
                 if (self.isCoinbaseTransaction(tx)) {
                     // Use the canonical coinbase processing logic
-                    try self.processCoinbaseTransaction(tx, tx.recipient, @intCast(height));
+                    try self.processCoinbaseTransaction(tx, tx.recipient, @intCast(height), true);
                 } else {
                     // Use the canonical regular transaction processing logic
-                    try self.processTransaction(tx);
+                    try self.processTransaction(tx, true);
                 }
             }
         }
@@ -502,7 +502,7 @@ pub const ChainState = struct {
     }
 
     /// Process all transactions in a block
-    pub fn processBlockTransactions(self: *Self, transactions: []Transaction, current_height: u32) !void {
+    pub fn processBlockTransactions(self: *Self, transactions: []Transaction, current_height: u32, force_processing: bool) !void {
         log.info("🔍 [BLOCK TX] Processing {} transactions at height {}", .{ transactions.len, current_height });
 
         // First pass: process all coinbase transactions
@@ -511,13 +511,13 @@ pub const ChainState = struct {
                 const tx_hash = tx.hash();
 
                 // Check for duplicate processing to prevent double-spend during sync replay
-                if (self.isTransactionProcessed(tx_hash)) {
+                if (!force_processing and self.isTransactionProcessed(tx_hash)) {
                     log.info("🔄 [TX DEDUP] Coinbase transaction {} already processed, skipping", .{i});
                     continue;
                 }
 
                 log.info("🔍 [BLOCK TX] Processing coinbase transaction {} at height {}", .{ i, current_height });
-                try self.processCoinbaseTransaction(tx, tx.recipient, current_height);
+                try self.processCoinbaseTransaction(tx, tx.recipient, current_height, force_processing);
             }
         }
 
@@ -527,13 +527,13 @@ pub const ChainState = struct {
                 const tx_hash = tx.hash();
 
                 // Check for duplicate processing to prevent double-spend during sync replay
-                if (self.isTransactionProcessed(tx_hash)) {
+                if (!force_processing and self.isTransactionProcessed(tx_hash)) {
                     log.info("🔄 [TX DEDUP] Regular transaction {} already processed, skipping", .{i});
                     continue;
                 }
 
                 log.info("🔍 [BLOCK TX] Processing regular transaction {} at height {}", .{ i, current_height });
-                try self.processTransaction(tx);
+                try self.processTransaction(tx, force_processing);
             }
         }
 

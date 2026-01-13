@@ -194,7 +194,7 @@ pub const ChainOperations = struct {
     /// Add a validated block to the chain
     pub fn addBlockToChain(self: *Self, block: Block, height: u32) !void {
         // Process all transactions in the block
-        try self.chain_state.processBlockTransactions(block.transactions, height);
+        try self.chain_state.processBlockTransactions(block.transactions, height, false);
 
         // Save block to database
         try self.chain_state.database.saveBlock(height, block);
@@ -224,7 +224,7 @@ pub const ChainOperations = struct {
         }
 
         // Process transactions
-        try self.chain_state.processBlockTransactions(block.transactions, target_height);
+        try self.chain_state.processBlockTransactions(block.transactions, target_height, false);
 
         // Save to database
         try self.chain_state.database.saveBlock(target_height, block);
@@ -237,7 +237,7 @@ pub const ChainOperations = struct {
         const block_height = try self.getHeight();
 
         // Process all transactions in the block
-        try self.chain_state.processBlockTransactions(block.transactions, block_height);
+        try self.chain_state.processBlockTransactions(block.transactions, block_height, false);
 
         // Save block to database
         try self.chain_state.database.saveBlock(block_height, block);

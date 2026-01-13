@@ -274,9 +274,9 @@ pub const ChainProcessor = struct {
             }
 
             if (tx.isCoinbase()) {
-                try self.chain_state.processCoinbaseTransaction(tx, tx.recipient, height);
+                try self.chain_state.processCoinbaseTransaction(tx, tx.recipient, height, false);
             } else {
-                try self.chain_state.processTransaction(tx);
+                try self.chain_state.processTransaction(tx, false);
             }
         }
     }

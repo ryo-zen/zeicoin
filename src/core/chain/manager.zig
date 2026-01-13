@@ -150,8 +150,8 @@ pub const ChainManager = struct {
         // Save genesis block at height 0  
         try self.state.database.saveBlock(0, genesis_block);
         
-        // Process genesis transactions to initialize accounts
-        try self.state.processBlockTransactions(genesis_block.transactions, 0);
+        // Process genesis transactions - force processing as this is initialization
+        try self.state.processBlockTransactions(genesis_block.transactions, 0, true);
         
         log.info("✅ Genesis block initialized for network {}", .{network});
     }
