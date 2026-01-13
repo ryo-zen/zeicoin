@@ -39,23 +39,16 @@ echo "🔍 Checking for divergence at height ${BLOCK_HEIGHT}..."
 
 # Get raw output from Miner 1
 RAW1=$(docker exec zeicoin-miner-1 ./zig-out/bin/zeicoin block $BLOCK_HEIGHT 2>&1)
-# Extract hash
 HASH1=$(echo "$RAW1" | grep '"hash":' | awk -F'"' '{print $4}')
 echo "   Miner 1 Hash: $HASH1"
 
 # Get raw output from Miner 2
 RAW2=$(docker exec zeicoin-miner-2 ./zig-out/bin/zeicoin block $BLOCK_HEIGHT 2>&1)
-# Extract hash
 HASH2=$(echo "$RAW2" | grep '"hash":' | awk -F'"' '{print $4}')
 echo "   Miner 2 Hash: $HASH2"
 
-# Validation
 if [ -z "$HASH1" ] || [ -z "$HASH2" ]; then
     echo "❌ TEST FAILED: Could not retrieve block hashes."
-    echo "   Miners likely did not reach height ${BLOCK_HEIGHT} in the allotted time."
-    echo "   Current Heights:"
-    docker exec zeicoin-miner-1 ./zig-out/bin/zeicoin status | grep "Height"
-    docker exec zeicoin-miner-2 ./zig-out/bin/zeicoin status | grep "Height"
     exit 1
 fi
 
@@ -65,6 +58,26 @@ if [ "$HASH1" == "$HASH2" ]; then
 fi
 
 echo "✅ SUCCESS: Chains have diverged (hashes differ)!"
+
+# FREEZE CHAIN STEP
+echo "❄️  Freezing Miner 1 (Stopping mining to allow catch-up)..."
+# 1. Stop the mining container
+docker stop zeicoin-miner-1
+docker rm zeicoin-miner-1
+# 2. Start it back up as a passive node (no mining script) using the same volume
+# We need to manually construct the run command to match the network/volumes of compose
+docker run -d --name zeicoin-miner-1 \
+  --network docker_zeicoin-network \
+  --network-alias miner-1 \
+  -v docker_miner1-data:/zeicoin/zeicoin_data \
+  -e ZEICOIN_NETWORK=testnet \
+  -e ZEICOIN_BIND_IP=0.0.0.0 \
+  -e ZEICOIN_SERVER=0.0.0.0 \
+  docker-miner-1:latest \
+  ./zig-out/bin/zen_server
+
+echo "✅ Miner 1 restarted in passive mode (Chain frozen)"
+sleep 5 # Give it a moment to initialize
 
 # 3. Convergence Phase
 echo "🔗 Reconnecting Miner 2 to network..."
