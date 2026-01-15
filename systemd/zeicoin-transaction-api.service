@@ -8,7 +8,12 @@ Type=simple
 User=root
 WorkingDirectory=/root/zeicoin
 EnvironmentFile=-/root/zeicoin/.env
+EnvironmentFile=-/root/zeicoin/.env.local
 Environment="ZEICOIN_SERVER=127.0.0.1"
+
+# Clean up stale api processes
+ExecStartPre=-/usr/bin/pkill -9 -x transaction_api
+
 ExecStart=/root/zeicoin/zig-out/bin/transaction_api
 Restart=always
 RestartSec=5

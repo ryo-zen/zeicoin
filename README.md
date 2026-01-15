@@ -39,6 +39,7 @@ Key features include an account-based transaction model, concurrent blockchain a
 - **Zig** 0.14.1
 - **RandomX** proof-of-work mining algorithm
 - **RocksDB** libraries (`librocksdb-dev` on Ubuntu/Debian)
+- **Memory**: 2GB+ RAM recommended. For 1GB nodes, **4GB of swap is required** (see `systemd/README.md`).
 
 ### Optional (Not Required for Running a Node)
 - **PostgreSQL** 12+ (only for analytics and L2 messaging features)
@@ -288,7 +289,6 @@ sudo systemctl status zeicoin.target
 - `zeicoin-mining.service` - Main mining server with auto-restart
 - `zeicoin-server.service` - Non-mining blockchain server
 - `zeicoin-indexer.timer` - Automatic indexing every 30 seconds
-- `zeicoin-rest-api.service` - REST API for analytics
 - `zeicoin.target` - Start/stop all services together
 
 See [systemd/README.md](systemd/README.md) for detailed installation and configuration instructions.
@@ -378,11 +378,24 @@ zig build clean                    # Clean artifacts
 
 ## Contributing
 
-Contributions are welcome! Please:
+We welcome contributions to ZeiCoin! There are several ways to help:
+
+### Run a Bootstrap Node
+
+Help grow the testnet by running a public bootstrap node! Requirements:
+- Public static IP with port 10801 open
+- 2GB+ RAM, 10GB+ storage
+- 99%+ uptime commitment
+
+See **[CONTRIBUTING.md](CONTRIBUTING.md#running-a-bootstrap-node)** for detailed setup instructions and how to submit your node via pull request.
+
+**Current Bootstrap Nodes**: See [config/bootstrap_testnet.json](config/bootstrap_testnet.json)
+
+### Code Contributions
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/fire-feature`)
-3. Test your changes
+3. Test your changes (`zig build test`)
 4. Commit your changes (`git commit -m 'feature: fire feature'`)
 5. Push to the branch (`git push origin feature/fire-feature`)
 6. Open a Pull Request
@@ -391,7 +404,9 @@ Contributions are welcome! Please:
 - Follow Zig best practices
 - Add tests for new features
 - Update documentation
-- Ensure all tests pass (`zig build test`)
+- Ensure code compiles and tests pass
+
+For detailed guidelines, see **[CONTRIBUTING.md](CONTRIBUTING.md)**
 
 ## License
 
