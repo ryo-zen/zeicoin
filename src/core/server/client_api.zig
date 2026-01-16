@@ -192,12 +192,15 @@ pub const ClientApiServer = struct {
                 break :blk 150.5; // Placeholder hash rate
             } else 0.0;
         }
+
+        // If mining, we are working on the NEXT block (height + 1)
+        const display_height = if (is_mining) height + 1 else height;
         
         // Format: "STATUS:height:peers:mempool:mining:hashrate"
         const response = try std.fmt.allocPrint(
             self.allocator,
             "STATUS:{}:{}:{}:{}:{d:.1}\n",
-            .{height, connected_peers, pending_count, is_mining, hash_rate}
+            .{display_height, connected_peers, pending_count, is_mining, hash_rate}
         );
         defer self.allocator.free(response);
         
