@@ -2,10 +2,18 @@
 // Clean, simple, Zig-native serialization for ZeiCoin data structures
 
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 const types = @import("../types/types.zig");
 
 const log = std.log.scoped(.storage);
+
+// Debug logging helper - only logs in Debug builds
+fn debugLog(comptime fmt: []const u8, args: anytype) void {
+    if (builtin.mode == .Debug) {
+        log.debug(fmt, args);
+    }
+}
 
 // Error types for serialization
 pub const SerializeError = error{
@@ -307,54 +315,40 @@ pub fn readBlockHeader(reader: anytype) !types.BlockHeader {
 
 /// Serialize a Block to a writer
 pub fn writeBlock(writer: anytype, block: types.Block) !void {
-    log.info("🔍 SYNC DEBUG: writeBlock() starting", .{});
-    log.info("  📋 Block header version: {}", .{block.header.version});
-    log.info("  📋 Block timestamp: {}", .{block.header.timestamp});
-    log.info("  📋 Block nonce: {}", .{block.header.nonce});
-    log.info("  📋 Block height: {}", .{block.height});
-    log.info("  📋 Transaction count: {}", .{block.transactions.len});
+    debugLog("writeBlock() starting - height: {}, txs: {}", .{ block.height, block.transactions.len });
 
     // Serialize header
     try block.header.serialize(writer);
-    log.info("  ✅ Header serialized", .{});
 
-    // Serialize height (Fix 2: include block height in serialization)
+    // Serialize height
     try writer.writeInt(u32, block.height, .little);
-    log.info("  ✅ Height serialized: {}", .{block.height});
 
     // Serialize transaction count
     try writer.writeInt(u32, @intCast(block.transactions.len), .little);
-    log.info("  ✅ Transaction count serialized: {}", .{block.transactions.len});
 
     // Serialize each transaction
-    for (block.transactions, 0..) |tx, i| {
-        log.info("  📝 Serializing transaction {}/{}", .{i + 1, block.transactions.len});
+    for (block.transactions) |tx| {
         try writeTransaction(writer, tx);
     }
-    log.info("🔍 SYNC DEBUG: writeBlock() completed", .{});
+
+    debugLog("writeBlock() completed - height: {}", .{block.height});
 }
 
 /// Deserialize a Block from a reader
 pub fn readBlock(reader: anytype, allocator: std.mem.Allocator) !types.Block {
-    log.info("🔍 SYNC DEBUG: readBlock() starting", .{});
+    debugLog("readBlock() starting", .{});
 
     // Deserialize header
     const header = try types.BlockHeader.deserialize(reader);
-    log.info("  📋 Deserialized header version: {} (hex: 0x{X})", .{header.version, header.version});
-    log.info("  📋 Deserialized timestamp: {}", .{header.timestamp});
-    log.info("  📋 Deserialized nonce: {}", .{header.nonce});
-    log.info("  📋 Deserialized difficulty: {}", .{header.difficulty});
 
-    // Deserialize height (Fix 2: read block height from serialization)
+    // Deserialize height
     const height = try reader.readInt(u32, .little);
-    log.info("  📋 Deserialized height: {}", .{height});
 
     // Deserialize transaction count
     const tx_count = try reader.readInt(u32, .little);
-    log.info("  📋 Deserialized transaction count: {}", .{tx_count});
 
     if (tx_count > 100000) {
-        log.info("  ❌ WARNING: Suspicious transaction count: {}", .{tx_count});
+        log.warn("Suspicious transaction count: {}", .{tx_count});
     }
 
     // Deserialize transactions
@@ -363,19 +357,17 @@ pub fn readBlock(reader: anytype, allocator: std.mem.Allocator) !types.Block {
 
     var i: usize = 0;
     while (i < tx_count) : (i += 1) {
-        log.info("  📝 Deserializing transaction {}/{}", .{i + 1, tx_count});
         transactions[i] = readTransaction(reader, allocator) catch |err| {
-            log.info("  ❌ Error deserializing transaction {}: {}", .{i, err});
-            // If an error occurs, deinit all previously read transactions to prevent leaks
+            log.err("Error deserializing transaction {}: {}", .{ i, err });
+            // Free previously read transactions to prevent leaks
             for (transactions[0..i]) |*tx| {
                 tx.deinit(allocator);
             }
-            // Propagate the error, which will trigger the outer errdefer to free the main array
             return err;
         };
     }
 
-    log.info("🔍 SYNC DEBUG: readBlock() completed successfully", .{});
+    debugLog("readBlock() completed - height: {}, txs: {}", .{ height, tx_count });
     return types.Block{
         .header = header,
         .transactions = transactions,
