@@ -54,7 +54,9 @@ pub const BlockProcessor = struct {
         self.logIncomingBlock(peer, block.transactions.len);
 
         // Validate block
-        const block_height = try self.blockchain.getHeight() + 1;
+        // CRITICAL FIX: Use block's own height for validation
+        // This ensures forks and reorg blocks (which may not be tip+1) are validated correctly
+        const block_height = block.height; 
         log.debug("About to validate block at height {}", .{block_height});
         if (!try self.validateBlock(&owned_block, block_height)) {
             log.warn("Block validation FAILED, returning rejected", .{});
@@ -90,13 +92,36 @@ pub const BlockProcessor = struct {
             log.debug("Block validated - checking chain continuity", .{});
             var block_copy = context.block;
             if (!try self.validateChainContinuity(&block_copy, context.block_height)) {
+                // Block doesn't connect - this might be a fork scenario
+                log.warn("Block doesn't connect to our chain - possible fork", .{});
+
+                // If block is from a peer with similar or higher height, this is likely a fork
+                // Store as orphan instead of rejecting to allow fork resolution
+                if (peer) |p| {
+                    if (p.height >= (try self.blockchain.getHeight())) {
+                        log.info("🔀 [FORK] Block from peer at height {} doesn't connect - storing as orphan for fork resolution", .{p.height});
+
+                        // Try to store as orphan for later processing
+                        var orphan_block = try context.block.clone(self.allocator);
+                        self.blockchain.chain_processor.orphan_pool.addOrphan(orphan_block) catch |err| {
+                            log.warn("Failed to store as orphan: {}", .{err});
+                            orphan_block.deinit(self.allocator);
+                            // Ignore the block but don't disconnect peer
+                            return .ignored;
+                        };
+
+                        return .stored_as_orphan;
+                    }
+                }
+
+                // Not a fork scenario - genuinely invalid block
                 log.warn("Block rejected - doesn't connect properly", .{});
                 return .rejected;
             }
             try self.handleMainChainExtension(&block_copy, context.block_height);
             return .accepted;
         } else {
-            // Invalid block - ignore it  
+            // Invalid block - ignore it
             log.debug("Block invalid - gracefully ignored", .{});
             return .ignored;
         }
@@ -249,65 +274,49 @@ pub const BlockProcessor = struct {
         log.info("New best chain detected! Starting reorganization...", .{});
 
         // Import modern reorganization architecture
-        const ReorgManager = @import("../../chain/reorganization/manager.zig").ReorgManager;
-        const ChainValidator = @import("../../chain/validator.zig").ChainValidator;
-        const ChainOperations = @import("../../chain/operations.zig").ChainOperations;
-
-        // Initialize reorganization components
-        var chain_validator = ChainValidator.init(self.allocator, &self.blockchain.chain_state);
-        defer chain_validator.deinit();
-
-        var chain_operations = ChainOperations.init(self.allocator, &self.blockchain.chain_state, &chain_validator);
-        defer chain_operations.deinit();
-
-        // Initialize modern reorganization manager
-        var reorg_manager = ReorgManager.init(
-            self.allocator,
-            &self.blockchain.chain_state,
-            &chain_validator,
-            &chain_operations,
-        ) catch |err| {
-            log.err("Failed to initialize reorganization manager: {}", .{err});
-            return;
+        // Reorganization is handled by sync manager detecting competing chains
+        // Just try to accept the block - chain processor will store as orphan if needed
+        log.info("Fork detected - delegating to chain processor", .{});
+        self.blockchain.chain_processor.acceptBlock(owned_block.*) catch |err| {
+            log.warn("Failed to accept block (stored as orphan): {}", .{err});
         };
-        defer reorg_manager.deinit();
-
-        // Execute complete reorganization
-        const new_chain_tip = owned_block.hash();
-        const reorg_result = reorg_manager.executeReorganization(owned_block.*, new_chain_tip) catch |err| {
-            log.err("Chain reorganization failed: {}", .{err});
-            return;
-        };
-
-        // Handle reorganization result
-        if (reorg_result.success) {
-            log.info("Modern reorganization completed successfully!", .{});
-            log.info("Stats: {} blocks reverted, {} applied, {} txs replayed ({} ms)", .{ reorg_result.blocks_reverted, reorg_result.blocks_applied, reorg_result.transactions_replayed, reorg_result.duration_ms });
-
-            // Block will be cleaned up by caller
-        } else {
-            log.err("Reorganization failed: {s}", .{reorg_result.error_message orelse "Unknown error"});
-            owned_block.deinit(self.allocator);
-        }
+        owned_block.deinit(self.allocator);
     }
 
     /// Handle main chain extension
     fn handleMainChainExtension(self: *Self, owned_block: *Block, block_height: u32) !void {
-        log.info("Block extends main chain - adding to blockchain", .{});
+        log.info("Block passes validation - submitting to chain processor", .{});
 
         // Create a deep copy of the block for chain processor
         var block_copy = try owned_block.dupe(self.allocator);
 
-        // Transfer ownership to chain processor
-        self.blockchain.chain_processor.addBlockToChain(block_copy, block_height) catch |err| {
-            log.err("Failed to add block to chain: {}", .{err});
+        // Get current tip before processing to detect if chain advanced
+        const old_tip_height = self.blockchain.getHeight() catch 0;
+
+        // Transfer ownership to chain processor via acceptBlock
+        // acceptBlock handles orphans, forks, and extensions correctly
+        self.blockchain.chain_processor.acceptBlock(block_copy) catch |err| {
+            log.err("Failed to accept block: {}", .{err});
             block_copy.deinit(self.allocator);
             return;
         };
-        // Ownership transferred to chain_processor
+        // Ownership transferred to chain_processor (if successful)
         // Note: chain_processor now owns block_copy
 
-        // Block will be cleaned up by caller for broadcasting
+        // Check if chain actually advanced
+        const new_tip_height = self.blockchain.getHeight() catch 0;
+        
+        if (new_tip_height == old_tip_height) {
+            // Chain didn't advance, meaning block was likely stored as an orphan/fork
+            log.info("Block {} did not advance chain (tip: {}) - triggering sync/reorg check", .{block_height, new_tip_height});
+            
+            // Trigger auto-sync to handle potential reorg or missing parents
+            self.triggerAutoSync() catch |err| {
+                log.warn("Failed to trigger auto-sync: {}", .{err});
+            };
+        } else {
+            log.info("Chain advanced to height {}", .{new_tip_height});
+        }
     }
 
     /// Handle side chain block
@@ -351,7 +360,7 @@ pub const BlockProcessor = struct {
             if (self.blockchain.network_coordinator.getNetworkManager()) |network| {
                 if (network.peer_manager.getBestPeerForSync()) |best_peer| {
                     // Use libp2p-powered batch sync for improved performance
-                    try sync_manager.startSync(best_peer, best_peer.height);
+                    try sync_manager.startSync(best_peer, best_peer.height, false);
                     log.info("libp2p batch auto-sync triggered due to orphan block with peer height {}", .{best_peer.height});
                 } else {
                     log.warn("No peers available for auto-sync", .{});

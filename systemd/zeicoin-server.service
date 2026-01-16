@@ -7,8 +7,17 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=/root/zeicoin
+EnvironmentFile=-/root/zeicoin/.env
+EnvironmentFile=-/root/zeicoin/.env.local
 Environment="ZEICOIN_SERVER=127.0.0.1"
 Environment="ZEICOIN_BOOTSTRAP=209.38.31.77:10801,134.199.170.129:10801"
+
+# Clean up stale RocksDB lock before starting (handles crash recovery)
+ExecStartPre=-/usr/bin/pkill -9 -x zen_server
+ExecStartPre=/bin/sleep 1
+ExecStartPre=-/bin/rm -f /root/zeicoin/zeicoin_data_testnet/rocksdb/LOCK
+ExecStartPre=-/bin/rm -f /root/zeicoin/zeicoin_data_mainnet/rocksdb/LOCK
+
 ExecStart=/root/zeicoin/zig-out/bin/zen_server --mine miner
 Restart=always
 RestartSec=10

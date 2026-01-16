@@ -53,10 +53,18 @@ pub const MessageType = enum(u8) {
     get_mempool = 12,
     mempool_inv = 13,
 
+    // Missing block requests (Fix 3: Orphan block resolution)
+    get_missing_blocks = 14,
+    missing_blocks_response = 15,
+
+    // Chain work requests (for reorganization)
+    get_chain_work = 16,
+    chain_work_response = 17,
+
     _,
 
     pub fn isValid(self: MessageType) bool {
-        return @intFromEnum(self) <= @intFromEnum(MessageType.mempool_inv);
+        return @intFromEnum(self) <= @intFromEnum(MessageType.chain_work_response);
     }
 };
 

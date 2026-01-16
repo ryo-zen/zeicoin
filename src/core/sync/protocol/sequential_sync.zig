@@ -46,19 +46,34 @@ pub fn requestBlock(peer: *Peer, hash: Hash) !Block {
 pub fn requestBlockByHeight(peer: *Peer, height: u32) !Block {
     log.debug("Requesting block by height: {}", .{height});
     
-    // Send single block request by height
-    try peer.sendGetBlock(height);
+    // Send ZSP-001 height-encoded block request
+    try peer.sendGetBlockByHeight(height);
     
+    // ZSP-001 height encoding uses height-encoded hash
+    var height_hash: [32]u8 = [_]u8{0} ** 32;
+    std.mem.writeInt(u32, height_hash[0..4], height, .little);
+    const ZSP_001_HEIGHT_MAGIC: u32 = 0xDEADBEEF;
+    std.mem.writeInt(u32, height_hash[4..8], ZSP_001_HEIGHT_MAGIC, .little);
+
     // Wait for response with timeout
     const timeout_ms = 30000; // 30 seconds
     const start_time = util.getTime();
     
-    // ZSP-001: Sequential sync utilities are minimal stubs for legacy peer support
-    // In practice, ZSP-001 batch sync is preferred
-    _ = timeout_ms;
-    _ = start_time;
-    log.warn("Block request by height not implemented (use batch sync)", .{});
-    return error.NotImplemented;
+    while (util.getTime() - start_time < timeout_ms / 1000) {
+        // Check if block has arrived
+        // Note: Peer stores received blocks by hash. For height-encoded requests,
+        // we might need to check if a block with matching height arrived.
+        if (peer.getReceivedBlockByHeight(height)) |block| {
+            log.info("Block {} received by height", .{height});
+            return block;
+        }
+        
+        // Small delay to avoid busy waiting
+        std.time.sleep(100 * std.time.ns_per_ms);
+    }
+    
+    log.warn("Block {} request timed out", .{height});
+    return error.BlockRequestTimeout;
 }
 
 /// Request the latest block from a peer

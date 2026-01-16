@@ -36,12 +36,15 @@ pub const ChainState = struct {
     // O(1) block lookups - replaces O(n) searches
     block_index: block_index.BlockIndex,
 
+    mutex: std.Thread.Mutex,
+
     allocator: std.mem.Allocator,
 
     const Self = @This();
 
     /// Helper method to format address for logging in ChainState context
     fn formatAddressForLogging(self: *const Self, address: Address) []const u8 {
+        // Safe to access allocator without lock as it's thread-safe or immutable in this context
         return formatAddress(self.allocator, address);
     }
 
@@ -51,6 +54,7 @@ pub const ChainState = struct {
             .database = database,
             .processed_transactions = std.ArrayList([32]u8).init(allocator),
             .block_index = block_index.BlockIndex.init(allocator),
+            .mutex = .{},
             .allocator = allocator,
         };
     }
@@ -65,37 +69,49 @@ pub const ChainState = struct {
     /// Initialize block index from existing blockchain data
     /// Should be called after ChainState creation to populate O(1) lookups
     pub fn initializeBlockIndex(self: *Self) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         try self.block_index.rebuild(self.database);
         log.info("✅ ChainState: Block index initialized", .{});
     }
 
     /// Check if a block hash already exists in the chain
     /// Important for preventing duplicate blocks
-    pub fn hasBlock(self: *const Self, block_hash: Hash) bool {
+    pub fn hasBlock(self: *Self, block_hash: Hash) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         return self.block_index.hasBlock(block_hash);
     }
 
     /// Add block to index when new block is processed
     /// Maintains O(1) lookup performance for reorganizations
     pub fn indexBlock(self: *Self, height: u32, block_hash: Hash) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         try self.block_index.addBlock(height, block_hash);
     }
 
     /// Remove blocks from index during reorganization
     /// Used when rolling back to a previous chain state
     pub fn removeBlocksFromIndex(self: *Self, from_height: u32) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         self.block_index.removeFromHeight(from_height);
     }
 
     /// Get block height by hash - O(1) operation
     /// Replaces the O(n) search in reorganization.zig
-    pub fn getBlockHeight(self: *const Self, block_hash: Hash) ?u32 {
+    pub fn getBlockHeight(self: *Self, block_hash: Hash) ?u32 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         return self.block_index.getHeight(block_hash);
     }
 
     /// Get block hash by height - O(1) operation
     /// Useful for chain validation and reorganization
-    pub fn getBlockHash(self: *const Self, height: u32) ?Hash {
+    pub fn getBlockHash(self: *Self, height: u32) ?Hash {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         return self.block_index.getHash(height);
     }
 
@@ -146,10 +162,10 @@ pub const ChainState = struct {
     }
 
     /// Process a regular transaction and update account states
-    pub fn processTransaction(self: *Self, tx: Transaction) !void {
+    pub fn processTransaction(self: *Self, tx: Transaction, force_processing: bool) !void {
         // CRITICAL: Check for duplicate transaction before processing
         const tx_hash = tx.hash();
-        if (self.database.hasTransaction(tx_hash)) {
+        if (!force_processing and self.database.hasTransaction(tx_hash)) {
             const tx_hash_hex = std.fmt.fmtSliceHexLower(tx_hash[0..8]);
             log.info("🚫 [DUPLICATE TX] Transaction {s} already exists in blockchain - SKIPPING to prevent double-spend", .{tx_hash_hex});
             return; // Skip processing duplicate transaction
@@ -245,10 +261,10 @@ pub const ChainState = struct {
     }
 
     /// Process a coinbase transaction (mining reward)
-    pub fn processCoinbaseTransaction(self: *Self, coinbase_tx: Transaction, miner_address: Address, current_height: u32) !void {
+    pub fn processCoinbaseTransaction(self: *Self, coinbase_tx: Transaction, miner_address: Address, current_height: u32, force_processing: bool) !void {
         // CRITICAL: Check for duplicate coinbase transaction before processing
         const tx_hash = coinbase_tx.hash();
-        if (self.database.hasTransaction(tx_hash)) {
+        if (!force_processing and self.database.hasTransaction(tx_hash)) {
             const tx_hash_hex = std.fmt.fmtSliceHexLower(tx_hash[0..8]);
             log.info("🚫 [DUPLICATE COINBASE] Coinbase transaction {s} already exists in blockchain - SKIPPING to prevent double-spend", .{tx_hash_hex});
             return; // Skip processing duplicate coinbase transaction
@@ -325,11 +341,10 @@ pub const ChainState = struct {
 
     /// Clear all account state for rebuild
     pub fn clearAllAccounts(self: *Self) !void {
-        // With RocksDB, we would need to iterate and delete all account keys
-        // For now, this is a no-op since we don't have a batch delete API
-        // Accounts will be overwritten as needed during rebuild
-        _ = self;
-        log.info("  ⚠️  Account clearing not implemented for RocksDB backend", .{});
+        // Use the new batch deletion capability in Database
+        // This ensures no "dirty state" remains from reverted blocks
+        try self.database.deleteAllAccounts();
+        log.info("🧹 All accounts cleared for state rebuild", .{});
     }
 
     /// Replay blockchain from genesis to rebuild state
@@ -347,14 +362,14 @@ pub const ChainState = struct {
                 // Block index rebuild failure logging disabled - too verbose during reorganization
             };
 
-            // Process each transaction in the block
+            // Process each transaction in the block using the same logic as normal chain processing
             for (block.transactions) |tx| {
                 if (self.isCoinbaseTransaction(tx)) {
-                    // Process coinbase - simplified for now
-                    try self.replayCoinbaseTransaction(tx);
+                    // Use the canonical coinbase processing logic
+                    try self.processCoinbaseTransaction(tx, tx.recipient, @intCast(height), true);
                 } else {
-                    // Process regular transaction
-                    try self.replayRegularTransaction(tx);
+                    // Use the canonical regular transaction processing logic
+                    try self.processTransaction(tx, true);
                 }
             }
         }
@@ -369,11 +384,36 @@ pub const ChainState = struct {
         // Remove blocks from index that will be rolled back
         self.removeBlocksFromIndex(target_height + 1);
 
-        // Clear all account state - we'll rebuild by replaying from genesis
+        // Delete rolled-back blocks from database to prevent duplicate TX detection
+        try self.database.deleteBlocksFromHeight(target_height + 1, current_height);
+
+        // Clear all account state and supply metrics - we'll rebuild by replaying from genesis
         try self.clearAllAccounts();
+        try self.database.resetTotalSupply();
 
         // Replay blockchain from genesis up to target height
         try self.replayFromGenesis(target_height);
+    }
+
+    /// Rollback state (accounts) to specific height WITHOUT deleting blocks
+    /// This is used during reorganization to safely revert state before applying new blocks
+    /// If the reorg fails, the old blocks are still in the database for recovery
+    pub fn rollbackStateWithoutDeletingBlocks(self: *Self, target_height: u32, current_height: u32) !void {
+        if (target_height >= current_height) {
+            return; // Nothing to rollback
+        }
+
+        // Remove blocks from index that will be rolled back
+        self.removeBlocksFromIndex(target_height + 1);
+
+        // Clear all account state and supply metrics - we'll rebuild by replaying from genesis
+        try self.clearAllAccounts();
+        try self.database.resetTotalSupply();
+
+        // Replay blockchain from genesis up to target height
+        try self.replayFromGenesis(target_height);
+
+        std.log.info("🔄 [STATE ROLLBACK] State reverted to height {} (blocks preserved)", .{target_height});
     }
 
     /// Check if transaction is a coinbase transaction
@@ -462,7 +502,7 @@ pub const ChainState = struct {
     }
 
     /// Process all transactions in a block
-    pub fn processBlockTransactions(self: *Self, transactions: []Transaction, current_height: u32) !void {
+    pub fn processBlockTransactions(self: *Self, transactions: []Transaction, current_height: u32, force_processing: bool) !void {
         log.info("🔍 [BLOCK TX] Processing {} transactions at height {}", .{ transactions.len, current_height });
 
         // First pass: process all coinbase transactions
@@ -471,13 +511,13 @@ pub const ChainState = struct {
                 const tx_hash = tx.hash();
 
                 // Check for duplicate processing to prevent double-spend during sync replay
-                if (self.isTransactionProcessed(tx_hash)) {
+                if (!force_processing and self.isTransactionProcessed(tx_hash)) {
                     log.info("🔄 [TX DEDUP] Coinbase transaction {} already processed, skipping", .{i});
                     continue;
                 }
 
                 log.info("🔍 [BLOCK TX] Processing coinbase transaction {} at height {}", .{ i, current_height });
-                try self.processCoinbaseTransaction(tx, tx.recipient, current_height);
+                try self.processCoinbaseTransaction(tx, tx.recipient, current_height, force_processing);
             }
         }
 
@@ -487,17 +527,19 @@ pub const ChainState = struct {
                 const tx_hash = tx.hash();
 
                 // Check for duplicate processing to prevent double-spend during sync replay
-                if (self.isTransactionProcessed(tx_hash)) {
+                if (!force_processing and self.isTransactionProcessed(tx_hash)) {
                     log.info("🔄 [TX DEDUP] Regular transaction {} already processed, skipping", .{i});
                     continue;
                 }
 
                 log.info("🔍 [BLOCK TX] Processing regular transaction {} at height {}", .{ i, current_height });
-                try self.processTransaction(tx);
+                try self.processTransaction(tx, force_processing);
             }
         }
 
         // Mark all transactions as processed to prevent re-broadcasting
+        self.mutex.lock();
+        defer self.mutex.unlock();
         for (transactions) |tx| {
             const tx_hash = tx.hash();
             try self.processed_transactions.append(tx_hash);
@@ -505,7 +547,9 @@ pub const ChainState = struct {
     }
 
     /// Check if a transaction has already been processed (for sync deduplication)
-    pub fn isTransactionProcessed(self: *const Self, tx_hash: [32]u8) bool {
+    pub fn isTransactionProcessed(self: *Self, tx_hash: [32]u8) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         for (self.processed_transactions.items) |processed_hash| {
             if (std.mem.eql(u8, &processed_hash, &tx_hash)) {
                 return true;

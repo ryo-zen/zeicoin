@@ -7,6 +7,7 @@ const print = std.debug.print;
 const command_line = @import("command_line.zig");
 const initialization = @import("initialization.zig");
 const client_api = @import("client_api.zig");
+const sync = @import("../sync/manager.zig");
 const RPCServer = @import("../rpc/server.zig").RPCServer;
 
 // Signal handling for graceful shutdown
@@ -15,12 +16,8 @@ var running = std.atomic.Value(bool).init(true);
 fn signalHandler(sig: c_int) callconv(.C) void {
     _ = sig;
     running.store(false, .release);
-    log.info("\nReceived Ctrl+C, shutting down gracefully...", .{});
-    
-    // Give a moment for cleanup, then force exit if needed
-    std.time.sleep(2 * std.time.ns_per_s);
-    log.info("Force exit after 2 seconds...", .{});
-    std.process.exit(0);
+    // Signal received - main loop will exit and trigger defer cleanup
+    // systemd's TimeoutStopSec=10 acts as emergency timeout if cleanup hangs
 }
 
 pub fn main() !void {
@@ -84,25 +81,84 @@ pub fn main() !void {
     const rpc_thread = try std.Thread.spawn(.{}, RPCServer.start, .{rpc_server});
     rpc_thread.detach();
     
-    // Setup signal handlers
+    // Setup signal handlers for graceful shutdown
+    // Handle SIGINT (Ctrl+C)
     _ = std.posix.sigaction(std.posix.SIG.INT, &.{
         .handler = .{ .handler = signalHandler },
         .mask = std.posix.empty_sigset,
         .flags = 0,
     }, null);
-    
+
+    // Handle SIGTERM (systemd stop, kill command)
+    _ = std.posix.sigaction(std.posix.SIG.TERM, &.{
+        .handler = .{ .handler = signalHandler },
+        .mask = std.posix.empty_sigset,
+        .flags = 0,
+    }, null);
+
     std.log.info("✅ ZeiCoin node started successfully", .{});
     std.log.info("Press Ctrl+C to shutdown", .{});
     
     // Main loop - wait for shutdown signal
     var last_status_time = std.time.timestamp();
+    var last_reconnection_check = std.time.timestamp();
+    var last_sync_retry_check = std.time.timestamp();
     var mining_started = false;
     var initial_sync_done = false;
-    
+
     while (running.load(.acquire)) {
+        const now = std.time.timestamp();
+
         // Periodic maintenance (only if still running)
         if (running.load(.acquire)) {
             components.network_manager.maintenance();
+        }
+
+        // Periodic reconnection check (every 10 seconds)
+        if (now - last_reconnection_check >= 10) {
+            last_reconnection_check = now;
+
+            const peer_stats = components.network_manager.getPeerStats();
+            if (peer_stats.connected == 0 and components.network_manager.bootstrap_nodes.len > 0) {
+                std.log.debug("🔄 [AUTO RECONNECT] No peers connected, triggering maintenance", .{});
+                // Trigger reconnection attempt via maintenance
+                components.network_manager.maintenance();
+            }
+        }
+
+        // Periodic sync retry check (every 5 seconds)
+        if (now - last_sync_retry_check >= 5) {
+            last_sync_retry_check = now;
+
+            // CRITICAL FIX: Check for sync timeout before attempting retry
+            // This ensures stuck syncs are detected and reset automatically
+            components.sync_manager.checkTimeout();
+
+            const sync_state = components.sync_manager.getSyncState();
+            std.log.debug("🔄 [PERIODIC SYNC] Check triggered (state: {})", .{sync_state});
+
+            // CRITICAL: Also retry when in failed state (after cooldown expires, recovery can proceed)
+            if (sync_state == .idle or sync_state == .failed) {
+                const our_height = components.blockchain.getHeight() catch 0;
+                const highest_peer_height = components.network_manager.getHighestPeerHeight();
+
+                std.log.debug("🔄 [PERIODIC SYNC] Heights - us: {}, highest peer: {}", .{our_height, highest_peer_height});
+
+                // Only retry if peer has more blocks
+                if (highest_peer_height > our_height) {
+                    const blocks_behind = highest_peer_height - our_height;
+                    std.log.info("🔄 [AUTO SYNC RETRY] {} blocks behind (state: {}), attempting recovery", .{blocks_behind, sync_state});
+
+                    // Wrap in thread to avoid blocking main loop (detectCompetingChain blocks!)
+                    _ = std.Thread.spawn(.{}, triggerSyncRecovery, .{ components.sync_manager }) catch |err| {
+                        std.log.err("⚠️ [AUTO SYNC RETRY] Failed to spawn recovery thread: {}", .{err});
+                    };
+                } else if (highest_peer_height == 0) {
+                    std.log.debug("🔄 [PERIODIC SYNC] No peers with valid height, skipping retry", .{});
+                }
+            } else {
+                std.log.debug("🔄 [PERIODIC SYNC] State {} not eligible for retry (needs .idle or .failed)", .{sync_state});
+            }
         }
         
         // Check if we should start mining after initial sync
@@ -142,7 +198,6 @@ pub fn main() !void {
         }
         
         // Print status every 30 seconds
-        const now = std.time.timestamp();
         if (now - last_status_time >= 30 and running.load(.acquire)) {
             printStatus(&components);
             last_status_time = now;
@@ -165,6 +220,12 @@ pub fn main() !void {
     
     // Note: Network stop is handled in components.deinit()
     // to ensure proper ordering with sync manager cleanup
+}
+
+fn triggerSyncRecovery(sync_manager: *sync.SyncManager) void {
+    sync_manager.attemptSyncRecovery() catch |err| {
+        std.log.err("Asynchronous sync recovery failed: {}", .{err});
+    };
 }
 
 fn printBanner() void {

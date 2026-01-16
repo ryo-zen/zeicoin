@@ -24,6 +24,9 @@ pub fn serialize(writer: anytype, value: anytype) SerializeError!void {
         .int => |int_info| {
             if (int_info.bits <= 64) {
                 try serializeInt(writer, value);
+            } else if (int_info.bits == 256) {
+                // Special handling for u256 (used for chain work)
+                try serializeU256(writer, value);
             } else {
                 return SerializeError.UnsupportedType;
             }
@@ -123,6 +126,9 @@ pub fn deserialize(reader: anytype, comptime T: type, allocator: std.mem.Allocat
         .int => |int_info| {
             if (int_info.bits <= 64) {
                 return deserializeInt(reader, T);
+            } else if (int_info.bits == 256) {
+                // Special handling for u256 (used for chain work)
+                return deserializeU256(reader);
             } else {
                 return SerializeError.UnsupportedType;
             }
@@ -253,6 +259,17 @@ fn deserializeBool(reader: anytype) !bool {
     return byte != 0;
 }
 
+fn serializeU256(writer: anytype, value: u256) !void {
+    const bytes = std.mem.toBytes(value);
+    try writer.writeAll(&bytes);
+}
+
+fn deserializeU256(reader: anytype) !u256 {
+    var bytes: [32]u8 = undefined;
+    _ = try reader.readAll(&bytes);
+    return std.mem.bytesToValue(u256, &bytes);
+}
+
 fn serializeFloat(writer: anytype, value: anytype) !void {
     const bytes = std.mem.toBytes(value);
     try writer.writeAll(&bytes);
@@ -294,11 +311,16 @@ pub fn writeBlock(writer: anytype, block: types.Block) !void {
     log.info("  📋 Block header version: {}", .{block.header.version});
     log.info("  📋 Block timestamp: {}", .{block.header.timestamp});
     log.info("  📋 Block nonce: {}", .{block.header.nonce});
+    log.info("  📋 Block height: {}", .{block.height});
     log.info("  📋 Transaction count: {}", .{block.transactions.len});
-    
+
     // Serialize header
     try block.header.serialize(writer);
     log.info("  ✅ Header serialized", .{});
+
+    // Serialize height (Fix 2: include block height in serialization)
+    try writer.writeInt(u32, block.height, .little);
+    log.info("  ✅ Height serialized: {}", .{block.height});
 
     // Serialize transaction count
     try writer.writeInt(u32, @intCast(block.transactions.len), .little);
@@ -315,7 +337,7 @@ pub fn writeBlock(writer: anytype, block: types.Block) !void {
 /// Deserialize a Block from a reader
 pub fn readBlock(reader: anytype, allocator: std.mem.Allocator) !types.Block {
     log.info("🔍 SYNC DEBUG: readBlock() starting", .{});
-    
+
     // Deserialize header
     const header = try types.BlockHeader.deserialize(reader);
     log.info("  📋 Deserialized header version: {} (hex: 0x{X})", .{header.version, header.version});
@@ -323,10 +345,14 @@ pub fn readBlock(reader: anytype, allocator: std.mem.Allocator) !types.Block {
     log.info("  📋 Deserialized nonce: {}", .{header.nonce});
     log.info("  📋 Deserialized difficulty: {}", .{header.difficulty});
 
+    // Deserialize height (Fix 2: read block height from serialization)
+    const height = try reader.readInt(u32, .little);
+    log.info("  📋 Deserialized height: {}", .{height});
+
     // Deserialize transaction count
     const tx_count = try reader.readInt(u32, .little);
     log.info("  📋 Deserialized transaction count: {}", .{tx_count});
-    
+
     if (tx_count > 100000) {
         log.info("  ❌ WARNING: Suspicious transaction count: {}", .{tx_count});
     }
@@ -353,6 +379,7 @@ pub fn readBlock(reader: anytype, allocator: std.mem.Allocator) !types.Block {
     return types.Block{
         .header = header,
         .transactions = transactions,
+        .height = height,
     };
 }
 

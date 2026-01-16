@@ -4,8 +4,8 @@ This directory contains systemd service files for running ZeiCoin as a productio
 
 ## Service Files
 
-- **zeicoin-mining.service** - Main mining server with auto-restart
-- **zeicoin-server.service** - Blockchain server (non-mining mode)
+- **zeicoin-mining.service** - Main mining server with crash recovery
+- **zeicoin-server.service** - Blockchain server (non-mining mode) with crash recovery
 - **zeicoin-indexer.service** - Blockchain indexer (one-shot execution)
 - **zeicoin-indexer.timer** - Auto-indexer timer (runs every 30 seconds)
 - **zeicoin-transaction-api.service** - Transaction API for RPC operations
@@ -24,10 +24,12 @@ This directory contains systemd service files for running ZeiCoin as a productio
    ./scripts/setup_analytics.sh
    ```
 
-3. Configure environment:
+3. Configure environment and secrets:
    ```bash
-   cp .env.testnet .env
-   # Edit .env with your settings
+   cp .env.example .env
+   # Secrets go in .env.local (which is ignored by git)
+   echo "ZEICOIN_DB_PASSWORD=your_secure_password" > .env.local
+   chmod 600 .env.local
    ```
 
 ## Installation
@@ -39,48 +41,29 @@ This directory contains systemd service files for running ZeiCoin as a productio
    sudo cp systemd/*.target /etc/systemd/system/
    ```
 
-2. Update paths in service files if needed:
-   ```bash
-   # Edit WorkingDirectory and ExecStart paths if not using /root/zeicoin
-   sudo nano /etc/systemd/system/zeicoin-mining.service
-   ```
-
-3. Reload systemd:
+2. Reload systemd:
    ```bash
    sudo systemctl daemon-reload
    ```
 
-## Usage
+## Crash Recovery (Unlocking)
 
-### Start Individual Services
-
-```bash
-# Start mining server
-sudo systemctl start zeicoin-mining.service
-
-# Start transaction API
-sudo systemctl start zeicoin-transaction-api.service
-
-# Start indexer timer (runs every 30s)
-sudo systemctl start zeicoin-indexer.timer
-```
+The services are configured with `ExecStartPre` logic to handle hard crashes. If the node crashes, RocksDB often leaves a `LOCK` file behind that prevents restarting. Our services automatically:
+1. Kill any zombie `zen_server` processes.
+2. Remove stale `LOCK` files from the data directories.
+3. Start the service fresh.
 
 ## 🚀 Auto-Indexer Quick Start
 
-The auto-indexer keeps PostgreSQL in sync with the blockchain for the REST API.
+The auto-indexer keeps PostgreSQL in sync with the blockchain.
 
 ### Setup (One-time)
 
 ```bash
-# 1. Copy service files to systemd
-sudo cp /home/max/zeicoin/systemd/zeicoin-indexer.* /etc/systemd/system/
+# 1. Ensure secrets are in .env.local
+# (Service will automatically load them)
 
-# 2. Update database password in service file
-sudo nano /etc/systemd/system/zeicoin-indexer.service
-# Change: Environment="ZEICOIN_DB_PASSWORD=your_password_here"
-
-# 3. Enable and start timer
-sudo systemctl daemon-reload
+# 2. Enable and start timer
 sudo systemctl enable zeicoin-indexer.timer
 sudo systemctl start zeicoin-indexer.timer
 ```
@@ -107,9 +90,6 @@ ZEICOIN_DB_PASSWORD=yourpass psql -h localhost -U zeicoin -d zeicoin_testnet \
 
 # Compare with blockchain
 ZEICOIN_SERVER=127.0.0.1 ./zig-out/bin/zeicoin status | grep Height
-
-# Test API
-curl http://localhost:8080/api/transactions/YOUR_ADDRESS
 ```
 
 ### Start All Services
@@ -157,29 +137,22 @@ sudo systemctl stop zeicoin.target
 
 ### Environment Variables
 
-Edit `/root/zeicoin/.env` to configure:
+The services load variables from **`/root/zeicoin/.env`** and overrides from **`/root/zeicoin/.env.local`**.
 
 ```bash
-# Network
+# .env.local (Secrets)
+ZEICOIN_DB_PASSWORD=your_secure_password_here
+
+# .env (Config)
 ZEICOIN_SERVER=127.0.0.1
 ZEICOIN_BIND_IP=0.0.0.0
 ZEICOIN_BOOTSTRAP=209.38.31.77:10801,134.199.170.129:10801
-
-# Mining
-ZEICOIN_MINE_ENABLED=true
-ZEICOIN_MINER_WALLET=miner
-
-# Database (for indexer/API)
-ZEICOIN_DB_PASSWORD=your_secure_password_here
-ZEICOIN_DB_HOST=127.0.0.1
-ZEICOIN_DB_NAME=zeicoin_testnet
-ZEICOIN_DB_USER=zeicoin
 ```
 
 ### Service Dependencies
 
-- **zeicoin-server.service** - Independent, starts first
-- **zeicoin-indexer.service** - Requires PostgreSQL and zeicoin-server
+- **zeicoin-mining.service** - Main server
+- **zeicoin-indexer.service** - Requires PostgreSQL and zen_server
 - **zeicoin-transaction-api.service** - Independent, provides RPC interface
 - **zeicoin-indexer.timer** - Requires zeicoin-indexer.service
 
@@ -193,16 +166,7 @@ sudo ufw allow 10801/tcp comment "ZeiCoin P2P"
 sudo ufw allow 10802/tcp comment "ZeiCoin Client API"
 sudo ufw allow 10803/tcp comment "ZeiCoin JSON-RPC"
 sudo ufw allow 8080/tcp comment "ZeiCoin Transaction API"
-
-# Firewalld (CentOS/RHEL)
-sudo firewall-cmd --permanent --add-port=10801/tcp
-sudo firewall-cmd --permanent --add-port=10802/tcp
-sudo firewall-cmd --permanent --add-port=10803/tcp
-sudo firewall-cmd --permanent --add-port=8080/tcp
-sudo firewall-cmd --reload
 ```
-
-**Note:** Port 10800 is reserved for future QUIC transport implementation.
 
 ## Troubleshooting
 
@@ -214,59 +178,31 @@ sudo journalctl -u zeicoin-mining.service -n 50
 
 # Check if binary exists
 ls -la /root/zeicoin/zig-out/bin/zen_server
-
-# Check permissions
-sudo systemctl status zeicoin-mining.service
 ```
 
-### Database Connection Issues
+## Low-Memory Environments (1GB RAM)
+
+If running on a VPS with 1GB of RAM or less, the system may kill the miner or indexer (OOM Killer). It is **highly recommended** to configure at least 4GB of swap space:
 
 ```bash
-# Test PostgreSQL connection
-PGPASSWORD=your_password psql -h localhost -U zeicoin -d zeicoin_testnet
+# Create and enable a 4GB swap file
+sudo fallocate -l 4G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
 
-# Check if PostgreSQL is running
-sudo systemctl status postgresql
-```
-
-### Wallet Issues
-
-```bash
-# Verify wallet exists
-ZEICOIN_SERVER=127.0.0.1 ./zig-out/bin/zeicoin balance miner
-
-# Create wallet if needed
-ZEICOIN_SERVER=127.0.0.1 ./zig-out/bin/zeicoin wallet create miner
-```
-
-## Quick Start (Full Stack)
-
-```bash
-# 1. Install services
-sudo cp systemd/* /etc/systemd/system/
-sudo systemctl daemon-reload
-
-# 2. Enable all services
-sudo systemctl enable zeicoin.target
-
-# 3. Start everything
-sudo systemctl start zeicoin.target
-
-# 4. Check status
-sudo systemctl status zeicoin.target
-
-# 5. Watch logs
-sudo journalctl -u zeicoin.target -f
+# Make it permanent
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 ```
 
 ## Service Architecture
 
 ```
 zeicoin.target
-├── zeicoin-mining.service (or zeicoin-server.service)
+├── zeicoin-mining.service (Exclusive with zeicoin-server)
 │   └── zen_server --mine miner
 ├── zeicoin-transaction-api.service
-│   └── transaction_api (port 8080)
+│   └── transaction_api (port 10803)
 └── zeicoin-indexer.timer
     └── zeicoin_indexer (every 30s)
 ```

@@ -10,7 +10,6 @@ const net = @import("network/peer.zig");
 const NetworkCoordinator = @import("network/coordinator.zig").NetworkCoordinator;
 const randomx = @import("crypto/randomx.zig");
 const genesis = @import("chain/genesis.zig");
-const ReorgManager = @import("chain/reorganization/manager.zig").ReorgManager;
 // const headerchain = @import("network/headerchain.zig"); // ZSP-001: Disabled headers-first sync
 const sync_mod = @import("sync/manager.zig");
 const message_dispatcher = @import("network/message_dispatcher.zig");
@@ -35,7 +34,6 @@ pub const ZeiCoin = struct {
     chain_state: @import("chain/state.zig").ChainState,
     network_coordinator: NetworkCoordinator,
     allocator: std.mem.Allocator,
-    reorg_manager: ?*ReorgManager,
     // header_chain: headerchain.HeaderChain, // ZSP-001: Disabled headers-first sync
     sync_manager: ?*sync_mod.SyncManager,
     message_dispatcher: message_dispatcher.MessageDispatcher,
@@ -64,9 +62,6 @@ pub const ZeiCoin = struct {
         const instance_ptr = try allocator.create(ZeiCoin);
         errdefer allocator.destroy(instance_ptr);
 
-        // Modern reorganization manager will be initialized later
-        const reorg_manager: ?*ReorgManager = null;
-
         // var header_chain = headerchain.HeaderChain.init(allocator); // ZSP-001: Disabled headers-first sync
         // errdefer header_chain.deinit(); // ZSP-001: Disabled headers-first sync
 
@@ -77,7 +72,6 @@ pub const ZeiCoin = struct {
             .chain_state = chain_state,
             .network_coordinator = undefined,
             .allocator = allocator,
-            .reorg_manager = reorg_manager,
             // .header_chain = header_chain, // ZSP-001: Disabled headers-first sync
             .sync_manager = null,
             .message_dispatcher = undefined,
@@ -90,6 +84,13 @@ pub const ZeiCoin = struct {
             .mining_state = types.MiningState.init(),
             .mining_manager = null,
             .mining_keypair = null,
+        };
+
+        // CRITICAL FIX: Rebuild block index from database on startup
+        // This ensures getBlockHash() works for blocks loaded from disk
+        instance_ptr.chain_state.initializeBlockIndex() catch |err| {
+            log.err("❌ Failed to initialize block index: {}", .{err});
+            return err;
         };
 
         var components_initialized: u8 = 0;
@@ -119,23 +120,6 @@ pub const ZeiCoin = struct {
 
         instance_ptr.chain_processor = ChainProcessor.init(allocator, instance_ptr.database, &instance_ptr.chain_state, &instance_ptr.chain_validator, null);
         components_initialized = 4;
-        
-        // Initialize ReorgManager now that chain components are ready
-        // Note: ChainOperations is ChainProcessor in our architecture
-        instance_ptr.reorg_manager = ReorgManager.init(
-            allocator,
-            &instance_ptr.chain_state,
-            &instance_ptr.chain_validator,
-            &instance_ptr.chain_processor,
-        ) catch |err| blk: {
-            log.warn("Failed to initialize ReorgManager: {}, chain reorgs disabled", .{err});
-            break :blk null;
-        };
-        
-        // Pass reorg_manager to chain_processor
-        instance_ptr.chain_processor.reorg_manager = instance_ptr.reorg_manager;
-        components_initialized = 5;
-
 
         instance_ptr.difficulty_calculator = DifficultyCalculator.init(allocator, instance_ptr.database);
         components_initialized = 5;
@@ -214,10 +198,6 @@ pub const ZeiCoin = struct {
         self.message_dispatcher.deinit();
 
         // self.header_chain.deinit(); // ZSP-001: Disabled headers-first sync
-        if (self.reorg_manager) |manager| {
-            manager.deinit();
-            self.allocator.destroy(manager);
-        }
 
         if (self.sync_manager) |sm| {
             sm.deinit();
@@ -237,10 +217,13 @@ pub const ZeiCoin = struct {
         defer genesis_block.deinit(self.allocator);
         for (genesis_block.transactions) |tx| {
             if (tx.isCoinbase()) {
-                try self.chain_state.processCoinbaseTransaction(tx, tx.recipient, 0);
+                try self.chain_state.processCoinbaseTransaction(tx, tx.recipient, 0, true);
             }
         }
         try self.database.saveBlock(0, genesis_block);
+
+        // CRITICAL FIX: Index genesis block
+        try self.chain_state.indexBlock(0, genesis_block.hash());
 
         // Genesis initialization handled by chain state
         // Modern reorganization system doesn't require explicit genesis setup
@@ -402,20 +385,11 @@ pub const ZeiCoin = struct {
     }
 
     fn handleChainReorganization(self: *ZeiCoin, new_block: types.Block, new_chain_state: types.ChainState) !void {
-        _ = new_chain_state; // Modern system handles state internally
-        if (self.reorg_manager) |manager| {
-            const new_chain_tip = new_block.hash();
-            const result = manager.executeReorganization(new_block, new_chain_tip) catch |err| {
-                log.info("❌ Reorganization failed: {}", .{err});
-                return err;
-            };
-            log.info("✅ Reorganization completed: {} blocks reverted, {} applied", .{ result.blocks_reverted, result.blocks_applied });
-        } else {
-            log.info("⚠️ Reorganization manager not initialized - using legacy approach", .{});
-            // Fallback: simple block acceptance
-            const height = try self.getHeight() + 1;
-            try self.addBlockToChain(new_block, height);
-        }
+        _ = new_chain_state;
+        _ = new_block;
+        // Reorganization is now handled by sync manager via bulk reorg
+        log.debug("handleChainReorganization called - delegating to sync manager", .{});
+        _ = self;
     }
 
     fn rollbackToHeight(self: *ZeiCoin, target_height: u32) !void {

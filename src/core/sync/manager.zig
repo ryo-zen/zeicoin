@@ -35,7 +35,7 @@ const Peer = net.Peer;
 const Allocator = std.mem.Allocator;
 
 // Module-level blockchain reference for dependency injection functions
-var g_blockchain: ?*ZeiCoin = null;
+pub var g_blockchain: ?*ZeiCoin = null;
 const SyncState = protocol.SyncState;
 
 // ============================================================================
@@ -84,9 +84,15 @@ pub const SyncManager = struct {
 
     /// Last sync state save timestamp for persistence
     last_state_save: i64,
-    
+
     /// Timestamp when sync session started (for timeout detection)
     sync_start_time: i64,
+
+    /// Fork cooldown tracking to prevent immediate retry loops
+    fork_cooldowns: std.AutoHashMap(u32, i64),
+
+    /// Last sync retry check timestamp
+    last_sync_retry_check: i64,
 
     const Self = @This();
 
@@ -118,6 +124,8 @@ pub const SyncManager = struct {
             .failed_peers = std.ArrayList(*Peer).init(allocator),
             .last_state_save = 0,
             .sync_start_time = 0,
+            .fork_cooldowns = std.AutoHashMap(u32, i64).init(allocator),
+            .last_sync_retry_check = 0,
         };
     }
 
@@ -127,19 +135,58 @@ pub const SyncManager = struct {
 
         self.batch_sync.deinit();
         self.failed_peers.deinit();
+        self.fork_cooldowns.deinit();
 
         log.debug("Sync manager cleanup completed", .{});
     }
 
     /// Start synchronization with a peer to a target height
     /// Main entry point for blockchain synchronization
-    pub fn startSync(self: *Self, peer: *Peer, target_height: u32) !void {
+    /// force_reorg: If true, bypasses height difference check to force reorganization at equal heights
+    pub fn startSync(self: *Self, peer: *Peer, target_height: u32, force_reorg: bool) !void {
         log.info("INITIATING BLOCKCHAIN SYNCHRONIZATION", .{});
         log.info("Session parameters:", .{});
         log.info("   Target peer: {any}", .{peer.address});
         log.info("   Target height: {}", .{target_height});
+        log.info("   Force reorg: {}", .{force_reorg});
         log.info("   Current state: {}", .{self.sync_state});
         log.info("   Failed peers: {}", .{self.failed_peers.items.len});
+
+        // CRITICAL: Pause mining during sync/reorg to prevent race conditions
+        // Mining interference can cause BlockRequestTimeout, InvalidPreviousHash errors, and reorg failures
+        const was_mining = self.blockchain.mining_state.active.load(.acquire);
+        if (was_mining) {
+            self.blockchain.mining_state.active.store(false, .release);
+            log.info("⏸️  [SYNC] Paused mining for synchronization/reorganization", .{});
+        }
+
+        // Track whether mining should resume (will be set to false if fork detection fails)
+        var should_resume_mining = was_mining;
+
+        // Ensure mining resumes when sync completes successfully
+        // IMPORTANT: Don't resume mining if in failed state (fork detection failed)
+        defer {
+            if (should_resume_mining) {
+                // CRITICAL FIX: Mining thread exits when active flag is set to false
+                // The thread handle remains non-null, but the thread has terminated
+                // We must stop the thread properly (join + clear handle) then restart it
+                log.info("🔄 [SYNC] Stopping and restarting mining thread after sync/reorg", .{});
+
+                if (self.blockchain.mining_manager) |mining_manager| {
+                    // Stop the old thread properly (join and clear handle)
+                    mining_manager.stopMining();
+
+                    // Restart mining with stored keypair
+                    mining_manager.startMiningDeferred() catch |err| {
+                        log.err("❌ [SYNC] Failed to restart mining thread: {}", .{err});
+                    };
+                    log.info("▶️  [SYNC] Mining thread restarted after synchronization/reorganization", .{});
+                }
+            } else if (was_mining) {
+                log.warn("⏸️  [SYNC] Mining remains paused - sync failed (will retry after cooldown)", .{});
+                log.warn("💡 [SYNC] Mining will resume after successful sync or manual intervention", .{});
+            }
+        }
 
         // Check if sync can be started
         log.debug("STEP 1: Validating sync state...", .{});
@@ -149,6 +196,11 @@ pub const SyncManager = struct {
             log.info("Suggestion: Wait for current sync to complete or call stopSync()", .{});
             return;
         }
+        
+        // Transition to analyzing state to prevent concurrent initiations
+        self.sync_state = .analyzing;
+        errdefer self.sync_state = .failed;
+        
         log.debug("STEP 1 PASSED: Sync state allows new session", .{});
 
         // Validate sync requirements
@@ -167,13 +219,126 @@ pub const SyncManager = struct {
         log.info("   Peer info: {any}", .{peer.address});
         log.info("   Peer height: {}", .{peer.height});
 
-        if (height_diff < SYNC_CONFIG.MIN_SYNC_HEIGHT_DIFF) {
+        if (height_diff < SYNC_CONFIG.MIN_SYNC_HEIGHT_DIFF and !force_reorg) {
             log.warn("🚫 [SYNC ABORT] Already synchronized - height diff {} < threshold {}", .{ height_diff, SYNC_CONFIG.MIN_SYNC_HEIGHT_DIFF });
             log.info("Local height {} >= target height {} (diff: {})", .{ current_height, target_height, height_diff });
             log.info("No synchronization needed - session complete", .{});
+            self.sync_state = .idle;
             return;
         }
-        log.info("STEP 2 PASSED: Sync required ({} blocks behind)", .{height_diff});
+        if (force_reorg and height_diff == 0) {
+            log.info("🔄 [FORCE REORG] Bypassing height check for equal-height fork resolution", .{});
+        }
+        log.info("STEP 2 PASSED: Sync required ({} blocks behind, force_reorg={})", .{ height_diff, force_reorg });
+
+        // STEP 2.5: Check for competing chain (divergent chain from common ancestor)
+        // CRITICAL: We check for divergence even if heights are equal, as we might be on a fork.
+        if (target_height > 0) {
+            log.debug("STEP 2.5: Checking for competing chains...", .{});
+            const is_competing = self.detectCompetingChain(peer) catch |err| {
+                log.err("❌ [FORK DETECT] Failed to detect competing chain: {}", .{err});
+                log.err("⚠️  [FORK DETECT] Fork detection failed - keeping mining paused", .{});
+
+                // Add extended cooldown
+                self.addForkCooldown(current_height, 60) catch {};
+
+                // Keep mining paused
+                should_resume_mining = false;
+                self.sync_state = .failed;
+
+                return error.ForkDetectionFailed;
+            };
+
+            if (is_competing) {
+                const fork_detector = @import("fork_detector.zig");
+
+                log.warn("🔥 [COMPETING CHAIN] Peer has divergent chain!", .{});
+                log.warn("   Our height: {}", .{current_height});
+                log.warn("   Peer height: {}", .{target_height});
+
+                // Find fork point for reorg decision
+                const fork_point = fork_detector.findForkPoint(
+                    self.allocator,
+                    g_blockchain.?.database,
+                    peer,
+                    current_height,
+                    target_height,
+                ) catch |err| {
+                    log.err("❌ [REORG] Failed to find fork point: {}", .{err});
+                    log.err("⚠️  [REORG] Fork detection failed - will retry after cooldown", .{});
+
+                    // Add extended cooldown to prevent rapid retry loops
+                    self.addForkCooldown(current_height, 60) catch {};
+
+                    // Keep mining paused to prevent fork from worsening
+                    should_resume_mining = false;
+
+                    // Set sync to failed state
+                    self.sync_state = .failed;
+
+                    // Return error
+                    return error.ForkDetectionFailed;
+                };
+
+                // Use cumulative work comparison (Bitcoin's method)
+                const should_reorg = fork_detector.shouldReorganize(
+                    self.allocator,
+                    g_blockchain.?.database,
+                    peer,
+                    current_height,
+                    target_height,
+                    fork_point,
+                ) catch |err| {
+                    log.err("❌ [REORG] Failed to compare chain work: {}", .{err});
+                    log.err("⚠️  [REORG] Work comparison failed - will retry after cooldown", .{});
+
+                    // Add extended cooldown to prevent rapid retry loops
+                    self.addForkCooldown(current_height, 60) catch {};
+
+                    // Keep mining paused to prevent fork from worsening
+                    should_resume_mining = false;
+
+                    // Set sync to failed state
+                    self.sync_state = .failed;
+
+                    // Return error
+                    return error.ForkDetectionFailed;
+                };
+
+                if (should_reorg) {
+                    log.warn("🔄 [REORG DECISION] Peer chain has more work - reorganizing!", .{});
+                    try self.executeBulkReorg(peer, fork_point, target_height);
+                    self.sync_state = .idle; // executeBulkReorg finishes sync
+                    return;
+                } else {
+                    // PREFIX CASE: If fork_point == our tip, we're a prefix of peer's chain
+                    // This means NO divergence - just sync forward normally
+                    const is_prefix = (fork_point == current_height);
+
+                    if (is_prefix) {
+                        log.info("ℹ️  [REORG DECISION] Chain is prefix - continuing with normal sync", .{});
+                        // Fall through to normal sync below
+                    } else {
+                        log.info("ℹ️  [REORG DECISION] Our chain has equal or more work - keeping our chain", .{});
+
+                        // If heights are equal but we didn't reorg, we stay on our fork.
+                        // If peer was behind, they might sync from us.
+                        if (target_height > current_height) {
+                            // Competing chain: peer has more blocks but less work (e.g. difficulty attack)
+                            // In Bitcoin, we would just ignore this peer for now or wait for more work.
+                            log.warn("⚠️  Peer has MORE blocks ({}) but LESS work. Ignoring sync request.", .{target_height});
+                            self.sync_state = .idle;
+                            return;
+                        }
+
+                        // If chains are divergent but we have more work, we don't reorg.
+                        // Normal sync will continue if we decide to just extend our chain.
+                    }
+                }
+            } else {
+                log.debug("STEP 2.5 PASSED: Chains are compatible, proceeding with normal sync", .{});
+            }
+        }
 
         // Ensure genesis block exists before syncing
         log.debug("STEP 3: Validating genesis block...", .{});
@@ -216,7 +381,14 @@ pub const SyncManager = struct {
 
             // Start ZSP-001 batch synchronization
             log.debug("STEP 5: Delegating to ZSP-001 batch sync...", .{});
-            try self.batch_sync.startSync(peer, target_height);
+
+            // For equal-height fork resolution, re-download chain from height 1
+            if (force_reorg and height_diff == 0) {
+                log.info("🔄 [FORCE REORG] Equal-height fork detected - syncing chain from height 1", .{});
+                try self.batch_sync.syncFromHeight(peer, 1, target_height);
+            } else {
+                try self.batch_sync.startSync(peer, target_height);
+            }
 
             // Update our state AFTER batch sync has successfully started
             log.debug("STATE TRANSITION: {} → syncing", .{self.sync_state});
@@ -252,6 +424,50 @@ pub const SyncManager = struct {
         log.info("Next state save: {} seconds", .{SYNC_CONFIG.STATE_SAVE_INTERVAL});
 
         log.info("SYNCHRONIZATION SESSION SUCCESSFULLY STARTED!", .{});
+
+        // CRITICAL FIX #4: Polling loop to retrieve blocks and handle timeouts
+        // Without this loop, blocks are cached but never retrieved or processed
+        log.info("🔄 [SYNC POLL] Starting sync polling loop (polls every 5 seconds)", .{});
+
+        while (self.sync_state.isActive()) {
+            // Sleep for 5 seconds between polls
+            std.time.sleep(5 * std.time.ns_per_s);
+
+            // Check for global timeout
+            const elapsed = std.time.timestamp() - self.sync_start_time;
+            if (elapsed > SYNC_CONFIG.SYNC_TIMEOUT) {
+                log.warn("🚨 [SYNC TIMEOUT] Synchronization timed out after {} seconds", .{elapsed});
+                self.sync_state = .failed;
+                break;
+            }
+
+            // Poll for new blocks and handle timeouts
+            self.handleTimeouts() catch |err| {
+                log.err("❌ [SYNC POLL] Error during timeout handling: {}", .{err});
+                self.sync_state = .failed;
+                break;
+            };
+
+            // Update our state from batch sync
+            self.sync_state = self.batch_sync.getSyncState();
+
+            // Handle sync failure
+            if (self.sync_state == .failed) {
+                log.warn("🔴 [SYNC POLL] Sync failed, exiting polling loop", .{});
+                break;
+            }
+
+            // Log progress periodically
+            if (@mod(elapsed, 10) < 5) { // Log every ~10 seconds
+                log.info("📊 [SYNC PROGRESS] State: {}, Progress: {d:.1}%, Elapsed: {}s", .{
+                    self.sync_state,
+                    self.getProgress(),
+                    elapsed,
+                });
+            }
+        }
+
+        log.info("🏁 [SYNC POLL] Polling loop ended - Final state: {}", .{self.sync_state});
     }
 
     /// Handle incoming batch of blocks from ZSP-001 protocol
@@ -321,17 +537,15 @@ pub const SyncManager = struct {
     pub fn handleTimeouts(self: *Self) !void {
         if (!self.sync_state.isActive()) return;
 
+        // CRITICAL: Retrieve blocks from peer cache before checking timeouts
+        // This ensures blocks that have arrived are processed before timeout logic
+        try self.batch_sync.retrievePendingBlocks();
+
         // Handle batch sync timeouts
         try self.batch_sync.handleTimeouts();
 
         // Update our state based on batch sync state
         self.sync_state = self.batch_sync.getSyncState();
-
-        // Handle sync failure recovery
-        if (self.sync_state == .failed) {
-            log.info("🔄 [SYNC MANAGER] Sync failed, attempting peer rotation", .{});
-            try self.attemptSyncRecovery();
-        }
     }
 
     /// Complete synchronization process
@@ -394,15 +608,52 @@ pub const SyncManager = struct {
         if (self.sync_state.isActive() and self.sync_start_time > 0) {
             const current_time = std.time.timestamp();
             const elapsed_time = current_time - self.sync_start_time;
-            
+
             if (elapsed_time > SYNC_CONFIG.SYNC_TIMEOUT) {
                 log.warn("🚨 [SYNC TIMEOUT] Synchronization timed out after {} seconds", .{elapsed_time});
                 log.warn("🔄 [SYNC TIMEOUT] Resetting sync state to idle", .{});
+                
+                // CRITICAL: Reset batch sync protocol state as well
+                self.batch_sync.failSync("Synchronization session timeout");
+                
                 self.sync_state = .idle;
                 self.sync_start_time = 0;
                 log.info("✅ [SYNC TIMEOUT] Sync state reset - ready for new sync attempts", .{});
             }
         }
+    }
+
+    /// Add a cooldown period for a specific fork height to prevent retry loops
+    pub fn addForkCooldown(self: *Self, fork_height: u32, seconds: i64) !void {
+        const cooldown_until = std.time.timestamp() + seconds;
+        try self.fork_cooldowns.put(fork_height, cooldown_until);
+        log.info("⏳ [SYNC] Added {} second cooldown for fork height {}", .{ seconds, fork_height });
+    }
+
+    /// Check if we can attempt sync at a given fork height (cooldown expired)
+    /// Public API to allow server handlers to check before initiating sync on peer connection
+    pub fn canSyncAtForkHeight(self: *Self, fork_height: u32) bool {
+        log.info("🔍 [SYNC COOLDOWN] Checking if can sync at fork height {}", .{fork_height});
+
+        // Check if there's an active cooldown for this fork height
+        if (self.fork_cooldowns.get(fork_height)) |cooldown_until| {
+            const now = std.time.timestamp();
+            if (now < cooldown_until) {
+                const remaining = cooldown_until - now;
+                log.info("⏳ [SYNC COOLDOWN] Fork height {} in cooldown for {} more seconds", .{ fork_height, remaining });
+                log.info("💡 [SYNC COOLDOWN] Sync will be deferred until cooldown expires", .{});
+                return false;
+            }
+            // Cooldown expired, remove it
+            _ = self.fork_cooldowns.remove(fork_height);
+            log.info("✅ [SYNC COOLDOWN] Fork height {} cooldown EXPIRED - ready for retry!", .{fork_height});
+            log.info("🔄 [SYNC COOLDOWN] Proceeding with sync attempt after cooldown period", .{});
+        } else {
+            log.info("✅ [SYNC COOLDOWN] No active cooldown for fork height {} - ready to sync", .{fork_height});
+        }
+
+        log.info("✅ [SYNC COOLDOWN] All checks passed - sync can proceed at height {}", .{fork_height});
+        return true;
     }
 
     /// Get detailed sync status for monitoring and debugging
@@ -452,24 +703,275 @@ pub const SyncManager = struct {
         log.info("✅ [SYNC MANAGER] Sequential sync completed", .{});
     }
 
+    /// Handle peer with potentially competing chain
+    /// Triggered when a peer announces a new block or height updates
+    pub fn handlePeerSync(self: *Self, peer: *Peer) !void {
+        const our_height = try getBlockchainHeight();
+        
+        // If peer is ahead or at equal height (might be a fork), check for sync/reorg
+        if (peer.height >= our_height and peer.height > 0) {
+            // Check for divergence
+            const is_competing = try self.detectCompetingChain(peer);
+            
+            if (is_competing) {
+                log.info("🔥 [FORK DETECTED] Peer height {} vs our height {}", .{peer.height, our_height});
+                
+                // If we are already syncing, cancel it to allow reorg check
+                if (self.sync_state.isActive()) {
+                    log.info("🔄 [REORG TRIGGER] Canceling active sync to handle competing chain", .{});
+                    self.batch_sync.failSync("Canceled for reorganization");
+                    self.sync_state = .idle;
+                }
+                
+                try self.startSync(peer, peer.height, false);
+            } else if (peer.height > our_height) {
+                // Not competing, just ahead. Trigger normal sync if not already syncing.
+                if (self.sync_state.canStart()) {
+                    try self.startSync(peer, peer.height, false);
+                }
+            }
+        }
+    }
+
     /// Attempt to recover from sync failure by trying a different peer
-    fn attemptSyncRecovery(self: *Self) !void {
+    pub fn attemptSyncRecovery(self: *Self) !void {
         log.info("🔄 [SYNC MANAGER] Attempting sync recovery with peer rotation", .{});
 
-        // Get next available peer
-        const new_peer = self.getNextAvailablePeer() orelse {
+        const current_height = try getBlockchainHeight();
+        const target_height = if (g_blockchain) |bc|
+            bc.network_coordinator.getNetworkManager().?.getHighestPeerHeight()
+        else
+            current_height;
+
+        // Check fork cooldown before attempting sync
+        if (!self.canSyncAtForkHeight(current_height)) {
+            log.debug("Sync recovery skipped - fork height in cooldown", .{});
+            return;
+        }
+
+        // Get next available peer using smart selection
+        const new_peer = getNextAvailablePeer() orelse {
             log.info("❌ [SYNC MANAGER] No peers available for recovery", .{});
             return;
         };
 
-        // Restart sync with new peer
-        const current_height = try getBlockchainHeight();
-        const target_height = self.blockchain.getTargetHeight() catch current_height;
+        // Increment reference count for the duration of startSync (which might block)
+        new_peer.addRef();
+        defer new_peer.release();
 
+        // Only sync if target is higher than current
         if (target_height > current_height) {
-            log.info("🔄 [SYNC MANAGER] Restarting sync with recovery peer", .{});
-            try self.startSync(new_peer, target_height);
+            const blocks_behind = target_height - current_height;
+            log.info("🔄 [SYNC MANAGER] Restarting sync with recovery peer ({} blocks behind)", .{blocks_behind});
+            try self.startSync(new_peer, target_height, false);
+        } else {
+            log.debug("Sync not needed - already at target height", .{});
         }
+    }
+
+    /// Sync a specific range of blocks for reorganization scenarios
+    /// This is used when we detect missing intermediate blocks during reorg
+    pub fn syncBlockRange(self: *Self, peer: *Peer, start_height: u32, end_height: u32) !void {
+        log.info("🔄 [SYNC RANGE] ========================================", .{});
+        log.info("🔄 [SYNC RANGE] Initiating block range sync for reorganization", .{});
+        log.info("🔄 [SYNC RANGE] Start height: {}", .{start_height});
+        log.info("🔄 [SYNC RANGE] End height: {}", .{end_height});
+        log.info("🔄 [SYNC RANGE] Blocks to fetch: {}", .{end_height - start_height + 1});
+        log.info("🔄 [SYNC RANGE] Peer: {}", .{peer});
+        log.info("🔄 [SYNC RANGE] ========================================", .{});
+
+        // Validate parameters
+        if (start_height > end_height) {
+            log.err("❌ [SYNC RANGE] Invalid range: start {} > end {}", .{start_height, end_height});
+            return error.InvalidBlockRange;
+        }
+
+        if (start_height == 0) {
+            log.err("❌ [SYNC RANGE] Cannot sync from genesis (height 0)", .{});
+            return error.InvalidBlockRange;
+        }
+
+        log.info("✅ [SYNC RANGE] Parameters validated", .{});
+
+        // Check current sync state
+        if (self.sync_state.isActive()) {
+            log.warn("⚠️ [SYNC RANGE] Sync already active - state: {}", .{self.sync_state});
+            log.info("💡 [SYNC RANGE] Failing current sync to allow range sync", .{});
+            self.batch_sync.failSync("Interrupted by block range sync");
+            self.sync_state = .idle;
+        }
+
+        log.info("🔄 [SYNC RANGE] Calling batch sync with custom height range", .{});
+
+        // Use batch sync with custom start height
+        self.batch_sync.syncFromHeight(peer, start_height, end_height) catch |err| {
+            log.err("❌ [SYNC RANGE] Failed to start batch sync: {}", .{err});
+            log.err("   Start: {}, End: {}", .{start_height, end_height});
+            log.err("   Peer: {}", .{peer});
+            return err;
+        };
+
+        log.info("✅ [SYNC RANGE] Batch sync initiated successfully", .{});
+        log.info("⏳ [SYNC RANGE] Waiting for blocks to arrive...", .{});
+    }
+
+    /// Detect if peer has a competing chain using fork point detection
+    fn detectCompetingChain(self: *Self, peer: *Peer) !bool {
+        const fork_detector = @import("fork_detector.zig");
+
+        const current_height = try getBlockchainHeight();
+        const peer_height = peer.height;
+
+        // Early return if we're at genesis
+        if (current_height == 0) {
+            log.debug("✅ [CHAIN DETECT] We're at genesis, accepting peer's chain", .{});
+            return false;
+        }
+
+        log.info("🔍 [FORK DETECT] Starting fork point detection", .{});
+        log.info("   Our height: {}", .{current_height});
+        log.info("   Peer height: {}", .{peer_height});
+
+        // Use fork_detector to find the fork point
+        const fork_point = fork_detector.findForkPoint(
+            self.allocator,
+            g_blockchain.?.database,
+            peer,
+            current_height,
+            peer_height,
+        ) catch |err| {
+            log.warn("⚠️ [FORK DETECT] Failed to find fork point: {}", .{err});
+            // Propagate error instead of fallback to prevent mining from resuming
+            return err;
+        };
+
+        log.info("📍 [FORK DETECT] Fork point found at height {}", .{fork_point});
+
+        // If fork point is at current height, chains are the same
+        if (fork_point == current_height and fork_point == peer_height) {
+            log.debug("✅ [FORK DETECT] Chains are identical", .{});
+            return false;
+        }
+
+        // If fork point is less than current height, we have divergence
+        if (fork_point < current_height or fork_point < peer_height) {
+            log.warn("🔥 [FORK DETECT] Chains diverged at height {}!", .{fork_point});
+            log.warn("   Our blocks after fork: {}", .{current_height - fork_point});
+            log.warn("   Peer blocks after fork: {}", .{peer_height - fork_point});
+            return true;
+        }
+
+        log.debug("✅ [FORK DETECT] Chains are compatible", .{});
+        return false;
+    }
+
+    /// Legacy fork detection (checks only block 1) - fallback
+    fn detectCompetingChainLegacy(self: *Self, peer: *Peer) !bool {
+        const current_height = try getBlockchainHeight();
+
+        // Request peer's block 1 to compare
+        log.debug("🔍 [CHAIN DETECT LEGACY] Requesting peer's block 1 for comparison (our height: {})", .{current_height});
+
+        const peer_blocks = sequential.requestBlockRange(self.allocator, peer, 1, 1) catch |err| {
+            log.warn("⚠️ [CHAIN DETECT LEGACY] Failed to request peer's block 1: {}", .{err});
+            return false; // Can't determine, assume compatible
+        };
+        defer {
+            for (peer_blocks.items) |*block| {
+                block.deinit(self.allocator);
+            }
+            peer_blocks.deinit();
+        }
+
+        if (peer_blocks.items.len == 0) {
+            log.warn("⚠️ [CHAIN DETECT LEGACY] Peer returned no blocks", .{});
+            return false;
+        }
+
+        const peer_block_1 = peer_blocks.items[0];
+
+        // Get our block 1 (if we have it)
+        var our_block_1 = g_blockchain.?.database.getBlock(1) catch |err| {
+            log.debug("✅ [CHAIN DETECT LEGACY] We don't have block 1 yet ({}), accepting peer's chain", .{err});
+            return false;
+        };
+        defer our_block_1.deinit(self.allocator);
+
+        // Compare hashes
+        const peer_hash = peer_block_1.hash();
+        const our_hash = our_block_1.hash();
+
+        if (!std.mem.eql(u8, &peer_hash, &our_hash)) {
+            log.warn("🔥 [CHAIN DETECT LEGACY] Competing chain detected!", .{});
+            log.warn("   Our block 1:   {s}", .{std.fmt.fmtSliceHexLower(&our_hash)});
+            log.warn("   Peer block 1:  {s}", .{std.fmt.fmtSliceHexLower(&peer_hash)});
+            return true;
+        }
+
+        log.debug("✅ [CHAIN DETECT LEGACY] Chains are compatible (same block 1)", .{});
+        return false;
+    }
+
+    /// Execute bulk reorganization to switch to peer's longer chain
+    fn executeBulkReorg(self: *Self, peer: *Peer, fork_point: u32, peer_height: u32) !void {
+        log.warn("🔄 [BULK REORG] ========================================", .{});
+        log.warn("🔄 [BULK REORG] Starting chain reorganization from fork point {}", .{fork_point});
+        log.warn("🔄 [BULK REORG] ========================================", .{});
+
+        const current_height = try getBlockchainHeight();
+        log.warn("   Current height: {}", .{current_height});
+        log.warn("   Target height: {}", .{peer_height});
+        log.warn("   Blocks to fetch: {}", .{peer_height - fork_point});
+
+        // Fetch the competing chain from peer starting at fork_point + 1
+        log.info("📥 [BULK REORG] Fetching competing chain blocks...", .{});
+
+        // Use batch sync to fetch all blocks
+        var all_blocks = std.ArrayList(Block).init(self.allocator);
+        defer {
+            for (all_blocks.items) |*block| {
+                block.deinit(self.allocator);
+            }
+            all_blocks.deinit();
+        }
+
+        // Fetch blocks in batches (50 at a time)
+        var batch_start: u32 = fork_point + 1;
+        while (batch_start <= peer_height) {
+            const batch_end = @min(batch_start + 49, peer_height);
+            const batch_size = batch_end - batch_start + 1;
+
+            log.info("   Fetching batch: blocks {} to {} ({} blocks)", .{batch_start, batch_end, batch_size});
+
+            const batch_blocks = sequential.requestBlockRange(self.allocator, peer, batch_start, batch_size) catch |err| {
+                log.err("❌ [BULK REORG] Failed to fetch batch starting at {}: {}", .{batch_start, err});
+                return error.BulkReorgFetchFailed;
+            };
+            defer batch_blocks.deinit();
+
+            // Add to our collection
+            for (batch_blocks.items) |block| {
+                const block_copy = try block.clone(self.allocator);
+                try all_blocks.append(block_copy);
+            }
+
+            batch_start = batch_end + 1;
+        }
+
+        log.warn("✅ [BULK REORG] Fetched {} blocks from peer", .{all_blocks.items.len});
+
+        // Execute reorganization via chain processor
+        log.warn("🔄 [BULK REORG] Executing chain reorganization...", .{});
+
+        if (g_blockchain) |blockchain| {
+            try blockchain.chain_processor.executeBulkReorg(all_blocks.items);
+            log.warn("✅ [BULK REORG] Reorganization completed successfully!", .{});
+        } else {
+            log.err("❌ [BULK REORG] No blockchain instance available", .{});
+            return error.NoBlockchain;
+        }
+
+        log.warn("🔄 [BULK REORG] ========================================", .{});
     }
 
     /// Handle periodic state persistence for resume capability
@@ -540,9 +1042,24 @@ pub const SyncManager = struct {
 
     /// Get next available peer for sync
     fn getNextAvailablePeer() ?*Peer {
-        // This would be implemented to get the next available peer from peer manager
-        // For now, return null
-        log.info("🔍 [SYNC MANAGER] Getting next available peer (stub implementation)", .{});
+        if (g_blockchain) |blockchain| {
+            const network_mgr = blockchain.network_coordinator.getNetworkManager() orelse return null;
+            
+            // Use getBestPeerForSync which is now thread-safe and returns an addRef'd peer
+            if (network_mgr.peer_manager.getBestPeerForSync()) |peer| {
+                // Check if this peer is in our failed list
+                if (blockchain.sync_manager) |manager| {
+                    for (manager.failed_peers.items) |failed| {
+                        if (failed == peer) {
+                            // Release it since we aren't using it
+                            peer.release();
+                            return null; // TODO: Implement better rotation
+                        }
+                    }
+                }
+                return peer;
+            }
+        }
         return null;
     }
 

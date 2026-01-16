@@ -8,7 +8,6 @@ const util = @import("../util/util.zig");
 const genesis = @import("genesis.zig");
 const ChainState = @import("state.zig").ChainState;
 const ChainValidator = @import("validator.zig").ChainValidator;
-const ReorgManager = @import("reorganization/manager.zig").ReorgManager;
 
 const log = std.log.scoped(.chain);
 
@@ -195,7 +194,7 @@ pub const ChainOperations = struct {
     /// Add a validated block to the chain
     pub fn addBlockToChain(self: *Self, block: Block, height: u32) !void {
         // Process all transactions in the block
-        try self.chain_state.processBlockTransactions(block.transactions, height);
+        try self.chain_state.processBlockTransactions(block.transactions, height, false);
 
         // Save block to database
         try self.chain_state.database.saveBlock(height, block);
@@ -225,7 +224,7 @@ pub const ChainOperations = struct {
         }
 
         // Process transactions
-        try self.chain_state.processBlockTransactions(block.transactions, target_height);
+        try self.chain_state.processBlockTransactions(block.transactions, target_height, false);
 
         // Save to database
         try self.chain_state.database.saveBlock(target_height, block);
@@ -238,7 +237,7 @@ pub const ChainOperations = struct {
         const block_height = try self.getHeight();
 
         // Process all transactions in the block
-        try self.chain_state.processBlockTransactions(block.transactions, block_height);
+        try self.chain_state.processBlockTransactions(block.transactions, block_height, false);
 
         // Save block to database
         try self.chain_state.database.saveBlock(block_height, block);
@@ -282,17 +281,7 @@ pub const ChainOperations = struct {
         // Highest cumulative work rule: if fork has more work, reorganize
         if (fork_work > current_work) {
             log.info("🏆 Fork block has more work ({} vs {}) - triggering reorganization", .{ fork_work, current_work });
-
-            // Delegate to modern reorganization system
-            var reorg_manager = try ReorgManager.init(
-                self.allocator,
-                &self.chain_state,
-                self.chain_validator,
-                self,
-            );
-            defer reorg_manager.deinit();
-
-            _ = try reorg_manager.executeReorganization(block, block.hash());
+            log.warn("⚠️ storeForkBlock() called - reorganization should use ChainProcessor.executeBulkReorg()", .{});
         } else {
             log.info("📊 Fork block has less work ({} vs {}) - keeping current chain", .{ fork_work, current_work });
         }

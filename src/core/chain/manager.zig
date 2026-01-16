@@ -12,7 +12,6 @@ const db = @import("../storage/db.zig");
 const ChainState = @import("state.zig").ChainState;
 const ChainValidator = @import("validator.zig").ChainValidator;
 const ChainOperations = @import("operations.zig").ChainOperations;
-const ReorgManager = @import("reorganization/manager.zig").ReorgManager;
 const Genesis = @import("genesis.zig");
 
 // Type aliases for clarity
@@ -40,8 +39,7 @@ pub const ChainManager = struct {
     state: ChainState,
     validator: ChainValidator,
     operations: ChainOperations,
-    reorganization: *ReorgManager,
-    
+
     // Resource management
     allocator: std.mem.Allocator,
 
@@ -56,7 +54,6 @@ pub const ChainManager = struct {
             .state = state,
             .validator = undefined, // Will be initialized below
             .operations = undefined, // Will be initialized below
-            .reorganization = undefined, // Will be initialized below
             .allocator = allocator,
         };
     }
@@ -65,8 +62,7 @@ pub const ChainManager = struct {
     pub fn completeInit(self: *Self) !void {
         self.validator = ChainValidator.init(self.allocator, &self.state);
         self.operations = ChainOperations.init(self.allocator, &self.state, &self.validator);
-        self.reorganization = try ReorgManager.init(self.allocator, &self.state, &self.validator, &self.operations);
-        
+
         // Initialize block index from existing blockchain data
         self.state.initializeBlockIndex() catch |err| {
             log.info("⚠️ Failed to initialize block index: {} - O(1) lookups disabled", .{err});
@@ -75,7 +71,6 @@ pub const ChainManager = struct {
 
     /// Cleanup resources
     pub fn deinit(self: *Self) void {
-        self.reorganization.deinit();
         self.operations.deinit();
         self.validator.deinit();
         self.state.deinit();
@@ -136,10 +131,6 @@ pub const ChainManager = struct {
         return self.operations.getBlockByHeight(height);
     }
 
-    /// Handle chain reorganization
-    pub fn handleReorganization(self: *Self, new_block: Block, new_tip: Hash) !void {
-        _ = try self.reorganization.executeReorganization(new_block, new_tip);
-    }
 
     /// Get current mempool size
     fn getMempoolSize(self: *Self) !usize {
@@ -159,8 +150,8 @@ pub const ChainManager = struct {
         // Save genesis block at height 0  
         try self.state.database.saveBlock(0, genesis_block);
         
-        // Process genesis transactions to initialize accounts
-        try self.state.processBlockTransactions(genesis_block.transactions, 0);
+        // Process genesis transactions - force processing as this is initialization
+        try self.state.processBlockTransactions(genesis_block.transactions, 0, true);
         
         log.info("✅ Genesis block initialized for network {}", .{network});
     }

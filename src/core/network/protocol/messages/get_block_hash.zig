@@ -21,6 +21,11 @@ pub const GetBlockHashMessage = struct {
         try self.serialize(writer);
     }
 
+    pub fn estimateSize(self: GetBlockHashMessage) usize {
+        _ = self;
+        return @sizeOf(u32); // 4 bytes for height
+    }
+
     pub fn deinit(self: *GetBlockHashMessage, allocator: std.mem.Allocator) void {
         _ = self;
         _ = allocator;

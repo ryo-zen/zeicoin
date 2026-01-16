@@ -8,19 +8,19 @@ const db = @import("../storage/db.zig");
 const util = @import("../util/util.zig");
 const genesis = @import("genesis.zig");
 const ChainState = @import("state.zig").ChainState;
-// ForkManager removed - using modern reorganization system
 const ChainValidator = @import("../validation/validator.zig").ChainValidator;
 const bech32 = @import("../crypto/bech32.zig");
+const OrphanPool = @import("orphan_pool.zig").OrphanPool;
+const ReorgExecutor = @import("reorg_executor.zig").ReorgExecutor;
 
 pub const ChainProcessor = struct {
     allocator: std.mem.Allocator,
     database: *db.Database,
     chain_state: *ChainState,
-    // fork_manager removed - using modern reorganization system
     chain_validator: *ChainValidator,
     mempool_manager: ?*@import("../mempool/manager.zig").MempoolManager,
-    reorg_manager: ?*@import("reorganization/manager.zig").ReorgManager = null,
-    // Reference to parent for network broadcasting
+    reorg_executor: ReorgExecutor,
+    orphan_pool: OrphanPool,
     network_callback: ?*const fn (block: types.Block) void = null,
 
     pub fn init(
@@ -36,11 +36,13 @@ pub const ChainProcessor = struct {
             .chain_state = chain_state,
             .chain_validator = chain_validator,
             .mempool_manager = mempool_manager,
+            .reorg_executor = ReorgExecutor.init(allocator, chain_state, database),
+            .orphan_pool = OrphanPool.init(allocator, OrphanPool.MAX_ORPHANS_DEFAULT),
         };
     }
 
     pub fn deinit(self: *ChainProcessor) void {
-        _ = self;
+        self.orphan_pool.deinit();
     }
 
     pub fn setNetworkCallback(self: *ChainProcessor, callback: *const fn (block: types.Block) void) void {
@@ -73,8 +75,23 @@ pub const ChainProcessor = struct {
         // Process all transactions in the block
         try self.processBlockTransactions(block.transactions, height);
 
-        // Save block to database
-        try self.database.saveBlock(height, block);
+        // Calculate cumulative chain work (critical for reorganization)
+        var block_with_work = block;
+        const block_work = block.header.getWork();
+        const prev_chain_work = if (height > 0) blk: {
+            var prev_block = try self.database.getBlock(height - 1);
+            defer prev_block.deinit(self.allocator);
+            break :blk prev_block.chain_work;
+        } else 0;
+
+        block_with_work.chain_work = prev_chain_work + block_work;
+
+        log.debug("⚡ [CHAIN WORK] Block #{} work: {}, cumulative: {}", .{
+            height, block_work, block_with_work.chain_work
+        });
+
+        // Save block to database with chain work
+        try self.database.saveBlock(height, block_with_work);
 
         // Update block index for O(1) lookups in reorganizations
         const index_block_hash = block.hash();
@@ -140,50 +157,20 @@ pub const ChainProcessor = struct {
                 log.warn("   📊 Our tip at height {}: {s}", .{ current_height, std.fmt.fmtSliceHexLower(&current_tip_hash) });
                 log.warn("   📦 Block's previous_hash: {s}", .{ std.fmt.fmtSliceHexLower(&block.header.previous_hash) });
                 log.warn("   🔀 Block hash: {s}", .{ std.fmt.fmtSliceHexLower(&block_hash) });
-                
-                // Check if we have a reorg manager to handle chain forks
-                if (self.reorg_manager) |reorg| {
-                    log.info("🔄 [REORG] Attempting chain reorganization...", .{});
-                    log.info("   📍 Current height: {}", .{current_height});
-                    log.info("   📦 New block attempting to fork chain", .{});
-                    
-                    // Attempt reorganization
-                    const result = reorg.executeReorganization(block, block_hash) catch |err| {
-                        log.err("❌ [REORG FAILED] Error during reorganization: {}", .{err});
-                        return error.InvalidPreviousHash;
-                    };
-                    
-                    if (result.success) {
-                        log.info("✅ [REORG SUCCESS] Chain reorganized!", .{});
-                        log.info("   ⬆️ Blocks reverted: {}", .{result.blocks_reverted});
-                        log.info("   ⬇️ Blocks applied: {}", .{result.blocks_applied});
-                        log.info("   🔄 Transactions replayed: {}", .{result.transactions_replayed});
-                        log.info("   ❌ Transactions orphaned: {}", .{result.transactions_orphaned});
-                        log.info("   ⏱️ Duration: {}ms", .{result.duration_ms});
-                        return; // Reorg successful, block accepted
-                    } else {
-                        log.warn("❌ [REORG FAILED] Could not reorganize to new chain", .{});
-                        if (result.error_message) |msg| {
-                            log.warn("   💬 Reason: {s}", .{msg});
-                        }
-                        
-                        // If reorganization failed but we found a fork point, 
-                        // we need to sync from that point to get the missing blocks
-                        if (result.fork_height) |fork_height| {
-                            log.info("🔄 [FORK SYNC] Need to sync from fork point at height {}", .{fork_height});
-                            log.info("   📥 Missing blocks: {}-{}", .{ fork_height + 1, current_height + 2 });
-                            
-                            // Store fork height for sync system to use
-                            // TODO: Implement custom sync start height
-                            // For now, the error will trigger normal sync retry
-                        }
-                        
-                        return error.InvalidPreviousHash;
-                    }
-                } else {
-                    log.warn("   ⚠️ No reorg manager available, rejecting block", .{});
+                log.warn("   📏 Block height: {}", .{block.height});
+
+                // Block doesn't connect to our chain - store as orphan
+                // The sync manager will handle detecting competing chains and triggering reorganization
+                log.info("💾 [ORPHAN] Storing block as orphan - sync manager will handle chain resolution", .{});
+
+                var block_copy = try block.clone(self.allocator);
+                self.orphan_pool.addOrphan(block_copy) catch |err| {
+                    log.warn("⚠️ Failed to add orphan: {}", .{err});
+                    block_copy.deinit(self.allocator);
                     return error.InvalidPreviousHash;
-                }
+                };
+
+                return; // Stored as orphan
             }
         } else if (current_height == 0) {
             // At height 0, we're waiting for block 1 which must reference genesis
@@ -214,8 +201,23 @@ pub const ChainProcessor = struct {
         // Process transactions
         try self.processBlockTransactions(block.transactions, target_height);
 
-        // Save to database
-        try self.database.saveBlock(target_height, block);
+        // Calculate cumulative chain work (critical for reorganization)
+        var block_with_work = block;
+        const block_work = block.header.getWork();
+        const prev_chain_work = if (target_height > 0) blk: {
+            var prev_block = try self.database.getBlock(target_height - 1);
+            defer prev_block.deinit(self.allocator);
+            break :blk prev_block.chain_work;
+        } else 0;
+
+        block_with_work.chain_work = prev_chain_work + block_work;
+
+        log.debug("⚡ [CHAIN WORK] Block #{} work: {}, cumulative: {}", .{
+            target_height, block_work, block_with_work.chain_work
+        });
+
+        // Save to database with chain work
+        try self.database.saveBlock(target_height, block_with_work);
 
         // Update block index for O(1) lookups in reorganizations
         const index_block_hash = block.hash();
@@ -226,6 +228,12 @@ pub const ChainProcessor = struct {
 
         // Clean mempool of transactions that are now confirmed in this block
         self.cleanMempool(block);
+
+        // FIX: Check if any orphan blocks can now be processed after adding this block
+        self.processOrphanBlocks() catch |err| {
+            log.warn("⚠️ [ORPHAN PROCESS] Error processing orphans: {}", .{err});
+            // Continue - orphan processing failures shouldn't stop block acceptance
+        };
 
         // Broadcast to network if callback is set
         if (self.network_callback) |callback| {
@@ -266,9 +274,9 @@ pub const ChainProcessor = struct {
             }
 
             if (tx.isCoinbase()) {
-                try self.chain_state.processCoinbaseTransaction(tx, tx.recipient, height);
+                try self.chain_state.processCoinbaseTransaction(tx, tx.recipient, height, false);
             } else {
-                try self.chain_state.processTransaction(tx);
+                try self.chain_state.processTransaction(tx, false);
             }
         }
     }
@@ -319,5 +327,128 @@ pub const ChainProcessor = struct {
             block.deinit(self.allocator);
         }
         return total_work;
+    }
+
+    /// Request a range of missing blocks from the sync system
+    /// This is called when we detect a gap in the blockchain
+    fn requestMissingBlocks(self: *ChainProcessor, start_height: u32, end_height: u32) !void {
+        _ = self; // Currently unused but needed for future implementation
+        log.info("📥 [MISSING BLOCKS] Requesting blocks {} to {} ({} blocks)", .{
+            start_height,
+            end_height,
+            end_height - start_height + 1,
+        });
+
+        // Access global blockchain instance via sync manager
+        const sync_manager_module = @import("../sync/manager.zig");
+        if (sync_manager_module.g_blockchain) |blockchain| {
+            if (blockchain.sync_manager) |sync_mgr| {
+                // Get the network manager to find a peer
+                const network_mgr = blockchain.network_coordinator.getNetworkManager() orelse {
+                    log.warn("❌ [MISSING BLOCKS] Network manager not available", .{});
+                    return error.NoNetworkManager;
+                };
+
+                // Get the best peer for sync
+                const peer = network_mgr.peer_manager.getBestPeerForSync() orelse {
+                    log.warn("❌ [MISSING BLOCKS] No peers available for sync", .{});
+                    return error.NoPeersAvailable;
+                };
+                defer peer.release();
+
+                log.info("✅ [MISSING BLOCKS] Using peer at height {} for sync", .{peer.height});
+
+                // Trigger sync for the missing block range
+                // Note: startSync will handle the actual block fetching
+                sync_mgr.startSync(peer, end_height, false) catch |err| {
+                    log.warn("❌ [MISSING BLOCKS] Failed to start sync: {}", .{err});
+                    return err;
+                };
+
+                log.info("✅ [MISSING BLOCKS] Sync request initiated successfully", .{});
+            } else {
+                log.warn("❌ [MISSING BLOCKS] Sync manager not available", .{});
+                return error.NoSyncManager;
+            }
+        } else {
+            log.warn("❌ [MISSING BLOCKS] Global blockchain instance not available", .{});
+            return error.NoBlockchain;
+        }
+    }
+
+    /// Execute bulk chain reorganization
+    /// Called by sync manager when a competing longer chain is detected
+    pub fn executeBulkReorg(self: *ChainProcessor, new_blocks: []const types.Block) !void {
+        const current_height = try self.database.getHeight();
+        const new_tip_height = if (new_blocks.len > 0) new_blocks[new_blocks.len - 1].height else current_height;
+
+        log.warn("🔄 [BULK REORG] Starting reorganization: height {} → {}", .{current_height, new_tip_height});
+        log.warn("   📦 Blocks to process: {}", .{new_blocks.len});
+
+        // Execute the reorganization
+        const result = try self.reorg_executor.executeReorg(current_height, new_tip_height, new_blocks);
+
+        if (result.success) {
+            log.warn("✅ [BULK REORG] Chain reorganization successful!", .{});
+            log.warn("   ⏪ Blocks reverted: {}", .{result.blocks_reverted});
+            log.warn("   ⏩ Blocks applied: {}", .{result.blocks_applied});
+            log.warn("   🔀 Fork height: {}", .{result.fork_height});
+
+            // Clear orphan pool after successful reorg
+            self.orphan_pool.clear();
+        } else {
+            log.err("❌ [BULK REORG] Chain reorganization failed!", .{});
+            if (result.error_message) |msg| {
+                log.err("   💬 Error: {s}", .{msg});
+            }
+            return error.ReorgFailed;
+        }
+    }
+
+    /// Process orphan blocks after a new block is added to the chain
+    /// Checks if any orphans are now ready to be connected
+    fn processOrphanBlocks(self: *ChainProcessor) anyerror!void {
+        log.info("🔍 [ORPHAN PROCESS] Checking orphan pool for processable blocks", .{});
+        log.info("   📊 Current orphan count: {}", .{self.orphan_pool.size()});
+
+        // Get the current chain tip
+        const current_height = try self.database.getHeight();
+        var current_tip = try self.database.getBlock(current_height);
+        defer current_tip.deinit(self.allocator);
+        const current_tip_hash = current_tip.hash();
+
+        // Check if any orphans are waiting for this block as their parent
+        if (self.orphan_pool.getOrphansByParent(current_tip_hash)) |orphan_blocks| {
+            defer {
+                // Clean up the ArrayList wrapper
+                var list = std.ArrayList(types.Block).fromOwnedSlice(self.allocator, @constCast(orphan_blocks));
+                for (list.items) |*block| {
+                    block.deinit(self.allocator);
+                }
+                list.deinit();
+            }
+
+            log.info("✅ [ORPHAN PROCESS] Found {} orphan(s) that can now be processed", .{orphan_blocks.len});
+
+            // Process each orphan block
+            for (orphan_blocks) |orphan_block| {
+                const orphan_hash = orphan_block.hash();
+                log.info("   📦 Processing orphan block at height {} (hash: {s})", .{
+                    orphan_block.height,
+                    std.fmt.fmtSliceHexLower(orphan_hash[0..8]),
+                });
+
+                // Try to accept the orphan block
+                // Note: We don't catch errors here - let them propagate up
+                try self.acceptBlock(orphan_block);
+
+                log.info("   ✅ Orphan block processed successfully", .{});
+            }
+
+            // Note: Don't recurse here to avoid inferred error set issues
+            // The caller (addBlockToChain) will call processOrphanBlocks again if needed
+        } else {
+            log.info("   ℹ️  No orphans ready for processing", .{});
+        }
     }
 };

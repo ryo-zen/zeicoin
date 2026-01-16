@@ -7,6 +7,7 @@ const protocol = @import("protocol/protocol.zig");
 const wire = @import("wire/wire.zig");
 const message_types = @import("protocol/messages/message_types.zig");
 const message_envelope = @import("protocol/message_envelope.zig");
+const types = @import("../types/types.zig");
 
 const ArrayList = std.ArrayList;
 const Mutex = std.Thread.Mutex;
@@ -65,14 +66,40 @@ pub const Peer = struct {
     consecutive_successful_requests: u32,
     consecutive_failures: u32,
 
+    // Failure metadata for reconnection logic
+    last_failed_at: i64,
+    failure_reason: ?[]const u8,
+    retry_allowed_after: i64,
+
     // TCP send callback
     tcp_send_fn: ?*const fn (ctx: ?*anyopaque, data: []const u8) anyerror!void,
     tcp_send_ctx: ?*anyopaque,
-    
+
     // Shutdown synchronization
     is_shutting_down: std.atomic.Value(bool),
 
+    // Response queues for synchronous request/response patterns (fork detection)
+    // These are used by fork_detector.zig to wait for specific responses
+    block_hash_responses: std.AutoHashMap(u32, BlockHashResponse),  // height -> response
+    chain_work_response: ?types.ChainWork,  // Latest chain work response
+    
+    // Block caches for synchronous requests (ZSP-001)
+    received_blocks: std.AutoHashMap([32]u8, types.Block),          // hash -> block
+    received_blocks_by_height: std.AutoHashMap(u32, types.Block),   // height -> block
+    
+    response_mutex: std.Thread.Mutex,  // Protects response queues and block caches
+    
+    // Reference counting for thread-safe peer lifecycle
+    ref_count: std.atomic.Value(u32),
+
     const Self = @This();
+
+    /// Block hash response for fork detection
+    pub const BlockHashResponse = struct {
+        hash: types.Hash,
+        exists: bool,
+        timestamp: i64,
+    };
 
     pub fn init(allocator: std.mem.Allocator, id: u64, address: net.Address) Self {
         return .{
@@ -94,22 +121,44 @@ pub const Peer = struct {
             .ping_time_ms = 0,
             .consecutive_successful_requests = 0,
             .consecutive_failures = 0,
+            .last_failed_at = 0,
+            .failure_reason = null,
+            .retry_allowed_after = 0,
             .tcp_send_fn = null,
             .tcp_send_ctx = null,
             .is_shutting_down = std.atomic.Value(bool).init(false),
+            .block_hash_responses = std.AutoHashMap(u32, BlockHashResponse).init(allocator),
+            .chain_work_response = null,
+            .received_blocks = std.AutoHashMap([32]u8, types.Block).init(allocator),
+            .received_blocks_by_height = std.AutoHashMap(u32, types.Block).init(allocator),
+            .response_mutex = std.Thread.Mutex{},
+            .ref_count = std.atomic.Value(u32).init(1),
         };
     }
 
     pub fn deinit(self: *Self) void {
         // Signal shutdown to connection threads
         self.is_shutting_down.store(true, .release);
-        
+
         // Give threads a moment to notice the shutdown flag
         std.time.sleep(10 * std.time.ns_per_ms);
-        
+
         if (self.user_agent.len > 0) {
             self.allocator.free(self.user_agent);
         }
+
+        // Clean up response queues and block caches
+        self.block_hash_responses.deinit();
+        
+        // Properly deinit all cached blocks
+        var block_it = self.received_blocks.iterator();
+        while (block_it.next()) |entry| {
+            var mutable_block = entry.value_ptr.*;
+            mutable_block.deinit(self.allocator);
+        }
+        self.received_blocks.deinit();
+        self.received_blocks_by_height.deinit(); // Blocks are same as above, don't double-deinit
+
         self.connection.deinit();
     }
 
@@ -118,15 +167,22 @@ pub const Peer = struct {
         const result = try self.connection.sendMessage(msg_type, msg);
 
         // If we have a TCP send callback, use it to actually send the data
-        if (self.tcp_send_fn) |send_fn| {
-            try send_fn(self.tcp_send_ctx, result);
+        self.response_mutex.lock();
+        const send_fn = self.tcp_send_fn;
+        const send_ctx = self.tcp_send_ctx;
+        self.response_mutex.unlock();
+
+        if (send_fn) |f| {
+            try f(send_ctx, result);
         }
 
         return result;
     }
 
     /// Set TCP send callback
-    pub fn setTcpSendCallback(self: *Self, send_fn: *const fn (ctx: ?*anyopaque, data: []const u8) anyerror!void, ctx: ?*anyopaque) void {
+    pub fn setTcpSendCallback(self: *Self, send_fn: ?*const fn (ctx: ?*anyopaque, data: []const u8) anyerror!void, ctx: ?*anyopaque) void {
+        self.response_mutex.lock();
+        defer self.response_mutex.unlock();
         self.tcp_send_fn = send_fn;
         self.tcp_send_ctx = ctx;
     }
@@ -167,6 +223,114 @@ pub const Peer = struct {
         const now = std.time.timestamp();
         const timeout_result = (now - self.last_recv) > protocol.CONNECTION_TIMEOUT_SECONDS;
         return timeout_result;
+    }
+
+    /// Queue a block hash response (called by message handlers)
+    pub fn queueBlockHashResponse(self: *Self, height: u32, hash: types.Hash, exists: bool) !void {
+        self.response_mutex.lock();
+        defer self.response_mutex.unlock();
+
+        try self.block_hash_responses.put(height, BlockHashResponse{
+            .hash = hash,
+            .exists = exists,
+            .timestamp = std.time.timestamp(),
+        });
+    }
+
+    /// Get a block hash response if available (non-blocking)
+    pub fn getBlockHashResponse(self: *Self, height: u32) ?BlockHashResponse {
+        self.response_mutex.lock();
+        defer self.response_mutex.unlock();
+
+        return self.block_hash_responses.get(height);
+    }
+
+    /// Remove a block hash response after consuming it
+    pub fn removeBlockHashResponse(self: *Self, height: u32) void {
+        self.response_mutex.lock();
+        defer self.response_mutex.unlock();
+
+        _ = self.block_hash_responses.remove(height);
+    }
+
+    /// Queue a chain work response (called by message handlers)
+    pub fn queueChainWorkResponse(self: *Self, work: types.ChainWork) void {
+        self.response_mutex.lock();
+        defer self.response_mutex.unlock();
+
+        self.chain_work_response = work;
+    }
+
+    /// Get and consume the chain work response
+    pub fn getChainWorkResponse(self: *Self) ?types.ChainWork {
+        self.response_mutex.lock();
+        defer self.response_mutex.unlock();
+
+        const work = self.chain_work_response;
+        self.chain_work_response = null;  // Clear after reading
+        return work;
+    }
+
+    /// Add a block to the received blocks cache
+    pub fn addReceivedBlock(self: *Self, block: types.Block) !void {
+        self.response_mutex.lock();
+        defer self.response_mutex.unlock();
+
+        const hash = block.hash();
+        
+        // Deep copy block to ensure ownership in cache
+        const block_copy = try block.clone(self.allocator);
+        
+        // Remove existing block if any to prevent leaks
+        if (self.received_blocks.get(hash)) |old_block| {
+            var mutable_old = old_block;
+            mutable_old.deinit(self.allocator);
+        }
+
+        try self.received_blocks.put(hash, block_copy);
+        try self.received_blocks_by_height.put(block.height, block_copy);
+    }
+
+    /// Get a received block by hash and remove it from cache
+    pub fn getReceivedBlock(self: *Self, hash: [32]u8) ?types.Block {
+        self.response_mutex.lock();
+        defer self.response_mutex.unlock();
+
+        if (self.received_blocks.get(hash)) |block| {
+            _ = self.received_blocks.remove(hash);
+            _ = self.received_blocks_by_height.remove(block.height);
+            return block;
+        }
+        return null;
+    }
+
+    /// Get a received block by height and remove it from cache
+    pub fn getReceivedBlockByHeight(self: *Self, height: u32) ?types.Block {
+        self.response_mutex.lock();
+        defer self.response_mutex.unlock();
+
+        if (self.received_blocks_by_height.get(height)) |block| {
+            const hash = block.hash();
+            _ = self.received_blocks.remove(hash);
+            _ = self.received_blocks_by_height.remove(height);
+            return block;
+        }
+        return null;
+    }
+
+    /// Increment reference count
+    pub fn addRef(self: *Self) void {
+        _ = self.ref_count.fetchAdd(1, .acq_rel);
+    }
+
+    /// Decrement reference count and cleanup if zero
+    pub fn release(self: *Self) void {
+        const old_count = self.ref_count.fetchSub(1, .acq_rel);
+        if (old_count == 1) {
+            const allocator = self.allocator;
+            self.deinit();
+            allocator.destroy(self);
+        }
     }
 
     /// Check if peer is connected and ready for requests
@@ -220,14 +384,50 @@ pub const Peer = struct {
     /// Send ZSP-001 compliant request for multiple blocks (batch sync)
     /// Supports both hash-based and height-encoded requests in the same batch
     pub fn sendGetBlocks(self: *Self, hashes: []const [32]u8) !void {
-
-        // Batch analysis removed - was only for debug logging
+        std.log.info("📤 [SEND GET_BLOCKS] ============================================", .{});
+        std.log.info("📤 [SEND GET_BLOCKS] Peer {d} sending GetBlocks message", .{self.id});
+        std.log.info("📤 [SEND GET_BLOCKS] Number of hashes: {d}", .{hashes.len});
+        if (hashes.len > 0) {
+            std.log.info("📤 [SEND GET_BLOCKS] First hash: {s}...{s}", .{
+                std.fmt.fmtSliceHexLower(hashes[0][0..4]),
+                std.fmt.fmtSliceHexLower(hashes[0][4..8]),
+            });
+        }
 
         // Create and send the batch message
         var msg = try message_types.GetBlocksMessage.init(self.allocator, hashes);
         defer msg.deinit(self.allocator);
 
-        _ = try self.sendMessage(.get_blocks, msg);
+        std.log.info("📤 [SEND GET_BLOCKS] Calling sendMessage with .get_blocks type", .{});
+        const bytes_sent = try self.sendMessage(.get_blocks, msg);
+        std.log.info("📤 [SEND GET_BLOCKS] ✅ Message sent successfully ({d} bytes)", .{bytes_sent});
+        std.log.info("📤 [SEND GET_BLOCKS] ============================================", .{});
+    }
+
+    /// Request specific blocks by hash (Fix 3: Orphan block resolution)
+    /// Used for targeted missing block requests during orphan processing
+    pub fn requestMissingBlocks(self: *Self, block_hashes: []const [32]u8) !void {
+        if (block_hashes.len == 0) return;
+
+        const log = std.log.scoped(.network);
+        log.info("📥 [REQUEST] Requesting {} missing block(s) from peer {}", .{
+            block_hashes.len,
+            self.id,
+        });
+
+        var msg = message_types.GetMissingBlocksMessage.init(self.allocator);
+        defer msg.deinit(self.allocator);
+
+        // Add each hash to request (up to MAX_MISSING_BLOCKS)
+        for (block_hashes) |hash| {
+            try msg.addHash(hash);
+            log.debug("   Requesting: {s}", .{std.fmt.fmtSliceHexLower(&hash)});
+        }
+
+        // Send message
+        _ = try self.sendMessage(.get_missing_blocks, msg);
+
+        log.info("✅ [REQUEST] Missing blocks request sent", .{});
     }
 
     /// Send request for headers using block locator pattern
@@ -314,6 +514,16 @@ pub const Peer = struct {
     pub fn recordFailedRequest(self: *Self) void {
         self.consecutive_failures += 1;
         self.consecutive_successful_requests = 0;
+
+        // Track failure timestamp and set cooldown
+        self.last_failed_at = std.time.timestamp();
+        self.retry_allowed_after = self.last_failed_at + 30; // 30-second cooldown
+    }
+
+    /// Check if peer can retry connection (cooldown expired)
+    pub fn canRetryConnection(self: *const Self) bool {
+        const now = std.time.timestamp();
+        return now >= self.retry_allowed_after;
     }
 
     /// Check if peer should be considered for sync operations
@@ -400,8 +610,7 @@ pub const PeerManager = struct {
         defer self.mutex.unlock();
 
         for (self.peers.items) |peer| {
-            peer.deinit();
-            self.allocator.destroy(peer);
+            peer.release();
         }
         self.peers.deinit();
         self.known_addresses.deinit();
@@ -463,8 +672,8 @@ pub const PeerManager = struct {
             if (peer.id == peer_id) {
                 found = true;
 
-                peer.deinit();
-                self.allocator.destroy(peer);
+                // Release reference (might destroy if last reference)
+                peer.release();
 
                 _ = self.peers.orderedRemove(i);
 
@@ -480,6 +689,7 @@ pub const PeerManager = struct {
 
         for (self.peers.items) |peer| {
             if (peer.id == peer_id) {
+                peer.addRef();
                 return peer;
             }
         }
@@ -514,6 +724,8 @@ pub const PeerManager = struct {
                 }
             }
         }
+        
+        if (best) |p| p.addRef();
         return best;
     }
 
@@ -568,8 +780,7 @@ pub const PeerManager = struct {
         while (i < self.peers.items.len) {
             const peer = self.peers.items[i];
             if (peer.isTimedOut()) {
-                peer.deinit();
-                self.allocator.destroy(peer);
+                peer.release();
                 _ = self.peers.orderedRemove(i);
                 // Don't increment i since we removed an item
             } else {

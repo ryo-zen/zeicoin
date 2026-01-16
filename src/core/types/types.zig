@@ -566,7 +566,7 @@ pub const DifficultyTarget = struct {
         return switch (network) {
             .testnet => DifficultyTarget{
                 .base_bytes = 1,
-                .threshold = 0xFFFF0000, // Ultra-easy difficulty for fast testing (near-instant blocks)
+                .threshold = 0xFFFFFFF0, // EXTREMELY easy difficulty - instant blocks for low-end hardware
             },
             .mainnet => DifficultyTarget{
                 .base_bytes = 2,
@@ -798,6 +798,8 @@ pub const BlockHeader = struct {
 pub const Block = struct {
     header: BlockHeader,
     transactions: []Transaction,
+    height: u32, // Block height in the chain (Fix 2: explicit height to prevent calculation errors)
+    chain_work: ChainWork = 0, // Cumulative proof-of-work up to this block (for reorganization)
 
     /// Get the hash of this block
     pub fn hash(self: *const Block) BlockHash {
@@ -885,6 +887,75 @@ pub const Block = struct {
         return true;
     }
 
+    /// Calculate Merkle root of transactions
+    /// Uses Bitcoin-style double SHA256 hashing
+    pub fn calculateMerkleRoot(self: *const Block, allocator: std.mem.Allocator) !Hash {
+        if (self.transactions.len == 0) {
+            // Empty merkle root (all zeros)
+            return [_]u8{0} ** 32;
+        }
+
+        // Special case: single transaction
+        if (self.transactions.len == 1) {
+            return self.transactions[0].hash();
+        }
+
+        // Build merkle tree from transaction hashes
+        var current_level = try allocator.alloc(Hash, self.transactions.len);
+        
+        // Use a flag to track if we need to manually free on error
+        // This is safer than nested errdefers during reassignment
+        var success = false;
+        defer if (!success) allocator.free(current_level);
+
+        // First level: transaction hashes
+        for (self.transactions, 0..) |tx, i| {
+            current_level[i] = tx.hash();
+        }
+
+        // Build tree bottom-up
+        while (current_level.len > 1) {
+            const next_level_size = (current_level.len + 1) / 2;
+            var next_level = try allocator.alloc(Hash, next_level_size);
+            errdefer allocator.free(next_level);
+
+            var i: usize = 0;
+            while (i < current_level.len) : (i += 2) {
+                var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+
+                // Hash left child
+                hasher.update(&current_level[i]);
+
+                // Hash right child (or duplicate left if odd number)
+                if (i + 1 < current_level.len) {
+                    hasher.update(&current_level[i + 1]);
+                } else {
+                    hasher.update(&current_level[i]); // Duplicate last hash
+                }
+
+                // Double SHA256
+                var first_hash: [32]u8 = undefined;
+                hasher.final(&first_hash);
+
+                var hasher2 = std.crypto.hash.sha2.Sha256.init(.{});
+                hasher2.update(&first_hash);
+                hasher2.final(&next_level[i / 2]);
+            }
+
+            // Free the previous level as we're done with it
+            allocator.free(current_level);
+            // Update to the new level
+            current_level = next_level;
+        }
+
+        const root = current_level[0];
+        // Clean up the final level
+        allocator.free(current_level);
+        // Mark as successful so the defer doesn't free it again
+        success = true;
+        return root;
+    }
+
     /// Free all dynamically allocated memory in this block
     /// This includes the transactions array and any nested allocations
     /// IMPORTANT: Only call this on blocks loaded from disk/database
@@ -904,6 +975,8 @@ pub const Block = struct {
         var new_block = Block{
             .header = self.header,
             .transactions = undefined,
+            .height = self.height, // Fix 2: Copy height from original block
+            .chain_work = self.chain_work, // Copy cumulative work
         };
 
         // Allocate array for transactions
@@ -924,6 +997,12 @@ pub const Block = struct {
         }
 
         return new_block;
+    }
+
+    /// Alias for dupe() - creates a deep copy of this block
+    /// The caller owns the returned block and must call deinit on it
+    pub fn clone(self: *const Block, allocator: std.mem.Allocator) !Block {
+        return try self.dupe(allocator);
     }
 };
 
@@ -1163,7 +1242,7 @@ pub const NetworkConfig = struct {
         return switch (CURRENT_NETWORK) {
             .testnet => NetworkConfig{
                 .randomx_mode = false, // Light mode (256MB RAM)
-                .target_block_time = 10, // 10 seconds
+                .target_block_time = 60, // 60 seconds (Slow down for testing)
                 .max_nonce = 1_000_000, // Reasonable limit for testing
                 .block_reward = 10 * ZEI_COIN, // 10 ZEI per block
                 .min_fee = 1000, // 0.00001 ZEI minimum fee
@@ -1459,6 +1538,7 @@ test "block validation" {
             .extra_data = std.mem.zeroes([32]u8),
         },
         .transactions = &transactions,
+        .height = 1, // Test block at height 1
     };
 
     try testing.expect(block.isValid());
@@ -1677,6 +1757,7 @@ test "block hash delegated to header hash" {
             .extra_data = std.mem.zeroes([32]u8),
         },
         .transactions = &transactions,
+        .height = 1, // Test block at height 1
     };
 
     // Block hash should equal header hash
@@ -1726,6 +1807,7 @@ test "block version validation" {
             .extra_data = std.mem.zeroes([32]u8),
         },
         .transactions = txs,
+        .height = 1, // Test block at height 1
     };
     try testing.expect(block_v0.isValid());
 
@@ -1744,6 +1826,7 @@ test "block version validation" {
             .extra_data = std.mem.zeroes([32]u8),
         },
         .transactions = txs,
+        .height = 1, // Test block at height 1
     };
     try testing.expect(!block_v1.isValid());
 
@@ -1762,6 +1845,7 @@ test "block version validation" {
             .extra_data = std.mem.zeroes([32]u8),
         },
         .transactions = txs,
+        .height = 1, // Test block at height 1
     };
     try testing.expect(!block_v999.isValid());
 }
