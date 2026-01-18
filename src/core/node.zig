@@ -261,7 +261,8 @@ pub const ZeiCoin = struct {
     }
     
     pub fn getBlockHashAtHeight(self: *ZeiCoin, height: u32) ![32]u8 {
-        const block = try self.chain_query.getBlock(height);
+        var block = try self.chain_query.getBlock(height);
+        defer block.deinit(self.allocator);
         return block.hash();
     }
     

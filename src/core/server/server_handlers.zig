@@ -418,37 +418,40 @@ pub const ServerHandlers = struct {
                     std.log.info("📋 [GET_BLOCKS] Requested height {} beyond current height {}", .{ height, current_height });
                     continue;
                 }
-                
-                if (self.blockchain.database.getBlock(height)) |block| {
-                    std.log.info("📤 [GET_BLOCKS] Sending block {} to peer {any}", .{ height, peer.address });
-                    
-                    // Send block to peer
-                    const block_msg = network.message_types.BlockMessage{ .block = block };
-                    _ = peer.sendMessage(.block, block_msg) catch |err| {
-                        std.log.err("Failed to send block {} to peer: {}", .{ height, err });
-                        std.log.info("📊 [GET_BLOCKS] Sent {} blocks before connection error", .{ blocks_sent });
-                        return;
-                    };
-                    blocks_sent += 1;
-                } else |err| {
+
+                var block = self.blockchain.database.getBlock(height) catch |err| {
                     std.log.err("Failed to get block {}: {}", .{ height, err });
-                }
+                    continue;
+                };
+                defer block.deinit(self.blockchain.allocator);
+
+                std.log.info("📤 [GET_BLOCKS] Sending block {} to peer {any}", .{ height, peer.address });
+
+                // Send block to peer
+                const block_msg = network.message_types.BlockMessage{ .block = block };
+                _ = peer.sendMessage(.block, block_msg) catch |err| {
+                    std.log.err("Failed to send block {} to peer: {}", .{ height, err });
+                    std.log.info("📊 [GET_BLOCKS] Sent {} blocks before connection error", .{ blocks_sent });
+                    return;
+                };
+                blocks_sent += 1;
             } else {
                 // Legacy hash-based request - fallback to old behavior
                 std.log.info("📋 [LEGACY] Processing hash-based request - sending all blocks from height 1", .{});
                 var height: u32 = 1;
                 while (height <= current_height) : (height += 1) {
-                    if (self.blockchain.database.getBlock(height)) |block| {
-                        const block_msg = network.message_types.BlockMessage{ .block = block };
-                        _ = peer.sendMessage(.block, block_msg) catch |err| {
-                            std.log.err("Failed to send block {} to peer: {}", .{ height, err });
-                            return;
-                        };
-                        blocks_sent += 1;
-                    } else |err| {
+                    var block = self.blockchain.database.getBlock(height) catch |err| {
                         std.log.err("Failed to get block {}: {}", .{ height, err });
                         break;
-                    }
+                    };
+                    defer block.deinit(self.blockchain.allocator);
+
+                    const block_msg = network.message_types.BlockMessage{ .block = block };
+                    _ = peer.sendMessage(.block, block_msg) catch |err| {
+                        std.log.err("Failed to send block {} to peer: {}", .{ height, err });
+                        return;
+                    };
+                    blocks_sent += 1;
                 }
                 break; // Exit loop after processing legacy request
             }
@@ -709,11 +712,12 @@ pub const ServerHandlers = struct {
         // Must check current_height down to 0 (inclusive), avoiding unsigned underflow
         var height: u32 = current_height;
         while (true) {
-            const block = try self.blockchain.database.getBlock(height);
+            var block = try self.blockchain.database.getBlock(height);
             const hash = block.hash();
             if (std.mem.eql(u8, &hash, &block_hash)) {
                 return block;
             }
+            block.deinit(self.blockchain.allocator);
 
             // Break before decrementing to avoid underflow at height 0
             if (height == 0) break;

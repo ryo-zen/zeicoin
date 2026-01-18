@@ -371,25 +371,33 @@ pub const Database = struct {
     fn updateHeight(self: *Database, height: u32) !void {
         const current_height = try self.getHeight();
         if (height > current_height) {
-            const height_str = try std.fmt.allocPrint(self.allocator, "{}", .{height});
-            defer self.allocator.free(height_str);
-
-            var err: ?[*:0]u8 = null;
-            c.rocksdb_put(
-                self.db,
-                self.write_options,
-                HEIGHT_KEY.ptr,
-                HEIGHT_KEY.len,
-                height_str.ptr,
-                height_str.len,
-                @ptrCast(&err),
-            );
-
-            if (err != null) {
-                c.rocksdb_free(@constCast(@ptrCast(err)));
-                return DatabaseError.SaveFailed;
-            }
+            try self.writeHeight(height);
         }
+    }
+
+    fn writeHeight(self: *Database, height: u32) !void {
+        const height_str = try std.fmt.allocPrint(self.allocator, "{}", .{height});
+        defer self.allocator.free(height_str);
+
+        var err: ?[*:0]u8 = null;
+        c.rocksdb_put(
+            self.db,
+            self.write_options,
+            HEIGHT_KEY.ptr,
+            HEIGHT_KEY.len,
+            height_str.ptr,
+            height_str.len,
+            @ptrCast(&err),
+        );
+
+        if (err != null) {
+            c.rocksdb_free(@constCast(@ptrCast(err)));
+            return DatabaseError.SaveFailed;
+        }
+    }
+
+    pub fn saveHeight(self: *Database, height: u32) !void {
+        try self.writeHeight(height);
     }
 
     pub fn getAccountCount(self: *Database) !u32 {
@@ -925,9 +933,7 @@ pub const Database = struct {
         log.info("🗑️ Removed block at height {}", .{height});
     }
 
-    pub fn saveHeight(self: *Database, height: u32) !void {
-        try self.updateHeight(height);
-    }
+
 
     pub fn createWriteBatch(self: *Database) WriteBatch {
         return WriteBatch{

@@ -289,6 +289,7 @@ pub const BlockProcessor = struct {
 
         // Create a deep copy of the block for chain processor
         var block_copy = try owned_block.dupe(self.allocator);
+        defer block_copy.deinit(self.allocator);
 
         // Get current tip before processing to detect if chain advanced
         const old_tip_height = self.blockchain.getHeight() catch 0;
@@ -297,7 +298,6 @@ pub const BlockProcessor = struct {
         // acceptBlock handles orphans, forks, and extensions correctly
         self.blockchain.chain_processor.acceptBlock(block_copy) catch |err| {
             log.err("Failed to accept block: {}", .{err});
-            block_copy.deinit(self.allocator);
             return;
         };
         // Ownership transferred to chain_processor (if successful)

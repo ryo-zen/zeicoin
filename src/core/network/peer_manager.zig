@@ -653,6 +653,7 @@ pub const PeerManager = struct {
 
         // Create new peer
         const peer = try self.allocator.create(Peer);
+        errdefer self.allocator.destroy(peer);
         const assigned_id = self.next_peer_id;
         peer.* = Peer.init(self.allocator, assigned_id, address);
         self.next_peer_id += 1;

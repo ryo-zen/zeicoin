@@ -1027,6 +1027,13 @@ pub const SyncManager = struct {
 
             log.info("🔧 [SYNC MANAGER] Applying block to blockchain at height {}", .{next_height});
 
+            // CRITICAL: Validate block hash chain before applying
+            // This prevents adding blocks that don't connect to the tip (corruption prevention)
+            if (!try validateBlockBeforeApply(block, next_height)) {
+                log.err("❌ [SYNC MANAGER] Block validation failed for height {} - rejecting application", .{next_height});
+                return error.InvalidBlock;
+            }
+
             // Apply block using the chain processor
             blockchain.chain_processor.addBlockToChain(block, next_height) catch |err| {
                 log.info("❌ [SYNC MANAGER] Failed to apply block to chain: {}", .{err});
