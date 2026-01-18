@@ -304,10 +304,19 @@ pub const PeerConnection = struct {
         self.peer.height = handshake.start_height;
         self.peer.best_block_hash = handshake.best_block_hash;
         std.log.info("   ✅ Peer {d} height now set to: {d}", .{peer_id, self.peer.height});
+
+        // Free old user_agent if exists
         if (self.peer.user_agent.len > 0) {
             self.allocator.free(self.peer.user_agent);
+            self.peer.user_agent = &[_]u8{}; // Reset to prevent double-free
         }
+
+        // Allocate new user_agent with proper cleanup on error
         self.peer.user_agent = try self.allocator.dupe(u8, handshake.user_agent);
+        errdefer {
+            self.allocator.free(self.peer.user_agent);
+            self.peer.user_agent = &[_]u8{};
+        }
 
         // Send handshake ack with our current height
         const cached_peer_id = self.peer.id; // Cache the ID

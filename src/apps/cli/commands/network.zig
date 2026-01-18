@@ -144,28 +144,32 @@ fn handleWatchStatus(allocator: std.mem.Allocator) !void {
         }
         last_mining_state = is_mining;
 
-        // Clear previous display (2 lines) - but not on first iteration
-        if (!first_iteration) {
-            print("\r\x1b[K", .{}); // Clear current line
-            print("\x1b[1A\x1b[K", .{}); // Move up and clear line
-        }
-        first_iteration = false;
-
+        // Single-line display with smooth animation (clear FIRST to prevent white streak)
         if (is_mining) {
             // Show blockchain animation when mining
             const frame = blockchain_frames[frame_counter % blockchain_frames.len];
-            print("{s}\n", .{frame});
-            print("Mining Block: {s} | Peers: {s} | Mempool: {s} | {s} H/s", .{ height orelse "?", peers orelse "?", pending orelse "?", hashrate orelse "0" });
+
+            if (first_iteration) {
+                // First iteration: print normally
+                print("{s} Block: {s: >3} | Peers: {s: >2} | Mempool: {s: >3} | Hash: {s: >5} H/s", .{ frame, height orelse "?", peers orelse "?", pending orelse "?", hashrate orelse "0.0" });
+            } else {
+                // Update: carriage return, clear entire line, then print (prevents white streak)
+                print("\r\x1b[2K{s} Block: {s: >3} | Peers: {s: >2} | Mempool: {s: >3} | Hash: {s: >5} H/s", .{ frame, height orelse "?", peers orelse "?", pending orelse "?", hashrate orelse "0.0" });
+            }
             frame_counter += 1;
         } else {
             // Show static status when not mining
-            print("⏸️ Mining Inactive ⏸️\n", .{});
-            print("Current blockchain height: {s} | Peers: {s} | Mempool: {s} | Ready for transactions", .{ height orelse "?", peers orelse "?", pending orelse "?" });
+            if (first_iteration) {
+                print("⏸️ Mining Inactive | Height: {s: >3} | Peers: {s: >2} | Mempool: {s: >3}", .{ height orelse "?", peers orelse "?", pending orelse "?" });
+            } else {
+                print("\r\x1b[2K⏸️ Mining Inactive | Height: {s: >3} | Peers: {s: >2} | Mempool: {s: >3}", .{ height orelse "?", peers orelse "?", pending orelse "?" });
+            }
             frame_counter = 0; // Keep at start when inactive
         }
+        first_iteration = false;
 
-        // Wait 200ms for smooth animation
-        std.time.sleep(200 * std.time.ns_per_ms);
+        // Wait 100ms for smooth animation (10 FPS)
+        std.time.sleep(100 * std.time.ns_per_ms);
     }
 }
 

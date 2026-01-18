@@ -135,7 +135,13 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
 
     // Get previous block hash even for block 1 (height 0 = genesis exists)
     // Check if database is completely empty (no blocks at all)
-    const has_genesis = ctx.database.getBlock(0) catch null != null;
+    const has_genesis = blk: {
+        var genesis_block = ctx.database.getBlock(0) catch {
+            break :blk false;
+        };
+        genesis_block.deinit(ctx.allocator);
+        break :blk true;
+    };
 
     const previous_hash = if (current_height == 0 and !has_genesis) blk: {
         // Special case: mining first block when genesis doesn't exist yet

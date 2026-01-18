@@ -122,11 +122,12 @@ pub fn miningThreadFn(ctx: MiningContext, miner_keypair: key.KeyPair, mining_add
 
         // Mine the block
         log.info("🔨 Mining thread: Calling zenMineBlock (mempool has {} transactions)", .{ctx.mempool_manager.getTransactionCount()});
-        const block = core.zenMineBlock(ctx, miner_keypair, mining_address) catch |err| {
+        var block = core.zenMineBlock(ctx, miner_keypair, mining_address) catch |err| {
             log.info("❌ [MINING ERROR] Height {} - {}", .{ current_height, err });
             std.time.sleep(1 * std.time.ns_per_s); // Wait 1 second before retry
             continue;
         };
+        defer block.deinit(ctx.allocator);
 
         // Successfully mined - the block is already added to chain in zenMineBlock
         const block_height = ctx.blockchain.getHeight() catch 0;
