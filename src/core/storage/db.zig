@@ -805,6 +805,7 @@ pub const Database = struct {
                 c.rocksdb_iter_next(it);
                 continue;
             };
+            errdefer block.deinit(self.allocator);
 
             if (std.mem.eql(u8, &block.hash(), &hash)) {
                 return block;

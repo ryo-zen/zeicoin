@@ -92,3 +92,4 @@ tests_dev/
 
 # === Other ===
 web/l2-test-app.html
+test_spinner3.zig
