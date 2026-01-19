@@ -1,0 +1,24 @@
+[Unit]
+Description=ZeiCoin Error Monitor
+After=postgresql.service zeicoin-mining.service
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/zeicoin
+EnvironmentFile=-/root/zeicoin/.env
+EnvironmentFile=-/root/zeicoin/.env.local
+Environment="ZEICOIN_DB_HOST=127.0.0.1"
+Environment="ZEICOIN_DB_NAME=zeicoin_testnet"
+Environment="ZEICOIN_DB_USER=zeicoin"
+Environment="ZEICOIN_MONITOR_MIN_SEVERITY=MEDIUM"
+
+ExecStart=/root/zeicoin/zig-out/bin/error_monitor
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
