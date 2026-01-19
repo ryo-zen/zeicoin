@@ -1366,20 +1366,20 @@ pub const ZenFees = struct {
 
 /// 📦 Block size limits - prevent spam while allowing growth
 pub const BlockLimits = struct {
-    /// Maximum block size in bytes (16MB) - hard consensus limit
-    pub const MAX_BLOCK_SIZE: usize = 16 * 1024 * 1024; // 16MB
+    /// Maximum block size in bytes (32MB) - hard consensus limit
+    pub const MAX_BLOCK_SIZE: usize = 32 * 1024 * 1024; // 32MB
 
-    /// Soft limit for miners (2MB) - can be adjusted without fork
-    pub const SOFT_BLOCK_SIZE: usize = 2 * 1024 * 1024; // 2MB
+    /// Soft limit for miners (16MB) - can be adjusted without fork
+    pub const SOFT_BLOCK_SIZE: usize = 16 * 1024 * 1024; // 16MB
 
-    /// Average transaction size estimate for capacity planning
-    pub const AVG_TX_SIZE: usize = 2048; // 2KB average
+    /// Average transaction size estimate for capacity planning (ML-DSA-44 signatures)
+    pub const AVG_TX_SIZE: usize = 2560; // 2.5KB average (post-quantum ready)
 
     /// Estimated transactions per block at soft limit
-    pub const SOFT_TXS_PER_BLOCK: usize = SOFT_BLOCK_SIZE / AVG_TX_SIZE; // ~1000 txs
+    pub const SOFT_TXS_PER_BLOCK: usize = SOFT_BLOCK_SIZE / AVG_TX_SIZE; // ~6250 txs
 
     /// Estimated transactions per block at hard limit
-    pub const MAX_TXS_PER_BLOCK: usize = MAX_BLOCK_SIZE / AVG_TX_SIZE; // ~8000 txs
+    pub const MAX_TXS_PER_BLOCK: usize = MAX_BLOCK_SIZE / AVG_TX_SIZE; // ~12500 txs
 };
 
 /// 🏊 Mempool limits - prevent memory exhaustion attacks

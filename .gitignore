@@ -4,6 +4,7 @@ zig-cache/
 .zig-cache/
 zig_docs
 zig_docs_std
+zig-x86_64-linux-*/
 
 # === ZeiCoin data & databases ===
 zeicoin_data/
