@@ -610,6 +610,8 @@ pub const PeerManager = struct {
         defer self.mutex.unlock();
 
         for (self.peers.items) |peer| {
+            // Signal shutdown to prevent hanging threads (Fixes memory leak)
+            peer.is_shutting_down.store(true, .release);
             peer.release();
         }
         self.peers.deinit();
@@ -621,9 +623,10 @@ pub const PeerManager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        // Mark all peers as disconnected
+        // Mark all peers as disconnected and signal shutdown
         for (self.peers.items) |peer| {
             peer.state = .disconnected;
+            peer.is_shutting_down.store(true, .release);
         }
     }
 

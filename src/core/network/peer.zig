@@ -180,6 +180,17 @@ pub const NetworkManager = struct {
             stream.close();
             return;
         }
+
+        // Set non-blocking mode to prevent hanging threads (Fixes memory leak on shutdown)
+        const flags = std.posix.fcntl(stream.handle, std.posix.F.GETFL, 0) catch 0;
+        // O_NONBLOCK = 0o4000 on Linux
+        _ = std.posix.fcntl(stream.handle, std.posix.F.SETFL, flags | 0o4000) catch |err| {
+             std.log.warn("Failed to set non-blocking mode for peer {}: {}", .{peer.id, err});
+             std.log.warn("Failed to set non-blocking mode for peer {}: {}", .{peer.id, err});
+             stream.close();
+             self.peer_manager.removePeer(peer.id);
+             return;
+        };
         
         var conn = PeerConnection.init(self.allocator, peer, stream, self.message_handler);
         defer conn.deinit();
@@ -269,6 +280,17 @@ pub const NetworkManager = struct {
             stream.close();
             return;
         }
+
+        // Set non-blocking mode for incoming connections too
+        const flags = std.posix.fcntl(stream.handle, std.posix.F.GETFL, 0) catch 0;
+        // O_NONBLOCK = 0o4000 on Linux
+        _ = std.posix.fcntl(stream.handle, std.posix.F.SETFL, flags | 0o4000) catch |err| {
+             std.log.warn("Failed to set non-blocking mode for peer {}: {}", .{peer.id, err});
+             std.log.warn("Failed to set non-blocking mode for incoming peer {}: {}", .{peer.id, err});
+             stream.close();
+             self.peer_manager.removePeer(peer.id);
+             return;
+        };
         
         var conn = PeerConnection.init(self.allocator, peer, stream, self.message_handler);
         defer conn.deinit();

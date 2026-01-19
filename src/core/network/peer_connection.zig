@@ -83,6 +83,11 @@ pub const PeerConnection = struct {
         while (self.running) {
             // Main connection loop - running flag provides safer shutdown signaling
 
+            // Check if peer is shutting down (from PeerManager)
+            if (self.peer.is_shutting_down.load(.acquire)) {
+                break;
+            }
+
             // Read data with timeout
             const bytes_read = self.stream.read(buffer) catch |err| switch (err) {
                 error.WouldBlock => {

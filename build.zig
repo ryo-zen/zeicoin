@@ -225,6 +225,35 @@ pub fn build(b: *std.Build) !void {
     }
 
     // **************************************************************
+    // *              ERROR MONITOR                                 *
+    // **************************************************************
+    {
+        const exe = b.addExecutable(.{
+            .name = "error_monitor",
+            .root_source_file = b.path("src/apps/error_monitor.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        // Add dependency modules
+        for (deps) |mod| exe.root_module.addImport(
+            mod.name,
+            mod.module,
+        );
+        // Add internal modules
+        exe.root_module.addImport("zeicoin", lib.root_module);
+
+        exe.linkLibC();
+        exe.linkSystemLibrary("rocksdb");
+
+        b.installArtifact(exe);
+
+        const run_cmd = b.addRunArtifact(exe);
+        run_cmd.step.dependOn(b.getInstallStep());
+        const run_step = b.step("run-error-monitor", "Run the error monitor");
+        run_step.dependOn(&run_cmd.step);
+    }
+
+    // **************************************************************
     // *              CHECK FOR FAST FEEDBACK LOOP                  *
     // **************************************************************
     // Tip taken from: `https://kristoff.it/blog/improving-your-zls-experience/`
