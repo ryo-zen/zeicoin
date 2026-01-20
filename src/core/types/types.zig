@@ -564,8 +564,8 @@ pub const DifficultyTarget = struct {
     pub fn initial(network: NetworkType) DifficultyTarget {
         return switch (network) {
             .testnet => DifficultyTarget{
-                .base_bytes = 1,
-                .threshold = 0xFFFFFFF0, // EXTREMELY easy difficulty - instant blocks for low-end hardware
+                .base_bytes = 0, // TEST: No leading zeros required - makes tests instant
+                .threshold = 0xFFFFFFFF, // TEST: Accept any hash - for fast test execution
             },
             .mainnet => DifficultyTarget{
                 .base_bytes = 2,

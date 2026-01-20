@@ -40,7 +40,7 @@ pub fn zenProofOfWorkRandomX(ctx: MiningContext, block: *types.Block) bool {
     var nonce: u32 = 0;
     const difficulty_target = block.header.getDifficultyTarget();
     const mining_start_time = @as(u64, @intCast(util.getTime())) * 1000;
-    
+
     while (nonce < types.ZenMining.MAX_NONCE) {
         // Check if blockchain height changed (another miner found a block)
         const current_height = ctx.blockchain.getHeight() catch starting_height;
