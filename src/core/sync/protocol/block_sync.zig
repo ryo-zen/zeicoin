@@ -93,7 +93,7 @@ pub const BlockSyncProtocol = struct {
     sync_state: SyncState,
     sync_progress: ?SyncProgress,
     sync_peer: ?*net.Peer,
-    failed_peers: std.ArrayList(*net.Peer),
+    failed_peers: std.array_list.Managed(*net.Peer),
 
     pub fn init(allocator: std.mem.Allocator, context: *BlockSyncContext) BlockSyncProtocol {
         return BlockSyncProtocol{
@@ -101,7 +101,7 @@ pub const BlockSyncProtocol = struct {
             .sync_state = .synced,
             .sync_progress = null,
             .sync_peer = null,
-            .failed_peers = std.ArrayList(*net.Peer).init(allocator),
+            .failed_peers = std.array_list.Managed(*net.Peer).init(allocator),
         };
     }
 
@@ -503,14 +503,14 @@ pub const BlockSyncProtocol = struct {
             log.info("🔍 Genesis validation details:", .{});
             log.info("   Block timestamp: {}", .{block.header.timestamp});
             log.info("   Expected genesis timestamp: {}", .{types.Genesis.timestamp()});
-            log.info("   Block previous_hash: {s}", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+            log.info("   Block previous_hash: {x}", .{&block.header.previous_hash});
             log.info("   Block difficulty: {}", .{block.header.difficulty});
             log.info("   Block nonce: 0x{X}", .{block.header.nonce});
             log.info("   Block transaction count: {}", .{block.txCount()});
 
             const block_hash = block.hash();
-            log.info("   Block hash: {s}", .{std.fmt.fmtSliceHexLower(&block_hash)});
-            log.info("   Expected genesis hash: {s}", .{std.fmt.fmtSliceHexLower(&genesis.getCanonicalGenesisHash())});
+            log.info("   Block hash: {x}", .{&block_hash});
+            log.info("   Expected genesis hash: {x}", .{&genesis.getCanonicalGenesisHash()});
 
             if (!genesis.validateGenesis(block)) {
                 log.info("❌ Genesis block validation failed: not canonical genesis", .{});
@@ -581,13 +581,13 @@ pub const BlockSyncProtocol = struct {
                 defer prev_block.deinit(self.context.allocator);
 
                 const prev_hash = prev_block.hash();
-                log.info("   Previous block hash in chain: {s}", .{std.fmt.fmtSliceHexLower(&prev_hash)});
-                log.info("   Block's previous_hash field: {s}", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+                log.info("   Previous block hash in chain: {x}", .{&prev_hash});
+                log.info("   Block's previous_hash field: {x}", .{&block.header.previous_hash});
 
                 if (!std.mem.eql(u8, &block.header.previous_hash, &prev_hash)) {
                     log.info("❌ Previous hash validation failed during sync", .{});
-                    log.info("   Expected: {s}", .{std.fmt.fmtSliceHexLower(&prev_hash)});
-                    log.info("   Received: {s}", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+                    log.info("   Expected: {x}", .{&prev_hash});
+                    log.info("   Received: {x}", .{&block.header.previous_hash});
                     log.info("⚠️ This might indicate a fork - skipping hash validation during sync", .{});
                     // During sync, we trust the peer's chain - skip this validation
                 }
@@ -617,8 +617,8 @@ pub const BlockSyncProtocol = struct {
                 log.info("❌ Transaction {} structure validation failed", .{i});
                 const sender_bytes = tx.sender.toBytes();
                 const recipient_bytes = tx.recipient.toBytes();
-                log.info("   Sender: {s}", .{std.fmt.fmtSliceHexLower(&sender_bytes)});
-                log.info("   Recipient: {s}", .{std.fmt.fmtSliceHexLower(&recipient_bytes)});
+                log.info("   Sender: {x}", .{&sender_bytes});
+                log.info("   Recipient: {x}", .{&recipient_bytes});
                 log.info("   Amount: {}", .{tx.amount});
                 log.info("   Fee: {}", .{tx.fee});
                 log.info("   Nonce: {}", .{tx.nonce});
@@ -632,8 +632,8 @@ pub const BlockSyncProtocol = struct {
             // Signature validation (but no balance check)
             if (!try self.context.validateTransactionSignature(self.context, tx)) {
                 log.info("❌ Transaction {} signature validation failed", .{i});
-                log.info("   Public key: {s}", .{std.fmt.fmtSliceHexLower(&tx.sender_public_key)});
-                log.info("   Signature: {s}", .{std.fmt.fmtSliceHexLower(&tx.signature)});
+                log.info("   Public key: {x}", .{&tx.sender_public_key});
+                log.info("   Signature: {x}", .{&tx.signature});
                 return false;
             }
             log.info("   ✅ Transaction {} signature validation passed", .{i});

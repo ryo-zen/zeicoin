@@ -30,7 +30,8 @@ pub const KeyPair = struct {
     pub fn generateNew() KeyError!KeyPair {
         // Generate Ed25519 keypair
         const Ed25519 = std.crypto.sign.Ed25519;
-        const keypair = Ed25519.KeyPair.generate();
+        const io = std.Io.Threaded.global_single_threaded.ioBasic();
+        const keypair = Ed25519.KeyPair.generate(io);
 
         return KeyPair{
             .private_key = keypair.secret_key.bytes,
@@ -42,7 +43,7 @@ pub const KeyPair = struct {
     pub fn fromPrivateKey(private_key: [64]u8) KeyPair {
         // Make mutable copy for secure clearing after use
         var mutable_key = private_key;
-        defer std.crypto.utils.secureZero(u8, &mutable_key); // Clear input copy from stack
+        defer std.crypto.secureZero(u8, &mutable_key); // Clear input copy from stack
 
         const Ed25519 = std.crypto.sign.Ed25519;
         const secret_key = Ed25519.SecretKey.fromBytes(mutable_key) catch {
@@ -98,7 +99,7 @@ pub const KeyPair = struct {
     /// Securely clear the private key from memory
     /// After calling this, signing operations will fail
     pub fn clearPrivateKey(self: *KeyPair) void {
-        std.crypto.utils.secureZero(u8, &self.private_key);
+        std.crypto.secureZero(u8, &self.private_key);
     }
 
     /// Cleanup keypair - clears private key

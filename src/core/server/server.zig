@@ -8,19 +8,20 @@ const command_line = @import("command_line.zig");
 const initialization = @import("initialization.zig");
 const client_api = @import("client_api.zig");
 const sync = @import("../sync/manager.zig");
+const util = @import("../util/util.zig");
 const RPCServer = @import("../rpc/server.zig").RPCServer;
 
 // Signal handling for graceful shutdown
 var running = std.atomic.Value(bool).init(true);
 
-fn signalHandler(sig: c_int) callconv(.C) void {
+fn signalHandler(sig: std.posix.SIG) callconv(.c) void {
     _ = sig;
     running.store(false, .release);
     // Signal received - main loop will exit and trigger defer cleanup
     // systemd's TimeoutStopSec=10 acts as emergency timeout if cleanup hangs
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     // Print banner
     printBanner();
     
@@ -28,6 +29,10 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    
+    // Get args
+    const args = try std.process.Args.toSlice(init.minimal.args, allocator);
+    defer allocator.free(args);
     
     // Load .env file if present (before processing arguments)
     // Use page allocator for dotenv since putenv requires persistent memory
@@ -39,7 +44,7 @@ pub fn main() !void {
     };
     
     // Parse command line
-    var config = command_line.parseArgs(allocator) catch |err| switch (err) {
+    var config = command_line.parseArgs(allocator, args) catch |err| switch (err) {
         error.HelpRequested => return,
         error.MissingMinerWallet => return, // Error already printed in parseArgs
         error.UnknownArgument => return,   // Error already printed in parseArgs
@@ -48,7 +53,7 @@ pub fn main() !void {
     defer config.deinit();
     
     // Initialize node components
-    var components = initialization.initializeNode(allocator, config) catch |err| switch (err) {
+    var components = initialization.initializeNode(allocator, init.io, config) catch |err| switch (err) {
         error.OpenFailed => {
             std.debug.print("❌ Database is locked or in use by another process\n", .{});
             std.debug.print("💡 Stop any running ZeiCoin servers and try again\n", .{});
@@ -85,14 +90,14 @@ pub fn main() !void {
     // Handle SIGINT (Ctrl+C)
     _ = std.posix.sigaction(std.posix.SIG.INT, &.{
         .handler = .{ .handler = signalHandler },
-        .mask = std.posix.empty_sigset,
+        .mask = std.posix.sigemptyset(),
         .flags = 0,
     }, null);
 
     // Handle SIGTERM (systemd stop, kill command)
     _ = std.posix.sigaction(std.posix.SIG.TERM, &.{
         .handler = .{ .handler = signalHandler },
-        .mask = std.posix.empty_sigset,
+        .mask = std.posix.sigemptyset(),
         .flags = 0,
     }, null);
 
@@ -100,14 +105,15 @@ pub fn main() !void {
     std.log.info("Press Ctrl+C to shutdown", .{});
     
     // Main loop - wait for shutdown signal
-    var last_status_time = std.time.timestamp();
-    var last_reconnection_check = std.time.timestamp();
-    var last_sync_retry_check = std.time.timestamp();
+    var last_status_time = util.getTime();
+    var last_reconnection_check = util.getTime();
+    var last_sync_retry_check = util.getTime();
     var mining_started = false;
     var initial_sync_done = false;
+    const io = components.blockchain.io;
 
     while (running.load(.acquire)) {
-        const now = std.time.timestamp();
+        const now = util.getTime();
 
         // Periodic maintenance (only if still running)
         if (running.load(.acquire)) {
@@ -170,7 +176,9 @@ pub fn main() !void {
                     if (!initial_sync_done) {
                         // Give network 5 seconds to connect before starting mining on empty network
                         const startup_time = 5;
-                        std.time.sleep(startup_time * std.time.ns_per_s);
+                        io.sleep(std.Io.Duration.fromSeconds(startup_time), std.Io.Clock.awake) catch |sleep_err| {
+                            std.log.warn("Startup sleep failed: {}", .{sleep_err});
+                        };
                         initial_sync_done = true;
                         std.log.info("⛏️  No peers found after startup delay - starting mining on local chain", .{});
                         break :blk true;
@@ -203,7 +211,9 @@ pub fn main() !void {
             last_status_time = now;
         }
         
-        std.time.sleep(100 * std.time.ns_per_ms); // Check more frequently
+        io.sleep(std.Io.Duration.fromMilliseconds(100), std.Io.Clock.awake) catch |sleep_err| {
+            std.log.warn("Main loop sleep failed: {}", .{sleep_err});
+        };
     }
     
     std.log.info("Shutting down...", .{});

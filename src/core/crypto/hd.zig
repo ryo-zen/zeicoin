@@ -60,7 +60,7 @@ pub const HDKey = struct {
     pub fn fromSeed(seed: [64]u8) HDKey {
         // Make mutable copy of seed for secure clearing
         var mutable_seed = seed;
-        defer std.crypto.utils.secureZero(u8, &mutable_seed); // Clear seed copy from stack
+        defer std.crypto.secureZero(u8, &mutable_seed); // Clear seed copy from stack
 
         // Use BLAKE3 with domain separation
         var hasher = std.crypto.hash.Blake3.init(.{});
@@ -68,7 +68,7 @@ pub const HDKey = struct {
         hasher.update(&mutable_seed);
 
         var output: [64]u8 = undefined;
-        defer std.crypto.utils.secureZero(u8, &output); // Clear intermediate key material
+        defer std.crypto.secureZero(u8, &output); // Clear intermediate key material
         hasher.final(output[0..32]);
 
         // Second round for chain code
@@ -99,7 +99,7 @@ pub const HDKey = struct {
 
         // Prepare data for derivation (contains private key material)
         var data: [37]u8 = undefined;
-        defer std.crypto.utils.secureZero(u8, &data); // Clear derivation data containing key
+        defer std.crypto.secureZero(u8, &data); // Clear derivation data containing key
         data[0] = 0x00; // Hardened derivation marker
         @memcpy(data[1..33], &self.key);
         std.mem.writeInt(u32, data[33..37], index, .big);
@@ -110,7 +110,7 @@ pub const HDKey = struct {
         hasher.update(&data);
 
         var output: [64]u8 = undefined;
-        defer std.crypto.utils.secureZero(u8, &output); // Clear intermediate key material
+        defer std.crypto.secureZero(u8, &output); // Clear intermediate key material
         hasher.final(output[0..32]);
 
         // Second round for new chain code
@@ -141,7 +141,7 @@ pub const HDKey = struct {
         // For deterministic key generation, we need to convert our key material
         // into a proper Ed25519 seed format
         var seed: [32]u8 = undefined;
-        defer std.crypto.utils.secureZero(u8, &seed); // Clear private key material from stack
+        defer std.crypto.secureZero(u8, &seed); // Clear private key material from stack
         @memcpy(&seed, &self.key);
 
         // Use the standard Ed25519 key generation from seed
@@ -157,7 +157,7 @@ pub const HDKey = struct {
     pub fn toKeyPair(self: *const HDKey) !key.KeyPair {
         // Use the same seed-based generation
         var seed: [32]u8 = undefined;
-        defer std.crypto.utils.secureZero(u8, &seed); // Clear private key material from stack
+        defer std.crypto.secureZero(u8, &seed); // Clear private key material from stack
         @memcpy(&seed, &self.key);
 
         const Ed25519 = std.crypto.sign.Ed25519;
@@ -178,7 +178,7 @@ pub const HDKey = struct {
 
 /// Parse HD derivation path like "m/44'/882'/0'/0/0"
 pub fn parsePath(path: []const u8) ![]u32 {
-    var parts = std.ArrayList(u32).init(std.heap.page_allocator);
+    var parts = std.array_list.Managed(u32).init(std.heap.page_allocator);
     defer parts.deinit();
     
     var iter = std.mem.tokenizeScalar(u8, path, '/');

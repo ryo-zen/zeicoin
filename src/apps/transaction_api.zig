@@ -6,6 +6,7 @@ const zeicoin = @import("zeicoin");
 const wallet_mod = zeicoin.wallet;
 const types = zeicoin.types;
 const bech32 = zeicoin.bech32;
+const util = zeicoin.util;
 
 var rpc: RPCClient = undefined;
 var pg_pool: *pg.Pool = undefined;
@@ -217,7 +218,7 @@ fn handleTransactionHistory(r: zap.Request, address: []const u8) !void {
     defer result.deinit();
 
     // Build JSON response
-    var response = std.ArrayList(u8).init(allocator);
+    var response = std.array_list.Managed(u8).init(allocator);
     defer response.deinit();
 
     try response.appendSlice("{\"address\":\"");
@@ -252,9 +253,9 @@ fn handleTransactionHistory(r: zap.Request, address: []const u8) !void {
     }
 
     try response.appendSlice("],\"limit\":");
-    try response.writer().print("{d}", .{limit});
+    try response.print("{d}", .{limit});
     try response.appendSlice(",\"offset\":");
-    try response.writer().print("{d}", .{offset});
+    try response.print("{d}", .{offset});
     try response.append('}');
 
     r.setStatus(.ok);
@@ -337,17 +338,17 @@ pub fn main() !void {
     std.log.info("✅ Connected to RPC server", .{});
 
     // Initialize PostgreSQL connection pool
-    const db_password = std.process.getEnvVarOwned(allocator, "ZEICOIN_DB_PASSWORD") catch {
+    const db_password = util.getEnvVarOwned(allocator, "ZEICOIN_DB_PASSWORD") catch {
         std.log.err("❌ ZEICOIN_DB_PASSWORD not set", .{});
         return error.MissingPassword;
     };
     defer allocator.free(db_password);
 
-    const db_host = std.process.getEnvVarOwned(allocator, "ZEICOIN_DB_HOST") catch
+    const db_host = util.getEnvVarOwned(allocator, "ZEICOIN_DB_HOST") catch
         try allocator.dupe(u8, "127.0.0.1");
     defer allocator.free(db_host);
 
-    const db_name = std.process.getEnvVarOwned(allocator, "ZEICOIN_DB_NAME") catch
+    const db_name = util.getEnvVarOwned(allocator, "ZEICOIN_DB_NAME") catch
         try allocator.dupe(u8, "zeicoin_testnet");
     defer allocator.free(db_name);
 

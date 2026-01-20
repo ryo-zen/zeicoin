@@ -37,17 +37,21 @@ pub const DotEnv = struct {
     }
 
     /// Load environment variables from a .env file
-    pub fn loadFromFile(self: *DotEnv, path: []const u8) !void {
-        const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+    pub fn loadFromFile(self: *DotEnv, io: std.Io, path: []const u8) !void {
+        const dir = std.Io.Dir.cwd();
+        const file = dir.openFile(io, path, .{}) catch |err| {
             if (err == error.FileNotFound) {
                 // .env file is optional, so we don't error if it doesn't exist
                 return;
             }
             return err;
         };
-        defer file.close();
+        defer file.close(io);
 
-        const content = try file.readToEndAlloc(self.allocator, 1024 * 1024); // Max 1MB
+        // Read file content (blocking)
+        var buf: [1024 * 1024]u8 = undefined; // Max 1MB stack buffer
+        const bytes_read = try file.readStreaming(io, &[_][]u8{&buf});
+        const content = try self.allocator.dupe(u8, buf[0..bytes_read]);
         defer self.allocator.free(content);
 
         try self.parseContent(content);
@@ -109,22 +113,17 @@ pub const DotEnv = struct {
             // Unix/Linux implementation
             var it = self.vars.iterator();
             while (it.next()) |entry| {
-                // Only set if not already in environment (env vars take precedence)
-                if (std.process.getEnvVarOwned(self.allocator, entry.key_ptr.*)) |existing| {
-                    self.allocator.free(existing);
-                    continue; // Skip, already set
-                } else |_| {
-                    // Use setenv which copies the strings, so we can free them
-                    const key_cstr = try self.allocator.dupeZ(u8, entry.key_ptr.*);
-                    defer self.allocator.free(key_cstr);
-                    const value_cstr = try self.allocator.dupeZ(u8, entry.value_ptr.*);
-                    defer self.allocator.free(value_cstr);
-                    
-                    // setenv copies the strings internally, so we can free ours
-                    const result = c.setenv(key_cstr, value_cstr, 1); // 1 = overwrite if exists
-                    if (result != 0) {
-                        return error.SetEnvFailed;
-                    }
+                // Use setenv which copies the strings, so we can free them
+                const key_cstr = try self.allocator.dupeZ(u8, entry.key_ptr.*);
+                defer self.allocator.free(key_cstr);
+                const value_cstr = try self.allocator.dupeZ(u8, entry.value_ptr.*);
+                defer self.allocator.free(value_cstr);
+
+                // setenv copies the strings internally, so we can free ours
+                // 0 = don't overwrite if exists (env vars take precedence)
+                const result = c.setenv(key_cstr, value_cstr, 0);
+                if (result != 0) {
+                    return error.SetEnvFailed;
                 }
             }
         }
@@ -144,10 +143,15 @@ pub fn load(allocator: std.mem.Allocator) !void {
     if (env_loaded) {
         return; // Already loaded
     }
-    
+
+    // Create Io instance for file operations
+    var threaded = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer threaded.deinit();
+    const io = threaded.io();
+
     var dotenv = DotEnv.init(allocator);
     defer dotenv.deinit(); // Clean up after applying to environment
-    
+
     // Try to load multiple .env files in order of precedence
     const files = [_][]const u8{
         ".env",          // Default environment
@@ -155,17 +159,17 @@ pub fn load(allocator: std.mem.Allocator) !void {
     };
 
     for (files) |file| {
-        dotenv.loadFromFile(file) catch |err| {
+        dotenv.loadFromFile(io, file) catch |err| {
             if (err != error.FileNotFound) {
                 return err;
             }
             // Continue if file not found
         };
     }
-    
+
     // Apply to environment (setenv copies, so we can free after)
     try dotenv.applyToEnvironment();
-    
+
     env_loaded = true;
 }
 
@@ -174,34 +178,39 @@ pub fn loadForNetwork(allocator: std.mem.Allocator) !void {
     if (env_loaded) {
         return; // Already loaded
     }
-    
+
+    // Create Io instance for file operations
+    var threaded = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer threaded.deinit();
+    const io = threaded.io();
+
     var dotenv = DotEnv.init(allocator);
     defer dotenv.deinit(); // Clean up after applying to environment
-    
+
     // First, load base configuration to get ZEICOIN_NETWORK
-    dotenv.loadFromFile(".env") catch |err| {
+    dotenv.loadFromFile(io, ".env") catch |err| {
         if (err != error.FileNotFound) {
             return err;
         }
     };
-    
+
     // Determine which network-specific file to load based on ZEICOIN_NETWORK
     const network = dotenv.get("ZEICOIN_NETWORK") orelse "testnet"; // Default to testnet
-    
+
     // Load network-specific configuration
-    const network_file = if (std.mem.eql(u8, network, "mainnet")) 
-        ".env.mainnet" 
-    else 
+    const network_file = if (std.mem.eql(u8, network, "mainnet"))
+        ".env.mainnet"
+    else
         ".env.testnet";
-        
-    dotenv.loadFromFile(network_file) catch |err| {
+
+    dotenv.loadFromFile(io, network_file) catch |err| {
         if (err != error.FileNotFound) {
             return err;
         }
     };
-    
+
     // Load local overrides (git-ignored)
-    dotenv.loadFromFile(".env.local") catch |err| {
+    dotenv.loadFromFile(io, ".env.local") catch |err| {
         if (err != error.FileNotFound) {
             return err;
         }

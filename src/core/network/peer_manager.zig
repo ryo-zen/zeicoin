@@ -2,14 +2,15 @@
 // Handles peer connections, discovery, and lifecycle
 
 const std = @import("std");
-const net = std.net;
+const net = std.Io.net;
 const protocol = @import("protocol/protocol.zig");
 const wire = @import("wire/wire.zig");
 const message_types = @import("protocol/messages/message_types.zig");
 const message_envelope = @import("protocol/message_envelope.zig");
 const types = @import("../types/types.zig");
+const util = @import("../util/util.zig");
 
-const ArrayList = std.ArrayList;
+const ArrayList = std.array_list.Managed;
 const Mutex = std.Thread.Mutex;
 
 /// Peer connection state
@@ -41,7 +42,7 @@ pub const PeerState = enum {
 pub const Peer = struct {
     allocator: std.mem.Allocator,
     id: u64,
-    address: net.Address,
+    address: net.IpAddress,
     state: PeerState,
     connection: wire.WireConnection,
 
@@ -101,7 +102,7 @@ pub const Peer = struct {
         timestamp: i64,
     };
 
-    pub fn init(allocator: std.mem.Allocator, id: u64, address: net.Address) Self {
+    pub fn init(allocator: std.mem.Allocator, id: u64, address: net.IpAddress) Self {
         return .{
             .allocator = allocator,
             .id = id,
@@ -113,8 +114,8 @@ pub const Peer = struct {
             .height = 0,
             .user_agent = &[_]u8{},
             .best_block_hash = [_]u8{0} ** 32,
-            .last_ping = std.time.timestamp(),
-            .last_recv = std.time.timestamp(),
+            .last_ping = util.getTime(),
+            .last_recv = util.getTime(),
             .ping_nonce = null,
             .syncing = false,
             .headers_requested = false,
@@ -141,7 +142,8 @@ pub const Peer = struct {
         self.is_shutting_down.store(true, .release);
 
         // Give threads a moment to notice the shutdown flag
-        std.time.sleep(10 * std.time.ns_per_ms);
+        const io = std.Io.Threaded.global_single_threaded.ioBasic();
+        io.sleep(std.Io.Duration.fromMilliseconds(10), std.Io.Clock.awake) catch {};
 
         if (self.user_agent.len > 0) {
             self.allocator.free(self.user_agent);
@@ -194,7 +196,7 @@ pub const Peer = struct {
             return error.PeerShuttingDown;
         }
         
-        self.last_recv = std.time.timestamp();
+        self.last_recv = util.getTime();
         try self.connection.receiveData(data);
     }
 
@@ -207,20 +209,20 @@ pub const Peer = struct {
         
         const result = try self.connection.readMessage();
         if (result) |_| {
-            self.last_recv = std.time.timestamp();
+            self.last_recv = util.getTime();
         }
         return result;
     }
 
     /// Check if peer needs ping
     pub fn needsPing(self: Self) bool {
-        const now = std.time.timestamp();
+        const now = util.getTime();
         return (now - self.last_ping) > protocol.PING_INTERVAL_SECONDS;
     }
 
     /// Check if peer timed out
     pub fn isTimedOut(self: Self) bool {
-        const now = std.time.timestamp();
+        const now = util.getTime();
         const timeout_result = (now - self.last_recv) > protocol.CONNECTION_TIMEOUT_SECONDS;
         return timeout_result;
     }
@@ -233,7 +235,7 @@ pub const Peer = struct {
         try self.block_hash_responses.put(height, BlockHashResponse{
             .hash = hash,
             .exists = exists,
-            .timestamp = std.time.timestamp(),
+            .timestamp = util.getTime(),
         });
     }
 
@@ -388,9 +390,9 @@ pub const Peer = struct {
         std.log.info("📤 [SEND GET_BLOCKS] Peer {d} sending GetBlocks message", .{self.id});
         std.log.info("📤 [SEND GET_BLOCKS] Number of hashes: {d}", .{hashes.len});
         if (hashes.len > 0) {
-            std.log.info("📤 [SEND GET_BLOCKS] First hash: {s}...{s}", .{
-                std.fmt.fmtSliceHexLower(hashes[0][0..4]),
-                std.fmt.fmtSliceHexLower(hashes[0][4..8]),
+            std.log.info("📤 [SEND GET_BLOCKS] First hash: {x}...{x}", .{
+                hashes[0][0..4],
+                hashes[0][4..8],
             });
         }
 
@@ -400,7 +402,7 @@ pub const Peer = struct {
 
         std.log.info("📤 [SEND GET_BLOCKS] Calling sendMessage with .get_blocks type", .{});
         const bytes_sent = try self.sendMessage(.get_blocks, msg);
-        std.log.info("📤 [SEND GET_BLOCKS] ✅ Message sent successfully ({d} bytes)", .{bytes_sent});
+        std.log.info("📤 [SEND GET_BLOCKS] ✅ Message sent successfully ({d} bytes)", .{bytes_sent.len});
         std.log.info("📤 [SEND GET_BLOCKS] ============================================", .{});
     }
 
@@ -421,7 +423,7 @@ pub const Peer = struct {
         // Add each hash to request (up to MAX_MISSING_BLOCKS)
         for (block_hashes) |hash| {
             try msg.addHash(hash);
-            log.debug("   Requesting: {s}", .{std.fmt.fmtSliceHexLower(&hash)});
+            log.debug("   Requesting: {x}", .{&hash});
         }
 
         // Send message
@@ -434,7 +436,7 @@ pub const Peer = struct {
     pub fn sendGetHeaders(self: *Self, start_height: u32, count: u32) !void {
         _ = count; // For future use
 
-        var locator = std.ArrayList([32]u8).init(self.allocator);
+        var locator = std.array_list.Managed([32]u8).init(self.allocator);
         defer locator.deinit();
 
         // Build a simple block locator
@@ -516,13 +518,13 @@ pub const Peer = struct {
         self.consecutive_successful_requests = 0;
 
         // Track failure timestamp and set cooldown
-        self.last_failed_at = std.time.timestamp();
+        self.last_failed_at = util.getTime();
         self.retry_allowed_after = self.last_failed_at + 30; // 30-second cooldown
     }
 
     /// Check if peer can retry connection (cooldown expired)
     pub fn canRetryConnection(self: *const Self) bool {
-        const now = std.time.timestamp();
+        const now = util.getTime();
         return now >= self.retry_allowed_after;
     }
 
@@ -556,7 +558,7 @@ pub const Peer = struct {
         _ = fmt;
         _ = options;
         
-        // Safe address formatting to avoid std.net.Address crashes
+        // Safe address formatting to avoid std.net.IpAddress crashes
         switch (self.address.any.family) {
             std.posix.AF.INET => {
                 const addr = self.address.in.sa.addr;
@@ -590,7 +592,7 @@ pub const PeerManager = struct {
     max_peers: usize,
 
     // Discovery
-    known_addresses: ArrayList(net.Address),
+    known_addresses: ArrayList(net.IpAddress),
 
     const Self = @This();
 
@@ -601,7 +603,7 @@ pub const PeerManager = struct {
             .mutex = .{},
             .next_peer_id = 1,
             .max_peers = max_peers,
-            .known_addresses = ArrayList(net.Address).init(allocator),
+            .known_addresses = ArrayList(net.IpAddress).init(allocator),
         };
     }
 
@@ -631,7 +633,7 @@ pub const PeerManager = struct {
     }
 
     /// Add a new peer connection
-    pub fn addPeer(self: *Self, address: net.Address) !*Peer {
+    pub fn addPeer(self: *Self, address: net.IpAddress) !*Peer {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -644,7 +646,7 @@ pub const PeerManager = struct {
             _ = new_ip;
 
             // For now, use simpler exact address matching until proper IP comparison is implemented
-            if (peer.address.eql(address)) {
+            if (peer.address.eql(&address)) {
                 return error.AlreadyConnected;
             }
         }
@@ -748,7 +750,7 @@ pub const PeerManager = struct {
     }
 
     /// Add known address for discovery
-    pub fn addKnownAddress(self: *Self, address: net.Address) !void {
+    pub fn addKnownAddress(self: *Self, address: net.IpAddress) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -763,7 +765,7 @@ pub const PeerManager = struct {
     }
 
     /// Get random known address for connection
-    pub fn getRandomAddress(self: *Self) ?net.Address {
+    pub fn getRandomAddress(self: *Self) ?net.IpAddress {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -771,7 +773,11 @@ pub const PeerManager = struct {
             return null;
         }
 
-        const index = std.crypto.random.uintLessThan(usize, self.known_addresses.items.len);
+        const io = std.Io.Threaded.global_single_threaded.ioBasic();
+        var rand_bytes: [@sizeOf(usize)]u8 = undefined;
+        std.Io.random(io, &rand_bytes);
+        const rand_val = std.mem.readInt(usize, &rand_bytes, .little);
+        const index = rand_val % self.known_addresses.items.len;
         return self.known_addresses.items[index];
     }
 

@@ -4,6 +4,7 @@
 const std = @import("std");
 const protocol = @import("../protocol.zig");
 const types = @import("../../../types/types.zig");
+const util = @import("../../../util/util.zig");
 
 pub const HandshakeMessage = struct {
     /// Protocol version
@@ -38,9 +39,12 @@ pub const HandshakeMessage = struct {
         return Self{
             .version = protocol.PROTOCOL_VERSION,
             .services = protocol.ServiceFlags.FAST_NODE, // Modern full node with all optimizations
-            .timestamp = std.time.timestamp(),
+            .timestamp = util.getTime(),
             .listen_port = 0, // Set by caller if listening
-            .nonce = std.crypto.random.int(u64),
+            .nonce = blk: {
+                var prng = std.Random.DefaultPrng.init(@bitCast(util.getTime()));
+                break :blk prng.random().int(u64);
+            },
             .user_agent = agent_copy,
             .start_height = 0, // Set by caller
             .network_id = types.CURRENT_NETWORK.getNetworkId(),
@@ -62,50 +66,51 @@ pub const HandshakeMessage = struct {
     }
     
     pub fn encode(self: Self, writer: anytype) !void {
-        try writer.writeInt(u16, self.version, .little);
-        try writer.writeInt(u64, self.services, .little);
-        try writer.writeInt(i64, self.timestamp, .little);
-        try writer.writeInt(u16, self.listen_port, .little);
-        try writer.writeInt(u64, self.nonce, .little);
-        
+        var w = writer;
+        try std.Io.Writer.writeInt(&w, u16, self.version, .little);
+        try std.Io.Writer.writeInt(&w, u64, self.services, .little);
+        try std.Io.Writer.writeInt(&w, i64, self.timestamp, .little);
+        try std.Io.Writer.writeInt(&w, u16, self.listen_port, .little);
+        try std.Io.Writer.writeInt(&w, u64, self.nonce, .little);
+
         // Write user agent with length prefix
-        try writer.writeInt(u16, @intCast(self.user_agent.len), .little);
-        try writer.writeAll(self.user_agent);
-        
-        try writer.writeInt(u32, self.start_height, .little);
-        try writer.writeInt(u32, self.network_id, .little);
-        try writer.writeAll(&self.best_block_hash);
-        try writer.writeInt(u64, self.current_difficulty, .little);
-        try writer.writeAll(&self.genesis_hash);
+        try std.Io.Writer.writeInt(&w, u16, @intCast(self.user_agent.len), .little);
+        try w.writeAll(self.user_agent);
+
+        try std.Io.Writer.writeInt(&w, u32, self.start_height, .little);
+        try std.Io.Writer.writeInt(&w, u32, self.network_id, .little);
+        try w.writeAll(&self.best_block_hash);
+        try std.Io.Writer.writeInt(&w, u64, self.current_difficulty, .little);
+        try w.writeAll(&self.genesis_hash);
     }
     
     pub fn decode(allocator: std.mem.Allocator, reader: anytype) !Self {
-        const version = try reader.readInt(u16, .little);
-        const services = try reader.readInt(u64, .little);
-        const timestamp = try reader.readInt(i64, .little);
-        const listen_port = try reader.readInt(u16, .little);
-        const nonce = try reader.readInt(u64, .little);
+        const version = try reader.takeInt(u16, .little);
+        const services = try reader.takeInt(u64, .little);
+        const timestamp = try reader.takeInt(i64, .little);
+        const listen_port = try reader.takeInt(u16, .little);
+        const nonce = try reader.takeInt(u64, .little);
         
         // Read user agent
-        const agent_len = try reader.readInt(u16, .little);
+        const agent_len = try reader.takeInt(u16, .little);
         if (agent_len > MAX_USER_AGENT_LEN) {
             return error.UserAgentTooLong;
         }
         
         const user_agent = try allocator.alloc(u8, agent_len);
         errdefer allocator.free(user_agent);
-        try reader.readNoEof(user_agent);
+        try reader.readSliceAll(user_agent);
         
-        const start_height = try reader.readInt(u32, .little);
-        const network_id = try reader.readInt(u32, .little);
+        const start_height = try reader.takeInt(u32, .little);
+        const network_id = try reader.takeInt(u32, .little);
         
         var best_block_hash: [32]u8 = undefined;
-        try reader.readNoEof(&best_block_hash);
+        try reader.readSliceAll(&best_block_hash);
         
-        const current_difficulty = try reader.readInt(u64, .little);
+        const current_difficulty = try reader.takeInt(u64, .little);
         
         var genesis_hash: [32]u8 = undefined;
-        try reader.readNoEof(&genesis_hash);
+        try reader.readSliceAll(&genesis_hash);
         
         return Self{
             .version = version,
@@ -155,7 +160,7 @@ pub const HandshakeMessage = struct {
         }
         
         // Validate timestamp (reject if too far in future or past)
-        const now = std.time.timestamp();
+        const now = util.getTime();
         const time_diff = @abs(self.timestamp - now);
         if (time_diff > 2 * 60 * 60) { // 2 hours tolerance
             return error.InvalidTimestamp;
@@ -186,8 +191,8 @@ pub const HandshakeMessage = struct {
     pub fn checkGenesisCompatibility(self: Self, our_genesis_hash: [32]u8) !void {
         if (!std.mem.eql(u8, &self.genesis_hash, &our_genesis_hash)) {
             std.log.err("🚫 [CHAIN INCOMPATIBLE] Peer is on a different blockchain!", .{});
-            std.log.err("   ⛓️  Our genesis: {s}", .{std.fmt.fmtSliceHexLower(&our_genesis_hash)});
-            std.log.err("   ⛓️  Peer genesis: {s}", .{std.fmt.fmtSliceHexLower(&self.genesis_hash)});
+            std.log.err("   ⛓️  Our genesis: {x}", .{&our_genesis_hash});
+            std.log.err("   ⛓️  Peer genesis: {x}", .{&self.genesis_hash});
             std.log.err("   ℹ️  Cannot sync with this peer - incompatible chain", .{});
             return error.IncompatibleGenesis;
         }
@@ -288,7 +293,8 @@ pub const HandshakeAckMessage = struct {
     
     /// Serialize handshake ack to bytes
     pub fn serialize(self: *const HandshakeAckMessage, writer: anytype) !void {
-        try writer.writeInt(u32, self.current_height, .little);
+        var w = writer;
+        try std.Io.Writer.writeInt(&w, u32, self.current_height, .little);
     }
     
     /// Encode method for compatibility with wire protocol
@@ -298,7 +304,7 @@ pub const HandshakeAckMessage = struct {
     
     /// Deserialize handshake ack from bytes
     pub fn deserialize(reader: anytype) !HandshakeAckMessage {
-        const current_height = try reader.readInt(u32, .little);
+        const current_height = try reader.takeInt(u32, .little);
         
         const msg = HandshakeAckMessage.init(current_height);
         try msg.validate();
@@ -327,13 +333,12 @@ test "HandshakeMessage encode/decode" {
     msg.listen_port = 10801;
     msg.start_height = 12345;
     
-    var buffer = std.ArrayList(u8).init(allocator);
-    defer buffer.deinit();
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try msg.encode(aw.writer);
     
-    try msg.encode(buffer.writer());
-    
-    var stream = std.io.fixedBufferStream(buffer.items);
-    var decoded = try HandshakeMessage.decode(allocator, stream.reader());
+    var reader = std.Io.Reader.fixed(aw.written());
+    var decoded = try HandshakeMessage.decode(allocator, &reader);
     defer decoded.deinit(allocator);
     
     try std.testing.expectEqual(msg.version, decoded.version);
@@ -404,14 +409,14 @@ test "HandshakeAckMessage creation and validation" {
 test "HandshakeAckMessage serialization" {
     const testing = std.testing;
     var buffer: [1024]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buffer);
+    var writer = std.Io.Writer.fixed(&buffer);
     
     // Test serialization
     const original = HandshakeAckMessage.init(100);
-    try original.serialize(fbs.writer());
+    try original.serialize(&writer);
     
     // Test deserialization  
-    fbs.reset();
-    const deserialized = try HandshakeAckMessage.deserialize(fbs.reader());
+    var reader = std.Io.Reader.fixed(writer.buffered());
+    const deserialized = try HandshakeAckMessage.deserialize(&reader);
     try testing.expect(deserialized.current_height == 100);
 }

@@ -27,7 +27,7 @@ pub const PgConfig = struct {
 /// Load configuration from environment variables (required)
 fn loadConfig(allocator: std.mem.Allocator) !PgConfig {
     // Get database name 
-    const database = if (std.process.getEnvVarOwned(allocator, "ZEICOIN_DB_NAME")) |db_name| 
+    const database = if (util.getEnvVarOwned(allocator, "ZEICOIN_DB_NAME")) |db_name| 
         db_name
     else |_| blk: {
         // Fallback to network-based naming
@@ -37,24 +37,24 @@ fn loadConfig(allocator: std.mem.Allocator) !PgConfig {
     errdefer allocator.free(database);
     
     // Get host
-    const host = std.process.getEnvVarOwned(allocator, "ZEICOIN_DB_HOST") catch 
+    const host = util.getEnvVarOwned(allocator, "ZEICOIN_DB_HOST") catch 
         try allocator.dupe(u8, "127.0.0.1");
     errdefer allocator.free(host);
     
     // Get port
-    const port_str = std.process.getEnvVarOwned(allocator, "ZEICOIN_DB_PORT") catch null;
+    const port_str = util.getEnvVarOwned(allocator, "ZEICOIN_DB_PORT") catch null;
     const port = if (port_str) |p| blk: {
         defer allocator.free(p);
         break :blk std.fmt.parseInt(u16, p, 10) catch 5432;
     } else 5432;
     
     // Get user (with default for convenience)
-    const user = std.process.getEnvVarOwned(allocator, "ZEICOIN_DB_USER") catch 
+    const user = util.getEnvVarOwned(allocator, "ZEICOIN_DB_USER") catch 
         try allocator.dupe(u8, "zeicoin");
     errdefer allocator.free(user);
     
     // Get password (required - no default for security)
-    const password = std.process.getEnvVarOwned(allocator, "ZEICOIN_DB_PASSWORD") catch |err| {
+    const password = util.getEnvVarOwned(allocator, "ZEICOIN_DB_PASSWORD") catch |err| {
         std.log.err("❌ ZEICOIN_DB_PASSWORD environment variable is required", .{});
         std.log.err("   Set it in your .env file or export it:", .{});
         std.log.err("   export ZEICOIN_DB_PASSWORD=your_password_here", .{});
@@ -63,21 +63,21 @@ fn loadConfig(allocator: std.mem.Allocator) !PgConfig {
     errdefer allocator.free(password);
     
     // Get pool size
-    const pool_size_str = std.process.getEnvVarOwned(allocator, "ZEICOIN_DB_POOL_SIZE") catch null;
+    const pool_size_str = util.getEnvVarOwned(allocator, "ZEICOIN_DB_POOL_SIZE") catch null;
     const pool_size = if (pool_size_str) |p| blk: {
         defer allocator.free(p);
         break :blk std.fmt.parseInt(u32, p, 10) catch 5;
     } else 5;
     
     // Get batch size
-    const batch_size_str = std.process.getEnvVarOwned(allocator, "ZEICOIN_DB_BATCH_SIZE") catch null;
+    const batch_size_str = util.getEnvVarOwned(allocator, "ZEICOIN_DB_BATCH_SIZE") catch null;
     const batch_size = if (batch_size_str) |b| blk: {
         defer allocator.free(b);
         break :blk std.fmt.parseInt(u32, b, 10) catch 10;
     } else 10;
     
     // Get timeout
-    const timeout_str = std.process.getEnvVarOwned(allocator, "ZEICOIN_DB_TIMEOUT") catch null;
+    const timeout_str = util.getEnvVarOwned(allocator, "ZEICOIN_DB_TIMEOUT") catch null;
     const timeout = if (timeout_str) |t| blk: {
         defer allocator.free(t);
         break :blk std.fmt.parseInt(u32, t, 10) catch 10000;
@@ -99,17 +99,19 @@ fn loadConfig(allocator: std.mem.Allocator) !PgConfig {
 /// Concurrent blockchain indexer using RocksDB secondary instance
 pub const Indexer = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     blockchain_path: []const u8,
     secondary_path: []const u8,
     config: PgConfig,
     database: ?db.Database,
     last_checked_height: u32,
 
-    pub fn init(allocator: std.mem.Allocator, blockchain_path: []const u8, config: PgConfig) !Indexer {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, blockchain_path: []const u8, config: PgConfig) !Indexer {
         const secondary_path = try std.fmt.allocPrint(allocator, "{s}_indexer_secondary", .{blockchain_path});
         
         return Indexer{
             .allocator = allocator,
+            .io = io,
             .blockchain_path = blockchain_path,
             .secondary_path = secondary_path,
             .config = config,
@@ -132,13 +134,14 @@ pub const Indexer = struct {
         // Try secondary instance first (concurrent access)
         self.database = db.Database.initSecondary(
             self.allocator, 
+            self.io,
             self.blockchain_path, 
             self.secondary_path
         ) catch |err| switch (err) {
             DatabaseError.OpenFailed => {
                 std.log.info("⚠️  Secondary instance failed, trying primary (mining node may be stopped)", .{});
                 // Fallback to primary instance if secondary fails
-                self.database = db.Database.init(self.allocator, self.blockchain_path) catch |primary_err| {
+                self.database = db.Database.init(self.allocator, self.io, self.blockchain_path) catch |primary_err| {
                     std.log.err("❌ Cannot access blockchain database in any mode", .{});
                     std.log.err("   Primary error: {}", .{primary_err});  
                     std.log.err("   Secondary error: {}", .{err});
@@ -194,7 +197,7 @@ pub const Indexer = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -263,7 +266,7 @@ pub fn main() !void {
     }
 
     // Initialize indexer
-    var indexer = try Indexer.init(allocator, blockchain_path, config);
+    var indexer = try Indexer.init(allocator, init.io, blockchain_path, config);
     defer indexer.deinit();
 
     // Get current blockchain height
@@ -333,11 +336,11 @@ fn indexBlock(pool: *Pool, allocator: std.mem.Allocator, indexer: *Indexer, heig
     // Calculate block hash
     const block_hash = block.hash();
     var hash_hex: [64]u8 = undefined;
-    _ = try std.fmt.bufPrint(&hash_hex, "{}", .{std.fmt.fmtSliceHexLower(&block_hash)});
+    _ = try std.fmt.bufPrint(&hash_hex, "{x}", .{&block_hash});
 
     // Calculate previous hash hex
     var prev_hash_hex: [64]u8 = undefined;
-    _ = try std.fmt.bufPrint(&prev_hash_hex, "{}", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+    _ = try std.fmt.bufPrint(&prev_hash_hex, "{x}", .{&block.header.previous_hash});
 
     // Calculate total fees
     var total_fees: u64 = 0;
@@ -400,7 +403,7 @@ fn indexBlock(pool: *Pool, allocator: std.mem.Allocator, indexer: *Indexer, heig
                 const enhancement = pending_enhancements[0];
                 const tx_hash = tx.hash();
                 var tx_hash_hex: [64]u8 = undefined;
-                _ = try std.fmt.bufPrint(&tx_hash_hex, "{}", .{std.fmt.fmtSliceHexLower(&tx_hash)});
+                _ = try std.fmt.bufPrint(&tx_hash_hex, "{x}", .{&tx_hash});
                 
                 l2_svc.confirmEnhancement(
                     enhancement.temp_id,
@@ -431,7 +434,7 @@ fn indexTransaction(
     // Calculate transaction hash
     const tx_hash = tx.hash();
     var tx_hash_hex: [64]u8 = undefined;
-    _ = try std.fmt.bufPrint(&tx_hash_hex, "{}", .{std.fmt.fmtSliceHexLower(&tx_hash)});
+    _ = try std.fmt.bufPrint(&tx_hash_hex, "{x}", .{&tx_hash});
 
     // Convert addresses to bech32
     var sender_str: [70]u8 = undefined;

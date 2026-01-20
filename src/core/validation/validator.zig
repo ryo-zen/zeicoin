@@ -25,7 +25,7 @@ pub const ChainValidator = struct {
         return .{
             .allocator = allocator,
             .blockchain = blockchain,
-            .real_validator = RealChainValidator.init(allocator, &blockchain.chain_state),
+            .real_validator = RealChainValidator.init(allocator, &blockchain.chain_state, blockchain.io),
         };
     }
     

@@ -64,26 +64,31 @@ pub const ServerHandlers = struct {
         };
     }
     
-    fn getHeight(self: *Self) !u32 {
+    fn getHeight(self: *Self, io: std.Io) !u32 {
+        _ = io;
         return self.blockchain.getHeight();
     }
     
-    fn getBestBlockHash(self: *Self) ![32]u8 {
+    fn getBestBlockHash(self: *Self, io: std.Io) ![32]u8 {
+        _ = io;
         return self.blockchain.getBestBlockHash();
     }
     
-    fn getGenesisHash(self: *Self) ![32]u8 {
+    fn getGenesisHash(self: *Self, io: std.Io) ![32]u8 {
         _ = self; // Not used, but required for interface
+        _ = io;
         // Get the canonical genesis hash for the current network
         const genesis = @import("../chain/genesis.zig");
         return genesis.getCanonicalGenesisHash();
     }
     
-    fn getCurrentDifficulty(self: *Self) !u64 {
+    fn getCurrentDifficulty(self: *Self, io: std.Io) !u64 {
+        _ = io;
         return self.blockchain.getCurrentDifficulty();
     }
 
-    fn onPeerConnected(self: *Self, peer: *network.Peer) !void {
+    fn onPeerConnected(self: *Self, io: std.Io, peer: *network.Peer) !void {
+        _ = io;
         const our_height = try self.blockchain.getHeight();
         const our_best_hash = try self.blockchain.getBestBlockHash();
 
@@ -92,15 +97,15 @@ pub const ServerHandlers = struct {
         });
         std.log.info("🔍 [PEER CONNECT] Peer state: {}, services: 0x{x}", .{peer.state, peer.services});
         std.log.info("🔍 [PEER CONNECT] Sync manager status: {}", .{self.blockchain.sync_manager != null});
-        std.log.info("🔍 [PEER CONNECT] Peer best hash: {s}", .{std.fmt.fmtSliceHexLower(&peer.best_block_hash)});
-        std.log.info("🔍 [PEER CONNECT] Our best hash:  {s}", .{std.fmt.fmtSliceHexLower(&our_best_hash)});
+        std.log.info("🔍 [PEER CONNECT] Peer best hash: {x}", .{&peer.best_block_hash});
+        std.log.info("🔍 [PEER CONNECT] Our best hash:  {x}", .{&our_best_hash});
 
         // Check for chain divergence first (equal height, different hash)
         const has_diverged = (peer.height == our_height and !std.mem.eql(u8, &peer.best_block_hash, &our_best_hash));
         if (has_diverged) {
             std.log.warn("⚠️ [CHAIN DIVERGENCE] Detected at height {}", .{our_height});
-            std.log.warn("📊 Peer hash: {s}", .{std.fmt.fmtSliceHexLower(&peer.best_block_hash)});
-            std.log.warn("📊 Our hash:  {s}", .{std.fmt.fmtSliceHexLower(&our_best_hash)});
+            std.log.warn("📊 Peer hash: {x}", .{&peer.best_block_hash});
+            std.log.warn("📊 Our hash:  {x}", .{&our_best_hash});
 
             // FORK RESOLUTION: Trigger fork detection to find fork point and compare cumulative work
             // This handles network partition scenarios where both miners built separate chains
@@ -234,13 +239,13 @@ pub const ServerHandlers = struct {
         }
     }
 
-    fn onBlock(self: *Self, peer: *network.Peer, msg: network.message_types.BlockMessage) !void {
+    fn onBlock(self: *Self, io: std.Io, peer: *network.Peer, msg: network.message_types.BlockMessage) !void {
         const block = msg.block;
         const block_hash = block.hash();
 
         std.log.info("📦 [BLOCK] Received block from {any} at height {}", .{peer.address, block.height});
-        std.log.debug("   Hash: {s}", .{std.fmt.fmtSliceHexLower(&block_hash)});
-        std.log.debug("   Previous: {s}", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+        std.log.debug("   Hash: {x}", .{&block_hash});
+        std.log.debug("   Previous: {x}", .{&block.header.previous_hash});
 
         // Add to peer's received blocks cache for synchronous sync logic
         peer.addReceivedBlock(block) catch |err| {
@@ -290,7 +295,7 @@ pub const ServerHandlers = struct {
 
             if (!has_parent) {
                 std.log.info("🔍 [ORPHAN] Block parent not found!", .{});
-                std.log.debug("   Missing parent: {s}", .{std.fmt.fmtSliceHexLower(&parent_hash)});
+                std.log.debug("   Missing parent: {x}", .{&parent_hash});
 
                 // Add to orphan pool
                 self.blockchain.chain_processor.orphan_pool.addOrphan(block) catch |err| {
@@ -313,10 +318,10 @@ pub const ServerHandlers = struct {
         }
 
         // Process block normally
-        try self.blockchain.chain_processor.acceptBlock(block);
+        try self.blockchain.chain_processor.acceptBlock(io, block);
 
         // After successfully processing, check for orphans that can now be processed
-        try self.processOrphanChain(block_hash);
+        try self.processOrphanChain(io, block_hash);
 
         // Notify sync manager if actively syncing - allows sync completion detection
         if (self.blockchain.sync_manager) |sync_manager| {
@@ -331,7 +336,7 @@ pub const ServerHandlers = struct {
     }
 
     /// Process any orphan blocks that can now be applied
-    fn processOrphanChain(self: *Self, parent_hash: [32]u8) !void {
+    fn processOrphanChain(self: *Self, io: std.Io, parent_hash: [32]u8) !void {
         var current_hash = parent_hash;
         var processed_count: usize = 0;
 
@@ -354,7 +359,7 @@ pub const ServerHandlers = struct {
 
                 // Process directly through acceptBlock to avoid recursion issues
                 const orphan_hash = orphan_block.hash();
-                self.blockchain.chain_processor.acceptBlock(orphan_block) catch |err| {
+                self.blockchain.chain_processor.acceptBlock(io, orphan_block) catch |err| {
                     std.log.warn("   ❌ Orphan block processing failed: {}", .{err});
                     continue;
                 };
@@ -364,7 +369,7 @@ pub const ServerHandlers = struct {
                 std.log.info("   ✅ Orphan block processed successfully", .{});
 
                 // After processing, recursively check for more orphans
-                self.processOrphanChain(orphan_hash) catch |err| {
+                self.processOrphanChain(io, orphan_hash) catch |err| {
                     std.log.warn("   ⚠️ Orphan chain processing error: {}", .{err});
                 };
             }
@@ -377,7 +382,8 @@ pub const ServerHandlers = struct {
         }
     }
 
-    fn onTransaction(self: *Self, peer: *network.Peer, msg: network.message_types.TransactionMessage) !void {
+    fn onTransaction(self: *Self, io: std.Io, peer: *network.Peer, msg: network.message_types.TransactionMessage) !void {
+        _ = io;
         std.log.info("💳 [TX] Received transaction from {any}", .{peer.address});
         // Use handleIncomingTransaction for network-received transactions
         // This prevents re-broadcasting and duplicate additions
@@ -386,7 +392,7 @@ pub const ServerHandlers = struct {
         };
     }
 
-    fn onGetBlocks(self: *Self, peer: *network.Peer, msg: network.message_types.GetBlocksMessage) !void {
+    fn onGetBlocks(self: *Self, io: std.Io, peer: *network.Peer, msg: network.message_types.GetBlocksMessage) !void {
         std.log.info("📋 [GET_BLOCKS] Request from {any}", .{peer.address});
         std.log.info("📋 [GET_BLOCKS] Requested hashes: {}", .{msg.hashes.len});
         
@@ -407,7 +413,7 @@ pub const ServerHandlers = struct {
                 break :blk height;
             } else blk: {
                 // Legacy hash-based request - look up block by hash
-                std.log.info("📋 [LEGACY] Hash-based request: {s}", .{std.fmt.fmtSliceHexLower(hash[0..8])});
+                std.log.info("📋 [LEGACY] Hash-based request: {x}", .{hash[0..8]});
                 // For now, fallback to old behavior for legacy requests
                 break :blk null;
             };
@@ -419,7 +425,7 @@ pub const ServerHandlers = struct {
                     continue;
                 }
 
-                var block = self.blockchain.database.getBlock(height) catch |err| {
+                var block = self.blockchain.database.getBlock(io, height) catch |err| {
                     std.log.err("Failed to get block {}: {}", .{ height, err });
                     continue;
                 };
@@ -440,7 +446,7 @@ pub const ServerHandlers = struct {
                 std.log.info("📋 [LEGACY] Processing hash-based request - sending all blocks from height 1", .{});
                 var height: u32 = 1;
                 while (height <= current_height) : (height += 1) {
-                    var block = self.blockchain.database.getBlock(height) catch |err| {
+                    var block = self.blockchain.database.getBlock(io, height) catch |err| {
                         std.log.err("Failed to get block {}: {}", .{ height, err });
                         break;
                     };
@@ -495,21 +501,24 @@ pub const ServerHandlers = struct {
         return null; // Not a ZSP-001 encoded hash
     }
 
-    fn onGetPeers(self: *Self, peer: *network.Peer, msg: network.message_types.GetPeersMessage) !void {
+    fn onGetPeers(self: *Self, io: std.Io, peer: *network.Peer, msg: network.message_types.GetPeersMessage) !void {
         std.log.info("👥 [GET_PEERS] Request from {any}", .{peer.address});
+        _ = io;
         _ = self;
         _ = msg;
         // Handle peer list requests
     }
 
-    fn onPeers(self: *Self, peer: *network.Peer, msg: network.message_types.PeersMessage) !void {
+    fn onPeers(self: *Self, io: std.Io, peer: *network.Peer, msg: network.message_types.PeersMessage) !void {
         std.log.info("📋 [PEERS] Received {} peer addresses from {any}", .{ msg.addresses.len, peer.address });
+        _ = io;
         _ = self;
         // Process received peer list
     }
 
-    fn onGetBlockHash(self: *Self, peer: *network.Peer, msg: network.message_types.GetBlockHashMessage) !void {
+    fn onGetBlockHash(self: *Self, io: std.Io, peer: *network.Peer, msg: network.message_types.GetBlockHashMessage) !void {
         std.log.info("🔍 [GET_BLOCK_HASH] Request for height {} from {any}", .{ msg.height, peer.address });
+        _ = io;
         
         // Get block hash at requested height using chain_state
         if (self.blockchain.chain_state.getBlockHash(msg.height)) |hash| {
@@ -531,11 +540,12 @@ pub const ServerHandlers = struct {
         }
     }
 
-    fn onBlockHash(self: *Self, peer: *network.Peer, msg: network.message_types.BlockHashMessage) !void {
+    fn onBlockHash(self: *Self, io: std.Io, peer: *network.Peer, msg: network.message_types.BlockHashMessage) !void {
         std.log.info("📥 [BLOCK_HASH] Response for height {} from {any} (exists: {})", .{ msg.height, peer.address, msg.exists });
+        _ = io;
 
         if (msg.exists) {
-            std.log.info("✓ [BLOCK_HASH] Peer {any} has block at height {} with hash {}", .{ peer.address, msg.height, std.fmt.fmtSliceHexUpper(&msg.hash) });
+            std.log.info("✓ [BLOCK_HASH] Peer {any} has block at height {} with hash {X}", .{ peer.address, msg.height, msg.hash });
         } else {
             std.log.info("✗ [BLOCK_HASH] Peer {any} does not have block at height {}", .{ peer.address, msg.height });
         }
@@ -546,7 +556,8 @@ pub const ServerHandlers = struct {
         _ = self; // Unused in current implementation
     }
     
-    fn onGetMempool(self: *Self, peer: *network.Peer) !void {
+    fn onGetMempool(self: *Self, io: std.Io, peer: *network.Peer) !void {
+        _ = io;
         // Send mempool inventory to requesting peer
         std.log.info("📋 [MEMPOOL] Peer {} requesting mempool inventory", .{peer.id});
 
@@ -579,7 +590,8 @@ pub const ServerHandlers = struct {
         }
     }
 
-    fn onMempoolInv(self: *Self, peer: *network.Peer, msg: network.message_types.MempoolInvMessage) !void {
+    fn onMempoolInv(self: *Self, io: std.Io, peer: *network.Peer, msg: network.message_types.MempoolInvMessage) !void {
+        _ = io;
         std.log.info("📥 [MEMPOOL] Received {} transaction hashes from peer {}", .{ msg.tx_hashes.len, peer.id });
 
         {
@@ -597,9 +609,7 @@ pub const ServerHandlers = struct {
 
                     // TODO: Send request for full transaction data
                     // This would require implementing a getdata/inv protocol similar to Bitcoin
-                    std.log.debug("📋 [MEMPOOL] Need to request transaction {s}", .{
-                        std.fmt.fmtSliceHexLower(&tx_hash)
-                    });
+                    std.log.debug("📋 [MEMPOOL] Need to request transaction {x}", .{tx_hash});
                 }
             }
 
@@ -611,7 +621,7 @@ pub const ServerHandlers = struct {
         }
     }
 
-    fn onGetMissingBlocks(self: *Self, peer: *network.Peer, msg: network.message_types.GetMissingBlocksMessage) !void {
+    fn onGetMissingBlocks(self: *Self, io: std.Io, peer: *network.Peer, msg: network.message_types.GetMissingBlocksMessage) !void {
         std.log.info("📤 [REQUEST] Peer {} requesting {} missing block(s)", .{
             peer.id,
             msg.block_hashes.items.len,
@@ -623,10 +633,10 @@ pub const ServerHandlers = struct {
 
         // Look up each requested block
         for (msg.block_hashes.items) |block_hash| {
-            std.log.debug("   Looking for: {s}", .{std.fmt.fmtSliceHexLower(&block_hash)});
+            std.log.debug("   Looking for: {x}", .{&block_hash});
 
             // Try to find block by hash
-            if (try self.findBlockByHash(block_hash)) |block| {
+            if (try self.findBlockByHash(io, block_hash)) |block| {
                 try response.addBlock(block);
                 std.log.debug("   ✅ Found block at height {}", .{block.height});
             } else {
@@ -640,7 +650,7 @@ pub const ServerHandlers = struct {
         std.log.info("✅ [REQUEST] Sent {} block(s) in response", .{response.blocks.items.len});
     }
 
-    fn onMissingBlocksResponse(self: *Self, peer: *network.Peer, msg: network.message_types.MissingBlocksResponseMessage) !void {
+    fn onMissingBlocksResponse(self: *Self, io: std.Io, peer: *network.Peer, msg: network.message_types.MissingBlocksResponseMessage) !void {
         std.log.info("📥 [RESPONSE] Received {} missing block(s) from peer {}", .{
             msg.blocks.items.len,
             peer.id,
@@ -653,13 +663,13 @@ pub const ServerHandlers = struct {
 
             // Create a BlockMessage wrapper
             const block_msg = network.message_types.BlockMessage{ .block = block };
-            try self.onBlock(peer, block_msg);
+            try self.onBlock(io, peer, block_msg);
         }
 
         std.log.info("✅ [RESPONSE] All missing blocks processed", .{});
     }
 
-    fn onGetChainWork(self: *Self, peer: *network.Peer, msg: network.message_types.GetChainWorkMessage) !void {
+    fn onGetChainWork(self: *Self, io: std.Io, peer: *network.Peer, msg: network.message_types.GetChainWorkMessage) !void {
         std.log.info("📊 [GET_CHAIN_WORK] Request for range {}-{} from {any}", .{
             msg.start_height,
             msg.end_height,
@@ -672,7 +682,7 @@ pub const ServerHandlers = struct {
         var height = msg.start_height;
         while (height <= msg.end_height) : (height += 1) {
             // Get block at this height
-            var block = try self.blockchain.database.getBlock(height);
+            var block = try self.blockchain.database.getBlock(io, height);
             defer block.deinit(self.blockchain.allocator);
 
             // Add this block's work to the total
@@ -691,11 +701,12 @@ pub const ServerHandlers = struct {
         std.log.info("✅ [GET_CHAIN_WORK] Sent chain work response to peer", .{});
     }
 
-    fn onChainWorkResponse(self: *Self, peer: *network.Peer, msg: network.message_types.ChainWorkResponseMessage) !void {
+    fn onChainWorkResponse(self: *Self, io: std.Io, peer: *network.Peer, msg: network.message_types.ChainWorkResponseMessage) !void {
         std.log.info("📥 [CHAIN_WORK] Response from {any}: total_work={}", .{
             peer.address,
             msg.total_work,
         });
+        _ = io;
 
         // Queue the response for fork detection (used by fork_detector.zig)
         peer.queueChainWorkResponse(msg.total_work);
@@ -704,7 +715,7 @@ pub const ServerHandlers = struct {
     }
 
     /// Find a block by its hash in our blockchain
-    fn findBlockByHash(self: *Self, block_hash: [32]u8) !?types.Block {
+    fn findBlockByHash(self: *Self, io: std.Io, block_hash: [32]u8) !?types.Block {
         // Get current chain height
         const current_height = try self.blockchain.database.getHeight();
 
@@ -712,7 +723,7 @@ pub const ServerHandlers = struct {
         // Must check current_height down to 0 (inclusive), avoiding unsigned underflow
         var height: u32 = current_height;
         while (true) {
-            var block = try self.blockchain.database.getBlock(height);
+            var block = try self.blockchain.database.getBlock(io, height);
             const hash = block.hash();
             if (std.mem.eql(u8, &hash, &block_hash)) {
                 return block;
@@ -765,29 +776,35 @@ pub const ServerHandlers = struct {
 };
 
 // Global wrapper functions for function pointers
-fn getHeightGlobal() anyerror!u32 {
-    return global_handler.?.getHeight();
+fn getHeightGlobal(io: std.Io) anyerror!u32 {
+    return global_handler.?.getHeight(io);
 }
 
-fn getBestBlockHashGlobal() anyerror![32]u8 {
-    return global_handler.?.getBestBlockHash();
+fn getBestBlockHashGlobal(io: std.Io) anyerror![32]u8 {
+    return global_handler.?.getBestBlockHash(io);
 }
 
-fn getGenesisHashGlobal() anyerror![32]u8 {
-    return global_handler.?.getGenesisHash();
+fn getGenesisHashGlobal(io: std.Io) anyerror![32]u8 {
+    return global_handler.?.getGenesisHash(io);
 }
 
-fn getCurrentDifficultyGlobal() anyerror!u64 {
-    return global_handler.?.getCurrentDifficulty();
+fn getCurrentDifficultyGlobal(io: std.Io) anyerror!u64 {
+    return global_handler.?.getCurrentDifficulty(io);
 }
 
-fn onPeerConnectedGlobal(peer: *network.Peer) anyerror!void {
-    return global_handler.?.onPeerConnected(peer);
+fn onPeerConnectedGlobal(io: std.Io, peer: *network.Peer) anyerror!void {
+    return global_handler.?.onPeerConnected(io, peer);
 }
 
 fn triggerStartSync(sync_manager: *sync.SyncManager, peer: *network.Peer, target_height: u32) void {
     defer peer.release();
-    sync_manager.startSync(peer, target_height, false) catch |err| {
+    // TODO: We need an Io instance here. For background threads, we might need a dedicated Io instance or pass it.
+    // For now, creating a temporary threaded Io for the background sync thread.
+    var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{ .environ = .empty });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    sync_manager.startSync(io, peer, target_height, false) catch |err| {
         std.log.err("Asynchronous startSync failed: {}", .{err});
     };
 }
@@ -795,7 +812,11 @@ fn triggerStartSync(sync_manager: *sync.SyncManager, peer: *network.Peer, target
 /// Trigger fork resolution with force_reorg=true for equal-height divergence
 fn triggerForkResolution(sync_manager: *sync.SyncManager, peer: *network.Peer, target_height: u32) void {
     defer peer.release();
-    sync_manager.startSync(peer, target_height, true) catch |err| {
+    var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{ .environ = .empty });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    sync_manager.startSync(io, peer, target_height, true) catch |err| {
         std.log.err("Asynchronous fork resolution failed: {}", .{err});
     };
 }
@@ -803,61 +824,65 @@ fn triggerForkResolution(sync_manager: *sync.SyncManager, peer: *network.Peer, t
 /// Global callback for sync manager to start sync from thread
 fn triggerPeerSync(sync_manager: *sync.SyncManager, peer: *network.Peer) void {
     defer peer.release();
-    sync_manager.handlePeerSync(peer) catch |err| {
+    var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{ .environ = .empty });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    sync_manager.handlePeerSync(io, peer) catch |err| {
         std.log.err("Asynchronous peer sync failed: {}", .{err});
     };
 }
 
-fn onBlockGlobal(peer: *network.Peer, msg: network.message_types.BlockMessage) anyerror!void {
-    return global_handler.?.onBlock(peer, msg);
+fn onBlockGlobal(io: std.Io, peer: *network.Peer, msg: network.message_types.BlockMessage) anyerror!void {
+    return global_handler.?.onBlock(io, peer, msg);
 }
 
-fn onTransactionGlobal(peer: *network.Peer, msg: network.message_types.TransactionMessage) anyerror!void {
-    return global_handler.?.onTransaction(peer, msg);
+fn onTransactionGlobal(io: std.Io, peer: *network.Peer, msg: network.message_types.TransactionMessage) anyerror!void {
+    return global_handler.?.onTransaction(io, peer, msg);
 }
 
-fn onGetBlocksGlobal(peer: *network.Peer, msg: network.message_types.GetBlocksMessage) anyerror!void {
-    return global_handler.?.onGetBlocks(peer, msg);
+fn onGetBlocksGlobal(io: std.Io, peer: *network.Peer, msg: network.message_types.GetBlocksMessage) anyerror!void {
+    return global_handler.?.onGetBlocks(io, peer, msg);
 }
 
-fn onGetPeersGlobal(peer: *network.Peer, msg: network.message_types.GetPeersMessage) anyerror!void {
-    return global_handler.?.onGetPeers(peer, msg);
+fn onGetPeersGlobal(io: std.Io, peer: *network.Peer, msg: network.message_types.GetPeersMessage) anyerror!void {
+    return global_handler.?.onGetPeers(io, peer, msg);
 }
 
-fn onPeersGlobal(peer: *network.Peer, msg: network.message_types.PeersMessage) anyerror!void {
-    return global_handler.?.onPeers(peer, msg);
+fn onPeersGlobal(io: std.Io, peer: *network.Peer, msg: network.message_types.PeersMessage) anyerror!void {
+    return global_handler.?.onPeers(io, peer, msg);
 }
 
-fn onGetBlockHashGlobal(peer: *network.Peer, msg: network.message_types.GetBlockHashMessage) anyerror!void {
-    return global_handler.?.onGetBlockHash(peer, msg);
+fn onGetBlockHashGlobal(io: std.Io, peer: *network.Peer, msg: network.message_types.GetBlockHashMessage) anyerror!void {
+    return global_handler.?.onGetBlockHash(io, peer, msg);
 }
 
-fn onBlockHashGlobal(peer: *network.Peer, msg: network.message_types.BlockHashMessage) anyerror!void {
-    return global_handler.?.onBlockHash(peer, msg);
+fn onBlockHashGlobal(io: std.Io, peer: *network.Peer, msg: network.message_types.BlockHashMessage) anyerror!void {
+    return global_handler.?.onBlockHash(io, peer, msg);
 }
 
-fn onGetMempoolGlobal(peer: *network.Peer) anyerror!void {
-    return global_handler.?.onGetMempool(peer);
+fn onGetMempoolGlobal(io: std.Io, peer: *network.Peer) anyerror!void {
+    return global_handler.?.onGetMempool(io, peer);
 }
 
-fn onMempoolInvGlobal(peer: *network.Peer, msg: network.message_types.MempoolInvMessage) anyerror!void {
-    return global_handler.?.onMempoolInv(peer, msg);
+fn onMempoolInvGlobal(io: std.Io, peer: *network.Peer, msg: network.message_types.MempoolInvMessage) anyerror!void {
+    return global_handler.?.onMempoolInv(io, peer, msg);
 }
 
-fn onGetMissingBlocksGlobal(peer: *network.Peer, msg: network.message_types.GetMissingBlocksMessage) anyerror!void {
-    return global_handler.?.onGetMissingBlocks(peer, msg);
+fn onGetMissingBlocksGlobal(io: std.Io, peer: *network.Peer, msg: network.message_types.GetMissingBlocksMessage) anyerror!void {
+    return global_handler.?.onGetMissingBlocks(io, peer, msg);
 }
 
-fn onMissingBlocksResponseGlobal(peer: *network.Peer, msg: network.message_types.MissingBlocksResponseMessage) anyerror!void {
-    return global_handler.?.onMissingBlocksResponse(peer, msg);
+fn onMissingBlocksResponseGlobal(io: std.Io, peer: *network.Peer, msg: network.message_types.MissingBlocksResponseMessage) anyerror!void {
+    return global_handler.?.onMissingBlocksResponse(io, peer, msg);
 }
 
-fn onGetChainWorkGlobal(peer: *network.Peer, msg: network.message_types.GetChainWorkMessage) anyerror!void {
-    return global_handler.?.onGetChainWork(peer, msg);
+fn onGetChainWorkGlobal(io: std.Io, peer: *network.Peer, msg: network.message_types.GetChainWorkMessage) anyerror!void {
+    return global_handler.?.onGetChainWork(io, peer, msg);
 }
 
-fn onChainWorkResponseGlobal(peer: *network.Peer, msg: network.message_types.ChainWorkResponseMessage) anyerror!void {
-    return global_handler.?.onChainWorkResponse(peer, msg);
+fn onChainWorkResponseGlobal(io: std.Io, peer: *network.Peer, msg: network.message_types.ChainWorkResponseMessage) anyerror!void {
+    return global_handler.?.onChainWorkResponse(io, peer, msg);
 }
 
 fn onPeerDisconnectedGlobal(peer: *network.Peer, err: anyerror) anyerror!void {

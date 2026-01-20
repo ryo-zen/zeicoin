@@ -237,8 +237,8 @@ pub const BlockProcessor = struct {
         const parent_hash = parent_block.hash();
         if (!std.mem.eql(u8, &owned_block.header.previous_hash, &parent_hash)) {
             log.warn("Block {} doesn't connect to parent", .{block_height});
-            log.warn("   Expected: {s}", .{std.fmt.fmtSliceHexLower(&parent_hash)});
-            log.warn("   Got:      {s}", .{std.fmt.fmtSliceHexLower(&owned_block.header.previous_hash)});
+            log.warn("   Expected: {x}", .{&parent_hash});
+            log.warn("   Got:      {x}", .{&owned_block.header.previous_hash});
             return false;
         }
 

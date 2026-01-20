@@ -207,13 +207,13 @@ pub const ParallelDownloadManager = struct {
     allocator: std.mem.Allocator,
     
     // Download queues
-    pending_requests: std.ArrayList(DownloadRequest),
+    pending_requests: std.array_list.Managed(DownloadRequest),
     active_requests: std.AutoHashMap(u32, DownloadRequest), // height -> request
     completed_blocks: std.AutoHashMap(u32, types.Block), // height -> block
     
     // Peer management
     peer_capacities: std.AutoHashMap(*Peer, PeerCapacity),
-    available_peers: std.ArrayList(*Peer),
+    available_peers: std.array_list.Managed(*Peer),
     
     // Statistics and monitoring
     stats: DownloadStats,
@@ -224,11 +224,11 @@ pub const ParallelDownloadManager = struct {
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
             .allocator = allocator,
-            .pending_requests = std.ArrayList(DownloadRequest).init(allocator),
+            .pending_requests = std.array_list.Managed(DownloadRequest).init(allocator),
             .active_requests = std.AutoHashMap(u32, DownloadRequest).init(allocator),
             .completed_blocks = std.AutoHashMap(u32, types.Block).init(allocator),
             .peer_capacities = std.AutoHashMap(*Peer, PeerCapacity).init(allocator),
-            .available_peers = std.ArrayList(*Peer).init(allocator),
+            .available_peers = std.array_list.Managed(*Peer).init(allocator),
             .stats = DownloadStats.init(),
         };
     }
@@ -275,7 +275,7 @@ pub const ParallelDownloadManager = struct {
         
         // Cancel any active requests from this peer
         var iter = self.active_requests.iterator();
-        var requests_to_cancel = std.ArrayList(u32).init(self.allocator);
+        var requests_to_cancel = std.array_list.Managed(u32).init(self.allocator);
         defer requests_to_cancel.deinit();
         
         while (iter.next()) |entry| {
@@ -502,7 +502,7 @@ pub const ParallelDownloadManager = struct {
     
     /// Handle timed-out requests
     fn handleTimeouts(self: *Self) !void {
-        var timeouts = std.ArrayList(u32).init(self.allocator);
+        var timeouts = std.array_list.Managed(u32).init(self.allocator);
         defer timeouts.deinit();
         
         // Find timed-out requests

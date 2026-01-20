@@ -43,6 +43,7 @@ pub const ReorgExecutor = struct {
     /// - Invalid transactions are automatically discarded
     pub fn executeReorg(
         self: *Self,
+        io: std.Io,
         old_tip_height: u32,
         new_tip_height: u32,
         new_blocks: []const Block,
@@ -73,7 +74,7 @@ pub const ReorgExecutor = struct {
         // Phase 1: Revert STATE only (not blocks yet - safer to keep blocks until we verify new chain)
         if (blocks_to_revert > 0) {
             std.log.warn("⏪ [REORG] Reverting state (accounts) from height {} to {}", .{old_tip_height, fork_height});
-            self.revertStateToHeight(fork_height) catch |err| {
+            self.revertStateToHeight(io, fork_height) catch |err| {
                 std.log.err("❌ [REORG] Failed to revert state: {}", .{err});
 
                 // Attempt rollback
@@ -99,7 +100,7 @@ pub const ReorgExecutor = struct {
             const expected_height = fork_height + 1 + applied;
 
             // Apply the block first - this executes all transactions and updates account states
-            self.applyBlock(&new_block, expected_height) catch |err| {
+            self.applyBlock(io, &new_block, expected_height) catch |err| {
                 std.log.err("❌ [REORG] Failed to apply block at height {}: {}", .{expected_height, err});
 
                 // Rollback to fork point - state will be restored, old blocks still exist
@@ -123,8 +124,8 @@ pub const ReorgExecutor = struct {
                 const actual_state_root = try state_root.calculateStateRoot(self.allocator, self.db);
                 if (!std.mem.eql(u8, &new_block.header.state_root, &actual_state_root)) {
                     std.log.err("❌ [REORG] State root mismatch at height {}", .{expected_height});
-                    std.log.err("   Expected: {s}", .{std.fmt.fmtSliceHexLower(&new_block.header.state_root)});
-                    std.log.err("   Actual:   {s}", .{std.fmt.fmtSliceHexLower(&actual_state_root)});
+                    std.log.err("   Expected: {x}", .{&new_block.header.state_root});
+                    std.log.err("   Actual:   {x}", .{&actual_state_root});
 
                     // Rollback to fork point - state will be restored, old blocks still exist
                     try state_root.loadStateSnapshot(self.allocator, self.db, fork_height);
@@ -187,23 +188,23 @@ pub const ReorgExecutor = struct {
 
     /// Revert state (accounts) back to a specific height WITHOUT deleting blocks
     /// This is safer because if the reorg fails, the old blocks are still available
-    fn revertStateToHeight(self: *Self, target_height: u32) !void {
+    fn revertStateToHeight(self: *Self, io: std.Io, target_height: u32) !void {
         const current_height = try self.chain_state.getHeight();
 
         // Use ChainState's rollback functionality but WITHOUT deleting blocks
-        try self.chain_state.rollbackStateWithoutDeletingBlocks(target_height, current_height);
+        try self.chain_state.rollbackStateWithoutDeletingBlocks(io, target_height, current_height);
 
         std.log.debug("⏪ Reverted state from height {} to {}", .{current_height, target_height});
     }
 
     /// Apply a single block to the chain
-    fn applyBlock(self: *Self, block: *const Block, height: u32) !void {
+    fn applyBlock(self: *Self, io: std.Io, block: *const Block, height: u32) !void {
         // Process all transactions in the block using ChainState
         // Force processing = true because we might be reapplying blocks that exist in DB
-        try self.chain_state.processBlockTransactions(block.transactions, height, true);
+        try self.chain_state.processBlockTransactions(io, block.transactions, height, true);
 
         // Save block to database
-        try self.db.saveBlock(height, block.*);
+        try self.db.saveBlock(io, height, block.*);
 
         // Update block index
         try self.chain_state.indexBlock(height, block.header.hash());

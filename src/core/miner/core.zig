@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const log = std.log.scoped(.mining);
-const ArrayList = std.ArrayList;
+const ArrayList = std.array_list.Managed;
 
 const types = @import("../types/types.zig");
 const util = @import("../util/util.zig");
@@ -85,7 +85,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
         .amount = miner_reward, // 💰 Block reward + all transaction fees
         .fee = 0, // Coinbase has no fee
         .nonce = 0, // Coinbase always nonce 0
-        .timestamp = @intCast(std.time.milliTimestamp()),
+        .timestamp = @as(u64, @intCast(util.getTime())) * 1000,
         .expiry_height = std.math.maxInt(u64), // Coinbase transactions never expire
         .signature = std.mem.zeroes(types.Signature), // No signature needed for coinbase
         .script_version = 0,
@@ -104,7 +104,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
     log.info("💰 Miner reward: {s} (base) + {s} (fees) = {s} total", .{ base_reward_display, fees_display, total_reward_display });
 
     // Apply soft limit for mining (2MB default, configurable)
-    var transactions_to_include = std.ArrayList(Transaction).init(ctx.allocator);
+    var transactions_to_include = std.array_list.Managed(Transaction).init(ctx.allocator);
     defer transactions_to_include.deinit();
 
     // Always include coinbase
@@ -136,7 +136,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
     // Get previous block hash even for block 1 (height 0 = genesis exists)
     // Check if database is completely empty (no blocks at all)
     const has_genesis = blk: {
-        var genesis_block = ctx.database.getBlock(0) catch {
+        var genesis_block = ctx.database.getBlock(ctx.blockchain.io, 0) catch {
             break :blk false;
         };
         genesis_block.deinit(ctx.allocator);
@@ -151,10 +151,9 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
         // Normal case: get the hash of the previous block (current_height is the existing tip)
         // When mining block at height N+1, we need hash of block N
         log.info("🔍 Mining block at height {}, getting previous block at height {}", .{ current_height + 1, current_height });
-        var prev_block = try ctx.database.getBlock(current_height);
+        var prev_block = try ctx.database.getBlock(ctx.blockchain.io, current_height);
         const hash = prev_block.hash();
-        const hash_hex = std.fmt.fmtSliceHexLower(&hash);
-        log.info("🔍 Previous block hash: {}", .{hash_hex});
+        log.info("🔍 Previous block hash: {x}", .{hash});
         prev_block.deinit(ctx.allocator);
         break :blk hash;
     };
@@ -164,7 +163,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
 
     // Calculate current account state root before creating block
     const account_state_root = try ctx.blockchain.chain_state.calculateStateRoot();
-    log.info("🌳 [MINING] Calculated state root for new block: {}", .{std.fmt.fmtSliceHexLower(&account_state_root)});
+    log.info("🌳 [MINING] Calculated state root for new block: {x}", .{&account_state_root});
 
     // Create block with dynamic difficulty
     var new_block = Block{
@@ -172,7 +171,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
             .version = types.CURRENT_BLOCK_VERSION,
             .previous_hash = previous_hash,
             .merkle_root = std.mem.zeroes(Hash), // Will be calculated after transactions are set
-            .timestamp = @intCast(std.time.milliTimestamp()),
+            .timestamp = @as(u64, @intCast(util.getTime())) * 1000,
             .difficulty = next_difficulty_target.toU64(),
             .nonce = 0,
             .witness_root = std.mem.zeroes(Hash), // No witness data yet
@@ -181,7 +180,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
             .extra_data = blk: {
                 // Add randomness to prevent identical blocks between miners
                 var random_data: [32]u8 = std.mem.zeroes([32]u8);
-                std.crypto.random.bytes(&random_data);
+                ctx.blockchain.io.random(&random_data);
                 break :blk random_data;
             },
         },
@@ -209,7 +208,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
 
     // Calculate merkle root now that transactions are set
     new_block.header.merkle_root = try new_block.calculateMerkleRoot(ctx.allocator);
-    log.info("🌲 [MINING] Calculated merkle root for new block: {}", .{std.fmt.fmtSliceHexLower(&new_block.header.merkle_root)});
+    log.info("🌲 [MINING] Calculated merkle root for new block: {x}", .{&new_block.header.merkle_root});
 
     log.info("👌 Starting mining", .{});
     const start_time = util.getTime();
@@ -225,17 +224,17 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
     if (found_nonce) {
         // Process coinbase transaction (create new coins!)
         // Note: new_block_height was already calculated at function start
-        try ctx.blockchain.chain_state.processCoinbaseTransaction(coinbase_tx, mining_address, new_block_height, false);
+        try ctx.blockchain.chain_state.processCoinbaseTransaction(ctx.blockchain.io, coinbase_tx, mining_address, new_block_height, false);
 
         // Process regular transactions
         for (new_block.transactions[1..]) |tx| {
-            try ctx.blockchain.chain_state.processTransaction(tx, false);
+            try ctx.blockchain.chain_state.processTransaction(ctx.blockchain.io, tx, false);
         }
 
         // Calculate cumulative chain work before saving (critical for reorganization)
         const block_work = new_block.header.getWork();
         const prev_chain_work = if (new_block_height > 0) blk: {
-            var prev_block = try ctx.database.getBlock(new_block_height - 1);
+            var prev_block = try ctx.database.getBlock(ctx.blockchain.io, new_block_height - 1);
             defer prev_block.deinit(ctx.allocator);
             break :blk prev_block.chain_work;
         } else 0;
@@ -250,10 +249,9 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
 
         // Save block to database at next height
         const block_height = new_block_height;
-        const block_hash_hex = std.fmt.fmtSliceHexLower(&new_block.hash());
-        const prev_hash_hex = std.fmt.fmtSliceHexLower(&new_block.header.previous_hash);
-        log.info("💾 Saving block {} with hash {} and previous_hash {}", .{ block_height, block_hash_hex, prev_hash_hex });
-        try ctx.database.saveBlock(block_height, new_block);
+        const block_hash = new_block.hash();
+        log.info("💾 Saving block {} with hash {x} and previous_hash {x}", .{ block_height, block_hash, new_block.header.previous_hash });
+        try ctx.database.saveBlock(ctx.blockchain.io, block_height, new_block);
 
         // CRITICAL FIX: Index the new block in memory so getBlockHash/getHash works
         try ctx.blockchain.chain_state.indexBlock(block_height, new_block.hash());
@@ -261,7 +259,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
         // Check for matured coinbase rewards (100 block maturity)
         if (block_height >= types.COINBASE_MATURITY) {
             const maturity_height = block_height - types.COINBASE_MATURITY;
-            try ctx.blockchain.chain_state.matureCoinbaseRewards(maturity_height);
+            try ctx.blockchain.chain_state.matureCoinbaseRewards(ctx.blockchain.io, maturity_height);
         }
 
         // Clean mempool of confirmed transactions

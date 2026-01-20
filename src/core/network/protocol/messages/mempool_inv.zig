@@ -22,17 +22,18 @@ pub const MempoolInvMessage = struct {
 
     pub fn encode(self: MempoolInvMessage, writer: anytype) !void {
         // Write the number of transaction hashes
-        try writer.writeInt(u32, @intCast(self.tx_hashes.len), .little);
+        var w = writer;
+        try w.writeInt(u32, @intCast(self.tx_hashes.len), .little);
 
         // Write each hash
         for (self.tx_hashes) |hash| {
-            try writer.writeAll(&hash);
+            try w.writeAll(&hash);
         }
     }
 
     pub fn decode(allocator: std.mem.Allocator, reader: anytype) !MempoolInvMessage {
         // Read the number of hashes
-        const count = try reader.readInt(u32, .little);
+        const count = try reader.takeInt(u32, .little);
 
         // Limit to prevent DOS attacks (max 50,000 transactions)
         if (count > 50000) {
@@ -45,7 +46,7 @@ pub const MempoolInvMessage = struct {
 
         // Read each hash
         for (tx_hashes) |*hash| {
-            _ = try reader.readAll(&hash.*);
+            try reader.readSliceAll(&hash.*);
         }
 
         return MempoolInvMessage{

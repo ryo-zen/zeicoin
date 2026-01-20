@@ -2,7 +2,7 @@
     .name = .zeicoin,
     .version = "0.0.0",
     .fingerprint = 0x6d42938f4de07d4f,
-    .minimum_zig_version = "0.14.1",
+    .minimum_zig_version = "0.16.0-dev.2255+d417441f4",
     .dependencies = .{
         .pg = .{
             .url = "git+https://github.com/karlseguin/pg.zig?ref=master#842541eb22a6da1e43a2e78c1b20b5ea88aa9366",

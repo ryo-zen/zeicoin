@@ -4,11 +4,12 @@
 const std = @import("std");
 const protocol = @import("../protocol/protocol.zig");
 const message_envelope = @import("../protocol/message_envelope.zig");
+const util = @import("../../util/util.zig");
 
 /// Wire protocol reader for parsing incoming messages
 pub const WireReader = struct {
     allocator: std.mem.Allocator,
-    buffer: std.ArrayList(u8),
+    buffer: std.array_list.Managed(u8),
     read_pos: usize,
 
     const Self = @This();
@@ -19,7 +20,7 @@ pub const WireReader = struct {
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
             .allocator = allocator,
-            .buffer = std.ArrayList(u8).init(allocator),
+            .buffer = std.array_list.Managed(u8).init(allocator),
             .read_pos = 0,
         };
     }
@@ -48,9 +49,9 @@ pub const WireReader = struct {
         
         // Try to parse header
         const header_bytes = self.buffer.items[self.read_pos..][0..protocol.MessageHeader.SIZE];
-        var stream = std.io.fixedBufferStream(header_bytes);
+        var reader = std.Io.Reader.fixed(header_bytes);
         
-        const header = protocol.MessageHeader.deserialize(stream.reader()) catch {
+        const header = protocol.MessageHeader.deserialize(&reader) catch {
             // Invalid header, skip byte and try again
             self.read_pos += 1;
             self.compact();
@@ -109,14 +110,14 @@ pub const WireReader = struct {
 /// Wire protocol writer for sending messages
 pub const WireWriter = struct {
     allocator: std.mem.Allocator,
-    send_buffer: std.ArrayList(u8),
+    send_buffer: std.array_list.Managed(u8),
     
     const Self = @This();
     
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
             .allocator = allocator,
-            .send_buffer = std.ArrayList(u8).init(allocator),
+            .send_buffer = std.array_list.Managed(u8).init(allocator),
         };
     }
     
@@ -135,7 +136,10 @@ pub const WireWriter = struct {
         // Encode message payload
         const payload_start = self.send_buffer.items.len;
         if (@TypeOf(msg) != void) {
-            try msg.encode(self.send_buffer.writer());
+            var aw: std.Io.Writer.Allocating = .init(self.allocator);
+            defer aw.deinit();
+            try msg.encode(aw.writer);
+            try self.send_buffer.appendSlice(aw.written());
         }
         // For void messages (like blocks), payload remains empty
         
@@ -146,8 +150,8 @@ pub const WireWriter = struct {
         var header = protocol.MessageHeader.init(msg_type, payload_len);
         header.setChecksum(payload);
         
-        var header_stream = std.io.fixedBufferStream(self.send_buffer.items[0..protocol.MessageHeader.SIZE]);
-        try header.serialize(header_stream.writer());
+        var writer = std.Io.Writer.fixed(self.send_buffer.items[0..protocol.MessageHeader.SIZE]);
+        try header.serialize(&writer);
     }
     
     /// Get the complete message data for sending
@@ -221,7 +225,7 @@ pub const ConnectionStats = struct {
             .messages_received = 0,
             .bytes_sent = 0,
             .bytes_received = 0,
-            .connected_since = std.time.timestamp(),
+            .connected_since = util.getTime(),
         };
     }
 };

@@ -95,11 +95,12 @@ pub const BootstrapConfig = struct {
 };
 
 // Load bootstrap nodes from JSON configuration
-pub fn loadBootstrapNodes(allocator: std.mem.Allocator) ![][]const u8 {
+pub fn loadBootstrapNodes(allocator: std.mem.Allocator, io: std.Io) ![][]const u8 {
     const config_path = "config/bootstrap_testnet.json";
 
     // Read the JSON file
-    const file = std.fs.cwd().openFile(config_path, .{}) catch |err| switch (err) {
+    const dir = std.Io.Dir.cwd();
+    const file = dir.openFile(io, config_path, .{}) catch |err| switch (err) {
         error.FileNotFound => {
             // Fallback to hardcoded nodes if config file not found
             const fallback_nodes = [_][]const u8{
@@ -114,12 +115,11 @@ pub fn loadBootstrapNodes(allocator: std.mem.Allocator) ![][]const u8 {
         },
         else => return err,
     };
-    defer file.close();
+    defer file.close(io);
 
-    const file_size = try file.getEndPos();
-    const contents = try allocator.alloc(u8, file_size);
-    defer allocator.free(contents);
-    _ = try file.readAll(contents);
+    var buf: [4096]u8 = undefined;
+    const bytes_read = try file.readStreaming(io, &[_][]u8{&buf});
+    const contents = buf[0..bytes_read];
 
     // Parse JSON
     const parsed = try std.json.parseFromSlice(BootstrapConfig, allocator, contents, .{});
@@ -339,29 +339,28 @@ pub const Transaction = struct {
         // Use larger buffer to handle transactions with extra_data up to limit
         // Buffer size matches TransactionLimits.MAX_TX_SIZE (100KB)
         var buffer: [TransactionLimits.MAX_TX_SIZE]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&buffer);
-        const writer = stream.writer();
+        var writer = std.Io.Writer.fixed(&buffer);
 
         // Simple serialization for hashing (order matters!)
-        writer.writeInt(u16, tx_for_hash.version, .little) catch unreachable;
-        writer.writeInt(u16, @bitCast(tx_for_hash.flags), .little) catch unreachable;
+        std.Io.Writer.writeInt(&writer, u16, tx_for_hash.version, .little) catch unreachable;
+        std.Io.Writer.writeInt(&writer, u16, @bitCast(tx_for_hash.flags), .little) catch unreachable;
         writer.writeAll(std.mem.asBytes(&tx_for_hash.sender)) catch unreachable;
         writer.writeAll(std.mem.asBytes(&tx_for_hash.recipient)) catch unreachable;
-        writer.writeInt(u64, tx_for_hash.amount, .little) catch unreachable;
-        writer.writeInt(u64, tx_for_hash.fee, .little) catch unreachable;
-        writer.writeInt(u64, tx_for_hash.nonce, .little) catch unreachable;
-        writer.writeInt(u64, tx_for_hash.timestamp, .little) catch unreachable;
-        writer.writeInt(u64, tx_for_hash.expiry_height, .little) catch unreachable;
+        std.Io.Writer.writeInt(&writer, u64, tx_for_hash.amount, .little) catch unreachable;
+        std.Io.Writer.writeInt(&writer, u64, tx_for_hash.fee, .little) catch unreachable;
+        std.Io.Writer.writeInt(&writer, u64, tx_for_hash.nonce, .little) catch unreachable;
+        std.Io.Writer.writeInt(&writer, u64, tx_for_hash.timestamp, .little) catch unreachable;
+        std.Io.Writer.writeInt(&writer, u64, tx_for_hash.expiry_height, .little) catch unreachable;
         writer.writeAll(&tx_for_hash.sender_public_key) catch unreachable;
-        writer.writeInt(u16, tx_for_hash.script_version, .little) catch unreachable;
+        std.Io.Writer.writeInt(&writer, u16, tx_for_hash.script_version, .little) catch unreachable;
 
         // Include witness_data and extra_data in hash
-        writer.writeInt(u32, @intCast(self.witness_data.len), .little) catch unreachable;
+        std.Io.Writer.writeInt(&writer, u32, @intCast(self.witness_data.len), .little) catch unreachable;
         writer.writeAll(self.witness_data) catch unreachable;
-        writer.writeInt(u32, @intCast(self.extra_data.len), .little) catch unreachable;
+        std.Io.Writer.writeInt(&writer, u32, @intCast(self.extra_data.len), .little) catch unreachable;
         writer.writeAll(self.extra_data) catch unreachable;
 
-        const data = stream.getWritten();
+        const data = writer.buffered();
         return util.blake3Hash(data);
     }
 
@@ -727,17 +726,17 @@ pub const BlockHeader = struct {
 
     /// Serialize block header to bytes
     pub fn serialize(self: *const BlockHeader, writer: anytype) !void {
-        try writer.writeInt(u32, self.version, .little);
+        try std.Io.Writer.writeInt(writer, u32, self.version, .little);
         try writer.writeAll(&self.previous_hash);
         try writer.writeAll(&self.merkle_root);
-        try writer.writeInt(u64, self.timestamp, .little);
-        try writer.writeInt(u64, self.difficulty, .little);
-        try writer.writeInt(u32, self.nonce, .little);
+        try std.Io.Writer.writeInt(writer, u64, self.timestamp, .little);
+        try std.Io.Writer.writeInt(writer, u64, self.difficulty, .little);
+        try std.Io.Writer.writeInt(writer, u32, self.nonce, .little);
 
         // New future-proof fields
         try writer.writeAll(&self.witness_root);
         try writer.writeAll(&self.state_root);
-        try writer.writeInt(u64, self.extra_nonce, .little);
+        try std.Io.Writer.writeInt(writer, u64, self.extra_nonce, .little);
         try writer.writeAll(&self.extra_data);
     }
 
@@ -745,18 +744,18 @@ pub const BlockHeader = struct {
     pub fn deserialize(reader: anytype) !BlockHeader {
         var header: BlockHeader = undefined;
 
-        header.version = try reader.readInt(u32, .little);
-        _ = try reader.readAll(&header.previous_hash);
-        _ = try reader.readAll(&header.merkle_root);
-        header.timestamp = try reader.readInt(u64, .little);
-        header.difficulty = try reader.readInt(u64, .little);
-        header.nonce = try reader.readInt(u32, .little);
+        header.version = try reader.takeInt(u32, .little);
+        _ = try reader.readSliceAll(&header.previous_hash);
+        _ = try reader.readSliceAll(&header.merkle_root);
+        header.timestamp = try reader.takeInt(u64, .little);
+        header.difficulty = try reader.takeInt(u64, .little);
+        header.nonce = try reader.takeInt(u32, .little);
 
         // New future-proof fields
-        _ = try reader.readAll(&header.witness_root);
-        _ = try reader.readAll(&header.state_root);
-        header.extra_nonce = try reader.readInt(u64, .little);
-        _ = try reader.readAll(&header.extra_data);
+        _ = try reader.readSliceAll(&header.witness_root);
+        _ = try reader.readSliceAll(&header.state_root);
+        header.extra_nonce = try reader.takeInt(u64, .little);
+        _ = try reader.readSliceAll(&header.extra_data);
 
         return header;
     }
@@ -770,13 +769,12 @@ pub const BlockHeader = struct {
     pub fn hash(self: *const BlockHeader) BlockHash {
         // Serialize the block header to bytes
         var buffer: [1024]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&buffer);
-        const writer = stream.writer();
+        var writer = std.Io.Writer.fixed(&buffer);
 
         // Simple serialization for hashing (order matters!)
-        self.serialize(writer) catch unreachable;
+        self.serialize(&writer) catch unreachable;
 
-        const data = stream.getWritten();
+        const data = writer.buffered();
         return util.blake3Hash(data);
     }
 

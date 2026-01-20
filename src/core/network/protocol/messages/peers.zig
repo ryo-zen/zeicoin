@@ -22,27 +22,27 @@ pub const PeersMessage = struct {
     }
     
     pub fn encode(self: PeersMessage, writer: anytype) !void {
-        try writer.writeInt(u32, @intCast(self.addresses.len), .little);
+        try std.Io.Writer.writeInt(writer, u32, @intCast(self.addresses.len), .little);
         for (self.addresses) |addr| {
             try writer.writeAll(&addr.ip);
-            try writer.writeInt(u16, addr.port, .little);
-            try writer.writeInt(u64, addr.services, .little);
-            try writer.writeInt(i64, addr.last_seen, .little);
+            try std.Io.Writer.writeInt(writer, u16, addr.port, .little);
+            try std.Io.Writer.writeInt(writer, u64, addr.services, .little);
+            try std.Io.Writer.writeInt(writer, i64, addr.last_seen, .little);
         }
     }
     
     pub fn decode(allocator: std.mem.Allocator, reader: anytype) !PeersMessage {
-        const count = try reader.readInt(u32, .little);
+        const count = try reader.takeInt(u32, .little);
         if (count > 1000) return error.TooManyPeers;
         
         const addresses = try allocator.alloc(PeerAddress, count);
         errdefer allocator.free(addresses);
         
         for (addresses) |*addr| {
-            try reader.readNoEof(&addr.ip);
-            addr.port = try reader.readInt(u16, .little);
-            addr.services = try reader.readInt(u64, .little);
-            addr.last_seen = try reader.readInt(i64, .little);
+            try reader.readSliceAll(&addr.ip);
+            addr.port = try reader.takeInt(u16, .little);
+            addr.services = try reader.takeInt(u64, .little);
+            addr.last_seen = try reader.takeInt(i64, .little);
         }
         
         return .{ .addresses = addresses };

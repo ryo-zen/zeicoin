@@ -5,6 +5,7 @@
 const std = @import("std");
 const testing = std.testing;
 const zeicoin = @import("zeicoin");
+const util = zeicoin.util;
 
 const types = zeicoin.types;
 const key = zeicoin.key;
@@ -80,7 +81,7 @@ fn createValidTransaction() !Transaction {
         .amount = 100 * types.ZEI_COIN,
         .fee = types.ZenFees.MIN_FEE,
         .nonce = 0,
-        .timestamp = @intCast(std.time.timestamp()),
+        .timestamp = @intCast(util.getTime()),
         .expiry_height = 1000,
         .sender_public_key = keypair.public_key,
         .signature = undefined,

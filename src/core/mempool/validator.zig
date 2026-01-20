@@ -36,9 +36,10 @@ pub const ValidationError = error{
 pub const TransactionValidator = struct {
     // Chain state reference for account queries
     chain_state: *ChainState,
+    io: std.Io,
     
     // Processed transaction history for replay protection
-    processed_transactions: std.ArrayList(Hash),
+    processed_transactions: std.array_list.Managed(Hash),
     
     // Resource management
     allocator: std.mem.Allocator,
@@ -46,10 +47,11 @@ pub const TransactionValidator = struct {
     const Self = @This();
     
     /// Initialize transaction validator
-    pub fn init(allocator: std.mem.Allocator, chain_state: *ChainState) Self {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, chain_state: *ChainState) Self {
         return .{
             .chain_state = chain_state,
-            .processed_transactions = std.ArrayList(Hash).init(allocator),
+            .io = io,
+            .processed_transactions = std.array_list.Managed(Hash).init(allocator),
             .allocator = allocator,
         };
     }
@@ -198,7 +200,7 @@ pub const TransactionValidator = struct {
     
     /// Validate transaction nonce
     pub fn validateNonce(self: *Self, tx: Transaction) !bool {
-        const sender_account = try self.chain_state.getAccount(tx.sender);
+        const sender_account = try self.chain_state.getAccount(self.io, tx.sender);
         const expected_nonce = sender_account.nextNonce();
         
         // Allow nonce to be equal or higher than expected (for queuing future transactions)
@@ -224,7 +226,7 @@ pub const TransactionValidator = struct {
     
     /// Validate sender balance and fees
     pub fn validateBalance(self: *Self, tx: Transaction) !bool {
-        const sender_account = try self.chain_state.getAccount(tx.sender);
+        const sender_account = try self.chain_state.getAccount(self.io, tx.sender);
         
         // Check minimum fee
         if (tx.fee < types.ZenFees.MIN_FEE) {
@@ -248,7 +250,7 @@ pub const TransactionValidator = struct {
     
     /// Validate sender balance and fees with specific error reporting
     pub fn validateBalanceWithError(self: *Self, tx: Transaction) !void {
-        const sender_account = self.chain_state.getAccount(tx.sender) catch {
+        const sender_account = self.chain_state.getAccount(self.io, tx.sender) catch {
             return ValidationError.InvalidNonce; // Account not found, treat as invalid nonce
         };
         

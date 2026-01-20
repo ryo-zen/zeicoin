@@ -13,7 +13,7 @@ pub const OrphanPool = struct {
 
     /// Map: parent_hash -> list of orphan blocks waiting for that parent
     /// Key is the parent hash, value is list of blocks that reference it
-    orphans_by_parent: std.AutoHashMap([32]u8, std.ArrayList(Block)),
+    orphans_by_parent: std.AutoHashMap([32]u8, std.array_list.Managed(Block)),
 
     /// Map: block_hash -> block (for quick duplicate detection)
     orphans_by_hash: std.AutoHashMap([32]u8, void),
@@ -39,7 +39,7 @@ pub const OrphanPool = struct {
     pub fn init(allocator: Allocator, max_orphans: usize) OrphanPool {
         return .{
             .allocator = allocator,
-            .orphans_by_parent = std.AutoHashMap([32]u8, std.ArrayList(Block)).init(allocator),
+            .orphans_by_parent = std.AutoHashMap([32]u8, std.array_list.Managed(Block)).init(allocator),
             .orphans_by_hash = std.AutoHashMap([32]u8, void).init(allocator),
             .total_orphans = 0,
             .max_orphans = max_orphans,
@@ -67,9 +67,7 @@ pub const OrphanPool = struct {
 
         // Check if we already have this orphan
         if (self.orphans_by_hash.contains(block_hash)) {
-            log.debug("Orphan block already in pool: {s}", .{
-                std.fmt.fmtSliceHexLower(&block_hash),
-            });
+            log.debug("Orphan block already in pool: {x}", .{block_hash});
             return error.DuplicateOrphan;
         }
 
@@ -85,7 +83,7 @@ pub const OrphanPool = struct {
         // Get or create list for this parent hash
         const gop = try self.orphans_by_parent.getOrPut(parent_hash);
         if (!gop.found_existing) {
-            gop.value_ptr.* = std.ArrayList(Block).init(self.allocator);
+            gop.value_ptr.* = std.array_list.Managed(Block).init(self.allocator);
         }
 
         // Add block to list
@@ -101,9 +99,7 @@ pub const OrphanPool = struct {
             block.height,
             self.total_orphans,
         });
-        log.debug("   Parent needed: {s}", .{
-            std.fmt.fmtSliceHexLower(&parent_hash),
-        });
+        log.debug("   Parent needed: {x}", .{parent_hash});
     }
 
     /// Get all orphan blocks that have this parent hash
@@ -141,7 +137,7 @@ pub const OrphanPool = struct {
 
     /// Get list of all missing parent hashes (for requesting from peers)
     pub fn getMissingParentHashes(self: *OrphanPool, allocator: Allocator) ![]const [32]u8 {
-        var hashes = std.ArrayList([32]u8).init(allocator);
+        var hashes = std.array_list.Managed([32]u8).init(allocator);
         errdefer hashes.deinit();
 
         var it = self.orphans_by_parent.keyIterator();

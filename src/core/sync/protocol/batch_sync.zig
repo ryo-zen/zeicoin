@@ -167,8 +167,8 @@ const BatchTracker = struct {
     }
 
     /// Get all timed-out batches for retry
-    pub fn getTimedOutBatches(self: *BatchTracker, allocator: Allocator) !std.ArrayList(BatchRequest) {
-        var timed_out = std.ArrayList(BatchRequest).init(allocator);
+    pub fn getTimedOutBatches(self: *BatchTracker, allocator: Allocator) !std.array_list.Managed(BatchRequest) {
+        var timed_out = std.array_list.Managed(BatchRequest).init(allocator);
 
         var iter = self.active_batches.iterator();
         while (iter.next()) |entry| {
@@ -400,7 +400,7 @@ pub const BatchSyncProtocol = struct {
     metrics: SyncMetrics,
 
     /// Failed peers list for peer rotation
-    failed_peers: std.ArrayList(*Peer),
+    failed_peers: std.array_list.Managed(*Peer),
 
     /// Dependency injection context for blockchain operations
     context: BatchSyncContext,
@@ -444,7 +444,7 @@ pub const BatchSyncProtocol = struct {
             .batch_tracker = BatchTracker.init(allocator),
             .pending_queue = PendingQueue.init(allocator),
             .metrics = SyncMetrics.init(),
-            .failed_peers = std.ArrayList(*Peer).init(allocator),
+            .failed_peers = std.array_list.Managed(*Peer).init(allocator),
             .context = context,
         };
     }
@@ -736,10 +736,10 @@ pub const BatchSyncProtocol = struct {
             const height = start_height + @as(u32, @intCast(i));
             encoded_hashes[i] = encodeHeightAsHash(height);
 
-            log.info("   └─ Height {} → {s}...{s}", .{
+            log.info("   └─ Height {} → {x}...{x}", .{
                 height,
-                std.fmt.fmtSliceHexLower(encoded_hashes[i][0..4]), // Height bytes
-                std.fmt.fmtSliceHexLower(encoded_hashes[i][4..8]), // Magic marker
+                encoded_hashes[i][0..4], // Height bytes
+                encoded_hashes[i][4..8], // Magic marker
             });
         }
         log.info("✅ [ZSP-001 ENCODE] STEP 2 COMPLETED: All {} heights encoded", .{batch_size});
@@ -961,7 +961,7 @@ pub const BatchSyncProtocol = struct {
         log.debug("🔍 [BLOCK RETRIEVAL] Checking peer cache for pending blocks", .{});
 
         var blocks_retrieved: u32 = 0;
-        var batch_blocks = std.ArrayList(Block).init(self.allocator);
+        var batch_blocks = std.array_list.Managed(Block).init(self.allocator);
         defer {
             // Clean up any blocks we couldn't process
             for (batch_blocks.items) |*block| {

@@ -10,18 +10,22 @@ pub const PingMessage = struct {
     const Self = @This();
     
     pub fn init() Self {
+        const io = std.Io.Threaded.global_single_threaded.ioBasic();
+        var nonce_bytes: [8]u8 = undefined;
+        std.Io.random(io, &nonce_bytes);
         return .{
-            .nonce = std.crypto.random.int(u64),
+            .nonce = std.mem.readInt(u64, &nonce_bytes, .little),
         };
     }
     
     pub fn encode(self: Self, writer: anytype) !void {
-        try writer.writeInt(u64, self.nonce, .little);
+        var w = writer;
+        try std.Io.Writer.writeInt(&w, u64, self.nonce, .little);
     }
     
     pub fn decode(reader: anytype) !Self {
         return Self{
-            .nonce = try reader.readInt(u64, .little),
+            .nonce = try reader.takeInt(u64, .little),
         };
     }
     
@@ -36,12 +40,12 @@ test "PingMessage encode/decode" {
     const ping = PingMessage.init();
     
     var buffer: [8]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buffer);
+    var writer = std.Io.Writer.fixed(&buffer);
     
-    try ping.encode(stream.writer());
+    try ping.encode(&writer);
     
-    stream.reset();
-    const decoded = try PingMessage.decode(stream.reader());
+    var reader = std.Io.Reader.fixed(writer.buffered());
+    const decoded = try PingMessage.decode(&reader);
     
     try std.testing.expectEqual(ping.nonce, decoded.nonce);
 }

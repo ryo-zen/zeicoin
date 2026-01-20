@@ -4,6 +4,7 @@
 const std = @import("std");
 const log = std.log.scoped(.server);
 const network = @import("../network/peer.zig");
+const util = @import("../util/util.zig");
 
 pub const Config = struct {
     port: u16 = network.DEFAULT_PORT,
@@ -39,12 +40,9 @@ pub const BootstrapNode = struct {
     port: u16,
 };
 
-pub fn parseArgs(allocator: std.mem.Allocator) !Config {
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-    
+pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Config {
     var config = Config{ .allocator = allocator };
-    var bootstrap_list = std.ArrayList(BootstrapNode).init(allocator);
+    var bootstrap_list = std.array_list.Managed(BootstrapNode).init(allocator);
     defer bootstrap_list.deinit();
     
     var i: usize = 1;
@@ -81,14 +79,14 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Config {
     }
     
     // Handle environment variable for bind address
-    if (std.process.getEnvVarOwned(allocator, "ZEICOIN_BIND_IP")) |bind_ip| {
+    if (util.getEnvVarOwned(allocator, "ZEICOIN_BIND_IP")) |bind_ip| {
         config.bind_address = bind_ip; // Transfer ownership to config
         config.bind_address_allocated = true;
     } else |_| {}
     
     // Handle environment variable for bootstrap nodes
     if (bootstrap_list.items.len == 0) {
-        if (std.process.getEnvVarOwned(allocator, "ZEICOIN_BOOTSTRAP")) |env_bootstrap| {
+        if (util.getEnvVarOwned(allocator, "ZEICOIN_BOOTSTRAP")) |env_bootstrap| {
             defer allocator.free(env_bootstrap);
             try parseBootstrapNodes(&bootstrap_list, env_bootstrap);
         } else |_| {}
@@ -100,7 +98,7 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Config {
     return config;
 }
 
-fn parseBootstrapNodes(list: *std.ArrayList(BootstrapNode), input: []const u8) !void {
+fn parseBootstrapNodes(list: *std.array_list.Managed(BootstrapNode), input: []const u8) !void {
     var iter = std.mem.tokenizeScalar(u8, input, ',');
     while (iter.next()) |node| {
         var parts = std.mem.tokenizeScalar(u8, node, ':');

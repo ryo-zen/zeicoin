@@ -27,15 +27,17 @@ const Hash = types.Hash;
 pub const ChainValidator = struct {
     chain_state: *ChainState,
     allocator: std.mem.Allocator,
+    io: std.Io,
     // Fork manager removed - using modern reorganization system
 
     const Self = @This();
 
     /// Initialize ChainValidator with reference to ChainState
-    pub fn init(allocator: std.mem.Allocator, chain_state: *ChainState) Self {
+    pub fn init(allocator: std.mem.Allocator, chain_state: *ChainState, io: std.Io) Self {
         return .{
             .chain_state = chain_state,
             .allocator = allocator,
+            .io = io,
         };
     }
 
@@ -95,7 +97,7 @@ pub const ChainValidator = struct {
         }
 
         // Get sender account
-        const sender_account = try self.chain_state.getAccount(tx.sender);
+        const sender_account = try self.chain_state.getAccount(self.io, tx.sender);
 
         // Check nonce (must be next expected nonce)
         if (tx.nonce != sender_account.nextNonce()) {
@@ -144,9 +146,9 @@ pub const ChainValidator = struct {
 
         // Verify transaction signature
         const tx_hash = tx.hashForSigning();
-        // log.warn("     🔍 Transaction hash for signing: {s}", .{std.fmt.fmtSliceHexLower(&tx_hash)});
-        // log.warn("     🔍 Sender public key: {s}", .{std.fmt.fmtSliceHexLower(&tx.sender_public_key)});
-        // log.warn("     🔍 Transaction signature: {s}", .{std.fmt.fmtSliceHexLower(&tx.signature)});
+        // log.warn("     🔍 Transaction hash for signing: {x}", .{&tx_hash});
+        // log.warn("     🔍 Sender public key: {x}", .{&tx.sender_public_key});
+        // log.warn("     🔍 Transaction signature: {x}", .{&tx.signature});
 
         if (!key.verify(tx.sender_public_key, &tx_hash, tx.signature)) {
             log.warn("❌ Invalid signature: transaction not signed by sender", .{});
@@ -165,7 +167,7 @@ pub const ChainValidator = struct {
         const block_hash = block.hash();
         if (self.chain_state.hasBlock(block_hash)) {
             const existing_height = self.chain_state.block_index.getHeight(block_hash) orelse unreachable;
-            log.warn("❌ [CONSENSUS] Block validation failed: duplicate block hash {s} already exists at height {}", .{ std.fmt.fmtSliceHexLower(block_hash[0..8]), existing_height });
+            log.warn("❌ [CONSENSUS] Block validation failed: duplicate block hash {x} already exists at height {}", .{ block_hash[0..8], existing_height });
             return false;
         }
 
@@ -227,8 +229,8 @@ pub const ChainValidator = struct {
             const prev_hash = prev_block.hash();
             if (!std.mem.eql(u8, &block.header.previous_hash, &prev_hash)) {
                 log.warn("❌ Previous hash validation failed", .{});
-                log.warn("   Expected: {s}", .{std.fmt.fmtSliceHexLower(&prev_hash)});
-                log.warn("   Received: {s}", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+                log.warn("   Expected: {x}", .{&prev_hash});
+                log.warn("   Received: {x}", .{&block.header.previous_hash});
 
                 // CRITICAL: Check if this is actually a duplicate of a different block
                 // This catches the case where the same block is submitted at multiple heights
@@ -236,7 +238,7 @@ pub const ChainValidator = struct {
                 if (self.chain_state.hasBlock(submitted_hash)) {
                     const existing_height = self.chain_state.block_index.getHeight(submitted_hash) orelse unreachable;
                     log.warn("❌ [CHAIN CONTINUITY] This block is a duplicate of block at height {}!", .{existing_height});
-                    log.warn("   Block hash: {s}", .{std.fmt.fmtSliceHexLower(submitted_hash[0..8])});
+                    log.warn("   Block hash: {x}", .{submitted_hash[0..8]});
                 }
 
                 return false;
@@ -287,12 +289,12 @@ pub const ChainValidator = struct {
         const expected_state_root = try self.chain_state.calculateStateRoot();
         if (!std.mem.eql(u8, &block.header.state_root, &expected_state_root)) {
             log.warn("❌ CRITICAL: Account state root mismatch - hidden divergence detected!", .{});
-            log.warn("   Expected: {}", .{std.fmt.fmtSliceHexLower(&expected_state_root)});
-            log.warn("   Block:    {}", .{std.fmt.fmtSliceHexLower(&block.header.state_root)});
-            log.warn("   This indicates the block was created with different account states than this node has");
+            log.warn("   Expected: {x}", .{&expected_state_root});
+            log.warn("   Block:    {x}", .{&block.header.state_root});
+            log.warn("   This indicates the block was created with different account states than this node has", .{});
             return false;
         }
-        log.info("✅ [STATE ROOT] Account state root verified: {}", .{std.fmt.fmtSliceHexLower(&expected_state_root)});
+        log.info("✅ [STATE ROOT] Account state root verified: {x}", .{&expected_state_root});
 
         // SECURITY: Validate coinbase transaction
         if (!try self.validateCoinbase(block, expected_height)) {
@@ -323,7 +325,7 @@ pub const ChainValidator = struct {
         const block_hash = block.hash();
         if (self.chain_state.hasBlock(block_hash)) {
             const existing_height = self.chain_state.block_index.getHeight(block_hash) orelse unreachable;
-            log.warn("❌ [SYNC] Block validation failed: duplicate block hash {s} already exists at height {}", .{ std.fmt.fmtSliceHexLower(block_hash[0..8]), existing_height });
+            log.warn("❌ [SYNC] Block validation failed: duplicate block hash {x} already exists at height {}", .{ block_hash[0..8], existing_height });
             return false;
         }
 
@@ -335,14 +337,14 @@ pub const ChainValidator = struct {
             log.warn("🔍 Genesis validation details:", .{});
             log.warn("   Block timestamp: {}", .{block.header.timestamp});
             log.warn("   Expected genesis timestamp: {}", .{types.Genesis.timestamp()});
-            // log.warn("   Block previous_hash: {s}", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+            // log.warn("   Block previous_hash: {x}", .{&block.header.previous_hash});
             log.warn("   Block difficulty: {}", .{block.header.difficulty});
             log.warn("   Block nonce: 0x{X}", .{block.header.nonce});
             log.warn("   Block transaction count: {}", .{block.txCount()});
 
             _ = block.hash(); // Block hash calculated but not used in release mode
-            // log.warn("   Block hash: {s}", .{std.fmt.fmtSliceHexLower(&block_hash)});
-            // log.warn("   Expected genesis hash: {s}", .{std.fmt.fmtSliceHexLower(&genesis.getCanonicalGenesisHash())});
+            // log.warn("   Block hash: {x}", .{&block_hash});
+            // log.warn("   Expected genesis hash: {x}", .{&genesis.getCanonicalGenesisHash()});
 
             if (!genesis.validateGenesis(block.*)) {
                 log.warn("❌ Genesis block validation failed: not canonical genesis", .{});
@@ -467,13 +469,13 @@ pub const ChainValidator = struct {
                 defer prev_block.deinit(self.allocator);
 
                 const prev_hash = prev_block.hash();
-                // log.warn("   Previous block hash in chain: {s}", .{std.fmt.fmtSliceHexLower(&prev_hash)});
-                // log.warn("   Block's previous_hash field: {s}", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+                // log.warn("   Previous block hash in chain: {x}", .{&prev_hash});
+                // log.warn("   Block's previous_hash field: {x}", .{&block.header.previous_hash});
 
                 if (!std.mem.eql(u8, &block.header.previous_hash, &prev_hash)) {
                     log.warn("❌ Previous hash validation failed during sync", .{});
-                    // log.warn("   Expected: {s}", .{std.fmt.fmtSliceHexLower(&prev_hash)});
-                    // log.warn("   Received: {s}", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+                    // log.warn("   Expected: {x}", .{&prev_hash});
+                    // log.warn("   Received: {x}", .{&block.header.previous_hash});
                     log.warn("⚠️ This might indicate a fork - skipping hash validation during sync", .{});
                     // During sync, we trust the peer's chain - skip this validation
                 }
@@ -503,8 +505,8 @@ pub const ChainValidator = struct {
                 log.warn("❌ Transaction {} structure validation failed", .{i});
                 _ = tx.sender.toBytes(); // Sender bytes calculated but not used in release mode
                 _ = tx.recipient.toBytes(); // Recipient bytes calculated but not used in release mode
-                // log.warn("   Sender: {s}", .{std.fmt.fmtSliceHexLower(&sender_bytes)});
-                // log.warn("   Recipient: {s}", .{std.fmt.fmtSliceHexLower(&recipient_bytes)});
+                // log.warn("   Sender: {x}", .{&sender_bytes});
+                // log.warn("   Recipient: {x}", .{&recipient_bytes});
                 log.warn("   Amount: {}", .{tx.amount});
                 log.warn("   Fee: {}", .{tx.fee});
                 log.warn("   Nonce: {}", .{tx.nonce});
@@ -518,8 +520,8 @@ pub const ChainValidator = struct {
             // Signature validation (but no balance check)
             if (!try self.validateTransactionSignatureDetailed(tx)) {
                 log.warn("❌ Transaction {} signature validation failed", .{i});
-                // log.warn("   Public key: {s}", .{std.fmt.fmtSliceHexLower(&tx.sender_public_key)});
-                // log.warn("   Signature: {s}", .{std.fmt.fmtSliceHexLower(&tx.signature)});
+                // log.warn("   Public key: {x}", .{&tx.sender_public_key});
+                // log.warn("   Signature: {x}", .{&tx.signature});
                 return false;
             }
             log.warn("   ✅ Transaction {} signature validation passed", .{i});
@@ -622,13 +624,13 @@ pub const ChainValidator = struct {
 
     /// Get block by height (delegates to ChainState database)
     fn getBlockByHeight(self: *Self, height: u32) !types.Block {
-        return self.chain_state.database.getBlock(height);
+        return self.chain_state.database.getBlock(std.Io.Threaded.global_single_threaded.ioBasic(), height);
     }
 
     /// Calculate median time past for timestamp validation
     fn getMedianTimePast(self: *Self, height: u32) !u64 {
         const num_blocks = @min(height + 1, 11); // Use up to 11 blocks for median
-        var timestamps = std.ArrayList(u64).init(self.allocator);
+        var timestamps = std.array_list.Managed(u64).init(self.allocator);
         defer timestamps.deinit();
 
         // Collect timestamps from recent blocks

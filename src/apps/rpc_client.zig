@@ -1,5 +1,5 @@
 const std = @import("std");
-const net = std.net;
+const net = std.Io.net;
 
 /// Minimal JSON-RPC 2.0 client for blockchain queries
 pub const RPCClient = struct {

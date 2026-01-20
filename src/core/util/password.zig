@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const util = @import("util.zig");
 
 pub const PasswordError = error{
     PasswordTooShort,
@@ -24,7 +25,7 @@ pub fn getPassword(allocator: std.mem.Allocator, wallet_name: []const u8, option
     
     // Check for environment variable password first
     if (options.allow_env) {
-        if (std.process.getEnvVarOwned(allocator, "ZEICOIN_WALLET_PASSWORD")) |env_password| {
+        if (util.getEnvVarOwned(allocator, "ZEICOIN_WALLET_PASSWORD")) |env_password| {
             if (env_password.len < options.min_length) {
                 allocator.free(env_password);
                 return PasswordError.PasswordTooShort;
@@ -42,13 +43,23 @@ pub fn getPassword(allocator: std.mem.Allocator, wallet_name: []const u8, option
 }
 
 pub fn readPasswordFromStdin(allocator: std.mem.Allocator, options: PasswordOptions) ![]u8 {
-    const stdout = std.io.getStdOut().writer();
-    const stdin = std.io.getStdIn();
+    var threaded = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var stdout_buf: [256]u8 = undefined;
+    var stdout_writer = std.Io.File.Writer.initStreaming(std.Io.File.stdout(), io, &stdout_buf);
+    defer stdout_writer.interface.flush() catch {};
+
+    const stdin_file = std.Io.File.stdin();
+    var stdin_buf: [256]u8 = undefined;
+    var stdin_reader = std.Io.File.Reader.initStreaming(stdin_file, io, &stdin_buf);
     
-    try stdout.print("{s}", .{options.prompt});
+    try stdout_writer.interface.writeAll(options.prompt);
+    try stdout_writer.interface.flush();
 
     const original_termios = if (builtin.os.tag != .windows) blk: {
-        const termios = std.posix.tcgetattr(stdin.handle) catch |err| switch (err) {
+        const termios = std.posix.tcgetattr(stdin_file.handle) catch |err| switch (err) {
             error.NotATerminal => break :blk null,
             else => return err,
         };
@@ -57,19 +68,29 @@ pub fn readPasswordFromStdin(allocator: std.mem.Allocator, options: PasswordOpti
         new_termios.lflag.ECHO = false;
         new_termios.lflag.ICANON = true;
         
-        try std.posix.tcsetattr(stdin.handle, .NOW, new_termios);
+        try std.posix.tcsetattr(stdin_file.handle, .NOW, new_termios);
         break :blk termios;
     } else null;
     
     defer if (original_termios) |termios| {
-        std.posix.tcsetattr(stdin.handle, .NOW, termios) catch {};
-        stdout.print("\n", .{}) catch {};
+        std.posix.tcsetattr(stdin_file.handle, .NOW, termios) catch {};
+        stdout_writer.interface.writeAll("\n") catch {};
+        stdout_writer.interface.flush() catch {};
     };
 
-    const reader = stdin.reader();
-    const password = reader.readUntilDelimiterAlloc(allocator, '\n', options.max_length) catch |err| {
-        return err;
+    var collecting = std.Io.Writer.Allocating.init(allocator);
+    defer collecting.deinit();
+
+    _ = stdin_reader.interface.streamDelimiterLimit(&collecting.writer, '\n', .limited(options.max_length)) catch |err| switch (err) {
+        error.StreamTooLong => return PasswordError.PasswordTooLong,
+        else => return err,
     };
+    _ = stdin_reader.interface.discardDelimiterInclusive('\n') catch |err| switch (err) {
+        error.EndOfStream => {},
+        else => return err,
+    };
+
+    const password = try collecting.toOwnedSlice();
     errdefer allocator.free(password);
     
     const trimmed = std.mem.trim(u8, password, " \r\n\t");
@@ -87,8 +108,6 @@ pub fn readPasswordFromStdin(allocator: std.mem.Allocator, options: PasswordOpti
 }
 
 pub fn confirmPassword(allocator: std.mem.Allocator, options: PasswordOptions) ![]u8 {
-    const stdout = std.io.getStdOut().writer();
-    
     const first_password = try readPasswordFromStdin(allocator, .{
         .min_length = options.min_length,
         .max_length = options.max_length,
@@ -106,7 +125,7 @@ pub fn confirmPassword(allocator: std.mem.Allocator, options: PasswordOptions) !
     defer clearPassword(second_password);
     
     if (!std.mem.eql(u8, first_password, second_password)) {
-        try stdout.print("❌ Passwords do not match\n", .{});
+        std.debug.print("❌ Passwords do not match\n", .{});
         return error.PasswordMismatch;
     }
     
@@ -119,7 +138,7 @@ pub fn clearPassword(password: []u8) void {
 
 pub fn getPasswordForWallet(allocator: std.mem.Allocator, wallet_name: []const u8, creating: bool) ![]u8 {
     // Check if password is provided via environment variable
-    const has_env_password = if (std.process.getEnvVarOwned(allocator, "ZEICOIN_WALLET_PASSWORD")) |env_pw| blk: {
+    const has_env_password = if (util.getEnvVarOwned(allocator, "ZEICOIN_WALLET_PASSWORD")) |env_pw| blk: {
         allocator.free(env_pw);
         break :blk true;
     } else |_| false;

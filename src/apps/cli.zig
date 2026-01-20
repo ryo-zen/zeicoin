@@ -35,7 +35,7 @@ const Command = enum {
     help,
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -48,8 +48,8 @@ pub fn main() !void {
         }
     };
     
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try std.process.Args.toSlice(init.minimal.args, allocator);
+    defer allocator.free(args);
     
     if (args.len < 2) {
         display.printHelp();
@@ -67,35 +67,37 @@ pub fn main() !void {
     // Ensure cleanup happens even on early returns
     defer transaction_commands.cleanupGlobalNonceManager();
 
+    const io = init.io;
+
     // Delegate to appropriate command handler
     switch (command) {
-        .wallet => try wallet_commands.handleWallet(allocator, args[2..]),
-        .balance => transaction_commands.handleBalance(allocator, args[2..]) catch |err| {
+        .wallet => try wallet_commands.handleWallet(allocator, io, args[2..]),
+        .balance => transaction_commands.handleBalance(allocator, io, args[2..]) catch |err| {
             switch (err) {
                 TransactionCLIError.TransactionFailed => std.process.exit(1),
                 TransactionCLIError.NetworkError => std.process.exit(1),
                 else => return err,
             }
         },
-        .send => transaction_commands.handleSend(allocator, args[2..]) catch |err| {
+        .send => transaction_commands.handleSend(allocator, io, args[2..]) catch |err| {
             switch (err) {
                 TransactionCLIError.TransactionFailed => std.process.exit(1),
                 TransactionCLIError.NetworkError => std.process.exit(1),
                 else => return err,
             }
         },
-        .status => try network_commands.handleStatus(allocator, args[2..]),
-        .address => try wallet_commands.handleAddress(allocator, args[2..]),
-        .sync => try network_commands.handleSync(allocator, args[2..]),
-        .block => try network_commands.handleBlock(allocator, args[2..]),
-        .history => transaction_commands.handleHistory(allocator, args[2..]) catch |err| {
+        .status => try network_commands.handleStatus(allocator, io, args[2..]),
+        .address => try wallet_commands.handleAddress(allocator, io, args[2..]),
+        .sync => try network_commands.handleSync(allocator, io, args[2..]),
+        .block => try network_commands.handleBlock(allocator, io, args[2..]),
+        .history => transaction_commands.handleHistory(allocator, io, args[2..]) catch |err| {
             switch (err) {
                 TransactionCLIError.TransactionFailed => std.process.exit(1),
                 TransactionCLIError.NetworkError => std.process.exit(1),
                 else => return err,
             }
         },
-        .seed, .mnemonic => try wallet_commands.handleSeed(allocator, args[2..]),
+        .seed, .mnemonic => try wallet_commands.handleSeed(allocator, io, args[2..]),
         .help => display.printHelp(),
     }
 }

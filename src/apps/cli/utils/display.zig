@@ -129,7 +129,7 @@ pub fn displayHistory(allocator: std.mem.Allocator, wallet_name: []const u8, add
 
         print("   🔗 Block: {} | ✅ Confirmations: {}\n", .{ tx_info.height, tx_info.confirmations });
         print("   💰 Fee: {s} | ⏰ Time: {s}\n", .{ fee_display, time_str });
-        print("   🆔 Hash: {}\n", .{std.fmt.fmtSliceHexLower(&tx_info.hash)});
+        print("   🆔 Hash: {x}\n", .{&tx_info.hash});
     }
 
     print("─────────────────────────────────────────────────────────────\n", .{});

@@ -125,8 +125,8 @@ pub fn validateGenesis(block: types.Block) bool {
     if (!std.mem.eql(u8, &block_hash, &canonical_hash)) {
         const log = std.log.scoped(.chain);
         log.info("❌ Genesis validation failed: hash mismatch", .{});
-        log.info("   Expected: {s}", .{std.fmt.fmtSliceHexLower(&canonical_hash)});
-        log.info("   Received: {s}", .{std.fmt.fmtSliceHexLower(&block_hash)});
+        log.info("   Expected: {x}", .{&canonical_hash});
+        log.info("   Received: {x}", .{&block_hash});
         return false;
     }
 

@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const log = std.log.scoped(.server);
-const net = std.net;
+const net = std.Io.net;
 const types = @import("../types/types.zig");
 const zen = @import("../node.zig");
 const wallet = @import("../wallet/wallet.zig");
@@ -23,7 +23,13 @@ pub const ClientApiServer = struct {
     bind_address: []const u8,
     
     const Self = @This();
-    
+
+    fn sendResponse(io: std.Io, connection: net.Stream, data: []const u8) !void {
+        var buf: [4096]u8 = undefined;
+        var writer = connection.writer(io, &buf);
+        try writer.interface.writeAll(data);
+    }
+
     pub fn init(allocator: std.mem.Allocator, blockchain: *zen.ZeiCoin, bind_address: []const u8) Self {
         return .{
             .allocator = allocator,
@@ -37,21 +43,23 @@ pub const ClientApiServer = struct {
     pub fn deinit(self: *Self) void {
         self.stop();
         if (self.server) |*server| {
-            server.deinit();
+            const io = std.Io.Threaded.global_single_threaded.ioBasic();
+            server.deinit(io);
         }
     }
     
     pub fn start(self: *Self) !void {
-        const address = try net.Address.parseIp(self.bind_address, CLIENT_API_PORT);
-        self.server = try address.listen(.{ .reuse_address = true });
+        const address = try net.IpAddress.parse(self.bind_address, CLIENT_API_PORT);
+        const io = std.Io.Threaded.global_single_threaded.ioBasic();
+        self.server = try address.listen(io, .{ .reuse_address = true });
         
         log.info("Client API listening on {s}:{}", .{self.bind_address, CLIENT_API_PORT});
-        
+
         self.running = true;
         while (self.running) {
-            const connection = self.server.?.accept() catch |err| switch (err) {
+            const connection = self.server.?.accept(io) catch |err| switch (err) {
                 error.WouldBlock => {
-                    std.time.sleep(100 * std.time.ns_per_ms);
+                    io.sleep(std.Io.Duration.fromMilliseconds(100), std.Io.Clock.real) catch {};
                     continue;
                 },
                 else => return err,
@@ -69,18 +77,20 @@ pub const ClientApiServer = struct {
         self.running = false;
     }
     
-    fn handleConnection(self: *Self, connection: net.Server.Connection) void {
-        defer connection.stream.close();
-        
+    fn handleConnection(self: *Self, connection: net.Stream) !void {
+        const io = std.Io.Threaded.global_single_threaded.ioBasic();
+        defer connection.close(io);
+
         var transaction_count: u32 = 0;
-        
+
         // Connection handler loop
         var buffer: [65536]u8 = undefined;
         while (true) {
-            const bytes_read = connection.stream.read(&buffer) catch |err| {
+            const msg = connection.socket.receive(io, &buffer) catch |err| {
                 std.log.warn("Client connection error: {}", .{err});
                 break;
             };
+            const bytes_read = msg.data.len;
             
             if (bytes_read == 0) break;
             
@@ -88,68 +98,68 @@ pub const ClientApiServer = struct {
             
             // Parse command
             if (std.mem.startsWith(u8, message, "BLOCKCHAIN_STATUS_ENHANCED")) {
-                self.handleEnhancedStatus(connection) catch |err| {
+                self.handleEnhancedStatus(io, connection) catch |err| {
                     std.log.err("Failed to send enhanced status: {}", .{err});
                 };
             } else if (std.mem.startsWith(u8, message, "BLOCKCHAIN_STATUS")) {
-                self.handleStatus(connection) catch |err| {
+                self.handleStatus(io, connection) catch |err| {
                     std.log.err("Failed to send status: {}", .{err});
                 };
             } else if (std.mem.startsWith(u8, message, "CHECK_BALANCE:")) {
-                self.handleCheckBalance(connection, message) catch |err| {
+                self.handleCheckBalance(io, connection, message) catch |err| {
                     std.log.err("Failed to check balance: {}", .{err});
                 };
             } else if (std.mem.startsWith(u8, message, "BALANCE:")) {
-                self.handleBalance(connection, message) catch |err| {
+                self.handleBalance(io, connection, message) catch |err| {
                     std.log.err("Failed to check balance: {}", .{err});
                 };
             } else if (std.mem.startsWith(u8, message, "GET_HEIGHT")) {
-                self.handleGetHeight(connection) catch |err| {
+                self.handleGetHeight(io, connection) catch |err| {
                     std.log.err("Failed to send height: {}", .{err});
                 };
             } else if (std.mem.startsWith(u8, message, "HEIGHT")) {
-                self.handleHeight(connection) catch |err| {
+                self.handleHeight(io, connection) catch |err| {
                     std.log.err("Failed to send height: {}", .{err});
                 };
             } else if (std.mem.startsWith(u8, message, "GET_NONCE:")) {
-                self.handleGetNonce(connection, message) catch |err| {
+                self.handleGetNonce(io, connection, message) catch |err| {
                     std.log.err("Failed to check nonce: {}", .{err});
                 };
             } else if (std.mem.startsWith(u8, message, "NONCE:")) {
-                self.handleNonce(connection, message) catch |err| {
+                self.handleNonce(io, connection, message) catch |err| {
                     std.log.err("Failed to check nonce: {}", .{err});
                 };
             } else if (std.mem.startsWith(u8, message, "CLIENT_TRANSACTION:")) {
-                self.handleClientTransaction(connection, message, &transaction_count) catch |err| {
+                self.handleClientTransaction(io, connection, message, &transaction_count) catch |err| {
                     std.log.err("Failed to process transaction: {}", .{err});
                 };
             } else if (std.mem.startsWith(u8, message, "TX:")) {
-                self.handleTransaction(connection, message, &transaction_count) catch |err| {
+                self.handleTransaction(io, connection, message, &transaction_count) catch |err| {
                     std.log.err("Failed to process transaction: {}", .{err});
                 };
             } else if (std.mem.startsWith(u8, message, "BATCH_TX:")) {
-                self.handleBatchTransactions(connection, message, &transaction_count) catch |err| {
+                self.handleBatchTransactions(io, connection, message, &transaction_count) catch |err| {
                     std.log.err("Failed to process batch transactions: {}", .{err});
                 };
             } else if (std.mem.startsWith(u8, message, "TRIGGER_SYNC")) {
-                self.handleTriggerSync(connection) catch |err| {
+                self.handleTriggerSync(io, connection) catch |err| {
                     std.log.err("Failed to trigger sync: {}", .{err});
                 };
             } else if (std.mem.startsWith(u8, message, "GET_BLOCK:")) {
-                self.handleGetBlock(connection, message) catch |err| {
+                self.handleGetBlock(io, connection, message) catch |err| {
                     std.log.err("Failed to get block: {}", .{err});
                 };
             } else if (std.mem.startsWith(u8, message, "GET_HISTORY:")) {
-                self.handleGetHistory(connection, message) catch |err| {
+                self.handleGetHistory(io, connection, message) catch |err| {
                     std.log.err("Failed to get transaction history: {}", .{err});
                 };
             } else {
-                _ = connection.stream.write("ERROR: Unknown command\n") catch {};
+                try sendResponse(io, connection, "ERROR: Unknown command\n");
             }
         }
     }
     
-    fn handleStatus(self: *Self, connection: net.Server.Connection) !void {
+    fn handleStatus(self: *Self, io: std.Io, connection: net.Stream) !void {
         const height = try self.blockchain.getHeight();
         const pending_count = self.blockchain.mempool_manager.getTransactionCount();
         const response = try std.fmt.allocPrint(
@@ -159,10 +169,10 @@ pub const ClientApiServer = struct {
         );
         defer self.allocator.free(response);
         
-        _ = try connection.stream.write(response);
+        try sendResponse(io, connection, response);
     }
     
-    fn handleEnhancedStatus(self: *Self, connection: net.Server.Connection) !void {
+    fn handleEnhancedStatus(self: *Self, io: std.Io, connection: net.Stream) !void {
         const height = try self.blockchain.getHeight();
         const pending_count = self.blockchain.mempool_manager.getTransactionCount();
         
@@ -204,15 +214,15 @@ pub const ClientApiServer = struct {
         );
         defer self.allocator.free(response);
         
-        _ = try connection.stream.write(response);
+        try sendResponse(io, connection, response);
     }
     
-    fn handleTriggerSync(self: *Self, connection: net.Server.Connection) !void {
+    fn handleTriggerSync(self: *Self, io: std.Io, connection: net.Stream) !void {
         std.log.info("Manual sync triggered via client API", .{});
         
         // Check if sync manager is available
         if (self.blockchain.sync_manager == null) {
-            _ = try connection.stream.write("ERROR: Sync manager not initialized\n");
+            try sendResponse(io, connection, "ERROR: Sync manager not initialized\n");
             return;
         }
         
@@ -229,14 +239,14 @@ pub const ClientApiServer = struct {
                 .{sync_manager.getSyncState()}
             );
             defer self.allocator.free(response);
-            _ = try connection.stream.write(response);
+            try sendResponse(io, connection, response);
             return;
         }
         
         // Get current blockchain height
         const current_height = self.blockchain.getHeight() catch |err| {
             std.log.err("Failed to get blockchain height: {}", .{err});
-            _ = try connection.stream.write("ERROR: Failed to get blockchain height\n");
+            try sendResponse(io, connection, "ERROR: Failed to get blockchain height\n");
             return;
         };
         
@@ -245,12 +255,12 @@ pub const ClientApiServer = struct {
             const peer_stats = network_manager.getPeerStats();
             
             if (peer_stats.connected == 0) {
-                _ = try connection.stream.write("ERROR: No connected peers available for sync\n");
+                try sendResponse(io, connection, "ERROR: No connected peers available for sync\n");
                 return;
             }
             
             // Try to get a peer with higher height than us
-            var connected_peers = std.ArrayList(*@import("../network/peer.zig").Peer).init(self.allocator);
+            var connected_peers = std.array_list.Managed(*@import("../network/peer.zig").Peer).init(self.allocator);
             defer connected_peers.deinit();
             
             try network_manager.peer_manager.getConnectedPeers(&connected_peers);
@@ -267,9 +277,9 @@ pub const ClientApiServer = struct {
             
             if (best_peer) |peer| {
                 // Start sync with the best peer
-                sync_manager.startSync(peer, peer.height, false) catch |err| {
+                sync_manager.startSync(io, peer, peer.height, false) catch |err| {
                     std.log.err("Failed to start sync: {}", .{err});
-                    _ = try connection.stream.write("ERROR: Failed to start synchronization\n");
+                    try sendResponse(io, connection, "ERROR: Failed to start synchronization\n");
                     return;
                 };
                 
@@ -279,7 +289,7 @@ pub const ClientApiServer = struct {
                     .{current_height, peer.height}
                 );
                 defer self.allocator.free(response);
-                _ = try connection.stream.write(response);
+                try sendResponse(io, connection, response);
             } else {
                 const response = try std.fmt.allocPrint(
                     self.allocator,
@@ -287,24 +297,24 @@ pub const ClientApiServer = struct {
                     .{current_height, peer_stats.connected}
                 );
                 defer self.allocator.free(response);
-                _ = try connection.stream.write(response);
+                try sendResponse(io, connection, response);
             }
         } else {
-            _ = try connection.stream.write("ERROR: Network manager not available\n");
+            try sendResponse(io, connection, "ERROR: Network manager not available\n");
         }
     }
     
-    fn handleGetBlock(self: *Self, connection: net.Server.Connection, message: []const u8) !void {
+    fn handleGetBlock(self: *Self, io: std.Io, connection: net.Stream, message: []const u8) !void {
         const height_str = std.mem.trim(u8, message[10..], " \n\r"); // "GET_BLOCK:" is 10 chars
         
         const height = std.fmt.parseUnsigned(u32, height_str, 10) catch {
-            _ = try connection.stream.write("ERROR: Invalid height format\n");
+            try sendResponse(io, connection, "ERROR: Invalid height format\n");
             return;
         };
         
         const block = self.blockchain.getBlockByHeight(height) catch |err| switch (err) {
             error.NotFound => {
-                _ = try connection.stream.write("ERROR: Block not found\n");
+                try sendResponse(io, connection, "ERROR: Block not found\n");
                 return;
             },
             else => {
@@ -314,7 +324,7 @@ pub const ClientApiServer = struct {
                     .{err}
                 );
                 defer self.allocator.free(error_msg);
-                _ = try connection.stream.write(error_msg);
+                try sendResponse(io, connection, error_msg);
                 return;
             },
         };
@@ -322,10 +332,10 @@ pub const ClientApiServer = struct {
         // Format block information as JSON-like response
         const block_hash = block.hash();
         var hash_hex: [64]u8 = undefined;
-        _ = try std.fmt.bufPrint(&hash_hex, "{}", .{std.fmt.fmtSliceHexLower(&block_hash)});
+        _ = try std.fmt.bufPrint(&hash_hex, "{x}", .{&block_hash});
         
         var prev_hash_hex: [64]u8 = undefined;
-        _ = try std.fmt.bufPrint(&prev_hash_hex, "{}", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+        _ = try std.fmt.bufPrint(&prev_hash_hex, "{x}", .{&block.header.previous_hash});
         
         const response = try std.fmt.allocPrint(
             self.allocator,
@@ -343,25 +353,25 @@ pub const ClientApiServer = struct {
         );
         defer self.allocator.free(response);
         
-        _ = try connection.stream.write(response);
+        try sendResponse(io, connection, response);
     }
     
-    fn handleBalance(self: *Self, connection: net.Server.Connection, message: []const u8) !void {
+    fn handleBalance(self: *Self, io: std.Io, connection: net.Stream, message: []const u8) !void {
         const address_str = std.mem.trim(u8, message[8..], " \n\r");
         
         // Parse bech32 address (modern standard)
         const address = bech32.decodeAddress(self.allocator, address_str) catch {
-            _ = try connection.stream.write("ERROR: Invalid bech32 address format\n");
+            try sendResponse(io, connection, "ERROR: Invalid bech32 address format\n");
             return;
         };
-        const balance = self.blockchain.chain_query.getBalance(address) catch |err| {
+        const balance = self.blockchain.chain_query.getBalance(self.blockchain.io, address) catch |err| {
             const error_msg = try std.fmt.allocPrint(
                 self.allocator,
                 "ERROR: Failed to get balance: {}\n",
                 .{err}
             );
             defer self.allocator.free(error_msg);
-            _ = try connection.stream.write(error_msg);
+            try sendResponse(io, connection, error_msg);
             return;
         };
         
@@ -372,15 +382,15 @@ pub const ClientApiServer = struct {
         );
         defer self.allocator.free(response);
         
-        _ = try connection.stream.write(response);
+        try sendResponse(io, connection, response);
     }
     
-    fn handleCheckBalance(self: *Self, connection: net.Server.Connection, message: []const u8) !void {
+    fn handleCheckBalance(self: *Self, io: std.Io, connection: net.Stream, message: []const u8) !void {
         const address_str = std.mem.trim(u8, message[14..], " \n\r"); // "CHECK_BALANCE:" is 14 chars
         
         // Try to decode as bech32 address
         const decoded_address = bech32.decodeAddress(self.allocator, address_str) catch {
-            _ = try connection.stream.write("ERROR: Invalid address format\n");
+            try sendResponse(io, connection, "ERROR: Invalid address format\n");
             return;
         };
         
@@ -391,9 +401,9 @@ pub const ClientApiServer = struct {
         };
         
         // Get account to retrieve both mature and immature balances
-        const account = self.blockchain.chain_query.getAccount(address) catch |err| {
+        const account = self.blockchain.chain_query.getAccount(self.blockchain.io, address) catch |err| {
             if (err == error.AccountNotFound) {
-                _ = try connection.stream.write("BALANCE:0,0\n");
+                try sendResponse(io, connection, "BALANCE:0,0\n");
                 return;
             }
             std.log.warn("Failed to get account for address in CHECK_BALANCE: {}", .{err});
@@ -403,7 +413,7 @@ pub const ClientApiServer = struct {
                 .{err}
             );
             defer self.allocator.free(error_msg);
-            _ = try connection.stream.write(error_msg);
+            try sendResponse(io, connection, error_msg);
             return;
         };
         
@@ -416,10 +426,10 @@ pub const ClientApiServer = struct {
         );
         defer self.allocator.free(response);
         
-        _ = try connection.stream.write(response);
+        try sendResponse(io, connection, response);
     }
     
-    fn handleHeight(self: *Self, connection: net.Server.Connection) !void {
+    fn handleHeight(self: *Self, io: std.Io, connection: net.Stream) !void {
         const height = try self.blockchain.getHeight();
         const response = try std.fmt.allocPrint(
             self.allocator,
@@ -428,10 +438,10 @@ pub const ClientApiServer = struct {
         );
         defer self.allocator.free(response);
         
-        _ = try connection.stream.write(response);
+        try sendResponse(io, connection, response);
     }
     
-    fn handleGetHeight(self: *Self, connection: net.Server.Connection) !void {
+    fn handleGetHeight(self: *Self, io: std.Io, connection: net.Stream) !void {
         const height = try self.blockchain.getHeight();
         const response = try std.fmt.allocPrint(
             self.allocator,
@@ -440,19 +450,19 @@ pub const ClientApiServer = struct {
         );
         defer self.allocator.free(response);
         
-        _ = try connection.stream.write(response);
+        try sendResponse(io, connection, response);
     }
     
-    fn handleNonce(self: *Self, connection: net.Server.Connection, message: []const u8) !void {
+    fn handleNonce(self: *Self, io: std.Io, connection: net.Stream, message: []const u8) !void {
         const address_str = std.mem.trim(u8, message[6..], " \n\r");
         
         // Parse bech32 address (modern standard)
         const address = bech32.decodeAddress(self.allocator, address_str) catch {
-            _ = try connection.stream.write("ERROR: Invalid bech32 address format\n");
+            try sendResponse(io, connection, "ERROR: Invalid bech32 address format\n");
             return;
         };
         
-        const account = self.blockchain.chain_query.getAccount(address) catch types.Account{ .address = address, .balance = 0, .nonce = 0 };
+        const account = self.blockchain.chain_query.getAccount(self.blockchain.io, address) catch types.Account{ .address = address, .balance = 0, .nonce = 0 };
         const nonce = account.nonce;
         
         const response = try std.fmt.allocPrint(
@@ -462,15 +472,15 @@ pub const ClientApiServer = struct {
         );
         defer self.allocator.free(response);
         
-        _ = try connection.stream.write(response);
+        try sendResponse(io, connection, response);
     }
     
-    fn handleGetNonce(self: *Self, connection: net.Server.Connection, message: []const u8) !void {
+    fn handleGetNonce(self: *Self, io: std.Io, connection: net.Stream, message: []const u8) !void {
         const address_str = std.mem.trim(u8, message[10..], " \n\r"); // "GET_NONCE:" is 10 chars
         
         // Parse bech32 address (standardized format)
         const decoded_address = bech32.decodeAddress(self.allocator, address_str) catch {
-            _ = try connection.stream.write("ERROR: Invalid bech32 address format\n");
+            try sendResponse(io, connection, "ERROR: Invalid bech32 address format\n");
             return;
         };
         
@@ -479,13 +489,13 @@ pub const ClientApiServer = struct {
             .hash = decoded_address.hash,
         };
         
-        const account = self.blockchain.chain_query.getAccount(address) catch |err| {
+        const account = self.blockchain.chain_query.getAccount(self.blockchain.io, address) catch |err| {
             if (err == error.AccountNotFound) {
-                _ = try connection.stream.write("NONCE:0");
+                try sendResponse(io, connection, "NONCE:0");
                 return;
             }
             std.log.warn("Failed to get account for nonce query: {}", .{err});
-            _ = try connection.stream.write("ERROR: Failed to get nonce");
+            try sendResponse(io, connection, "ERROR: Failed to get nonce");
             return;
         };
         
@@ -499,32 +509,32 @@ pub const ClientApiServer = struct {
         );
         defer self.allocator.free(response);
         
-        _ = try connection.stream.write(response);
+        try sendResponse(io, connection, response);
     }
     
     fn handleTransaction(
         self: *Self,
-        connection: net.Server.Connection,
+        io: std.Io, connection: net.Stream,
         message: []const u8,
         transaction_count: *u32,
     ) !void {
         if (transaction_count.* >= MAX_TRANSACTIONS_PER_SESSION) {
-            _ = try connection.stream.write("ERROR: Transaction limit reached\n");
+            try sendResponse(io, connection, "ERROR: Transaction limit reached\n");
             return;
         }
         
         const tx_data = message[3..];
         
         // Deserialize transaction
-        var stream = std.io.fixedBufferStream(tx_data);
-        var tx = serialize.deserialize(stream.reader(), types.Transaction, self.allocator) catch |err| {
+        var reader = std.Io.Reader.fixed(tx_data);
+        var tx = serialize.deserialize(&reader, types.Transaction, self.allocator) catch |err| {
             const error_msg = try std.fmt.allocPrint(
                 self.allocator,
                 "ERROR: Failed to deserialize transaction: {}\n",
                 .{err}
             );
             defer self.allocator.free(error_msg);
-            _ = try connection.stream.write(error_msg);
+            try sendResponse(io, connection, error_msg);
             return;
         };
         defer tx.deinit(self.allocator);
@@ -569,7 +579,7 @@ pub const ClientApiServer = struct {
                 ),
             };
             defer self.allocator.free(error_msg);
-            _ = try connection.stream.write(error_msg);
+            try sendResponse(io, connection, error_msg);
             return;
         };
         
@@ -579,21 +589,19 @@ pub const ClientApiServer = struct {
         const tx_hash = tx.hash();
         const response = try std.fmt.allocPrint(
             self.allocator,
-            "OK:{}\n",
-            .{std.fmt.fmtSliceHexLower(&tx_hash)}
+            "OK:{x}\n",
+            .{tx_hash}
         );
         defer self.allocator.free(response);
         
-        _ = try connection.stream.write(response);
+        try sendResponse(io, connection, response);
         
-        std.log.info("Processed transaction {} from client", .{
-            std.fmt.fmtSliceHexLower(&tx_hash)
-        });
+        std.log.info("Processed transaction {x} from client", .{tx_hash});
     }
     
     fn handleBatchTransactions(
         self: *Self,
-        connection: net.Server.Connection,
+        io: std.Io, connection: net.Stream,
         message: []const u8,
         transaction_count: *u32,
     ) !void {
@@ -602,28 +610,28 @@ pub const ClientApiServer = struct {
         
         // Parse batch count
         const count_end = std.mem.indexOf(u8, batch_data, ":") orelse {
-            _ = try connection.stream.write("ERROR: Invalid batch format\n");
+            try sendResponse(io, connection, "ERROR: Invalid batch format\n");
             return;
         };
         
         const batch_count = std.fmt.parseInt(u32, batch_data[0..count_end], 10) catch {
-            _ = try connection.stream.write("ERROR: Invalid batch count\n");
+            try sendResponse(io, connection, "ERROR: Invalid batch count\n");
             return;
         };
         
         if (batch_count == 0 or batch_count > 100) {
-            _ = try connection.stream.write("ERROR: Batch count must be between 1 and 100\n");
+            try sendResponse(io, connection, "ERROR: Batch count must be between 1 and 100\n");
             return;
         }
         
         // Check transaction limit
         if (transaction_count.* + batch_count > MAX_TRANSACTIONS_PER_SESSION) {
-            _ = try connection.stream.write("ERROR: Transaction limit would be exceeded\n");
+            try sendResponse(io, connection, "ERROR: Transaction limit would be exceeded\n");
             return;
         }
         
         var tx_data = batch_data[count_end + 1..]; // Skip count and colon
-        var results = std.ArrayList(u8).init(self.allocator);
+        var results = std.array_list.Managed(u8).init(self.allocator);
         defer results.deinit();
         
         // Process each transaction in the batch
@@ -645,9 +653,9 @@ pub const ClientApiServer = struct {
             }
             
             // Deserialize transaction
-            var stream = std.io.fixedBufferStream(tx_data[0..tx_size]);
-            var tx = serialize.deserialize(stream.reader(), types.Transaction, self.allocator) catch |err| {
-                try results.writer().print("ERROR:Failed to deserialize: {}\n", .{err});
+            var reader = std.Io.Reader.fixed(tx_data[0..tx_size]);
+            var tx = serialize.deserialize(&reader, types.Transaction, self.allocator) catch |err| {
+                try results.print("ERROR:Failed to deserialize: {}\n", .{err});
                 tx_data = tx_data[tx_size..];
                 continue;
             };
@@ -664,14 +672,14 @@ pub const ClientApiServer = struct {
                     error.MempoolFull => "Mempool full",
                     else => "Unknown error",
                 };
-                try results.writer().print("ERROR:{s}\n", .{error_msg});
+                try results.print("ERROR:{s}\n", .{error_msg});
                 tx_data = tx_data[tx_size..];
                 continue;
             };
             
             // Success - add hash to results
             const tx_hash = tx.hash();
-            try results.writer().print("OK:{}\n", .{std.fmt.fmtSliceHexLower(&tx_hash)});
+            try results.print("OK:{x}\n", .{tx_hash});
             success_count += 1;
             
             tx_data = tx_data[tx_size..];
@@ -687,19 +695,19 @@ pub const ClientApiServer = struct {
         );
         defer self.allocator.free(response);
         
-        _ = try connection.stream.write(response);
+        try sendResponse(io, connection, response);
         
         std.log.info("Processed batch of {} transactions ({} successful)", .{ batch_count, success_count });
     }
     
     fn handleClientTransaction(
         self: *Self,
-        connection: net.Server.Connection,
+        io: std.Io, connection: net.Stream,
         message: []const u8,
         transaction_count: *u32,
     ) !void {
         if (transaction_count.* >= MAX_TRANSACTIONS_PER_SESSION) {
-            _ = try connection.stream.write("ERROR: Transaction limit reached\n");
+            try sendResponse(io, connection, "ERROR: Transaction limit reached\n");
             return;
         }
         
@@ -708,97 +716,97 @@ pub const ClientApiServer = struct {
         var parts = std.mem.splitScalar(u8, parts_str, ':');
         
         const sender_bech32 = parts.next() orelse {
-            _ = try connection.stream.write("ERROR: Invalid transaction format - missing sender\n");
+            try sendResponse(io, connection, "ERROR: Invalid transaction format - missing sender\n");
             return;
         };
         
         const recipient_bech32 = parts.next() orelse {
-            _ = try connection.stream.write("ERROR: Invalid transaction format - missing recipient\n");
+            try sendResponse(io, connection, "ERROR: Invalid transaction format - missing recipient\n");
             return;
         };
         
         const amount_str = parts.next() orelse {
-            _ = try connection.stream.write("ERROR: Invalid transaction format - missing amount\n");
+            try sendResponse(io, connection, "ERROR: Invalid transaction format - missing amount\n");
             return;
         };
         
         const fee_str = parts.next() orelse {
-            _ = try connection.stream.write("ERROR: Invalid transaction format - missing fee\n");
+            try sendResponse(io, connection, "ERROR: Invalid transaction format - missing fee\n");
             return;
         };
         
         const nonce_str = parts.next() orelse {
-            _ = try connection.stream.write("ERROR: Invalid transaction format - missing nonce\n");
+            try sendResponse(io, connection, "ERROR: Invalid transaction format - missing nonce\n");
             return;
         };
         
         const timestamp_str = parts.next() orelse {
-            _ = try connection.stream.write("ERROR: Invalid transaction format - missing timestamp\n");
+            try sendResponse(io, connection, "ERROR: Invalid transaction format - missing timestamp\n");
             return;
         };
         
         const expiry_str = parts.next() orelse {
-            _ = try connection.stream.write("ERROR: Invalid transaction format - missing expiry\n");
+            try sendResponse(io, connection, "ERROR: Invalid transaction format - missing expiry\n");
             return;
         };
         
         const signature_hex = parts.next() orelse {
-            _ = try connection.stream.write("ERROR: Invalid transaction format - missing signature\n");
+            try sendResponse(io, connection, "ERROR: Invalid transaction format - missing signature\n");
             return;
         };
         
         const sender_key_hex = parts.next() orelse {
-            _ = try connection.stream.write("ERROR: Invalid transaction format - missing sender public key\n");
+            try sendResponse(io, connection, "ERROR: Invalid transaction format - missing sender public key\n");
             return;
         };
         
         // Parse numeric values (trim whitespace)
         const amount = std.fmt.parseInt(u64, std.mem.trim(u8, amount_str, " \n\r\t"), 10) catch {
-            _ = try connection.stream.write("ERROR: Invalid amount format\n");
+            try sendResponse(io, connection, "ERROR: Invalid amount format\n");
             return;
         };
         
         const fee = std.fmt.parseInt(u64, std.mem.trim(u8, fee_str, " \n\r\t"), 10) catch {
-            _ = try connection.stream.write("ERROR: Invalid fee format\n");
+            try sendResponse(io, connection, "ERROR: Invalid fee format\n");
             return;
         };
         
         const nonce = std.fmt.parseInt(u64, std.mem.trim(u8, nonce_str, " \n\r\t"), 10) catch {
-            _ = try connection.stream.write("ERROR: Invalid nonce format\n");
+            try sendResponse(io, connection, "ERROR: Invalid nonce format\n");
             return;
         };
         
         const timestamp = std.fmt.parseInt(u64, std.mem.trim(u8, timestamp_str, " \n\r\t"), 10) catch {
-            _ = try connection.stream.write("ERROR: Invalid timestamp format\n");
+            try sendResponse(io, connection, "ERROR: Invalid timestamp format\n");
             return;
         };
         
         const expiry_height = std.fmt.parseInt(u64, std.mem.trim(u8, expiry_str, " \n\r\t"), 10) catch {
-            _ = try connection.stream.write("ERROR: Invalid expiry height format\n");
+            try sendResponse(io, connection, "ERROR: Invalid expiry height format\n");
             return;
         };
         
         // Decode addresses
         const sender_address = bech32.decodeAddress(self.allocator, std.mem.trim(u8, sender_bech32, " \n\r\t")) catch {
-            _ = try connection.stream.write("ERROR: Invalid sender address format\n");
+            try sendResponse(io, connection, "ERROR: Invalid sender address format\n");
             return;
         };
         
         const recipient_address = bech32.decodeAddress(self.allocator, std.mem.trim(u8, recipient_bech32, " \n\r\t")) catch {
-            _ = try connection.stream.write("ERROR: Invalid recipient address format\n");
+            try sendResponse(io, connection, "ERROR: Invalid recipient address format\n");
             return;
         };
         
         // Decode signature and public key
         var signature: [64]u8 = undefined;
         _ = std.fmt.hexToBytes(&signature, std.mem.trim(u8, signature_hex, " \n\r\t")) catch {
-            _ = try connection.stream.write("ERROR: Invalid signature format\n");
+            try sendResponse(io, connection, "ERROR: Invalid signature format\n");
             return;
         };
         
         var sender_public_key: [32]u8 = undefined;
         _ = std.fmt.hexToBytes(&sender_public_key, std.mem.trim(u8, sender_key_hex, " \n\r\t")) catch {
-            _ = try connection.stream.write("ERROR: Invalid public key format\n");
+            try sendResponse(io, connection, "ERROR: Invalid public key format\n");
             return;
         };
         
@@ -860,7 +868,7 @@ pub const ClientApiServer = struct {
                 ),
             };
             defer self.allocator.free(error_msg);
-            _ = try connection.stream.write(error_msg);
+            try sendResponse(io, connection, error_msg);
             return;
         };
         
@@ -870,23 +878,21 @@ pub const ClientApiServer = struct {
         const tx_hash = tx.hash();
         const response = try std.fmt.allocPrint(
             self.allocator,
-            "OK:{}\n",
-            .{std.fmt.fmtSliceHexLower(&tx_hash)}
+            "OK:{x}\n",
+            .{tx_hash}
         );
         defer self.allocator.free(response);
         
-        _ = try connection.stream.write(response);
+        try sendResponse(io, connection, response);
         
-        std.log.info("Processed client transaction {} from client", .{
-            std.fmt.fmtSliceHexLower(&tx_hash)
-        });
+        std.log.info("Processed client transaction {x} from client", .{tx_hash});
     }
     
-    fn handleGetHistory(self: *Self, connection: net.Server.Connection, message: []const u8) !void {
+    fn handleGetHistory(self: *Self, io: std.Io, connection: net.Stream, message: []const u8) !void {
         const address_str = std.mem.trim(u8, message[12..], " \n\r"); // "GET_HISTORY:" is 12 chars
         
         const address = types.Address.fromString(self.allocator, address_str) catch {
-            _ = try connection.stream.write("ERROR: Invalid address format\n");
+            try sendResponse(io, connection, "ERROR: Invalid address format\n");
             return;
         };
         
@@ -894,7 +900,7 @@ pub const ClientApiServer = struct {
         const chain_height = try self.blockchain.getHeight();
         
         // Create temporary list to store transactions
-        var transactions = std.ArrayList(struct {
+        var transactions = std.array_list.Managed(struct {
             height: u64,
             hash: [32]u8,
             tx_type: []const u8,
@@ -910,7 +916,7 @@ pub const ClientApiServer = struct {
         // Start from height 0 to include genesis block transactions
         var height: u64 = 0;
         while (height <= chain_height) : (height += 1) {
-            const block = self.blockchain.database.getBlock(@intCast(height)) catch {
+            const block = self.blockchain.database.getBlock(io, @intCast(height)) catch {
                 continue;
             };
             
@@ -954,11 +960,11 @@ pub const ClientApiServer = struct {
         }
         
         // Format response
-        var response = std.ArrayList(u8).init(self.allocator);
+        var response = std.array_list.Managed(u8).init(self.allocator);
         defer response.deinit();
         
         try response.appendSlice("HISTORY:");
-        try response.writer().print("{}", .{transactions.items.len});
+        try response.print("{}", .{transactions.items.len});
         try response.appendSlice("\n");
         
         // Add each transaction
@@ -967,9 +973,9 @@ pub const ClientApiServer = struct {
             defer self.allocator.free(counterparty_bech32);
             
             // Format: height|hash|type|amount|fee|timestamp|confirmations|counterparty
-            try response.writer().print("{}|{}|{s}|{}|{}|{}|{}|{s}\n", .{
+            try response.print("{}|{x}|{s}|{}|{}|{}|{}|{s}\n", .{
                 tx_info.height,
-                std.fmt.fmtSliceHexLower(&tx_info.hash),
+                tx_info.hash,
                 tx_info.tx_type,
                 tx_info.amount,
                 tx_info.fee,
@@ -979,7 +985,7 @@ pub const ClientApiServer = struct {
             });
         }
         
-        _ = try connection.stream.write(response.items);
+        try sendResponse(io, connection, response.items);
     }
     
 };

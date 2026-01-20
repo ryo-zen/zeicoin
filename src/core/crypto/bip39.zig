@@ -40,13 +40,13 @@ const wordlist = @import("bip39_wordlist.zig");
 pub const WORDLIST = wordlist.WORDLIST;
 
 /// Generate a new mnemonic phrase
-pub fn generateMnemonic(allocator: std.mem.Allocator, word_count: WordCount) ![]u8 {
+pub fn generateMnemonic(allocator: std.mem.Allocator, io: std.Io, word_count: WordCount) ![]u8 {
     const entropy_bytes = word_count.entropyBits() / 8;
 
     // Generate random entropy
     var entropy: [32]u8 = undefined; // Max 256 bits
-    defer std.crypto.utils.secureZero(u8, &entropy); // Clear entropy from stack
-    std.crypto.random.bytes(entropy[0..entropy_bytes]);
+    defer std.crypto.secureZero(u8, &entropy); // Clear entropy from stack
+    io.random(entropy[0..entropy_bytes]);
 
     // Generate mnemonic from entropy
     return entropyToMnemonic(allocator, entropy[0..entropy_bytes]);
@@ -97,7 +97,7 @@ pub fn entropyToMnemonic(allocator: std.mem.Allocator, entropy: []const u8) ![]u
     
     // Convert to word indices
     const word_count = total_bits / 11;
-    var words = std.ArrayList([]const u8).init(allocator);
+    var words = std.array_list.Managed([]const u8).init(allocator);
     defer words.deinit();
     
     var bit_index: usize = 0;
@@ -162,7 +162,7 @@ pub fn mnemonicToSeed(mnemonic: []const u8, passphrase: ?[]const u8) [64]u8 {
     // For key stretching (replaces PBKDF2's 2048 iterations)
     // We'll use BLAKE3's built-in key derivation
     var derived: [32]u8 = undefined;
-    defer std.crypto.utils.secureZero(u8, &derived); // Clear intermediate key material
+    defer std.crypto.secureZero(u8, &derived); // Clear intermediate key material
     kdf.final(&derived);
 
     // Additional rounds for computational cost
@@ -180,7 +180,7 @@ pub fn mnemonicToSeed(mnemonic: []const u8, passphrase: ?[]const u8) [64]u8 {
     final_kdf.update("zeicoin-seed-expansion");
     final_kdf.update(&derived);
     var expanded: [32]u8 = undefined;
-    defer std.crypto.utils.secureZero(u8, &expanded); // Clear intermediate expansion
+    defer std.crypto.secureZero(u8, &expanded); // Clear intermediate expansion
     final_kdf.final(&expanded);
 
     @memcpy(seed[0..32], expanded[0..32]);
@@ -190,7 +190,7 @@ pub fn mnemonicToSeed(mnemonic: []const u8, passphrase: ?[]const u8) [64]u8 {
     second_kdf.update("zeicoin-seed-expansion-2");
     second_kdf.update(&derived);
     var expanded2: [32]u8 = undefined;
-    defer std.crypto.utils.secureZero(u8, &expanded2); // Clear intermediate expansion
+    defer std.crypto.secureZero(u8, &expanded2); // Clear intermediate expansion
     second_kdf.final(&expanded2);
 
     @memcpy(seed[32..64], expanded2[0..32]);
@@ -201,7 +201,7 @@ pub fn mnemonicToSeed(mnemonic: []const u8, passphrase: ?[]const u8) [64]u8 {
 /// Convert mnemonic back to entropy (needed for checksum validation)
 pub fn mnemonicToEntropy(allocator: std.mem.Allocator, mnemonic: []const u8) ![]u8 {
     var words_iter = std.mem.tokenizeScalar(u8, mnemonic, ' ');
-    var words = std.ArrayList([]const u8).init(allocator);
+    var words = std.array_list.Managed([]const u8).init(allocator);
     defer words.deinit();
     
     // Split into words
@@ -215,7 +215,7 @@ pub fn mnemonicToEntropy(allocator: std.mem.Allocator, mnemonic: []const u8) ![]
     }
     
     // Convert words to indices
-    var indices = std.ArrayList(u16).init(allocator);
+    var indices = std.array_list.Managed(u16).init(allocator);
     defer indices.deinit();
     
     for (words.items) |word| {
@@ -236,7 +236,7 @@ pub fn mnemonicToEntropy(allocator: std.mem.Allocator, mnemonic: []const u8) ![]
     const entropy_bits = total_bits - checksum_bits;
     const entropy_bytes = entropy_bits / 8;
     
-    var bit_string = std.ArrayList(u8).init(allocator);
+    var bit_string = std.array_list.Managed(u8).init(allocator);
     defer bit_string.deinit();
     
     // Convert indices to bit string

@@ -17,7 +17,7 @@ pub const BlockIndex = struct {
     hash_to_height: std.HashMap([32]u8, u32, HashContext, std.hash_map.default_max_load_percentage),
 
     // Height to hash mapping for O(1) reverse lookups and reorganization
-    height_to_hash: std.ArrayList([32]u8),
+    height_to_hash: std.array_list.Managed([32]u8),
 
     allocator: std.mem.Allocator,
 
@@ -39,7 +39,7 @@ pub const BlockIndex = struct {
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
             .hash_to_height = std.HashMap([32]u8, u32, HashContext, std.hash_map.default_max_load_percentage).init(allocator),
-            .height_to_hash = std.ArrayList([32]u8).init(allocator),
+            .height_to_hash = std.array_list.Managed([32]u8).init(allocator),
             .allocator = allocator,
         };
     }
@@ -136,7 +136,7 @@ pub const BlockIndex = struct {
 
     /// Rebuild index from database (recovery/initialization)
     /// Memory safety: proper error handling with cleanup on failure
-    pub fn rebuild(self: *Self, database: *db.Database) !void {
+    pub fn rebuild(self: *Self, io: std.Io, database: *db.Database) !void {
         // Clear existing index
         self.hash_to_height.clearRetainingCapacity();
         self.height_to_hash.clearRetainingCapacity();
@@ -160,7 +160,7 @@ pub const BlockIndex = struct {
 
         // Build index from all blocks
         for (0..current_height + 1) |height| {
-            var block = database.getBlock(@intCast(height)) catch |err| {
+            var block = database.getBlock(io, @intCast(height)) catch |err| {
                 log.info("⚠️ Failed to load block {} during rebuild: {}", .{ height, err });
                 continue; // Skip missing blocks, don't fail entirely
             };

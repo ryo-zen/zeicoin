@@ -17,7 +17,7 @@ pub const std_options: std.Options = .{
 const zeicoin = @import("zeicoin");
 const server = zeicoin.server;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     // Forward to the server's main function
-    try server.main();
+    try server.main(init);
 }

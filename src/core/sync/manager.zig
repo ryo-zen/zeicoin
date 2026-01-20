@@ -16,6 +16,7 @@ const std = @import("std");
 const log = std.log.scoped(.sync);
 
 const types = @import("../types/types.zig");
+const util = @import("../util/util.zig");
 const net = @import("../network/peer.zig");
 const state_mod = @import("state.zig");
 const protocol = @import("protocol/lib.zig");
@@ -80,7 +81,7 @@ pub const SyncManager = struct {
     sync_state: SyncState,
 
     /// List of failed peers for avoidance during peer selection
-    failed_peers: std.ArrayList(*Peer),
+    failed_peers: std.array_list.Managed(*Peer),
 
     /// Last sync state save timestamp for persistence
     last_state_save: i64,
@@ -106,9 +107,9 @@ pub const SyncManager = struct {
         // Create dependency injection context for batch sync
         const batch_context = BatchSyncContext{
             .getHeight = getBlockchainHeight,
-            .applyBlock = applyBlockToBlockchain,
+            .applyBlock = applyBlockToBlockchainNoIo,
             .getNextPeer = getNextAvailablePeer,
-            .validateBlock = validateBlockBeforeApply,
+            .validateBlock = validateBlockBeforeApplyNoIo,
         };
 
         // Initialize batch sync protocol
@@ -121,7 +122,7 @@ pub const SyncManager = struct {
             .blockchain = blockchain,
             .batch_sync = batch_sync,
             .sync_state = .idle,
-            .failed_peers = std.ArrayList(*Peer).init(allocator),
+            .failed_peers = std.array_list.Managed(*Peer).init(allocator),
             .last_state_save = 0,
             .sync_start_time = 0,
             .fork_cooldowns = std.AutoHashMap(u32, i64).init(allocator),
@@ -143,7 +144,7 @@ pub const SyncManager = struct {
     /// Start synchronization with a peer to a target height
     /// Main entry point for blockchain synchronization
     /// force_reorg: If true, bypasses height difference check to force reorganization at equal heights
-    pub fn startSync(self: *Self, peer: *Peer, target_height: u32, force_reorg: bool) !void {
+    pub fn startSync(self: *Self, io: std.Io, peer: *Peer, target_height: u32, force_reorg: bool) !void {
         log.info("INITIATING BLOCKCHAIN SYNCHRONIZATION", .{});
         log.info("Session parameters:", .{});
         log.info("   Target peer: {any}", .{peer.address});
@@ -235,7 +236,7 @@ pub const SyncManager = struct {
         // CRITICAL: We check for divergence even if heights are equal, as we might be on a fork.
         if (target_height > 0) {
             log.debug("STEP 2.5: Checking for competing chains...", .{});
-            const is_competing = self.detectCompetingChain(peer) catch |err| {
+            const is_competing = self.detectCompetingChain(io, peer) catch |err| {
                 log.err("❌ [FORK DETECT] Failed to detect competing chain: {}", .{err});
                 log.err("⚠️  [FORK DETECT] Fork detection failed - keeping mining paused", .{});
 
@@ -307,7 +308,7 @@ pub const SyncManager = struct {
 
                 if (should_reorg) {
                     log.warn("🔄 [REORG DECISION] Peer chain has more work - reorganizing!", .{});
-                    try self.executeBulkReorg(peer, fork_point, target_height);
+                    try self.executeBulkReorg(io, peer, fork_point, target_height);
                     self.sync_state = .idle; // executeBulkReorg finishes sync
                     return;
                 } else {
@@ -345,7 +346,7 @@ pub const SyncManager = struct {
         if (current_height == 0) {
             // Check if genesis block actually exists in database
             const genesis_exists = blk: {
-                var genesis_block = self.blockchain.database.getBlock(0) catch break :blk false;
+                var genesis_block = self.blockchain.database.getBlock(io, 0) catch break :blk false;
                 genesis_block.deinit(self.allocator);
                 break :blk true;
             };
@@ -376,7 +377,7 @@ pub const SyncManager = struct {
             log.info("Performance: Up to 50x faster than sequential sync", .{});
 
             // Set timeout timer
-            self.sync_start_time = std.time.timestamp();
+            self.sync_start_time = util.getTime();
             log.info("🕒 [SYNC TIMEOUT] Started timeout timer (max {} seconds)", .{SYNC_CONFIG.SYNC_TIMEOUT});
 
             // Start ZSP-001 batch synchronization
@@ -402,12 +403,12 @@ pub const SyncManager = struct {
             log.warn("Performance: Standard speed (up to 50x slower than batch)", .{});
 
             // Set timeout timer
-            self.sync_start_time = std.time.timestamp();
+            self.sync_start_time = util.getTime();
             log.info("🕒 [SYNC TIMEOUT] Started timeout timer (max {} seconds)", .{SYNC_CONFIG.SYNC_TIMEOUT});
 
             // Use sequential sync utilities for legacy peers
             log.debug("STEP 5: Starting sequential sync fallback...", .{});
-            try self.startSequentialSync(peer, target_height);
+            try self.startSequentialSync(io, peer, target_height);
 
             // Update our state AFTER sequential sync has started
             log.debug("STATE TRANSITION: {} → syncing (sequential)", .{self.sync_state});
@@ -431,10 +432,12 @@ pub const SyncManager = struct {
 
         while (self.sync_state.isActive()) {
             // Sleep for 5 seconds between polls
-            std.time.sleep(5 * std.time.ns_per_s);
+            self.blockchain.io.sleep(std.Io.Duration.fromSeconds(5), std.Io.Clock.awake) catch |sleep_err| {
+                log.warn("Sync poll sleep failed: {}", .{sleep_err});
+            };
 
             // Check for global timeout
-            const elapsed = std.time.timestamp() - self.sync_start_time;
+            const elapsed = util.getTime() - self.sync_start_time;
             if (elapsed > SYNC_CONFIG.SYNC_TIMEOUT) {
                 log.warn("🚨 [SYNC TIMEOUT] Synchronization timed out after {} seconds", .{elapsed});
                 self.sync_state = .failed;
@@ -471,7 +474,7 @@ pub const SyncManager = struct {
     }
 
     /// Handle incoming batch of blocks from ZSP-001 protocol
-    pub fn handleBatchBlocks(self: *Self, blocks: []const Block, start_height: u32) !void {
+    pub fn handleBatchBlocks(self: *Self, io: std.Io, blocks: []const Block, start_height: u32) !void {
         log.info("=== PROCESSING ZSP-001 BATCH BLOCKS ===", .{});
         log.info("PROCESSING ZSP-001 BATCH BLOCKS", .{});
         log.info("=======================================", .{});
@@ -485,7 +488,7 @@ pub const SyncManager = struct {
 
         // CRITICAL: Validate bulk blocks for chain continuity before processing
         log.info("🔍 [BULK VALIDATION] Validating batch block continuity...", .{});
-        if (!try validateBulkBlocks(blocks, start_height, self.blockchain)) {
+        if (!try validateBulkBlocks(io, blocks, start_height, self.blockchain)) {
             log.info("❌ [BULK VALIDATION] Batch validation failed - rejecting entire batch", .{});
             return error.InvalidBatch;
         }
@@ -515,17 +518,17 @@ pub const SyncManager = struct {
     }
 
     /// Handle incoming single block (for sequential sync or single block requests)
-    pub fn handleSyncBlock(self: *Self, block: *const Block, height: u32) !void {
+    pub fn handleSyncBlock(self: *Self, io: std.Io, block: *const Block, height: u32) !void {
         log.info("📦 [SYNC MANAGER] Handling single sync block at height {}", .{height});
 
         // Validate the block before processing
-        if (!try validateBlockBeforeApply(block.*, height)) {
+        if (!try validateBlockBeforeApply(io, block.*, height)) {
             log.info("❌ [SYNC MANAGER] Block validation failed for height {}", .{height});
             return error.InvalidBlock;
         }
 
         // Apply block to blockchain directly using the real chain processor
-        try self.blockchain.chain_processor.addBlockToChain(block.*, height);
+        try self.blockchain.chain_processor.addBlockToChain(io, block.*, height);
 
         log.info("✅ [SYNC MANAGER] Single block {} applied successfully", .{height});
 
@@ -606,7 +609,7 @@ pub const SyncManager = struct {
     /// Check if sync has timed out and reset state if needed
     pub fn checkTimeout(self: *Self) void {
         if (self.sync_state.isActive() and self.sync_start_time > 0) {
-            const current_time = std.time.timestamp();
+            const current_time = util.getTime();
             const elapsed_time = current_time - self.sync_start_time;
 
             if (elapsed_time > SYNC_CONFIG.SYNC_TIMEOUT) {
@@ -625,7 +628,7 @@ pub const SyncManager = struct {
 
     /// Add a cooldown period for a specific fork height to prevent retry loops
     pub fn addForkCooldown(self: *Self, fork_height: u32, seconds: i64) !void {
-        const cooldown_until = std.time.timestamp() + seconds;
+        const cooldown_until = util.getTime() + seconds;
         try self.fork_cooldowns.put(fork_height, cooldown_until);
         log.info("⏳ [SYNC] Added {} second cooldown for fork height {}", .{ seconds, fork_height });
     }
@@ -637,7 +640,7 @@ pub const SyncManager = struct {
 
         // Check if there's an active cooldown for this fork height
         if (self.fork_cooldowns.get(fork_height)) |cooldown_until| {
-            const now = std.time.timestamp();
+            const now = util.getTime();
             if (now < cooldown_until) {
                 const remaining = cooldown_until - now;
                 log.info("⏳ [SYNC COOLDOWN] Fork height {} in cooldown for {} more seconds", .{ fork_height, remaining });
@@ -676,7 +679,7 @@ pub const SyncManager = struct {
     // ========================================================================
 
     /// Start sequential sync for legacy peers that don't support batching
-    fn startSequentialSync(self: *Self, peer: *Peer, target_height: u32) !void {
+    fn startSequentialSync(self: *Self, io: std.Io, peer: *Peer, target_height: u32) !void {
         log.info("🔄 [SYNC MANAGER] Starting sequential sync for legacy peer", .{});
 
         const current_height = try getBlockchainHeight();
@@ -694,7 +697,7 @@ pub const SyncManager = struct {
         // Apply blocks sequentially
         for (block_range.items, 0..) |block, i| {
             const height = current_height + 1 + @as(u32, @intCast(i));
-            try applyBlockToBlockchain(block);
+            try applyBlockToBlockchain(io, block);
 
             log.info("✅ [SYNC MANAGER] Sequential block {} applied", .{height});
         }
@@ -705,13 +708,13 @@ pub const SyncManager = struct {
 
     /// Handle peer with potentially competing chain
     /// Triggered when a peer announces a new block or height updates
-    pub fn handlePeerSync(self: *Self, peer: *Peer) !void {
+    pub fn handlePeerSync(self: *Self, io: std.Io, peer: *Peer) !void {
         const our_height = try getBlockchainHeight();
         
         // If peer is ahead or at equal height (might be a fork), check for sync/reorg
         if (peer.height >= our_height and peer.height > 0) {
             // Check for divergence
-            const is_competing = try self.detectCompetingChain(peer);
+            const is_competing = try self.detectCompetingChain(io, peer);
             
             if (is_competing) {
                 log.info("🔥 [FORK DETECTED] Peer height {} vs our height {}", .{peer.height, our_height});
@@ -723,11 +726,11 @@ pub const SyncManager = struct {
                     self.sync_state = .idle;
                 }
                 
-                try self.startSync(peer, peer.height, false);
+                try self.startSync(io, peer, peer.height, false);
             } else if (peer.height > our_height) {
                 // Not competing, just ahead. Trigger normal sync if not already syncing.
                 if (self.sync_state.canStart()) {
-                    try self.startSync(peer, peer.height, false);
+                    try self.startSync(io, peer, peer.height, false);
                 }
             }
         }
@@ -763,7 +766,13 @@ pub const SyncManager = struct {
         if (target_height > current_height) {
             const blocks_behind = target_height - current_height;
             log.info("🔄 [SYNC MANAGER] Restarting sync with recovery peer ({} blocks behind)", .{blocks_behind});
-            try self.startSync(new_peer, target_height, false);
+            
+            // TODO: We need an Io instance here. For background recovery thread, creating a temporary one.
+            var threaded = std.Io.Threaded.init(self.allocator, .{ .environ = .empty });
+            defer threaded.deinit();
+            const io = threaded.io();
+
+            try self.startSync(io, new_peer, target_height, false);
         } else {
             log.debug("Sync not needed - already at target height", .{});
         }
@@ -771,7 +780,8 @@ pub const SyncManager = struct {
 
     /// Sync a specific range of blocks for reorganization scenarios
     /// This is used when we detect missing intermediate blocks during reorg
-    pub fn syncBlockRange(self: *Self, peer: *Peer, start_height: u32, end_height: u32) !void {
+    pub fn syncBlockRange(self: *Self, io: std.Io, peer: *Peer, start_height: u32, end_height: u32) !void {
+        _ = io;
         log.info("🔄 [SYNC RANGE] ========================================", .{});
         log.info("🔄 [SYNC RANGE] Initiating block range sync for reorganization", .{});
         log.info("🔄 [SYNC RANGE] Start height: {}", .{start_height});
@@ -816,7 +826,8 @@ pub const SyncManager = struct {
     }
 
     /// Detect if peer has a competing chain using fork point detection
-    fn detectCompetingChain(self: *Self, peer: *Peer) !bool {
+    fn detectCompetingChain(self: *Self, io: std.Io, peer: *Peer) !bool {
+        _ = io;
         const fork_detector = @import("fork_detector.zig");
 
         const current_height = try getBlockchainHeight();
@@ -866,7 +877,7 @@ pub const SyncManager = struct {
     }
 
     /// Legacy fork detection (checks only block 1) - fallback
-    fn detectCompetingChainLegacy(self: *Self, peer: *Peer) !bool {
+    fn detectCompetingChainLegacy(self: *Self, io: std.Io, peer: *Peer) !bool {
         const current_height = try getBlockchainHeight();
 
         // Request peer's block 1 to compare
@@ -891,7 +902,7 @@ pub const SyncManager = struct {
         const peer_block_1 = peer_blocks.items[0];
 
         // Get our block 1 (if we have it)
-        var our_block_1 = g_blockchain.?.database.getBlock(1) catch |err| {
+        var our_block_1 = g_blockchain.?.database.getBlock(io, 1) catch |err| {
             log.debug("✅ [CHAIN DETECT LEGACY] We don't have block 1 yet ({}), accepting peer's chain", .{err});
             return false;
         };
@@ -903,8 +914,8 @@ pub const SyncManager = struct {
 
         if (!std.mem.eql(u8, &peer_hash, &our_hash)) {
             log.warn("🔥 [CHAIN DETECT LEGACY] Competing chain detected!", .{});
-            log.warn("   Our block 1:   {s}", .{std.fmt.fmtSliceHexLower(&our_hash)});
-            log.warn("   Peer block 1:  {s}", .{std.fmt.fmtSliceHexLower(&peer_hash)});
+            log.warn("   Our block 1:   {x}", .{&our_hash});
+            log.warn("   Peer block 1:  {x}", .{&peer_hash});
             return true;
         }
 
@@ -913,7 +924,7 @@ pub const SyncManager = struct {
     }
 
     /// Execute bulk reorganization to switch to peer's longer chain
-    fn executeBulkReorg(self: *Self, peer: *Peer, fork_point: u32, peer_height: u32) !void {
+    fn executeBulkReorg(self: *Self, io: std.Io, peer: *Peer, fork_point: u32, peer_height: u32) !void {
         log.warn("🔄 [BULK REORG] ========================================", .{});
         log.warn("🔄 [BULK REORG] Starting chain reorganization from fork point {}", .{fork_point});
         log.warn("🔄 [BULK REORG] ========================================", .{});
@@ -927,7 +938,7 @@ pub const SyncManager = struct {
         log.info("📥 [BULK REORG] Fetching competing chain blocks...", .{});
 
         // Use batch sync to fetch all blocks
-        var all_blocks = std.ArrayList(Block).init(self.allocator);
+        var all_blocks = std.array_list.Managed(Block).init(self.allocator);
         defer {
             for (all_blocks.items) |*block| {
                 block.deinit(self.allocator);
@@ -943,10 +954,7 @@ pub const SyncManager = struct {
 
             log.info("   Fetching batch: blocks {} to {} ({} blocks)", .{batch_start, batch_end, batch_size});
 
-            const batch_blocks = sequential.requestBlockRange(self.allocator, peer, batch_start, batch_size) catch |err| {
-                log.err("❌ [BULK REORG] Failed to fetch batch starting at {}: {}", .{batch_start, err});
-                return error.BulkReorgFetchFailed;
-            };
+            const batch_blocks = try sequential.requestBlockRange(self.allocator, peer, batch_start, batch_size);
             defer batch_blocks.deinit();
 
             // Add to our collection
@@ -964,7 +972,7 @@ pub const SyncManager = struct {
         log.warn("🔄 [BULK REORG] Executing chain reorganization...", .{});
 
         if (g_blockchain) |blockchain| {
-            try blockchain.chain_processor.executeBulkReorg(all_blocks.items);
+            try blockchain.chain_processor.executeBulkReorg(io, all_blocks.items);
             log.warn("✅ [BULK REORG] Reorganization completed successfully!", .{});
         } else {
             log.err("❌ [BULK REORG] No blockchain instance available", .{});
@@ -1019,7 +1027,7 @@ pub const SyncManager = struct {
     }
 
     /// Apply validated block to blockchain
-    fn applyBlockToBlockchain(block: Block) !void {
+    fn applyBlockToBlockchain(io: std.Io, block: Block) !void {
         if (g_blockchain) |blockchain| {
             // Get the current blockchain height to determine where to apply this block
             const current_height = blockchain.database.getHeight() catch 0;
@@ -1029,13 +1037,13 @@ pub const SyncManager = struct {
 
             // CRITICAL: Validate block hash chain before applying
             // This prevents adding blocks that don't connect to the tip (corruption prevention)
-            if (!try validateBlockBeforeApply(block, next_height)) {
+            if (!try validateBlockBeforeApply(io, block, next_height)) {
                 log.err("❌ [SYNC MANAGER] Block validation failed for height {} - rejecting application", .{next_height});
                 return error.InvalidBlock;
             }
 
             // Apply block using the chain processor
-            blockchain.chain_processor.addBlockToChain(block, next_height) catch |err| {
+            blockchain.chain_processor.addBlockToChain(io, block, next_height) catch |err| {
                 log.info("❌ [SYNC MANAGER] Failed to apply block to chain: {}", .{err});
                 return err;
             };
@@ -1045,6 +1053,24 @@ pub const SyncManager = struct {
             log.info("❌ [SYNC MANAGER] No blockchain reference available for applying block", .{});
             return error.NoBlockchainReference;
         }
+    }
+
+    /// Apply validated block to blockchain (no-io wrapper for batch sync context)
+    fn applyBlockToBlockchainNoIo(block: Block) !void {
+        if (g_blockchain) |blockchain| {
+            return applyBlockToBlockchain(blockchain.io, block);
+        }
+        log.info("❌ [SYNC MANAGER] No blockchain reference available for applying block", .{});
+        return error.NoBlockchainReference;
+    }
+
+    /// Validate block before applying (no-io wrapper for batch sync context)
+    fn validateBlockBeforeApplyNoIo(block: Block, height: u32) !bool {
+        if (g_blockchain) |blockchain| {
+            return validateBlockBeforeApply(blockchain.io, block, height);
+        }
+        log.info("❌ [SYNC MANAGER] No blockchain reference available for validating block", .{});
+        return false;
     }
 
     /// Get next available peer for sync
@@ -1071,7 +1097,7 @@ pub const SyncManager = struct {
     }
 
     /// Validate block before applying
-    fn validateBlockBeforeApply(block: Block, height: u32) !bool {
+    fn validateBlockBeforeApply(io: std.Io, block: Block, height: u32) !bool {
         log.info("🔍 [SYNC MANAGER] Validating sync block at height {}", .{height});
 
         // 1. Basic block structure validation
@@ -1093,7 +1119,7 @@ pub const SyncManager = struct {
 
             // For height 1, validate against genesis block (height 0)
             if (height == 1) {
-                const genesis_block = blockchain.database.getBlock(0) catch {
+                const genesis_block = blockchain.database.getBlock(io, 0) catch {
                     log.info("❌ [SYNC VALIDATION] Failed to get genesis block", .{});
                     return false;
                 };
@@ -1111,7 +1137,7 @@ pub const SyncManager = struct {
             // For height > 1, validate against previous block
             if (height > 1) {
                 const prev_height = height - 1;
-                const prev_block = blockchain.database.getBlock(prev_height) catch {
+                const prev_block = blockchain.database.getBlock(io, prev_height) catch {
                     log.info("❌ [SYNC VALIDATION] Failed to get block at height {}", .{prev_height});
                     return false;
                 };
@@ -1135,7 +1161,7 @@ pub const SyncManager = struct {
     }
 
     /// Validate a batch of blocks for chain continuity (prevents fork issue)
-    fn validateBulkBlocks(blocks: []const Block, start_height: u32, blockchain: *ZeiCoin) !bool {
+    fn validateBulkBlocks(io: std.Io, blocks: []const Block, start_height: u32, blockchain: *ZeiCoin) !bool {
         log.info("🔍 [BULK VALIDATION] Validating {} blocks starting at height {}", .{ blocks.len, start_height });
 
         if (blocks.len == 0) {
@@ -1146,7 +1172,7 @@ pub const SyncManager = struct {
         // Check if we have the parent block for the first block in batch
         if (start_height > 0) {
             const parent_exists = blk: {
-                var parent = blockchain.database.getBlock(start_height - 1) catch break :blk false;
+                var parent = blockchain.database.getBlock(io, start_height - 1) catch break :blk false;
                 parent.deinit(blockchain.allocator);
                 break :blk true;
             };
@@ -1156,7 +1182,7 @@ pub const SyncManager = struct {
             }
 
             // Get parent block to verify connection
-            var parent_block = blockchain.database.getBlock(start_height - 1) catch {
+            var parent_block = blockchain.database.getBlock(io, start_height - 1) catch {
                 log.info("❌ [BULK VALIDATION] Cannot read parent block at height {}", .{start_height - 1});
                 return false;
             };
@@ -1171,7 +1197,7 @@ pub const SyncManager = struct {
 
         // Verify each block connects to the previous block in the batch
         var prev_hash = if (start_height > 0) blk: {
-            var parent = blockchain.database.getBlock(start_height - 1) catch {
+            var parent = blockchain.database.getBlock(io, start_height - 1) catch {
                 return false;
             };
             defer parent.deinit(blockchain.allocator);
@@ -1184,8 +1210,8 @@ pub const SyncManager = struct {
             // Check block connects to previous
             if (!std.mem.eql(u8, &block.header.previous_hash, &prev_hash)) {
                 log.info("❌ [BULK VALIDATION] Block {} doesn't connect to previous block", .{block_height});
-                log.info("   Expected: {s}", .{std.fmt.fmtSliceHexLower(&prev_hash)});
-                log.info("   Got:      {s}", .{std.fmt.fmtSliceHexLower(&block.header.previous_hash)});
+                log.info("   Expected: {x}", .{&prev_hash});
+                log.info("   Got:      {x}", .{&block.header.previous_hash});
                 return false;
             }
 
@@ -1226,7 +1252,7 @@ pub const SyncManager = struct {
         };
 
         // Get connected peers
-        var connected_peers = std.ArrayList(*Peer).init(blockchain.allocator);
+        var connected_peers = std.array_list.Managed(*Peer).init(blockchain.allocator);
         defer connected_peers.deinit();
 
         try network_manager.peer_manager.getConnectedPeers(&connected_peers);
@@ -1238,7 +1264,7 @@ pub const SyncManager = struct {
 
         const block_hash = block.hash();
         log.info("📊 [CONSENSUS CHECK] Checking with {} peers for block at height {}", .{ connected_peers.items.len, height });
-        log.info("📊 [CONSENSUS CHECK] Our block hash: {s}", .{std.fmt.fmtSliceHexLower(block_hash[0..8])});
+        log.info("📊 [CONSENSUS CHECK] Our block hash: {x}", .{block_hash[0..8]});
         
         // Query peers for their block hash at this height
         var responses: u32 = 0;

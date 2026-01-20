@@ -14,12 +14,13 @@ pub const PongMessage = struct {
     }
     
     pub fn encode(self: Self, writer: anytype) !void {
-        try writer.writeInt(u64, self.nonce, .little);
+        var w = writer;
+        try std.Io.Writer.writeInt(&w, u64, self.nonce, .little);
     }
     
     pub fn decode(reader: anytype) !Self {
         return Self{
-            .nonce = try reader.readInt(u64, .little),
+            .nonce = try reader.takeInt(u64, .little),
         };
     }
     
@@ -35,12 +36,12 @@ test "PongMessage encode/decode" {
     const pong = PongMessage.init(nonce);
     
     var buffer: [8]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buffer);
+    var writer = std.Io.Writer.fixed(&buffer);
     
-    try pong.encode(stream.writer());
+    try pong.encode(&writer);
     
-    stream.reset();
-    const decoded = try PongMessage.decode(stream.reader());
+    var reader = std.Io.Reader.fixed(writer.buffered());
+    const decoded = try PongMessage.decode(&reader);
     
     try std.testing.expectEqual(pong.nonce, decoded.nonce);
 }

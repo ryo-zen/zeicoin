@@ -39,7 +39,7 @@ pub fn zenProofOfWorkRandomX(ctx: MiningContext, block: *types.Block) bool {
 
     var nonce: u32 = 0;
     const difficulty_target = block.header.getDifficultyTarget();
-    const mining_start_time = std.time.milliTimestamp();
+    const mining_start_time = @as(u64, @intCast(util.getTime())) * 1000;
     
     while (nonce < types.ZenMining.MAX_NONCE) {
         // Check if blockchain height changed (another miner found a block)
@@ -59,12 +59,12 @@ pub fn zenProofOfWorkRandomX(ctx: MiningContext, block: *types.Block) bool {
 
         // Serialize block header for RandomX input
         var buffer: [256]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&buffer);
-        block.header.serialize(stream.writer()) catch |err| {
+        var writer = std.Io.Writer.fixed(&buffer);
+        block.header.serialize(&writer) catch |err| {
             log.info("❌ Failed to serialize block header: {}", .{err});
             return false;
         };
-        const header_data = stream.getWritten();
+        const header_data = writer.buffered();
 
         // Calculate RandomX hash with proper difficulty
         var hash: [32]u8 = undefined;
@@ -75,7 +75,7 @@ pub fn zenProofOfWorkRandomX(ctx: MiningContext, block: *types.Block) bool {
 
         // Check if hash meets difficulty target
         if (randomx.hashMeetsDifficultyTarget(hash, difficulty_target)) {
-            log.info("✨ RandomX nonce found: {} (hash: {s})", .{ nonce, std.fmt.fmtSliceHexLower(hash[0..8]) });
+            log.info("✨ RandomX nonce found: {} (hash: {x})", .{ nonce, hash[0..8] });
             return true;
         }
 
@@ -83,7 +83,7 @@ pub fn zenProofOfWorkRandomX(ctx: MiningContext, block: *types.Block) bool {
 
         // Progress indicator (every 10k tries for RandomX due to slower speed)
         if (nonce % types.PROGRESS.RANDOMX_REPORT_INTERVAL == 0) {
-            const elapsed_ms = std.time.milliTimestamp() - mining_start_time;
+            const elapsed_ms = @as(u64, @intCast(util.getTime())) * 1000 - mining_start_time;
             const elapsed_sec = @as(f64, @floatFromInt(elapsed_ms)) / 1000.0;
             const hash_rate = if (elapsed_sec > 0) @as(f64, @floatFromInt(nonce)) / elapsed_sec else 0;
             const elapsed_min = @divFloor(elapsed_ms, 60000);

@@ -2,10 +2,11 @@
 // Clean modular implementation using the new protocol
 
 const std = @import("std");
-const net = std.net;
+const net = std.Io.net;
 const types = @import("../types/types.zig");
 const command_line = @import("../server/command_line.zig");
 const ip_detection = @import("ip_detection.zig");
+const util = @import("../util/util.zig");
 
 const log = std.log.scoped(.network);
 
@@ -27,7 +28,7 @@ pub const MAX_PEERS = protocol.MAX_PEERS;
 pub const NetworkManager = struct {
     allocator: std.mem.Allocator,
     peer_manager: PeerManager,
-    listen_address: ?net.Address,
+    listen_address: ?net.IpAddress,
     server: ?net.Server,
     message_handler: MessageHandler,
     running: bool,
@@ -75,7 +76,8 @@ pub const NetworkManager = struct {
         
         // Clean up server immediately
         if (self.server) |*server| {
-            server.deinit();
+            const io = std.Io.Threaded.global_single_threaded.ioBasic();
+            server.deinit(io);
             self.server = null;
         }
         
@@ -94,13 +96,13 @@ pub const NetworkManager = struct {
     }
     
     /// Start listening for connections
-    pub fn listen(self: *Self, port: u16) !void {
-        const address = try net.Address.parseIp("0.0.0.0", port);
+    pub fn listen(self: *Self, address_str: []const u8, port: u16) !void {
+        const address = try net.IpAddress.parse(address_str, port);
         self.listen_address = address;
         
-        self.server = try address.listen(.{
+        const io = std.Io.Threaded.global_single_threaded.ioBasic();
+        self.server = try address.listen(io, .{
             .reuse_address = true,
-            .reuse_port = true,
         });
         
         // Set running to true so connection threads can proceed
@@ -111,15 +113,16 @@ pub const NetworkManager = struct {
     }
     
     /// Connect to a peer
-    pub fn connectToPeer(self: *Self, address: net.Address) !void {
+    pub fn connectToPeer(self: *Self, address: net.IpAddress) !void {
         // Check if we have too many active connections
         const current_connections = self.active_connections.load(.acquire);
         if (current_connections >= MAX_ACTIVE_CONNECTIONS) {
             return error.TooManyConnections;
         }
-        
+
         // Prevent self-connections by checking if target IP is our public IP
-        if (ip_detection.isSelfConnection(self.allocator, address)) {
+        const io = std.Io.Threaded.global_single_threaded.ioBasic();
+        if (ip_detection.isSelfConnection(self.allocator, io, address)) {
             std.log.warn("🚫 Self-connection prevented: skipping connection to own public IP {}", .{address});
             return;
         }
@@ -143,9 +146,10 @@ pub const NetworkManager = struct {
     fn runPeerConnection(self: *Self, peer: *Peer) void {
         defer _ = self.active_connections.fetchSub(1, .acq_rel);
         std.log.info("Connection thread started for peer {} at {}", .{ peer.id, peer.address });
-        
+
         // Give the network time to fully initialize
-        std.time.sleep(100 * std.time.ns_per_ms);
+        const io = std.Io.Threaded.global_single_threaded.ioBasic();
+        io.sleep(std.Io.Duration.fromMilliseconds(100), std.Io.Clock.real) catch {};
         
         // Check if we're shutting down at the very start
         std.log.info("Checking if network is running: {}", .{self.running});
@@ -156,7 +160,8 @@ pub const NetworkManager = struct {
         
         // Attempt connection
         std.log.info("Starting TCP connection attempt to peer {} at {}", .{ peer.id, peer.address });
-        const stream = net.tcpConnectToAddress(peer.address) catch |err| {
+        const io_connect = std.Io.Threaded.global_single_threaded.ioBasic();
+        const stream = peer.address.connect(io_connect, .{ .mode = .stream }) catch |err| {
             // Check running state before ANY access to self
             if (!self.running) {
                 std.log.debug("Connection failed during shutdown, skipping cleanup", .{});
@@ -174,20 +179,22 @@ pub const NetworkManager = struct {
             return;
         };
         std.log.info("TCP connection established successfully to peer {} at {}", .{ peer.id, peer.address });
-        
+
+        const io_conn = std.Io.Threaded.global_single_threaded.ioBasic();
+
         // Check again before initializing connection
         if (!self.running) {
-            stream.close();
+            stream.close(io_conn);
             return;
         }
 
         // Set non-blocking mode to prevent hanging threads (Fixes memory leak on shutdown)
-        const flags = std.posix.fcntl(stream.handle, std.posix.F.GETFL, 0) catch 0;
+        const flags = std.posix.fcntl(stream.socket.handle, std.posix.F.GETFL, 0) catch 0;
         // O_NONBLOCK = 0o4000 on Linux
-        _ = std.posix.fcntl(stream.handle, std.posix.F.SETFL, flags | 0o4000) catch |err| {
+        _ = std.posix.fcntl(stream.socket.handle, std.posix.F.SETFL, flags | 0o4000) catch |err| {
              std.log.warn("Failed to set non-blocking mode for peer {}: {}", .{peer.id, err});
              std.log.warn("Failed to set non-blocking mode for peer {}: {}", .{peer.id, err});
-             stream.close();
+             stream.close(io_conn);
              self.peer_manager.removePeer(peer.id);
              return;
         };
@@ -196,7 +203,7 @@ pub const NetworkManager = struct {
         defer conn.deinit();
         
         // Run connection loop
-        conn.run() catch |err| {
+        conn.run(io_conn) catch |err| {
             // Check running state before logging
             if (!self.running) {
                 std.log.debug("Peer error during shutdown, skipping log", .{});
@@ -239,9 +246,10 @@ pub const NetworkManager = struct {
         
         self.running = true;
         while (self.running) {
-            const connection = self.server.?.accept() catch |err| switch (err) {
+            const io = std.Io.Threaded.global_single_threaded.ioBasic();
+            const connection = self.server.?.accept(io) catch |err| switch (err) {
                 error.WouldBlock => {
-                    std.time.sleep(100 * std.time.ns_per_ms);
+                    io.sleep(std.Io.Duration.fromMilliseconds(100), std.Io.Clock.awake) catch {};
                     continue;
                 },
                 else => return err,
@@ -250,15 +258,15 @@ pub const NetworkManager = struct {
             // Check connection limit for incoming connections too
             const current_connections = self.active_connections.load(.acquire);
             if (current_connections >= MAX_ACTIVE_CONNECTIONS) {
-                std.log.warn("Too many active connections ({}), rejecting incoming connection from {}", .{ current_connections, connection.address });
-                connection.stream.close();
+                std.log.warn("Too many active connections ({}), rejecting incoming connection", .{current_connections});
+                connection.close(io);
                 continue;
             }
 
             // Add peer
-            const peer = self.peer_manager.addPeer(connection.address) catch |err| {
-                std.log.warn("Failed to add peer {}: {}", .{ connection.address, err });
-                connection.stream.close();
+            const peer = self.peer_manager.addPeer(connection.socket.address) catch |err| {
+                std.log.warn("Failed to add peer: {}", .{err});
+                connection.close(io);
                 continue;
             };
 
@@ -267,7 +275,7 @@ pub const NetworkManager = struct {
 
             // Handle in thread
             const thread = try std.Thread.spawn(.{}, handleIncomingConnection, .{
-                self, peer, connection.stream
+                self, peer, connection
             });
             thread.detach();
         }
@@ -275,19 +283,20 @@ pub const NetworkManager = struct {
     
     fn handleIncomingConnection(self: *Self, peer: *Peer, stream: net.Stream) void {
         defer _ = self.active_connections.fetchSub(1, .acq_rel);
+        const io = std.Io.Threaded.global_single_threaded.ioBasic();
         // Check if shutting down
         if (!self.running) {
-            stream.close();
+            stream.close(io);
             return;
         }
 
         // Set non-blocking mode for incoming connections too
-        const flags = std.posix.fcntl(stream.handle, std.posix.F.GETFL, 0) catch 0;
+        const flags = std.posix.fcntl(stream.socket.handle, std.posix.F.GETFL, 0) catch 0;
         // O_NONBLOCK = 0o4000 on Linux
-        _ = std.posix.fcntl(stream.handle, std.posix.F.SETFL, flags | 0o4000) catch |err| {
+        _ = std.posix.fcntl(stream.socket.handle, std.posix.F.SETFL, flags | 0o4000) catch |err| {
              std.log.warn("Failed to set non-blocking mode for peer {}: {}", .{peer.id, err});
              std.log.warn("Failed to set non-blocking mode for incoming peer {}: {}", .{peer.id, err});
-             stream.close();
+             stream.close(io);
              self.peer_manager.removePeer(peer.id);
              return;
         };
@@ -295,7 +304,7 @@ pub const NetworkManager = struct {
         var conn = PeerConnection.init(self.allocator, peer, stream, self.message_handler);
         defer conn.deinit();
         
-        conn.run() catch |err| {
+        conn.run(io) catch |err| {
             // Only log if still running
             if (self.running) {
                 // Call disconnect handler if available
@@ -321,7 +330,7 @@ pub const NetworkManager = struct {
     
     /// Add a peer by string address (parses and delegates to connectToPeer)
     pub fn addPeer(self: *Self, address_str: []const u8) !void {
-        const address = try std.net.Address.parseIp4(address_str, 10801); // Default P2P port
+        const address = try net.IpAddress.parse(address_str, 10801); // Default P2P port
         try self.connectToPeer(address);
     }
     
@@ -333,9 +342,10 @@ pub const NetworkManager = struct {
         
         // Signal shutdown first - this must happen before ANY cleanup
         @atomicStore(bool, &self.running, false, .release);
-        
+
         // Give threads a moment to see the running flag change
-        std.time.sleep(100 * std.time.ns_per_ms);
+        const io_shutdown = std.Io.Threaded.global_single_threaded.ioBasic();
+        io_shutdown.sleep(std.Io.Duration.fromMilliseconds(100), std.Io.Clock.real) catch {};
         
         // Stop peer manager to close all peer connections
         // This will set all peers to disconnected state
@@ -344,7 +354,8 @@ pub const NetworkManager = struct {
         // Deinit the server to unblock accept()
         // Do this AFTER peer manager stop so existing connections can finish
         if (self.server) |*server| {
-            server.deinit();
+            const io = std.Io.Threaded.global_single_threaded.ioBasic();
+            server.deinit(io);
             self.server = null;
         }
         
@@ -363,7 +374,8 @@ pub const NetworkManager = struct {
                 std.log.info("All {} network threads finished cleanly after {}ms", .{0, waited_ms});
                 break;
             }
-            std.time.sleep(poll_interval_ms * std.time.ns_per_ms);
+            const io_wait = std.Io.Threaded.global_single_threaded.ioBasic();
+            io_wait.sleep(std.Io.Duration.fromMilliseconds(poll_interval_ms), std.Io.Clock.real) catch {};
             waited_ms += poll_interval_ms;
         }
 
@@ -393,9 +405,7 @@ pub const NetworkManager = struct {
         };
         
         const block_hash = block.hash();
-        std.log.debug("Broadcasted block {} directly to peers (ZSP-001)", .{
-            std.fmt.fmtSliceHexLower(&block_hash)
-        });
+        std.log.debug("Broadcasted block {x} directly to peers (ZSP-001)", .{block_hash});
     }
     
     /// Broadcast a new transaction to all connected peers
@@ -410,9 +420,7 @@ pub const NetworkManager = struct {
         };
         
         const tx_hash = tx.hash();
-        std.log.debug("Broadcasted transaction {} directly to peers (ZSP-001)", .{
-            std.fmt.fmtSliceHexLower(&tx_hash)
-        });
+        std.log.debug("Broadcasted transaction {x} directly to peers (ZSP-001)", .{tx_hash});
     }
     
     /// Get connected peer count
@@ -471,7 +479,7 @@ pub const NetworkManager = struct {
         self.peer_manager.cleanupTimedOut();
         
         // Auto-reconnect logic with exponential backoff
-        const now = std.time.timestamp();
+        const now = util.getTime();
         const peer_stats = self.getPeerStats();
         const connected_peers = peer_stats.connected;
 
@@ -486,7 +494,7 @@ pub const NetworkManager = struct {
 
                 var connection_succeeded = false;
                 for (self.bootstrap_nodes) |node| {
-                    const address = std.net.Address.parseIp(node.ip, node.port) catch |err| {
+                    const address = net.IpAddress.parse(node.ip, node.port) catch |err| {
                         std.log.warn("Failed to parse bootstrap node {s}:{} - {}", .{ node.ip, node.port, err });
                         continue;
                     };

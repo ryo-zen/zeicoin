@@ -6,6 +6,7 @@ const zap = @import("zap");
 const pg = @import("pg");
 const zeicoin = @import("zeicoin");
 const types = zeicoin.types;
+const fixed_buffer_stream = @import("../core/util/fixed_buffer_stream.zig");
 
 const log = std.log.scoped(.l2_service);
 
@@ -115,7 +116,7 @@ pub const L2Service = struct {
         defer self.pool.release(conn);
 
         // Convert tags to PostgreSQL array format with proper escaping
-        var tags_array = std.ArrayList(u8).init(self.allocator);
+        var tags_array = std.array_list.Managed(u8).init(self.allocator);
         defer tags_array.deinit();
 
         try tags_array.append('{');
@@ -240,7 +241,7 @@ pub const L2Service = struct {
         var result = try conn.query(query, .{ sender, recipient, status.toString() });
         defer result.deinit();
 
-        var enhancements = std.ArrayList(TransactionEnhancement).init(self.allocator);
+        var enhancements = std.array_list.Managed(TransactionEnhancement).init(self.allocator);
         
         while (try result.next()) |row| {
             const enhancement = TransactionEnhancement{
@@ -290,7 +291,7 @@ pub const L2Service = struct {
         limit: u32,
     ) ![]TransactionEnhancement {
         var query_buf: [1024]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&query_buf);
+        var stream = fixed_buffer_stream.fixedBufferStream(&query_buf);
         const writer = stream.writer();
         
         try writer.writeAll(
@@ -337,7 +338,7 @@ pub const L2Service = struct {
             
         defer result.deinit();
         
-        var enhancements = std.ArrayList(TransactionEnhancement).init(self.allocator);
+        var enhancements = std.array_list.Managed(TransactionEnhancement).init(self.allocator);
         
         while (try result.next()) |row| {
             const enhancement = TransactionEnhancement{
@@ -386,7 +387,7 @@ pub const L2Service = struct {
         defer result.deinit();
         
         if (try result.next()) |row| {
-            var tags = std.ArrayList([]const u8).init(self.allocator);
+            var tags = std.array_list.Managed([]const u8).init(self.allocator);
             defer tags.deinit();
             
             return TransactionEnhancement{
@@ -423,7 +424,7 @@ pub const L2Service = struct {
         _ = limit;
         _ = offset;
 
-        var enhancements = std.ArrayList(TransactionEnhancement).init(self.allocator);
+        var enhancements = std.array_list.Managed(TransactionEnhancement).init(self.allocator);
         
         return enhancements.toOwnedSlice();
     }
@@ -439,7 +440,7 @@ pub const L2Service = struct {
         _ = address;
         _ = limit;
 
-        var results = std.ArrayList(TransactionEnhancement).init(self.allocator);
+        var results = std.array_list.Managed(TransactionEnhancement).init(self.allocator);
         
         return results.toOwnedSlice();
     }
@@ -659,7 +660,7 @@ pub fn getEnhancedTransactionsHandler(r: zap.Request) void {
     };
     defer self.allocator.free(transactions);
 
-    var response = std.ArrayList(std.json.Value).init(self.allocator);
+    var response = std.array_list.Managed(std.json.Value).init(self.allocator);
     defer response.deinit();
 
     for (transactions) |tx| {

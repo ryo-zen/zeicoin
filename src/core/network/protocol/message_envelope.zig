@@ -72,7 +72,7 @@ pub const MessageEnvelope = struct {
         const payload = try allocator.alloc(u8, header.payload_length);
         errdefer allocator.free(payload);
 
-        try reader.readNoEof(payload);
+        try reader.readSliceAll(payload);
 
         // Verify checksum - critical security check
         if (!header.verifyChecksum(payload)) {
@@ -104,7 +104,7 @@ pub const MessageEnvelope = struct {
         }
 
         const payload = backing_buffer[0..header.payload_length];
-        try reader.readNoEof(payload);
+        try reader.readSliceAll(payload);
 
         // Verify checksum
         if (!header.verifyChecksum(payload)) {
@@ -131,20 +131,19 @@ pub fn encodeMessage(
     }
 
     // Use ArrayList's automatic resizing instead of magic numbers
-    var buffer = std.ArrayList(u8).init(allocator);
-    defer buffer.deinit();
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try message.encode(aw.writer);
 
-    try message.encode(buffer.writer());
-
-    return MessageEnvelope.init(allocator, msg_type, buffer.items);
+    return MessageEnvelope.init(allocator, msg_type, aw.written());
 }
 
 /// Fixed memory pool implementation with proper buffer tracking
 pub const MessagePool = struct {
     allocator: std.mem.Allocator,
-    small_buffers: std.ArrayList(PooledBuffer), // 4KB
-    medium_buffers: std.ArrayList(PooledBuffer), // 64KB
-    large_buffers: std.ArrayList(PooledBuffer), // 1MB
+    small_buffers: std.array_list.Managed(PooledBuffer), // 4KB
+    medium_buffers: std.array_list.Managed(PooledBuffer), // 64KB
+    large_buffers: std.array_list.Managed(PooledBuffer), // 1MB
 
     // Pool size constants
     pub const SMALL_SIZE = 4 * 1024;
@@ -159,9 +158,9 @@ pub const MessagePool = struct {
     pub fn init(allocator: std.mem.Allocator) !MessagePool {
         var pool = MessagePool{
             .allocator = allocator,
-            .small_buffers = std.ArrayList(PooledBuffer).init(allocator),
-            .medium_buffers = std.ArrayList(PooledBuffer).init(allocator),
-            .large_buffers = std.ArrayList(PooledBuffer).init(allocator),
+            .small_buffers = std.array_list.Managed(PooledBuffer).init(allocator),
+            .medium_buffers = std.array_list.Managed(PooledBuffer).init(allocator),
+            .large_buffers = std.array_list.Managed(PooledBuffer).init(allocator),
         };
 
         // Pre-allocate some buffers for better performance
@@ -285,15 +284,14 @@ test "MessageEnvelope round-trip with const correctness" {
     defer envelope.deinit();
 
     // Test const serialize
-    var buffer = std.ArrayList(u8).init(allocator);
-    defer buffer.deinit();
-
     const const_envelope: *const MessageEnvelope = &envelope;
-    try const_envelope.serialize(buffer.writer());
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try const_envelope.serialize(aw.writer);
 
     // Test deserialize
-    var stream = std.io.fixedBufferStream(buffer.items);
-    var decoded = try MessageEnvelope.deserialize(allocator, stream.reader());
+    var reader = std.Io.Reader.fixed(aw.written());
+    var decoded = try MessageEnvelope.deserialize(allocator, &reader);
     defer decoded.deinit();
 
     // Verify integrity
@@ -340,14 +338,16 @@ test "MessageEnvelope zero-copy deserialization" {
     defer original.deinit();
 
     // Serialize
-    var buffer = std.ArrayList(u8).init(allocator);
+    var buffer = std.array_list.Managed(u8).init(allocator);
     defer buffer.deinit();
-    try original.serialize(buffer.writer());
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try original.serialize(aw.writer);
 
     // Test zero-copy deserialize
     var backing_buffer: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(buffer.items);
-    const decoded = try MessageEnvelope.deserializeZeroCopy(stream.reader(), &backing_buffer);
+    var reader = std.Io.Reader.fixed(buffer.items);
+    const decoded = try MessageEnvelope.deserializeZeroCopy(&reader, &backing_buffer);
 
     // Verify (no deinit needed - using backing buffer)
     try std.testing.expectEqual(original.header.message_type, decoded.header.message_type);
@@ -362,7 +362,7 @@ test "encodeMessage input validation" {
         value: u32,
 
         pub fn encode(self: @This(), writer: anytype) !void {
-            try writer.writeInt(u32, self.value, .little);
+            try std.Io.Writer.writeInt(writer, u32, self.value, .little);
         }
     };
 

@@ -2,44 +2,38 @@
 // Provides methods to detect the node's public IP address using system interfaces
 
 const std = @import("std");
-const net = std.net;
+const net = std.Io.net;
 const posix = std.posix;
 
 /// Detect our public IP address by checking which interface routes to the internet
-pub fn detectPublicIP(allocator: std.mem.Allocator) ![]u8 {
+/// NOTE: Requires io parameter in Zig 0.16
+pub fn detectPublicIP(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
     // Method 1: Connect to a well-known address and check our local socket address
     // This tells us which interface/IP we use to reach the internet
-    const remote_addr = net.Address.parseIp4("1.1.1.1", 53) catch return error.IPDetectionFailed;
-    
-    const socket_fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch return error.IPDetectionFailed;
-    defer posix.close(socket_fd);
-    
-    // Connect to determine routing
-    _ = posix.connect(socket_fd, &remote_addr.any, remote_addr.getOsSockLen()) catch return error.IPDetectionFailed;
-    
-    // Get our local address from this socket
-    var local_addr: posix.sockaddr = undefined;
-    var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
-    posix.getsockname(socket_fd, &local_addr, &addr_len) catch return error.IPDetectionFailed;
-    
-    // Extract IP from sockaddr_in
-    const sockaddr_in: *const posix.sockaddr.in = @ptrCast(@alignCast(&local_addr));
-    const ip_int = sockaddr_in.addr;
-    
-    // Convert network byte order to host byte order and format as string
-    const ip_bytes = [4]u8{
-        @truncate(ip_int & 0xFF),           // First byte (little endian)
-        @truncate((ip_int >> 8) & 0xFF),    // Second byte
-        @truncate((ip_int >> 16) & 0xFF),   // Third byte  
-        @truncate((ip_int >> 24) & 0xFF),   // Fourth byte
+    // Using Cloudflare DNS (1.1.1.1:53)
+    const remote_addr = try net.IpAddress.parse("1.1.1.1", 53);
+
+    // Connect using Io.net API (IpAddress.connect returns Stream)
+    const conn = remote_addr.connect(io, .{ .mode = .stream }) catch return error.IPDetectionFailed;
+    defer conn.close(io);
+
+    // Get our local address from the connected socket
+    // Socket.address contains the local address after connecting
+    const local_address = conn.socket.address;
+
+    // Extract IP string from the IpAddress
+    const ip_str = switch (local_address) {
+        .ip4 => |ip4| try std.fmt.allocPrint(allocator, "{}.{}.{}.{}", .{
+            ip4.bytes[0],
+            ip4.bytes[1],
+            ip4.bytes[2],
+            ip4.bytes[3],
+        }),
+        .ip6 => return error.IPv6NotSupported, // For now, only handle IPv4
     };
-    
-    const ip_str = try std.fmt.allocPrint(allocator, "{}.{}.{}.{}", .{
-        ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]
-    });
-    
+
     std.log.debug("Detected outbound IP via Cloudflare DNS: {s}", .{ip_str});
-    
+
     // Check if this looks like a private IP - if so, we're behind NAT
     if (isPrivateIP(ip_str)) {
         std.log.debug("Detected private IP {s} - node is behind NAT", .{ip_str});
@@ -47,7 +41,7 @@ pub fn detectPublicIP(allocator: std.mem.Allocator) ![]u8 {
         // or UPnP to get the actual public IP, but for self-connection prevention,
         // the private IP is sufficient since peers will use public IPs
     }
-    
+
     return ip_str;
 }
 
@@ -61,23 +55,24 @@ fn isPrivateIP(ip_str: []const u8) bool {
 }
 
 /// Check if an address is a self-connection by comparing with our public IP
-pub fn isSelfConnection(allocator: std.mem.Allocator, address: net.Address) bool {
+/// NOTE: Requires io parameter in Zig 0.16
+pub fn isSelfConnection(allocator: std.mem.Allocator, io: std.Io, address: net.IpAddress) bool {
     // Get our public IP
-    const public_ip = detectPublicIP(allocator) catch |err| {
+    const public_ip = detectPublicIP(allocator, io) catch |err| {
         std.log.warn("⚠️  Failed to detect public IP: {}, allowing connection", .{err});
         return false;
     };
     defer allocator.free(public_ip);
     
     // Parse target IP from address
-    const target_ip = switch (address.any.family) {
-        std.posix.AF.INET => blk: {
+    const target_ip = switch (address) {
+        .ip4 => |ip4| blk: {
             var buf: [16]u8 = undefined;
             break :blk std.fmt.bufPrint(&buf, "{}.{}.{}.{}", .{
-                address.in.sa.addr & 0xFF,
-                (address.in.sa.addr >> 8) & 0xFF,
-                (address.in.sa.addr >> 16) & 0xFF,
-                (address.in.sa.addr >> 24) & 0xFF,
+                ip4.bytes[0],
+                ip4.bytes[1],
+                ip4.bytes[2],
+                ip4.bytes[3],
             }) catch return false;
         },
         else => return false,

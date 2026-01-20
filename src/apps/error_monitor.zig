@@ -232,7 +232,7 @@ fn extractErrorType(allocator: std.mem.Allocator, message: []const u8) !?[]const
 
 /// Extract structured context from message (height, hash, peer, etc.)
 fn extractContext(allocator: std.mem.Allocator, message: []const u8) !?[]const u8 {
-    var context = std.ArrayList(u8).init(allocator);
+    var context = std.array_list.Managed(u8).init(allocator);
     defer context.deinit();
 
     try context.appendSlice("{");
@@ -364,12 +364,14 @@ fn insertError(pool: *Pool, error_data: ErrorData) !void {
     });
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     print("🔍 ZeiCoin Error Monitor Starting...\n", .{});
+
+    const io = init.io;
 
     // Load .env files
     zeicoin.dotenv.loadForNetwork(std.heap.page_allocator) catch |err| {

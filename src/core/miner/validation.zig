@@ -52,12 +52,12 @@ pub fn validateBlockPoW(ctx: MiningContext, block: types.Block) !bool {
 
     // Serialize block header efficiently
     var buffer: [256]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buffer);
-    block.header.serialize(stream.writer()) catch |err| {
+    var writer = std.Io.Writer.fixed(&buffer);
+    block.header.serialize(&writer) catch |err| {
         log.warn("❌ Block header serialization failed: {}", .{err});
         return false;
     };
-    const header_data = stream.getWritten();
+    const header_data = writer.buffered();
 
     // Calculate RandomX hash with network-appropriate difficulty
     var hash: [32]u8 = undefined;
@@ -71,8 +71,7 @@ pub fn validateBlockPoW(ctx: MiningContext, block: types.Block) !bool {
     
     // Optional: Log validation result for debugging
     if (!valid) {
-        const hash_hex = std.fmt.fmtSliceHexLower(&hash);
-        log.warn("⚠️ Block hash {} does not meet difficulty target {}", .{ hash_hex, difficulty_target.toU64() });
+        log.warn("⚠️ Block hash {x} does not meet difficulty target {}", .{ hash, difficulty_target.toU64() });
     }
     
     return valid;

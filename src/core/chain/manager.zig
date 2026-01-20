@@ -59,12 +59,12 @@ pub const ChainManager = struct {
     }
 
     /// Complete initialization after struct is created (to handle circular references)
-    pub fn completeInit(self: *Self) !void {
+    pub fn completeInit(self: *Self, io: std.Io) !void {
         self.validator = ChainValidator.init(self.allocator, &self.state);
         self.operations = ChainOperations.init(self.allocator, &self.state, &self.validator);
 
         // Initialize block index from existing blockchain data
-        self.state.initializeBlockIndex() catch |err| {
+        self.state.initializeBlockIndex(io) catch |err| {
             log.info("⚠️ Failed to initialize block index: {} - O(1) lookups disabled", .{err});
         };
     }
@@ -79,46 +79,46 @@ pub const ChainManager = struct {
     // High-Level Chain Operations API
     
     /// Apply a transaction to the blockchain state
-    pub fn applyTransaction(self: *Self, transaction: Transaction) !void {
+    pub fn applyTransaction(self: *Self, io: std.Io, transaction: Transaction) !void {
         // Validate transaction first
         if (!try self.validator.validateTransaction(transaction)) {
             return error.InvalidTransaction;
         }
         
         // Process transaction through state manager
-        try self.state.processTransaction(transaction);
+        try self.state.processTransaction(io, transaction, false);
     }
 
     /// Validate and accept a block if valid
-    pub fn validateAndAcceptBlock(self: *Self, block: Block) !bool {
+    pub fn validateAndAcceptBlock(self: *Self, io: std.Io, block: Block) !bool {
         // Validate block structure and proof-of-work
         if (!try self.validator.validateBlock(block)) {
             return false;
         }
         
         // Accept block through operations manager
-        try self.operations.acceptBlock(block);
+        try self.operations.acceptBlock(io, block);
         return true;
     }
 
     /// Apply a block to the blockchain (without validation)
-    pub fn applyBlock(self: *Self, block: Block) !void {
-        try self.operations.applyBlock(block);
+    pub fn applyBlock(self: *Self, io: std.Io, block: Block) !void {
+        try self.operations.applyBlock(io, block);
     }
 
     /// Get current chain state information
-    pub fn getChainState(self: *Self) !ChainStateInfo {
+    pub fn getChainState(self: *Self, io: std.Io) !ChainStateInfo {
         return ChainStateInfo{
             .height = try self.operations.getHeight(),
-            .total_work = try self.operations.calculateTotalWork(),
-            .current_difficulty = try self.operations.calculateNextDifficulty(),
+            .total_work = try self.operations.calculateTotalWork(io),
+            .current_difficulty = try self.operations.calculateNextDifficulty(io),
             .mempool_size = try self.getMempoolSize(),
         };
     }
 
     /// Get account balance
-    pub fn getAccountBalance(self: *Self, address: Address) !u64 {
-        return self.state.getBalance(address);
+    pub fn getAccountBalance(self: *Self, io: std.Io, address: Address) !u64 {
+        return self.state.getBalance(io, address);
     }
 
     /// Get current chain height
@@ -127,8 +127,8 @@ pub const ChainManager = struct {
     }
 
     /// Get block at specific height
-    pub fn getBlockAtHeight(self: *Self, height: u32) !Block {
-        return self.operations.getBlockByHeight(height);
+    pub fn getBlockAtHeight(self: *Self, io: std.Io, height: u32) !Block {
+        return self.operations.getBlockByHeight(io, height);
     }
 
 
@@ -141,14 +141,14 @@ pub const ChainManager = struct {
     }
 
     /// Initialize blockchain with genesis block
-    pub fn initializeWithGenesis(self: *Self, network: types.Network) !void {
+    pub fn initializeWithGenesis(self: *Self, io: std.Io, network: types.Network) !void {
         // Use the Genesis component to create and save genesis block
-        const genesis = @import("genesis.zig");
-        const genesis_block = try genesis.createGenesis(self.allocator);
+        const genesis_mod = @import("genesis.zig");
+        const genesis_block = try genesis_mod.createGenesis(self.allocator);
         defer genesis_block.deinit(self.allocator);
         
         // Save genesis block at height 0  
-        try self.state.database.saveBlock(0, genesis_block);
+        try self.state.database.saveBlock(io, 0, genesis_block);
         
         // Process genesis transactions - force processing as this is initialization
         try self.state.processBlockTransactions(genesis_block.transactions, 0, true);

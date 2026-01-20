@@ -100,7 +100,7 @@ pub fn miningThreadFn(ctx: MiningContext, miner_keypair: key.KeyPair, mining_add
         if (tx_count == 1) {
             log.info("📦 Single transaction, waiting 2 seconds for more to batch...", .{});
             ctx.mining_state.mutex.unlock();
-            std.time.sleep(2 * std.time.ns_per_s); // Wait 2 seconds for more transactions
+            ctx.blockchain.io.sleep(std.Io.Duration.fromSeconds(2), std.Io.Clock.awake) catch {}; // Wait 2 seconds for more transactions
 
             // Re-check mempool count after delay
             const new_tx_count = ctx.mempool_manager.getTransactionCount();
@@ -124,7 +124,7 @@ pub fn miningThreadFn(ctx: MiningContext, miner_keypair: key.KeyPair, mining_add
         log.info("🔨 Mining thread: Calling zenMineBlock (mempool has {} transactions)", .{ctx.mempool_manager.getTransactionCount()});
         var block = core.zenMineBlock(ctx, miner_keypair, mining_address) catch |err| {
             log.info("❌ [MINING ERROR] Height {} - {}", .{ current_height, err });
-            std.time.sleep(1 * std.time.ns_per_s); // Wait 1 second before retry
+            ctx.blockchain.io.sleep(std.Io.Duration.fromSeconds(1), std.Io.Clock.awake) catch {}; // Wait 1 second before retry
             continue;
         };
         defer block.deinit(ctx.allocator);

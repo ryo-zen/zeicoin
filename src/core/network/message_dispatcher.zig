@@ -223,7 +223,7 @@ pub const MessageDispatcher = struct {
         // Update fork manager
         self.blockchain.fork_manager.updateChain(0, new_chain_state);
 
-        log.info("Reorganization complete! New chain tip: {s}", .{std.fmt.fmtSliceHexLower(new_chain_state.tip_hash[0..8])});
+        log.info("Reorganization complete! New chain tip: {x}", .{new_chain_state.tip_hash[0..8]});
     }
     
     /// Find common ancestor between current chain and new chain (private helper)

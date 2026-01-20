@@ -1,9 +1,10 @@
 const std = @import("std");
-const net = std.net;
+const net = std.Io.net;
 const rpc_types = @import("types.zig");
 const format = @import("format.zig");
 const zen = @import("../node.zig");
 const db = @import("../storage/db.zig");
+const util = @import("../util/util.zig");
 
 const log = std.log.scoped(.rpc_server);
 
@@ -36,10 +37,10 @@ pub const RPCServer = struct {
         const secondary_path = try std.fmt.allocPrint(allocator, "{s}_indexer_secondary", .{blockchain_path});
         errdefer allocator.free(secondary_path);
 
-        const address = try net.Address.parseIp4("0.0.0.0", port);
-        const server = try address.listen(.{
+        const address = try net.IpAddress.parse("0.0.0.0", port);
+        const io = std.Io.Threaded.global_single_threaded.ioBasic();
+        const server = try address.listen(io, .{
             .reuse_address = true,
-            .reuse_port = true,
         });
 
         self.* = RPCServer{
@@ -63,7 +64,8 @@ pub const RPCServer = struct {
             secondary.deinit();
         }
         self.allocator.free(self.secondary_path);
-        self.server.deinit();
+        const io = std.Io.Threaded.global_single_threaded.ioBasic();
+        self.server.deinit(io);
         self.allocator.destroy(self);
     }
 
@@ -75,9 +77,11 @@ pub const RPCServer = struct {
             return &self.secondary_db.?;
         }
 
+        const io = self.blockchain.io;
         // Try to initialize secondary instance
         self.secondary_db = db.Database.initSecondary(
             self.allocator,
+            io,
             self.blockchain_path,
             self.secondary_path,
         ) catch |err| {
@@ -106,7 +110,7 @@ pub const RPCServer = struct {
             const current = self.active_connections.load(.acquire);
             if (current >= MAX_CONNECTIONS) {
                 log.warn("⚠️ RPC connection limit reached ({}/{}), rejecting", .{ current, MAX_CONNECTIONS });
-                connection.stream.close();
+                                connection.close(self.blockchain.io);
                 continue;
             }
 
@@ -117,7 +121,7 @@ pub const RPCServer = struct {
             const thread = std.Thread.spawn(.{}, handleConnection, .{ self, connection }) catch |err| {
                 log.err("Failed to spawn thread: {}", .{err});
                 _ = self.active_connections.fetchSub(1, .acq_rel);
-                connection.stream.close();
+                                connection.close(self.blockchain.io);
                 continue;
             };
             thread.detach();
@@ -130,18 +134,19 @@ pub const RPCServer = struct {
         self.running.store(false, .release);
     }
 
-    fn acceptWithTimeout(self: *RPCServer) !net.Server.Connection {
-        const timeout_ns = 1 * std.time.ns_per_s;
-        const start_time = std.time.nanoTimestamp();
+    fn acceptWithTimeout(self: *RPCServer) !net.Stream {
+        const io = std.Io.Threaded.global_single_threaded.ioBasic();
+        const timeout_s: i64 = 1;
+        const start_time = util.getTime();
 
         while (true) {
-            if (std.time.nanoTimestamp() - start_time > timeout_ns) {
+            if (util.getTime() - start_time > timeout_s) {
                 return error.Timeout;
             }
 
-            const connection = self.server.accept() catch |err| {
+            const connection = self.server.accept(io) catch |err| {
                 if (err == error.WouldBlock) {
-                    std.time.sleep(10 * std.time.ns_per_ms);
+                    io.sleep(std.Io.Duration.fromMilliseconds(10), std.Io.Clock.real) catch {};
                     continue;
                 }
                 return err;
@@ -151,17 +156,21 @@ pub const RPCServer = struct {
         }
     }
 
-    fn handleConnection(self: *RPCServer, connection: net.Server.Connection) void {
+    fn handleConnection(self: *RPCServer, connection: net.Stream) void {
         defer {
-            connection.stream.close();
+                            connection.close(self.blockchain.io);
             _ = self.active_connections.fetchSub(1, .acq_rel);
         }
 
         var buffer: [8192]u8 = undefined;
-        const bytes_read = connection.stream.read(&buffer) catch |err| {
+        const io = self.blockchain.io;
+        const msg = connection.socket.receive(io, &buffer) catch |err| {
             log.err("Read error: {}", .{err});
+            connection.close(io);
+            _ = self.active_connections.fetchSub(1, .acq_rel);
             return;
         };
+        const bytes_read = msg.data.len;
 
         if (bytes_read == 0) return;
 
@@ -182,7 +191,11 @@ pub const RPCServer = struct {
             // Send HTTP response
             const http_response = self.wrapHttpResponse(error_response) catch return;
             defer self.allocator.free(http_response);
-            _ = connection.stream.writeAll(http_response) catch {};
+            {
+                var write_buf: [4096]u8 = undefined;
+                var writer = connection.writer(io, &write_buf);
+                _ = writer.interface.writeAll(http_response) catch {};
+            }
             return;
         };
         defer self.allocator.free(response);
@@ -197,9 +210,13 @@ pub const RPCServer = struct {
         };
         defer self.allocator.free(http_response);
 
-        _ = connection.stream.writeAll(http_response) catch |err| {
-            log.err("Write error: {}", .{err});
-        };
+        {
+            var write_buf: [4096]u8 = undefined;
+            var writer = connection.writer(io, &write_buf);
+            _ = writer.interface.writeAll(http_response) catch |err| {
+                log.err("Write error: {}", .{err});
+            };
+        }
     }
 
     fn extractJsonBody(self: *RPCServer, data: []const u8) ?[]const u8 {
@@ -298,7 +315,7 @@ pub const RPCServer = struct {
         }
 
         // Process each request
-        var responses = std.ArrayList([]const u8).init(self.allocator);
+        var responses = std.array_list.Managed([]const u8).init(self.allocator);
         defer {
             for (responses.items) |resp| {
                 self.allocator.free(resp);
@@ -332,7 +349,7 @@ pub const RPCServer = struct {
             return try self.allocator.alloc(u8, 0);
         }
 
-        var buf = std.ArrayList(u8).init(self.allocator);
+        var buf = std.array_list.Managed(u8).init(self.allocator);
         defer buf.deinit();
 
         try buf.append('[');
@@ -549,7 +566,8 @@ pub const RPCServer = struct {
 
         // Get transaction from secondary database
         const database = try self.ensureSecondaryDb();
-        const tx = database.getTransactionByHash(tx_hash) catch {
+        const io = self.blockchain.io;
+        const tx = database.getTransactionByHash(io, tx_hash) catch {
             // Check mempool if not found in database
             const mempool_tx = self.blockchain.mempool_manager.getTransaction(tx_hash) orelse {
                 return try format.formatError(
@@ -710,8 +728,8 @@ pub const RPCServer = struct {
         const tx_hash = transaction.hash();
         const tx_hash_hex = try std.fmt.allocPrint(
             self.allocator,
-            "{s}",
-            .{std.fmt.fmtSliceHexLower(&tx_hash)},
+            "{x}",
+            .{tx_hash},
         );
         defer self.allocator.free(tx_hash_hex);
 

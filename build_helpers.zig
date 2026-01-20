@@ -18,8 +18,8 @@ pub fn generateModuleDependencies(
     external_dependencies: []const Dependency,
     dependencies_opts: anytype,
 ) ![]std.Build.Module.Import {
-    var dependency_modules = std.ArrayList(*std.Build.Module).init(b.allocator);
-    defer _ = dependency_modules.deinit();
+    var dependency_modules: std.ArrayList(*std.Build.Module) = .{};
+    defer dependency_modules.deinit(b.allocator);
 
     // Populate dependency modules.
     for (external_dependencies) |dep| {
@@ -27,7 +27,7 @@ pub fn generateModuleDependencies(
             dep.name,
             dependencies_opts,
         ).module(dep.module_name);
-        _ = dependency_modules.append(module) catch unreachable;
+        try dependency_modules.append(b.allocator, module);
     }
     return try toModuleDependencyArray(
         b.allocator,
@@ -48,18 +48,18 @@ fn toModuleDependencyArray(
     modules: []const *std.Build.Module,
     ext_deps: []const Dependency,
 ) ![]std.Build.Module.Import {
-    var deps = std.ArrayList(std.Build.Module.Import).init(allocator);
-    defer deps.deinit();
+    var deps: std.ArrayList(std.Build.Module.Import) = .{};
+    defer deps.deinit(allocator);
 
     for (
         modules,
         0..,
     ) |module_ptr, i| {
-        try deps.append(.{
+        try deps.append(allocator, .{
             .name = ext_deps[i].name,
             .module = module_ptr,
         });
     }
 
-    return deps.toOwnedSlice();
+    return deps.toOwnedSlice(allocator);
 }

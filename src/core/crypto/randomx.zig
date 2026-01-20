@@ -67,7 +67,8 @@ pub const RandomXContext = struct {
         }
 
         // Use absolute path to prevent PATH manipulation
-        const exe_path = std.fs.realpathAlloc(self.allocator, "./randomx/randomx_helper") catch |err| {
+        const io = std.Io.Threaded.global_single_threaded.ioBasic();
+        const exe_path = std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io, "./randomx/randomx_helper", self.allocator) catch |err| {
             log.info("Failed to resolve RandomX helper path: {}", .{err});
             return RandomXError.ProcessFailed;
         };
@@ -87,27 +88,29 @@ pub const RandomXContext = struct {
         argv[4] = mode_str;
 
         // Run RandomX helper subprocess with resource limits
-        var child = std.process.Child.init(argv, self.allocator);
-
-        // Set resource limits for security
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
-        child.stdin_behavior = .Ignore;
-
-        // Spawn and wait with timeout
-        child.spawn() catch |err| {
+        // Spawn RandomX helper subprocess
+        var child = std.process.spawn(io, .{
+            .argv = argv,
+            .stdin = .ignore,
+            .stdout = .pipe,
+            .stderr = .pipe,
+        }) catch |err| {
             log.info("Failed to spawn RandomX helper: {}", .{err});
             return RandomXError.ProcessFailed;
         };
+        defer child.kill(io);
 
         // Set up timeout (30 seconds max)
         const timeout_ns = 30 * std.time.ns_per_s;
-        const start_time = std.time.nanoTimestamp();
+        var timer = std.time.Timer.start() catch {
+            log.info("Failed to start timer for RandomX helper", .{});
+            return RandomXError.ProcessFailed;
+        };
 
         // Collect output with size limits
-        var stdout = std.ArrayList(u8).init(self.allocator);
+        var stdout = std.array_list.Managed(u8).init(self.allocator);
         defer stdout.deinit();
-        var stderr = std.ArrayList(u8).init(self.allocator);
+        var stderr = std.array_list.Managed(u8).init(self.allocator);
         defer stderr.deinit();
 
         // Read with size limits (max 1KB output)
@@ -117,25 +120,35 @@ pub const RandomXContext = struct {
 
         // Read output before wait to avoid deadlock
         if (child.stdout) |out| {
-            const n = try out.reader().readAll(stdout.unusedCapacitySlice()[0..@min(max_output, stdout.unusedCapacitySlice().len)]);
+            const buf = stdout.unusedCapacitySlice()[0..@min(max_output, stdout.unusedCapacitySlice().len)];
+            const n = try out.readStreaming(io, &.{buf});
             stdout.items.len += n;
         }
         if (child.stderr) |err| {
-            const n = try err.reader().readAll(stderr.unusedCapacitySlice()[0..@min(max_output, stderr.unusedCapacitySlice().len)]);
+            const buf = stderr.unusedCapacitySlice()[0..@min(max_output, stderr.unusedCapacitySlice().len)];
+            const n = try err.readStreaming(io, &.{buf});
             stderr.items.len += n;
         }
 
-        const result = try child.wait();
+        const result = try child.wait(io);
 
         // Check execution time
-        const elapsed = std.time.nanoTimestamp() - start_time;
+        const elapsed = timer.read();
         if (elapsed > timeout_ns) return RandomXError.ProcessTimeout;
 
-        if (result != .Exited or result.Exited != 0) {
-            log.info("RandomX helper failed with exit code: {}", .{result});
-            log.info("stderr: {s}", .{stderr.items});
-            log.info("stdout: {s}", .{stdout.items});
-            return RandomXError.ProcessFailed;
+        switch (result) {
+            .exited => |code| if (code == 0) {} else {
+                log.info("RandomX helper failed with exit code: {}", .{code});
+                log.info("stderr: {s}", .{stderr.items});
+                log.info("stdout: {s}", .{stdout.items});
+                return RandomXError.ProcessFailed;
+            },
+            else => {
+                log.info("RandomX helper failed with exit status: {}", .{result});
+                log.info("stderr: {s}", .{stderr.items});
+                log.info("stdout: {s}", .{stdout.items});
+                return RandomXError.ProcessFailed;
+            },
         }
 
         // Parse result: hash_hex:meets_difficulty

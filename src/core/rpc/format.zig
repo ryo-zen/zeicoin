@@ -3,10 +3,9 @@ const types = @import("types.zig");
 
 /// Format a successful JSON-RPC 2.0 response
 pub fn formatSuccess(allocator: std.mem.Allocator, result: []const u8, id: ?std.json.Value) ![]const u8 {
-    var buf = std.ArrayList(u8).init(allocator);
-    defer buf.deinit();
-
-    const writer = buf.writer();
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    var writer = aw.writer;
     try writer.writeAll("{\"jsonrpc\":\"2.0\",\"result\":");
     try writer.writeAll(result);
     try writer.writeAll(",\"id\":");
@@ -24,15 +23,14 @@ pub fn formatSuccess(allocator: std.mem.Allocator, result: []const u8, id: ?std.
     }
 
     try writer.writeAll("}");
-    return buf.toOwnedSlice();
+    return try aw.toOwnedSlice();
 }
 
 /// Format a JSON-RPC 2.0 error response
 pub fn formatError(allocator: std.mem.Allocator, code: types.ErrorCode, data: ?[]const u8, id: ?std.json.Value) ![]const u8 {
-    var buf = std.ArrayList(u8).init(allocator);
-    defer buf.deinit();
-
-    const writer = buf.writer();
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    var writer = aw.writer;
     try writer.writeAll("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":");
     try writer.print("{d}", .{@intFromEnum(code)});
     try writer.writeAll(",\"message\":\"");
@@ -58,16 +56,15 @@ pub fn formatError(allocator: std.mem.Allocator, code: types.ErrorCode, data: ?[
     }
 
     try writer.writeAll("}");
-    return buf.toOwnedSlice();
+    return try aw.toOwnedSlice();
 }
 
 /// Format result object as JSON
 pub fn formatResult(allocator: std.mem.Allocator, comptime T: type, value: T) ![]const u8 {
-    var buf = std.ArrayList(u8).init(allocator);
-    defer buf.deinit();
-
-    try std.json.stringify(value, .{}, buf.writer());
-    return buf.toOwnedSlice();
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    try std.json.Stringify.value(value, .{}, &aw.writer);
+    return try aw.toOwnedSlice();
 }
 
 // ========== Tests ==========

@@ -13,7 +13,7 @@ pub fn main() !void {
 
     // Print in format for copying to genesis.zig
     std.debug.print("New genesis hash with updated timestamp (Sep 9, 2025 09:09:09.090):\n", .{});
-    std.debug.print("Hex: {s}\n", .{std.fmt.fmtSliceHexLower(&hash)});
+    std.debug.print("Hex: {x}\n", .{&hash});
 
     std.debug.print("\nFormatted for genesis.zig HASH field:\n", .{});
     std.debug.print("pub const HASH: [32]u8 = [_]u8{{ ", .{});
