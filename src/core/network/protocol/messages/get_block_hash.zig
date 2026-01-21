@@ -18,7 +18,7 @@ pub const GetBlockHashMessage = struct {
         };
     }
 
-    pub fn encode(self: GetBlockHashMessage, writer: anytype) !void {
+    pub fn encode(self: *const GetBlockHashMessage, writer: anytype) !void {
         try self.serialize(writer);
     }
 

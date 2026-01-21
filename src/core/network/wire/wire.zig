@@ -138,7 +138,7 @@ pub const WireWriter = struct {
         if (@TypeOf(msg) != void) {
             var aw: std.Io.Writer.Allocating = .init(self.allocator);
             defer aw.deinit();
-            try msg.encode(aw.writer);
+            try msg.encode(&aw.writer);
             try self.send_buffer.appendSlice(aw.written());
         }
         // For void messages (like blocks), payload remains empty

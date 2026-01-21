@@ -9,7 +9,7 @@ pub const GetChainWorkMessage = struct {
     start_height: u32,
     end_height: u32,
 
-    pub fn encode(self: GetChainWorkMessage, writer: anytype) !void {
+    pub fn encode(self: *const GetChainWorkMessage, writer: anytype) !void {
         var w = writer;
         try w.writeInt(u32, self.start_height, .little);
         try w.writeInt(u32, self.end_height, .little);
@@ -31,7 +31,7 @@ pub const GetChainWorkMessage = struct {
 pub const ChainWorkResponseMessage = struct {
     total_work: types.ChainWork, // u256 cumulative work
 
-    pub fn encode(self: ChainWorkResponseMessage, writer: anytype) !void {
+    pub fn encode(self: *const ChainWorkResponseMessage, writer: anytype) !void {
         // Serialize u256 as bytes (32 bytes)
         const work_bytes = std.mem.asBytes(&self.total_work);
         var w = writer;

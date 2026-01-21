@@ -7,7 +7,7 @@ const serialize = @import("../../../storage/serialize.zig");
 pub const BlockMessage = struct {
     block: types.Block,
     
-    pub fn encode(self: BlockMessage, writer: anytype) !void {
+    pub fn encode(self: *const BlockMessage, writer: anytype) !void {
         try serialize.serialize(writer, self.block);
     }
     

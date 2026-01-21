@@ -342,22 +342,22 @@ pub const Transaction = struct {
         var writer = std.Io.Writer.fixed(&buffer);
 
         // Simple serialization for hashing (order matters!)
-        std.Io.Writer.writeInt(&writer, u16, tx_for_hash.version, .little) catch unreachable;
-        std.Io.Writer.writeInt(&writer, u16, @bitCast(tx_for_hash.flags), .little) catch unreachable;
+        writer.writeInt(u16, tx_for_hash.version, .little) catch unreachable;
+        writer.writeInt(u16, @bitCast(tx_for_hash.flags), .little) catch unreachable;
         writer.writeAll(std.mem.asBytes(&tx_for_hash.sender)) catch unreachable;
         writer.writeAll(std.mem.asBytes(&tx_for_hash.recipient)) catch unreachable;
-        std.Io.Writer.writeInt(&writer, u64, tx_for_hash.amount, .little) catch unreachable;
-        std.Io.Writer.writeInt(&writer, u64, tx_for_hash.fee, .little) catch unreachable;
-        std.Io.Writer.writeInt(&writer, u64, tx_for_hash.nonce, .little) catch unreachable;
-        std.Io.Writer.writeInt(&writer, u64, tx_for_hash.timestamp, .little) catch unreachable;
-        std.Io.Writer.writeInt(&writer, u64, tx_for_hash.expiry_height, .little) catch unreachable;
+        writer.writeInt(u64, tx_for_hash.amount, .little) catch unreachable;
+        writer.writeInt(u64, tx_for_hash.fee, .little) catch unreachable;
+        writer.writeInt(u64, tx_for_hash.nonce, .little) catch unreachable;
+        writer.writeInt(u64, tx_for_hash.timestamp, .little) catch unreachable;
+        writer.writeInt(u64, tx_for_hash.expiry_height, .little) catch unreachable;
         writer.writeAll(&tx_for_hash.sender_public_key) catch unreachable;
-        std.Io.Writer.writeInt(&writer, u16, tx_for_hash.script_version, .little) catch unreachable;
+        writer.writeInt(u16, tx_for_hash.script_version, .little) catch unreachable;
 
         // Include witness_data and extra_data in hash
-        std.Io.Writer.writeInt(&writer, u32, @intCast(self.witness_data.len), .little) catch unreachable;
+        writer.writeInt(u32, @intCast(self.witness_data.len), .little) catch unreachable;
         writer.writeAll(self.witness_data) catch unreachable;
-        std.Io.Writer.writeInt(&writer, u32, @intCast(self.extra_data.len), .little) catch unreachable;
+        writer.writeInt(u32, @intCast(self.extra_data.len), .little) catch unreachable;
         writer.writeAll(self.extra_data) catch unreachable;
 
         const data = writer.buffered();
@@ -564,8 +564,8 @@ pub const DifficultyTarget = struct {
     pub fn initial(network: NetworkType) DifficultyTarget {
         return switch (network) {
             .testnet => DifficultyTarget{
-                .base_bytes = 0, // TEST: No leading zeros required - makes tests instant
-                .threshold = 0xFFFFFFFF, // TEST: Accept any hash - for fast test execution
+                .base_bytes = 1, // EXTREMELY easy difficulty - instant blocks for low-end hardware
+                .threshold = 0xFFFFFFF0,
             },
             .mainnet => DifficultyTarget{
                 .base_bytes = 2,
@@ -726,17 +726,17 @@ pub const BlockHeader = struct {
 
     /// Serialize block header to bytes
     pub fn serialize(self: *const BlockHeader, writer: anytype) !void {
-        try std.Io.Writer.writeInt(writer, u32, self.version, .little);
+        try writer.writeInt(u32, self.version, .little);
         try writer.writeAll(&self.previous_hash);
         try writer.writeAll(&self.merkle_root);
-        try std.Io.Writer.writeInt(writer, u64, self.timestamp, .little);
-        try std.Io.Writer.writeInt(writer, u64, self.difficulty, .little);
-        try std.Io.Writer.writeInt(writer, u32, self.nonce, .little);
+        try writer.writeInt(u64, self.timestamp, .little);
+        try writer.writeInt(u64, self.difficulty, .little);
+        try writer.writeInt(u32, self.nonce, .little);
 
         // New future-proof fields
         try writer.writeAll(&self.witness_root);
         try writer.writeAll(&self.state_root);
-        try std.Io.Writer.writeInt(writer, u64, self.extra_nonce, .little);
+        try writer.writeInt(u64, self.extra_nonce, .little);
         try writer.writeAll(&self.extra_data);
     }
 
@@ -1364,20 +1364,20 @@ pub const ZenFees = struct {
 
 /// 📦 Block size limits - prevent spam while allowing growth
 pub const BlockLimits = struct {
-    /// Maximum block size in bytes (32MB) - hard consensus limit
-    pub const MAX_BLOCK_SIZE: usize = 32 * 1024 * 1024; // 32MB
+    /// Maximum block size in bytes (16MB) - hard consensus limit
+    pub const MAX_BLOCK_SIZE: usize = 16 * 1024 * 1024; // 16MB
 
-    /// Soft limit for miners (16MB) - can be adjusted without fork
-    pub const SOFT_BLOCK_SIZE: usize = 16 * 1024 * 1024; // 16MB
+    /// Soft limit for miners (2MB) - can be adjusted without fork
+    pub const SOFT_BLOCK_SIZE: usize = 2 * 1024 * 1024; // 2MB
 
-    /// Average transaction size estimate for capacity planning (ML-DSA-44 signatures)
-    pub const AVG_TX_SIZE: usize = 2560; // 2.5KB average (post-quantum ready)
+    /// Average transaction size estimate for capacity planning
+    pub const AVG_TX_SIZE: usize = 2048; // 2KB average
 
     /// Estimated transactions per block at soft limit
-    pub const SOFT_TXS_PER_BLOCK: usize = SOFT_BLOCK_SIZE / AVG_TX_SIZE; // ~6250 txs
+    pub const SOFT_TXS_PER_BLOCK: usize = SOFT_BLOCK_SIZE / AVG_TX_SIZE; // ~1000 txs
 
     /// Estimated transactions per block at hard limit
-    pub const MAX_TXS_PER_BLOCK: usize = MAX_BLOCK_SIZE / AVG_TX_SIZE; // ~12500 txs
+    pub const MAX_TXS_PER_BLOCK: usize = MAX_BLOCK_SIZE / AVG_TX_SIZE; // ~8000 txs
 };
 
 /// 🏊 Mempool limits - prevent memory exhaustion attacks

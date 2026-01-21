@@ -26,7 +26,7 @@ pub const BlockHashMessage = struct {
         return msg;
     }
 
-    pub fn encode(self: BlockHashMessage, writer: anytype) !void {
+    pub fn encode(self: *const BlockHashMessage, writer: anytype) !void {
         try self.serialize(writer);
     }
 

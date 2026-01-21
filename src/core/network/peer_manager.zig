@@ -41,6 +41,7 @@ pub const PeerState = enum {
 /// Individual peer connection
 pub const Peer = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     id: u64,
     address: net.IpAddress,
     state: PeerState,
@@ -102,9 +103,10 @@ pub const Peer = struct {
         timestamp: i64,
     };
 
-    pub fn init(allocator: std.mem.Allocator, id: u64, address: net.IpAddress) Self {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, id: u64, address: net.IpAddress) Self {
         return .{
             .allocator = allocator,
+            .io = io,
             .id = id,
             .address = address,
             .state = .connecting,
@@ -141,8 +143,7 @@ pub const Peer = struct {
         // Signal shutdown to connection threads
         self.is_shutting_down.store(true, .release);
 
-        // Give threads a moment to notice the shutdown flag
-        const io = std.Io.Threaded.global_single_threaded.ioBasic();
+        const io = self.io;
         io.sleep(std.Io.Duration.fromMilliseconds(10), std.Io.Clock.awake) catch {};
 
         if (self.user_agent.len > 0) {
@@ -586,6 +587,7 @@ pub const Peer = struct {
 /// Peer manager handles all peer connections
 pub const PeerManager = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     peers: ArrayList(*Peer),
     mutex: Mutex,
     next_peer_id: u64,
@@ -596,9 +598,10 @@ pub const PeerManager = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, max_peers: usize) Self {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, max_peers: usize) Self {
         return .{
             .allocator = allocator,
+            .io = io,
             .peers = ArrayList(*Peer).init(allocator),
             .mutex = .{},
             .next_peer_id = 1,
@@ -660,7 +663,7 @@ pub const PeerManager = struct {
         const peer = try self.allocator.create(Peer);
         errdefer self.allocator.destroy(peer);
         const assigned_id = self.next_peer_id;
-        peer.* = Peer.init(self.allocator, assigned_id, address);
+        peer.* = Peer.init(self.allocator, self.io, assigned_id, address);
         self.next_peer_id += 1;
 
         try self.peers.append(peer);
@@ -773,7 +776,7 @@ pub const PeerManager = struct {
             return null;
         }
 
-        const io = std.Io.Threaded.global_single_threaded.ioBasic();
+        const io = self.io;
         var rand_bytes: [@sizeOf(usize)]u8 = undefined;
         std.Io.random(io, &rand_bytes);
         const rand_val = std.mem.readInt(usize, &rand_bytes, .little);

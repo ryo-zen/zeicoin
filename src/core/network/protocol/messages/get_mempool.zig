@@ -10,7 +10,7 @@ pub const GetMempoolMessage = struct {
         return .{};
     }
 
-    pub fn encode(self: GetMempoolMessage, writer: anytype) !void {
+    pub fn encode(self: *const GetMempoolMessage, writer: anytype) !void {
         _ = self;
         _ = writer;
         // No data to encode

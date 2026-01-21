@@ -20,7 +20,7 @@ pub const MempoolInvMessage = struct {
         };
     }
 
-    pub fn encode(self: MempoolInvMessage, writer: anytype) !void {
+    pub fn encode(self: *const MempoolInvMessage, writer: anytype) !void {
         // Write the number of transaction hashes
         var w = writer;
         try w.writeInt(u32, @intCast(self.tx_hashes.len), .little);

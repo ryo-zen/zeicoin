@@ -121,7 +121,7 @@ test "transaction processing" {
     }
 
     // Create a test keypair for the transaction
-    var sender_keypair = try key.KeyPair.generateNew();
+    var sender_keypair = try key.KeyPair.generateNew(io);
     defer sender_keypair.deinit();
 
     const sender_addr = sender_keypair.getAddress();
@@ -169,7 +169,7 @@ test "transaction processing" {
     try zeicoin.addTransaction(tx);
 
     // Mine with a different miner so alice doesn't get mining reward
-    var miner_keypair = try key.KeyPair.generateNew();
+    var miner_keypair = try key.KeyPair.generateNew(io);
     defer miner_keypair.deinit();
     const mined_block = try zeicoin.zenMineBlock(miner_keypair);
     var mutable_mined_block = mined_block;
@@ -302,7 +302,7 @@ test "mempool cleaning after block application" {
     }
 
     // Create test keypair and transaction
-    var sender_keypair = try key.KeyPair.generateNew();
+    var sender_keypair = try key.KeyPair.generateNew(io);
     defer sender_keypair.deinit();
 
     const sender_addr = sender_keypair.getAddress();
@@ -511,7 +511,7 @@ test "coinbase maturity basic" {
     }
 
     // Create a test miner
-    const miner_keypair = try key.KeyPair.generateNew();
+    const miner_keypair = try key.KeyPair.generateNew(io);
     const miner_address = miner_keypair.getAddress();
 
     // Mine a block (coinbase reward should be immature)
@@ -587,7 +587,7 @@ test "mempool limits enforcement" {
     
     
     // Try to add one more (should fail)
-    const overflow_sender = try key.KeyPair.generateNew();
+    const overflow_sender = try key.KeyPair.generateNew(io);
     const overflow_sender_addr = overflow_sender.getAddress();
     try zeicoin.database.saveAccount(overflow_sender_addr, types.Account{
         .address = overflow_sender_addr,
@@ -644,7 +644,7 @@ test "mempool limits enforcement" {
     zeicoin.mempool_manager.storage.total_size_bytes = types.MempoolLimits.MAX_SIZE_BYTES - 10;
     
     // Try to add a transaction (should fail due to size limit)
-    const size_test_sender = try key.KeyPair.generateNew();
+    const size_test_sender = try key.KeyPair.generateNew(io);
     const size_test_sender_addr = size_test_sender.getAddress();
     try zeicoin.database.saveAccount(size_test_sender_addr, types.Account{
         .address = size_test_sender_addr,
@@ -701,9 +701,9 @@ test "transaction expiration" {
     }
 
     // Create test wallets
-    const sender_keypair = try key.KeyPair.generateNew();
+    const sender_keypair = try key.KeyPair.generateNew(io);
     const sender_addr = sender_keypair.getAddress();
-    const recipient_keypair = try key.KeyPair.generateNew();
+    const recipient_keypair = try key.KeyPair.generateNew(io);
     const recipient_addr = recipient_keypair.getAddress();
 
     // Fund sender
@@ -832,10 +832,10 @@ test "transaction size limit" {
     }
     
     // Create test keypairs
-    var alice = try key.KeyPair.generateNew();
+    var alice = try key.KeyPair.generateNew(io);
     defer alice.deinit();
     const alice_addr = alice.getAddress();
-    var bob = try key.KeyPair.generateNew();
+    var bob = try key.KeyPair.generateNew(io);
     defer bob.deinit();
     const bob_addr = bob.getAddress();
     
@@ -1062,8 +1062,8 @@ test "memory leak detection - block operations" {
     }
         
         // Create and mine a block with multiple transactions
-        const alice = try key.KeyPair.generateNew();
-        const bob = try key.KeyPair.generateNew();
+        const alice = try key.KeyPair.generateNew(io);
+        const bob = try key.KeyPair.generateNew(io);
         const alice_addr = alice.getAddress();
         const bob_addr = bob.getAddress();
         
@@ -1109,8 +1109,8 @@ test "memory leak detection - block operations" {
     }
         
         // Create a block with transactions containing extra_data
-        const miner = try key.KeyPair.generateNew();
-        const recipient = try key.KeyPair.generateNew();
+        const miner = try key.KeyPair.generateNew(io);
+        const recipient = try key.KeyPair.generateNew(io);
         
         var transactions = try allocator.alloc(types.Transaction, 2);
         defer allocator.free(transactions);

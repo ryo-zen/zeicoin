@@ -27,6 +27,7 @@ pub const MAX_PEERS = protocol.MAX_PEERS;
 // Network manager coordinates all networking
 pub const NetworkManager = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     peer_manager: PeerManager,
     listen_address: ?net.IpAddress,
     server: ?net.Server,
@@ -48,11 +49,13 @@ pub const NetworkManager = struct {
     
     pub fn init(
         allocator: std.mem.Allocator,
+        io: std.Io,
         handler: MessageHandler,
     ) Self {
         return .{
             .allocator = allocator,
-            .peer_manager = PeerManager.init(allocator, MAX_PEERS),
+            .io = io,
+            .peer_manager = PeerManager.init(allocator, io, MAX_PEERS),
             .listen_address = null,
             .server = null,
             .message_handler = handler,
@@ -76,7 +79,7 @@ pub const NetworkManager = struct {
         
         // Clean up server immediately
         if (self.server) |*server| {
-            const io = std.Io.Threaded.global_single_threaded.ioBasic();
+            const io = self.io;
             server.deinit(io);
             self.server = null;
         }
@@ -100,7 +103,7 @@ pub const NetworkManager = struct {
         const address = try net.IpAddress.parse(address_str, port);
         self.listen_address = address;
         
-        const io = std.Io.Threaded.global_single_threaded.ioBasic();
+        const io = self.io;
         self.server = try address.listen(io, .{
             .reuse_address = true,
         });
@@ -121,7 +124,7 @@ pub const NetworkManager = struct {
         }
 
         // Prevent self-connections by checking if target IP is our public IP
-        const io = std.Io.Threaded.global_single_threaded.ioBasic();
+        const io = self.io;
         if (ip_detection.isSelfConnection(self.allocator, io, address)) {
             std.log.warn("🚫 Self-connection prevented: skipping connection to own public IP {}", .{address});
             return;
@@ -148,8 +151,8 @@ pub const NetworkManager = struct {
         std.log.info("Connection thread started for peer {} at {}", .{ peer.id, peer.address });
 
         // Give the network time to fully initialize
-        const io = std.Io.Threaded.global_single_threaded.ioBasic();
-        io.sleep(std.Io.Duration.fromMilliseconds(100), std.Io.Clock.real) catch {};
+        const io = self.io;
+        io.sleep(std.Io.Duration.fromMilliseconds(100), std.Io.Clock.awake) catch {};
         
         // Check if we're shutting down at the very start
         std.log.info("Checking if network is running: {}", .{self.running});
@@ -160,7 +163,7 @@ pub const NetworkManager = struct {
         
         // Attempt connection
         std.log.info("Starting TCP connection attempt to peer {} at {}", .{ peer.id, peer.address });
-        const io_connect = std.Io.Threaded.global_single_threaded.ioBasic();
+        const io_connect = self.io;
         const stream = peer.address.connect(io_connect, .{ .mode = .stream }) catch |err| {
             // Check running state before ANY access to self
             if (!self.running) {
@@ -180,7 +183,7 @@ pub const NetworkManager = struct {
         };
         std.log.info("TCP connection established successfully to peer {} at {}", .{ peer.id, peer.address });
 
-        const io_conn = std.Io.Threaded.global_single_threaded.ioBasic();
+        const io_conn = self.io;
 
         // Check again before initializing connection
         if (!self.running) {
@@ -200,7 +203,7 @@ pub const NetworkManager = struct {
         };
         
         var conn = PeerConnection.init(self.allocator, peer, stream, self.message_handler);
-        defer conn.deinit();
+        defer conn.deinit(io_conn);
         
         // Run connection loop
         conn.run(io_conn) catch |err| {
@@ -246,7 +249,7 @@ pub const NetworkManager = struct {
         
         self.running = true;
         while (self.running) {
-            const io = std.Io.Threaded.global_single_threaded.ioBasic();
+            const io = self.io;
             const connection = self.server.?.accept(io) catch |err| switch (err) {
                 error.WouldBlock => {
                     io.sleep(std.Io.Duration.fromMilliseconds(100), std.Io.Clock.awake) catch {};
@@ -283,7 +286,7 @@ pub const NetworkManager = struct {
     
     fn handleIncomingConnection(self: *Self, peer: *Peer, stream: net.Stream) void {
         defer _ = self.active_connections.fetchSub(1, .acq_rel);
-        const io = std.Io.Threaded.global_single_threaded.ioBasic();
+        const io = self.io;
         // Check if shutting down
         if (!self.running) {
             stream.close(io);
@@ -302,7 +305,7 @@ pub const NetworkManager = struct {
         };
         
         var conn = PeerConnection.init(self.allocator, peer, stream, self.message_handler);
-        defer conn.deinit();
+        defer conn.deinit(io);
         
         conn.run(io) catch |err| {
             // Only log if still running
@@ -344,8 +347,8 @@ pub const NetworkManager = struct {
         @atomicStore(bool, &self.running, false, .release);
 
         // Give threads a moment to see the running flag change
-        const io_shutdown = std.Io.Threaded.global_single_threaded.ioBasic();
-        io_shutdown.sleep(std.Io.Duration.fromMilliseconds(100), std.Io.Clock.real) catch {};
+        const io_shutdown = self.io;
+        io_shutdown.sleep(std.Io.Duration.fromMilliseconds(100), std.Io.Clock.awake) catch {};
         
         // Stop peer manager to close all peer connections
         // This will set all peers to disconnected state
@@ -354,7 +357,7 @@ pub const NetworkManager = struct {
         // Deinit the server to unblock accept()
         // Do this AFTER peer manager stop so existing connections can finish
         if (self.server) |*server| {
-            const io = std.Io.Threaded.global_single_threaded.ioBasic();
+            const io = self.io;
             server.deinit(io);
             self.server = null;
         }
@@ -374,8 +377,8 @@ pub const NetworkManager = struct {
                 std.log.info("All {} network threads finished cleanly after {}ms", .{0, waited_ms});
                 break;
             }
-            const io_wait = std.Io.Threaded.global_single_threaded.ioBasic();
-            io_wait.sleep(std.Io.Duration.fromMilliseconds(poll_interval_ms), std.Io.Clock.real) catch {};
+            const io_wait = self.io;
+            io_wait.sleep(std.Io.Duration.fromMilliseconds(poll_interval_ms), std.Io.Clock.awake) catch {};
             waited_ms += poll_interval_ms;
         }
 

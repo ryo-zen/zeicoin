@@ -18,9 +18,8 @@ pub const PingMessage = struct {
         };
     }
     
-    pub fn encode(self: Self, writer: anytype) !void {
-        var w = writer;
-        try std.Io.Writer.writeInt(&w, u64, self.nonce, .little);
+    pub fn encode(self: *const Self, writer: anytype) !void {
+        try std.Io.Writer.writeInt(writer, u64, self.nonce, .little);
     }
     
     pub fn decode(reader: anytype) !Self {

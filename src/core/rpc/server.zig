@@ -38,7 +38,7 @@ pub const RPCServer = struct {
         errdefer allocator.free(secondary_path);
 
         const address = try net.IpAddress.parse("0.0.0.0", port);
-        const io = std.Io.Threaded.global_single_threaded.ioBasic();
+        const io = blockchain.io;
         const server = try address.listen(io, .{
             .reuse_address = true,
         });
@@ -64,7 +64,7 @@ pub const RPCServer = struct {
             secondary.deinit();
         }
         self.allocator.free(self.secondary_path);
-        const io = std.Io.Threaded.global_single_threaded.ioBasic();
+        const io = self.blockchain.io;
         self.server.deinit(io);
         self.allocator.destroy(self);
     }
@@ -135,7 +135,7 @@ pub const RPCServer = struct {
     }
 
     fn acceptWithTimeout(self: *RPCServer) !net.Stream {
-        const io = std.Io.Threaded.global_single_threaded.ioBasic();
+        const io = self.blockchain.io;
         const timeout_s: i64 = 1;
         const start_time = util.getTime();
 
@@ -146,7 +146,7 @@ pub const RPCServer = struct {
 
             const connection = self.server.accept(io) catch |err| {
                 if (err == error.WouldBlock) {
-                    io.sleep(std.Io.Duration.fromMilliseconds(10), std.Io.Clock.real) catch {};
+                    io.sleep(std.Io.Duration.fromMilliseconds(10), std.Io.Clock.awake) catch {};
                     continue;
                 }
                 return err;

@@ -21,7 +21,7 @@ pub const PeersMessage = struct {
         allocator.free(self.addresses);
     }
     
-    pub fn encode(self: PeersMessage, writer: anytype) !void {
+    pub fn encode(self: *const PeersMessage, writer: anytype) !void {
         try std.Io.Writer.writeInt(writer, u32, @intCast(self.addresses.len), .little);
         for (self.addresses) |addr| {
             try writer.writeAll(&addr.ip);

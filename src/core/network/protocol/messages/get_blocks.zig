@@ -24,12 +24,11 @@ pub const GetBlocksMessage = struct {
         allocator.free(self.hashes);
     }
     
-    pub fn encode(self: Self, writer: anytype) !void {
-        var w = writer;
-        try w.writeInt(u32, @intCast(self.hashes.len), .little);
+    pub fn encode(self: *const Self, writer: anytype) !void {
+        try writer.writeInt(u32, @intCast(self.hashes.len), .little);
         
         for (self.hashes) |hash| {
-            try w.writeAll(&hash);
+            try writer.writeAll(&hash);
         }
     }
     
@@ -69,7 +68,7 @@ test "GetBlocksMessage encode/decode" {
     
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
-    try msg.encode(aw.writer);
+    try msg.encode(&aw.writer);
     
     var reader = std.Io.Reader.fixed(aw.written());
     var decoded = try GetBlocksMessage.decode(allocator, &reader);

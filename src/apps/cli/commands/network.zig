@@ -7,6 +7,7 @@ const print = std.debug.print;
 
 const zeicoin = @import("zeicoin");
 const types = zeicoin.types;
+const util = zeicoin.util;
 
 const connection = @import("../client/connection.zig");
 
@@ -34,7 +35,7 @@ pub fn handleStatus(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]
     print("📊 ZeiCoin Network Status:\n", .{});
 
     // Show server information (try to get it, fallback to localhost)
-    if (connection.getServerIP(allocator, io)) |server_ip| {
+    if (util.getEnvVarOwned(allocator, "ZEICOIN_SERVER")) |server_ip| {
         defer allocator.free(server_ip);
         print("🌐 Server: {s}:10802\n", .{server_ip});
     } else |_| {

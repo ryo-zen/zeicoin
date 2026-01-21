@@ -12,7 +12,7 @@ pub const GenesisBlocks = struct {
     /// Created: 2025-09-09 09:09:09.090 UTC
     /// Purpose: Development, testing, and experimentation
     pub const TESTNET = struct {
-        pub const HASH: [32]u8 = [_]u8{ 0x28, 0x26, 0xca, 0xb2, 0x24, 0x8f, 0x49, 0xab, 0xc9, 0x58, 0x46, 0x5a, 0xdc, 0x65, 0x0c, 0xe9, 0x8b, 0x37, 0xd4, 0x4c, 0xe4, 0xd8, 0x84, 0x5a, 0x86, 0xf6, 0xd8, 0xec, 0xd0, 0x57, 0xd4, 0xd5 };
+        pub const HASH: [32]u8 = [_]u8{ 0xd2, 0x6f, 0x16, 0xbc, 0xf6, 0xb5, 0x7e, 0xf3, 0x14, 0x15, 0x2c, 0xe6, 0x33, 0x84, 0xa5, 0x82, 0xed, 0xeb, 0x1b, 0x66, 0xd8, 0x42, 0x27, 0x09, 0x47, 0x06, 0x7b, 0x6c, 0x6e, 0x74, 0xfd, 0xdc };
 
         pub const MESSAGE = "ZeiCoin TestNet Genesis - A minimal digital currency written in ⚡Zig";
         pub const TIMESTAMP: u64 = 1757408949090; // September 9, 2025 09:09:09.090 UTC
@@ -235,4 +235,42 @@ test "Genesis block validation" {
 
     const log = std.log.scoped(.chain);
     log.info("✅ Genesis block validation tests passed", .{});
+}
+
+test "Verify Alice Genesis Address" {
+    const bip39 = @import("../crypto/bip39.zig");
+    const hd = @import("../crypto/hd.zig");
+    const allocator = std.testing.allocator;
+
+    const mnemonic = "useful humor stage innocent obvious detail project tribe vehicle bulb burst cable dignity asthma wisdom tilt settle light slight clean bring scrap outside detail";
+    const seed = bip39.mnemonicToSeed(mnemonic, "");
+    
+    // Derive master key
+    const master = hd.HDKey.fromSeed(seed);
+    
+    // Derive path m/44'/882'/0'/0/0
+    // 44' = 44 | 0x80000000 = 2147483692
+    // 882' = 882 | 0x80000000 = 2147484530
+    // 0' = 0 | 0x80000000 = 2147483648
+    // 0 = 0
+    // 0 = 0
+    const path = [_]u32{
+        44 | 0x80000000,
+        882 | 0x80000000,
+        0 | 0x80000000,
+        0,
+        0
+    };
+    
+    const derived = try hd.derivePath(&master, &path);
+    const address = derived.getAddress();
+    
+    // Encode to string to compare
+    const address_str = try address.toBech32(allocator, .testnet);
+    defer allocator.free(address_str);
+    
+    // Compare with Alice's address in genesis
+    const expected = "tzei1qqdewjya5ckmcz9pmr0duwrzx04jdvysdyw8ykl0";
+    
+    try std.testing.expectEqualStrings(expected, address_str);
 }

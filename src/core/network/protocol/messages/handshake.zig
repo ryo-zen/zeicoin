@@ -65,23 +65,22 @@ pub const HandshakeMessage = struct {
         allocator.free(self.user_agent);
     }
     
-    pub fn encode(self: Self, writer: anytype) !void {
-        var w = writer;
-        try std.Io.Writer.writeInt(&w, u16, self.version, .little);
-        try std.Io.Writer.writeInt(&w, u64, self.services, .little);
-        try std.Io.Writer.writeInt(&w, i64, self.timestamp, .little);
-        try std.Io.Writer.writeInt(&w, u16, self.listen_port, .little);
-        try std.Io.Writer.writeInt(&w, u64, self.nonce, .little);
+    pub fn encode(self: *const Self, writer: anytype) !void {
+        try writer.writeInt(u16, self.version, .little);
+        try writer.writeInt(u64, self.services, .little);
+        try writer.writeInt(i64, self.timestamp, .little);
+        try writer.writeInt(u16, self.listen_port, .little);
+        try writer.writeInt(u64, self.nonce, .little);
 
         // Write user agent with length prefix
-        try std.Io.Writer.writeInt(&w, u16, @intCast(self.user_agent.len), .little);
-        try w.writeAll(self.user_agent);
+        try writer.writeInt(u16, @intCast(self.user_agent.len), .little);
+        try writer.writeAll(self.user_agent);
 
-        try std.Io.Writer.writeInt(&w, u32, self.start_height, .little);
-        try std.Io.Writer.writeInt(&w, u32, self.network_id, .little);
-        try w.writeAll(&self.best_block_hash);
-        try std.Io.Writer.writeInt(&w, u64, self.current_difficulty, .little);
-        try w.writeAll(&self.genesis_hash);
+        try writer.writeInt(u32, self.start_height, .little);
+        try writer.writeInt(u32, self.network_id, .little);
+        try writer.writeAll(&self.best_block_hash);
+        try writer.writeInt(u64, self.current_difficulty, .little);
+        try writer.writeAll(&self.genesis_hash);
     }
     
     pub fn decode(allocator: std.mem.Allocator, reader: anytype) !Self {
@@ -293,8 +292,7 @@ pub const HandshakeAckMessage = struct {
     
     /// Serialize handshake ack to bytes
     pub fn serialize(self: *const HandshakeAckMessage, writer: anytype) !void {
-        var w = writer;
-        try std.Io.Writer.writeInt(&w, u32, self.current_height, .little);
+        try writer.writeInt(u32, self.current_height, .little);
     }
     
     /// Encode method for compatibility with wire protocol
@@ -335,7 +333,7 @@ test "HandshakeMessage encode/decode" {
     
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
-    try msg.encode(aw.writer);
+    try msg.encode(&aw.writer);
     
     var reader = std.Io.Reader.fixed(aw.written());
     var decoded = try HandshakeMessage.decode(allocator, &reader);

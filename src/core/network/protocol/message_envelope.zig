@@ -133,7 +133,7 @@ pub fn encodeMessage(
     // Use ArrayList's automatic resizing instead of magic numbers
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
-    try message.encode(aw.writer);
+    try message.encode(&aw.writer);
 
     return MessageEnvelope.init(allocator, msg_type, aw.written());
 }
@@ -287,7 +287,7 @@ test "MessageEnvelope round-trip with const correctness" {
     const const_envelope: *const MessageEnvelope = &envelope;
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
-    try const_envelope.serialize(aw.writer);
+    try const_envelope.serialize(&aw.writer);
 
     // Test deserialize
     var reader = std.Io.Reader.fixed(aw.written());
@@ -338,15 +338,13 @@ test "MessageEnvelope zero-copy deserialization" {
     defer original.deinit();
 
     // Serialize
-    var buffer = std.array_list.Managed(u8).init(allocator);
-    defer buffer.deinit();
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
-    try original.serialize(aw.writer);
+    try original.serialize(&aw.writer);
 
     // Test zero-copy deserialize
     var backing_buffer: [1024]u8 = undefined;
-    var reader = std.Io.Reader.fixed(buffer.items);
+    var reader = std.Io.Reader.fixed(aw.written());
     const decoded = try MessageEnvelope.deserializeZeroCopy(&reader, &backing_buffer);
 
     // Verify (no deinit needed - using backing buffer)

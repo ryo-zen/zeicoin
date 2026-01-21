@@ -25,7 +25,7 @@ pub fn zenProofOfWorkRandomX(ctx: MiningContext, block: *types.Block) bool {
     }
     
     const mode: randomx.RandomXMode = if (types.ZenMining.RANDOMX_MODE) .fast else .light;
-    var rx_ctx = randomx.RandomXContext.init(ctx.allocator, &hex_key, mode) catch {
+    var rx_ctx = randomx.RandomXContext.init(ctx.allocator, ctx.blockchain.io, &hex_key, mode) catch {
         log.info("❌ Failed to initialize RandomX context", .{});
         return false;
     };

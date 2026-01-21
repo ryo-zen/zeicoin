@@ -132,6 +132,7 @@ trap cleanup EXIT
 echo -e "${BLUE}🧹 Pre-test cleanup...${NC}"
 rm -f zeicoin_data_testnet/wallets/edge_*.wallet 2>/dev/null || true
 rm -f zeicoin_data_testnet/wallets/test_*.wallet 2>/dev/null || true
+rm -f zeicoin_data_testnet/wallets/this_is_exactly_63_characters_long_wallet_name_abcdefghijklmno.wallet 2>/dev/null || true
 
 # Start server in background
 echo -e "${BLUE}🚀 Starting ZeiCoin server...${NC}"

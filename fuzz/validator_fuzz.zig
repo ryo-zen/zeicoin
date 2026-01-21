@@ -67,10 +67,10 @@ const FuzzStats = struct {
 
 // Helper: Create a valid baseline transaction
 fn createValidTransaction() !Transaction {
-    var keypair = try key.KeyPair.generateNew();
+    var keypair = try key.KeyPair.generateNew(std.Io.Threaded.global_single_threaded.ioBasic());
     defer keypair.deinit();
 
-    var recipient_keypair = try key.KeyPair.generateNew();
+    var recipient_keypair = try key.KeyPair.generateNew(std.Io.Threaded.global_single_threaded.ioBasic());
     defer recipient_keypair.deinit();
 
     var tx = Transaction{

@@ -34,7 +34,7 @@ pub const GetMissingBlocksMessage = struct {
     }
 
     /// Encode message for network transmission
-    pub fn encode(self: GetMissingBlocksMessage, writer: anytype) !void {
+    pub fn encode(self: *const GetMissingBlocksMessage, writer: anytype) !void {
         const count = self.block_hashes.items.len;
 
         // Validate count
@@ -103,7 +103,7 @@ pub const MissingBlocksResponseMessage = struct {
     }
 
     /// Encode message (reuse existing block encoding)
-    pub fn encode(self: MissingBlocksResponseMessage, writer: anytype) !void {
+    pub fn encode(self: *const MissingBlocksResponseMessage, writer: anytype) !void {
         const count = self.blocks.items.len;
 
         if (count > GetMissingBlocksMessage.MAX_MISSING_BLOCKS) {

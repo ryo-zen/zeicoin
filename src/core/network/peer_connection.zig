@@ -19,6 +19,7 @@ pub const PeerConnection = struct {
     stream: net.Stream,
     message_handler: MessageHandler,
     running: bool,
+    current_io: ?std.Io,
 
     const Self = @This();
 
@@ -38,15 +39,16 @@ pub const PeerConnection = struct {
             .stream = stream,
             .message_handler = handler,
             .running = false,
+            .current_io = null,
         };
     }
 
     /// Clean up peer connection resources
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *Self, io: std.Io) void {
         self.running = false;
+        self.current_io = null;
         // Clear the callback BEFORE closing the stream
         self.peer.setTcpSendCallback(null, null);
-        const io = std.Io.Threaded.global_single_threaded.ioBasic();
         self.stream.close(io);
         
         // Release peer reference
@@ -67,7 +69,11 @@ pub const PeerConnection = struct {
     /// Handles the full connection lifecycle including handshake, message processing, and cleanup
     pub fn run(self: *Self, io: std.Io) !void {
         self.running = true;
-        defer self.running = false;
+        self.current_io = io;
+        defer {
+            self.running = false;
+            self.current_io = null;
+        }
 
         std.log.info("Peer {} connected", .{self.peer});
 
@@ -503,12 +509,12 @@ pub const MessageHandler = struct {
 fn tcpSendCallback(ctx: ?*anyopaque, data: []const u8) anyerror!void {
     const self = @as(*PeerConnection, @ptrCast(@alignCast(ctx.?)));
     // Check if connection is still running (safer than accessing peer memory)
-    if (!self.running) {
+    if (!self.running or self.current_io == null) {
         return error.PeerShuttingDown;
     }
     const peer_id = self.peer.id; // Cache the ID
     std.log.debug("Peer {} writing {} bytes to TCP stream", .{ peer_id, data.len });
-    const io = std.Io.Threaded.global_single_threaded.ioBasic();
+    const io = self.current_io.?;
     var buf: [4096]u8 = undefined;
     var writer = self.stream.writer(io, &buf);
     try writer.interface.writeAll(data);

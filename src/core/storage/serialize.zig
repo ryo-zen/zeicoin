@@ -24,7 +24,6 @@ pub const SerializeError = error{
 
 /// Serialize any value to a writer
 pub fn serialize(writer: anytype, value: anytype) SerializeError!void {
-    var w = writer;
     const T = @TypeOf(value);
     const type_info = @typeInfo(T);
 
@@ -57,13 +56,13 @@ pub fn serialize(writer: anytype, value: anytype) SerializeError!void {
         .array => |array_info| {
             if (array_info.child == u8) {
                 // Byte arrays - serialize length then data
-                try serialize(w, @as(u32, array_info.len));
-                try w.writeAll(&value);
+                try serialize(writer, @as(u32, array_info.len));
+                try writer.writeAll(&value);
             } else {
                 // Generic arrays - serialize each element
-                try serialize(w, @as(u32, array_info.len));
+                try serialize(writer, @as(u32, array_info.len));
                 for (value) |item| {
-                    try serialize(w, item);
+                    try serialize(writer, item);
                 }
             }
         },
@@ -73,13 +72,13 @@ pub fn serialize(writer: anytype, value: anytype) SerializeError!void {
                 .slice => {
                     if (ptr_info.child == u8) {
                         // String/byte slice - serialize length then data
-                        try serialize(w, @as(u32, @intCast(value.len)));
-                        try w.writeAll(value);
+                        try serialize(writer, @as(u32, @intCast(value.len)));
+                        try writer.writeAll(value);
                     } else {
                         // Generic slice - serialize each element
-                        try serialize(w, @as(u32, @intCast(value.len)));
+                        try serialize(writer, @as(u32, @intCast(value.len)));
                         for (value) |item| {
-                            try serialize(w, item);
+                            try serialize(writer, item);
                         }
                     }
                 },
@@ -88,8 +87,8 @@ pub fn serialize(writer: anytype, value: anytype) SerializeError!void {
                     const child_info = @typeInfo(ptr_info.child);
                     if (child_info == .array and child_info.array.child == u8) {
                         // String literal - serialize length then data
-                        try serialize(w, @as(u32, @intCast(value.len)));
-                        try w.writeAll(value);
+                        try serialize(writer, @as(u32, @intCast(value.len)));
+                        try writer.writeAll(value);
                     } else {
                         return SerializeError.UnsupportedType;
                     }
@@ -103,11 +102,11 @@ pub fn serialize(writer: anytype, value: anytype) SerializeError!void {
             // For extern structs with fixed layout, write raw bytes
             if (struct_info.layout == .@"extern") {
                 const bytes = std.mem.asBytes(&value);
-                try w.writeAll(bytes);
+                try writer.writeAll(bytes);
             } else {
                 // For regular structs, serialize each field
                 inline for (struct_info.fields) |field| {
-                    try serialize(w, @field(value, field.name));
+                    try serialize(writer, @field(value, field.name));
                 }
             }
         },
@@ -115,10 +114,10 @@ pub fn serialize(writer: anytype, value: anytype) SerializeError!void {
         // Optional types
         .optional => {
             if (value) |val| {
-                try serialize(w, @as(u8, 1)); // Present
-                try serialize(w, val);
+                try serialize(writer, @as(u8, 1)); // Present
+                try serialize(writer, val);
             } else {
-                try serialize(w, @as(u8, 0)); // Null
+                try serialize(writer, @as(u8, 0)); // Null
             }
         },
 
@@ -249,9 +248,8 @@ pub fn deserialize(reader: anytype, comptime T: type, allocator: std.mem.Allocat
 
 // Helper functions for basic types
 fn serializeInt(writer: anytype, value: anytype) !void {
-    var w = writer;
     const bytes = std.mem.toBytes(value);
-    try w.writeAll(&bytes);
+    try writer.writeAll(&bytes);
 }
 
 fn deserializeInt(reader: anytype, comptime T: type) !T {
@@ -261,8 +259,7 @@ fn deserializeInt(reader: anytype, comptime T: type) !T {
 }
 
 fn serializeBool(writer: anytype, value: bool) !void {
-    var w = writer;
-    try w.writeByte(if (value) 1 else 0);
+    try writer.writeByte(if (value) 1 else 0);
 }
 
 fn deserializeBool(reader: anytype) !bool {
@@ -271,9 +268,8 @@ fn deserializeBool(reader: anytype) !bool {
 }
 
 fn serializeU256(writer: anytype, value: u256) !void {
-    var w = writer;
     const bytes = std.mem.toBytes(value);
-    try w.writeAll(&bytes);
+    try writer.writeAll(&bytes);
 }
 
 fn deserializeU256(reader: anytype) !u256 {
@@ -283,9 +279,8 @@ fn deserializeU256(reader: anytype) !u256 {
 }
 
 fn serializeFloat(writer: anytype, value: anytype) !void {
-    var w = writer;
     const bytes = std.mem.toBytes(value);
-    try w.writeAll(&bytes);
+    try writer.writeAll(&bytes);
 }
 
 fn deserializeFloat(reader: anytype, comptime T: type) !T {
@@ -299,7 +294,7 @@ pub fn serializeToBytes(allocator: std.mem.Allocator, value: anytype) ![]u8 {
     var collecting = std.Io.Writer.Allocating.init(allocator);
     defer collecting.deinit();
 
-    try serialize(collecting.writer, value);
+    try serialize(&collecting.writer, value);
     return try collecting.toOwnedSlice();
 }
 
@@ -326,10 +321,10 @@ pub fn writeBlock(writer: anytype, block: types.Block) !void {
     try block.header.serialize(writer);
 
     // Serialize height
-    try std.Io.Writer.writeInt(writer, u32, block.height, .little);
+    try writer.writeInt(u32, block.height, .little);
 
     // Serialize transaction count
-    try std.Io.Writer.writeInt(writer, u32, @intCast(block.transactions.len), .little);
+    try writer.writeInt(u32, @intCast(block.transactions.len), .little);
 
     // Serialize each transaction
     for (block.transactions) |tx| {
@@ -382,23 +377,23 @@ pub fn readBlock(reader: anytype, allocator: std.mem.Allocator) !types.Block {
 
 /// Serialize a Transaction to a writer
 pub fn writeTransaction(writer: anytype, tx: types.Transaction) !void {
-    try std.Io.Writer.writeInt(writer, u16, tx.version, .little);
-    try std.Io.Writer.writeInt(writer, u16, @bitCast(tx.flags), .little);
+    try writer.writeInt(u16, tx.version, .little);
+    try writer.writeInt(u16, @bitCast(tx.flags), .little);
     try writer.writeAll(std.mem.asBytes(&tx.sender));
     try writer.writeAll(std.mem.asBytes(&tx.recipient));
-    try std.Io.Writer.writeInt(writer, u64, tx.amount, .little);
-    try std.Io.Writer.writeInt(writer, u64, tx.fee, .little);
-    try std.Io.Writer.writeInt(writer, u64, tx.nonce, .little);
-    try std.Io.Writer.writeInt(writer, u64, tx.timestamp, .little);
-    try std.Io.Writer.writeInt(writer, u64, tx.expiry_height, .little);
+    try writer.writeInt(u64, tx.amount, .little);
+    try writer.writeInt(u64, tx.fee, .little);
+    try writer.writeInt(u64, tx.nonce, .little);
+    try writer.writeInt(u64, tx.timestamp, .little);
+    try writer.writeInt(u64, tx.expiry_height, .little);
     try writer.writeAll(&tx.sender_public_key);
     try writer.writeAll(std.mem.asBytes(&tx.signature));
-    try std.Io.Writer.writeInt(writer, u16, tx.script_version, .little);
+    try writer.writeInt(u16, tx.script_version, .little);
     
     // Variable length fields with length prefixes
-    try std.Io.Writer.writeInt(writer, u32, @intCast(tx.witness_data.len), .little);
+    try writer.writeInt(u32, @intCast(tx.witness_data.len), .little);
     try writer.writeAll(tx.witness_data);
-    try std.Io.Writer.writeInt(writer, u32, @intCast(tx.extra_data.len), .little);
+    try writer.writeInt(u32, @intCast(tx.extra_data.len), .little);
     try writer.writeAll(tx.extra_data);
 }
 
@@ -445,15 +440,15 @@ test "serialize basic types" {
     defer aw.deinit();
 
     // Test integers
-    try serialize(aw.writer, @as(u32, 42));
-    try serialize(aw.writer, @as(i64, -123));
+    try serialize(&aw.writer, @as(u32, 42));
+    try serialize(&aw.writer, @as(i64, -123));
 
     // Test boolean
-    try serialize(aw.writer, true);
-    try serialize(aw.writer, false);
+    try serialize(&aw.writer, true);
+    try serialize(&aw.writer, false);
 
     // Test float
-    try serialize(aw.writer, @as(f32, 3.14));
+    try serialize(&aw.writer, @as(f32, 3.14));
     // Verify we have data
     try testing.expect(aw.written().len > 0);
 }
@@ -463,9 +458,9 @@ test "deserialize basic types" {
     defer aw.deinit();
 
     // Serialize test data
-    try serialize(aw.writer, @as(u32, 42));
-    try serialize(aw.writer, true);
-    try serialize(aw.writer, @as(f32, 3.14));
+    try serialize(&aw.writer, @as(u32, 42));
+    try serialize(&aw.writer, true);
+    try serialize(&aw.writer, @as(f32, 3.14));
 
     // Deserialize
     var reader = std.Io.Reader.fixed(aw.written());
@@ -484,7 +479,7 @@ test "serialize strings" {
     defer aw.deinit();
 
     const test_string = "Hello ZeiCoin!";
-    try serialize(aw.writer, test_string);
+    try serialize(&aw.writer, test_string);
     // Deserialize
     var reader = std.Io.Reader.fixed(aw.written());
     const result = try deserialize(&reader, []const u8, testing.allocator);
@@ -509,7 +504,7 @@ test "serialize structs" {
         .active = true,
     };
 
-    try serialize(aw.writer, test_data);
+    try serialize(&aw.writer, test_data);
     // Deserialize
     var reader = std.Io.Reader.fixed(aw.written());
     const result = try deserialize(&reader, TestStruct, testing.allocator);
@@ -527,8 +522,8 @@ test "serialize optionals" {
     const some_value: ?u32 = 42;
     const null_value: ?u32 = null;
 
-    try serialize(aw.writer, some_value);
-    try serialize(aw.writer, null_value);
+    try serialize(&aw.writer, some_value);
+    try serialize(&aw.writer, null_value);
     // Deserialize
     var reader = std.Io.Reader.fixed(aw.written());
 

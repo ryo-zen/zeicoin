@@ -21,13 +21,15 @@ pub const RandomXMode = enum {
 // RandomX context using subprocess approach
 pub const RandomXContext = struct {
     allocator: Allocator,
+    io: std.Io,
     key: []u8,
     mode: RandomXMode,
 
-    pub fn init(allocator: Allocator, key: []const u8, mode: RandomXMode) !RandomXContext {
+    pub fn init(allocator: Allocator, io: std.Io, key: []const u8, mode: RandomXMode) !RandomXContext {
         const key_copy = try allocator.dupe(u8, key);
         return RandomXContext{
             .allocator = allocator,
+            .io = io,
             .key = key_copy,
             .mode = mode,
         };
@@ -42,13 +44,6 @@ pub const RandomXContext = struct {
     }
 
     pub fn hashWithDifficulty(self: *RandomXContext, input: []const u8, output: *[32]u8, difficulty_bytes: u8) !void {
-        // Fast path for trivial difficulty (tests): skip RandomX subprocess
-        if (difficulty_bytes == 0) {
-            // Return a dummy hash - any hash passes with difficulty_bytes=0
-            @memset(output, 0);
-            return;
-        }
-
         // Convert input to hex string
         var hex_input = try self.allocator.alloc(u8, input.len * 2);
         defer self.allocator.free(hex_input);
@@ -73,7 +68,7 @@ pub const RandomXContext = struct {
         }
 
         // Use absolute path to prevent PATH manipulation
-        const io = std.Io.Threaded.global_single_threaded.ioBasic();
+        const io = self.io;
         const exe_path = std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io, "./randomx/randomx_helper", self.allocator) catch |err| {
             log.info("Failed to resolve RandomX helper path: {}", .{err});
             return RandomXError.ProcessFailed;
