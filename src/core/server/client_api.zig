@@ -21,6 +21,7 @@ pub const ClientApiServer = struct {
     server: ?net.Server,
     running: std.atomic.Value(bool),
     bind_address: []const u8,
+    port: u16,
     
     const Self = @This();
 
@@ -32,13 +33,14 @@ pub const ClientApiServer = struct {
         try writer.interface.writeAll(data);
     }
 
-    pub fn init(allocator: std.mem.Allocator, blockchain: *zen.ZeiCoin, bind_address: []const u8) Self {
+    pub fn init(allocator: std.mem.Allocator, blockchain: *zen.ZeiCoin, bind_address: []const u8, port: u16) Self {
         return .{ 
             .allocator = allocator,
             .blockchain = blockchain,
             .server = null,
             .running = std.atomic.Value(bool).init(false),
             .bind_address = bind_address,
+            .port = port,
         };
     }
     
@@ -53,10 +55,10 @@ pub const ClientApiServer = struct {
     /// Initialize the listener socket. 
     /// Should be called from the main thread before starting the background loop.
     pub fn setup(self: *Self) !void {
-        const address = try net.IpAddress.parse(self.bind_address, CLIENT_API_PORT);
+        const address = try net.IpAddress.parse(self.bind_address, self.port);
         const io = self.blockchain.io;
         self.server = try address.listen(io, .{ .reuse_address = true });
-        log.info("Client API listening on {s}:{}", .{self.bind_address, CLIENT_API_PORT});
+        log.info("Client API listening on {s}:{}", .{self.bind_address, self.port});
     }
     
     pub fn start(self: *Self) !void {

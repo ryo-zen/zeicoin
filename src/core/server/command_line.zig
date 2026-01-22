@@ -8,6 +8,8 @@ const util = @import("../util/util.zig");
 
 pub const Config = struct {
     port: u16 = network.DEFAULT_PORT,
+    api_port: u16 = 10802,
+    rpc_port: u16 = 10803,
     bootstrap_nodes: []const BootstrapNode = &[_]BootstrapNode{},
     enable_mining: bool = false,
     miner_wallet: ?[]const u8 = null,
@@ -91,6 +93,40 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Conf
             try parseBootstrapNodes(&bootstrap_list, env_bootstrap);
         } else |_| {}
     }
+
+    // Handle environment variables for ports
+    if (util.getEnvVarOwned(allocator, "ZEICOIN_P2P_PORT")) |p2p_port_str| {
+        defer allocator.free(p2p_port_str);
+        config.port = std.fmt.parseInt(u16, p2p_port_str, 10) catch config.port;
+    } else |_| {}
+
+    if (util.getEnvVarOwned(allocator, "ZEICOIN_API_PORT")) |api_port_str| {
+        defer allocator.free(api_port_str);
+        config.api_port = std.fmt.parseInt(u16, api_port_str, 10) catch config.api_port;
+    } else |_| {}
+
+    if (util.getEnvVarOwned(allocator, "ZEICOIN_RPC_PORT")) |rpc_port_str| {
+        defer allocator.free(rpc_port_str);
+        config.rpc_port = std.fmt.parseInt(u16, rpc_port_str, 10) catch config.rpc_port;
+    } else |_| {}
+    
+    // Handle mining environment variables
+    if (util.getEnvVarOwned(allocator, "ZEICOIN_MINE_ENABLED")) |mine_enabled_str| {
+        defer allocator.free(mine_enabled_str);
+        config.enable_mining = std.mem.eql(u8, mine_enabled_str, "true");
+    } else |_| {}
+    
+    if (config.miner_wallet == null) {
+        if (util.getEnvVarOwned(allocator, "ZEICOIN_MINER_WALLET")) |miner_wallet| {
+            config.miner_wallet = miner_wallet; // Transfer ownership
+        } else |_| {}
+    }
+
+    // Handle client API environment variable
+    if (util.getEnvVarOwned(allocator, "ZEICOIN_CLIENT_API_ENABLED")) |api_enabled_str| {
+        defer allocator.free(api_enabled_str);
+        config.client_api_disabled = std.mem.eql(u8, api_enabled_str, "false");
+    } else |_| {}
     
     // No default bootstrap nodes - nodes without bootstrap config act as bootstrap nodes themselves
     

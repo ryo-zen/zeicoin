@@ -123,41 +123,41 @@ fn detectNodeAddress(allocator: std.mem.Allocator) ![]const u8 {
 
 /// Load configuration from environment variables
 fn loadConfig(allocator: std.mem.Allocator) !PgConfig {
-    const database = std.process.getEnvVarOwned(allocator, "ZEICOIN_DB_NAME") catch
+    const database = zeicoin.util.getEnvVarOwned(allocator, "ZEICOIN_DB_NAME") catch
         try allocator.dupe(u8, "zeicoin_testnet");
     errdefer allocator.free(database);
 
-    const host = std.process.getEnvVarOwned(allocator, "ZEICOIN_DB_HOST") catch
+    const host = zeicoin.util.getEnvVarOwned(allocator, "ZEICOIN_DB_HOST") catch
         try allocator.dupe(u8, "127.0.0.1");
     errdefer allocator.free(host);
 
-    const port_str = std.process.getEnvVarOwned(allocator, "ZEICOIN_DB_PORT") catch null;
+    const port_str = zeicoin.util.getEnvVarOwned(allocator, "ZEICOIN_DB_PORT") catch null;
     const port = if (port_str) |p| blk: {
         defer allocator.free(p);
         break :blk std.fmt.parseInt(u16, p, 10) catch 5432;
     } else 5432;
 
-    const user = std.process.getEnvVarOwned(allocator, "ZEICOIN_DB_USER") catch
+    const user = zeicoin.util.getEnvVarOwned(allocator, "ZEICOIN_DB_USER") catch
         try allocator.dupe(u8, "zeicoin");
     errdefer allocator.free(user);
 
-    const password = std.process.getEnvVarOwned(allocator, "ZEICOIN_DB_PASSWORD") catch |err| {
+    const password = zeicoin.util.getEnvVarOwned(allocator, "ZEICOIN_DB_PASSWORD") catch |err| {
         print("❌ ZEICOIN_DB_PASSWORD environment variable is required\n", .{});
         return err;
     };
     errdefer allocator.free(password);
 
-    const node_address = std.process.getEnvVarOwned(allocator, "ZEICOIN_MONITOR_NODE_ADDRESS") catch
+    const node_address = zeicoin.util.getEnvVarOwned(allocator, "ZEICOIN_MONITOR_NODE_ADDRESS") catch
         try detectNodeAddress(allocator);
     errdefer allocator.free(node_address);
 
-    const severity_str = std.process.getEnvVarOwned(allocator, "ZEICOIN_MONITOR_MIN_SEVERITY") catch null;
+    const severity_str = zeicoin.util.getEnvVarOwned(allocator, "ZEICOIN_MONITOR_MIN_SEVERITY") catch null;
     const min_severity = if (severity_str) |s| blk: {
         defer allocator.free(s);
         break :blk ErrorSeverity.fromString(s);
     } else ErrorSeverity.MEDIUM;
 
-    const service_name = std.process.getEnvVarOwned(allocator, "ZEICOIN_MONITOR_SERVICE") catch
+    const service_name = zeicoin.util.getEnvVarOwned(allocator, "ZEICOIN_MONITOR_SERVICE") catch
         try allocator.dupe(u8, "zeicoin-mining.service");
     errdefer allocator.free(service_name);
 

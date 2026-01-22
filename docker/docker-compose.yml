@@ -52,7 +52,7 @@ services:
     environment:
       <<: *common-env
       ZEICOIN_BOOTSTRAP: miner-1:10801
-      ZEICOIN_MINE_ENABLED: true
+      ZEICOIN_MINE_ENABLED: false
       ZEICOIN_MINER_WALLET: miner2
       ZEICOIN_WALLET_PASSWORD: miner123
     depends_on:

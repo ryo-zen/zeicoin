@@ -75,7 +75,7 @@ pub const PeerConnection = struct {
             self.current_io = null;
         }
 
-        std.log.info("Peer {} connected", .{self.peer});
+        std.log.info("Peer {} connected ({})", .{ self.peer.id, self.peer.address });
 
         // Set up TCP send callback for this peer
         self.peer.setTcpSendCallback(tcpSendCallback, self);
@@ -248,38 +248,6 @@ pub const PeerConnection = struct {
         const our_difficulty = try self.message_handler.getCurrentDifficulty(io);
         handshake.checkPeerCompatibility(our_height, our_difficulty) catch |err| {
             switch (err) {
-                error.DifficultyConsensusMismatch => {
-                    // FORK RESOLUTION: Check if this is an equal-height fork scenario
-                    if (handshake.start_height == our_height and
-                        !std.mem.eql(u8, &handshake.best_block_hash, &our_best_hash))
-                    {
-                        std.log.warn("⚠️ [FORK DETECTED] Equal-height fork with peer {} at height {}", .{ peer_id, our_height });
-                        std.log.warn("   🔀 Our block hash: {x}", .{&our_best_hash});
-                        std.log.warn("   🔀 Peer block hash: {x}", .{&handshake.best_block_hash});
-
-                        // ETHEREUM-STYLE TIE-BREAKER: Compare hashes lexicographically
-                        const hash_comparison = compareHashesLexicographic(&handshake.best_block_hash, &our_best_hash);
-                        if (hash_comparison > 0) {
-                            std.log.warn("   🏆 [TIE-BREAKER] Peer's chain wins (higher hash)", .{});
-                            std.log.warn("   🔄 [TIE-BREAKER] We should reorganize to peer's chain", .{});
-                        } else if (hash_comparison < 0) {
-                            std.log.warn("   🏆 [TIE-BREAKER] Our chain wins (higher hash)", .{});
-                            std.log.warn("   💡 [TIE-BREAKER] Peer should reorganize to our chain", .{});
-                        } else {
-                            std.log.warn("   ⚠️ [TIE-BREAKER] Identical hashes (should never happen!)", .{});
-                        }
-
-                        std.log.info("   💡 FORK RESOLUTION: Allowing connection - tie-breaker determined winner", .{});
-
-                        // Allow connection - fork will be resolved via tie-breaker
-                        // Don't disconnect! Connection needed for reorganization
-                    } else {
-                        std.log.warn("❌ [CONSENSUS ERROR] Disconnecting peer {} due to difficulty mismatch", .{peer_id});
-                        std.log.warn("   💡 This indicates the peer is using different consensus rules", .{});
-                        std.log.warn("   💡 Both nodes may need to reset to a common genesis state", .{});
-                        return err;
-                    }
-                },
                 error.IncompatibleProtocolVersion => {
                     std.log.warn("❌ [PROTOCOL ERROR] Peer {} has incompatible protocol version {}", .{ peer_id, handshake.version });
                     std.log.warn("   💡 Peer needs to upgrade to protocol version {}", .{@import("protocol/protocol.zig").PROTOCOL_VERSION});
@@ -398,8 +366,7 @@ pub const PeerConnection = struct {
 
     fn handleBlocks(self: *Self, blocks: void) !void {
         _ = blocks; // blocks message type has no payload (void)
-        std.log.debug("Received blocks message from {}", .{self.peer});
-    }
+                        std.log.debug("Received blocks message from peer {}", .{self.peer.id});    }
 
     fn handleGetPeers(self: *Self, io: std.Io, get_peers: message_types.GetPeersMessage) !void {
         try self.message_handler.onGetPeers(io, self.peer, get_peers);

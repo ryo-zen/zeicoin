@@ -839,7 +839,8 @@ pub const PeerManager = struct {
         var syncing: usize = 0;
 
         for (self.peers.items) |peer| {
-            if (peer.state == .connected) connected += 1;
+            // Count connecting/handshaking as connected for maintenance purposes
+            if (peer.state == .connected or peer.state == .connecting or peer.state == .handshaking) connected += 1;
             if (peer.syncing) syncing += 1;
         }
 

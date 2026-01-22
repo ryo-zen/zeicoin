@@ -64,10 +64,14 @@ pub fn main(init: std.process.Init) !void {
     var api_server_ptr: ?*client_api.ClientApiServer = null;
     if (!config.client_api_disabled) {
         api_server_ptr = try allocator.create(client_api.ClientApiServer);
-        api_server_ptr.?.* = client_api.ClientApiServer.init(allocator, components.blockchain, config.bind_address);
+        api_server_ptr.?.* = client_api.ClientApiServer.init(allocator, components.blockchain, config.bind_address, config.api_port);
 
         // Initialize listener before spawning thread to catch early errors
-        try api_server_ptr.?.setup();
+        api_server_ptr.?.setup() catch |err| {
+            allocator.destroy(api_server_ptr.?);
+            api_server_ptr = null;
+            return err;
+        };
 
         const api_thread = std.Thread.spawn(.{}, client_api.ClientApiServer.start, .{api_server_ptr.?}) catch |err| blk: {
             log.err("❌ Failed to spawn Client API thread: {}", .{err});
@@ -78,16 +82,15 @@ pub fn main(init: std.process.Init) !void {
             std.log.info("✅ Client API thread detached", .{});
         }
     }
-    defer if (api_server_ptr) |server| {
-        server.deinit();
-        allocator.destroy(server);
+    defer if (api_server_ptr) |server_ptr| {
+        server_ptr.deinit();
+        allocator.destroy(server_ptr);
     };
 
     // Start RPC server
-    const RPC_PORT = 10803;
     const types = @import("../types/types.zig");
     const data_dir = types.CURRENT_NETWORK.getDataDir();
-    var rpc_server = try RPCServer.init(allocator, components.blockchain, data_dir, RPC_PORT);
+    var rpc_server = try RPCServer.init(allocator, components.blockchain, data_dir, config.rpc_port);
     defer rpc_server.deinit();
 
     const rpc_thread = try std.Thread.spawn(.{}, RPCServer.start, .{rpc_server});

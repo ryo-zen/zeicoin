@@ -24,7 +24,7 @@ pub fn getEnvVarOwned(allocator: std.mem.Allocator, key: []const u8) GetEnvError
     const val_c = c.getenv(key_c);
     if (val_c == null) return error.EnvironmentVariableMissing;
 
-    return allocator.dupe(u8, std.mem.span(val_c));
+    return allocator.dupe(u8, std.mem.span(val_c)) catch error.OutOfMemory;
 }
 
 /// Simple logging utilities for blockchain

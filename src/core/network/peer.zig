@@ -503,7 +503,11 @@ pub const NetworkManager = struct {
                     };
 
                     self.connectToPeer(address) catch |err| {
-                        std.log.debug("Failed to connect to {any}: {}", .{ address, err });
+                        if (err == error.AlreadyConnected) {
+                            std.log.debug("Already connected to bootstrap node {any}", .{address});
+                        } else {
+                            std.log.debug("Failed to connect to {any}: {}", .{ address, err });
+                        }
                         continue;
                     };
 

@@ -121,9 +121,14 @@ pub const DotEnv = struct {
 
                 // setenv copies the strings internally, so we can free ours
                 // 0 = don't overwrite if exists (env vars take precedence)
-                const result = c.setenv(key_cstr, value_cstr, 0);
-                if (result != 0) {
-                    return error.SetEnvFailed;
+                const existing = c.getenv(key_cstr);
+                if (existing == null) {
+                    const result = c.setenv(key_cstr, value_cstr, 0);
+                    if (result != 0) {
+                        return error.SetEnvFailed;
+                    }
+                } else {
+                    // std.debug.print("DEBUG: DOTENV skipping {s} because it exists with value {s}\n", .{entry.key_ptr.*, std.mem.span(existing.?)});
                 }
             }
         }

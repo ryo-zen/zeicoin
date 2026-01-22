@@ -174,9 +174,17 @@ pub fn initializeNode(allocator: std.mem.Allocator, io: std.Io, config: command_
     
     // Load consensus configuration from environment
     loadConsensusConfig();
+
+    // Check for ZEICOIN_DATA_DIR override
+    var data_dir_override: ?[]u8 = null;
+    if (util.getEnvVarOwned(allocator, "ZEICOIN_DATA_DIR")) |dir| {
+        data_dir_override = dir;
+        std.log.info("📂 Using data directory override: {s}", .{dir});
+    } else |_| {}
+    defer if (data_dir_override) |dir| allocator.free(dir);
     
     // Initialize blockchain
-    const blockchain = try zen.ZeiCoin.init(allocator, io, null);
+    const blockchain = try zen.ZeiCoin.init(allocator, io, data_dir_override);
     errdefer {
         blockchain.deinit();
         allocator.destroy(blockchain);
@@ -241,7 +249,7 @@ pub fn initializeNode(allocator: std.mem.Allocator, io: std.Io, config: command_
     // Initialize mining if enabled - but delay actual mining start until after sync
     if (config.enable_mining) {
         // miner_wallet is guaranteed to be non-null when enable_mining is true
-        if (initializeMiningSystem(blockchain, io, config.miner_wallet.?)) {
+        if (initializeMiningSystem(blockchain, io, config.miner_wallet.?, data_dir_override)) {
             std.log.info("⛏️  Mining system initialized - will start mining after initial sync", .{});
         } else |err| {
             // Handle mining initialization errors gracefully without exposing internals
@@ -293,7 +301,7 @@ fn createMessageHandler(allocator: std.mem.Allocator, blockchain: *zen.ZeiCoin) 
     };
 }
 
-fn initializeMiningSystem(blockchain: *zen.ZeiCoin, io: std.Io, miner_wallet_name: []const u8) !void {
+fn initializeMiningSystem(blockchain: *zen.ZeiCoin, io: std.Io, miner_wallet_name: []const u8, data_dir_override: ?[]const u8) !void {
     const allocator = blockchain.allocator;
     
     // Load specified mining wallet
@@ -305,7 +313,7 @@ fn initializeMiningSystem(blockchain: *zen.ZeiCoin, io: std.Io, miner_wallet_nam
     var wallet_obj = wallet.Wallet.init(allocator);
     
     // Build proper wallet path (wallet_name is already safely owned by Config)
-    const data_dir = types.CURRENT_NETWORK.getDataDir();
+    const data_dir = if (data_dir_override) |dir| dir else types.CURRENT_NETWORK.getDataDir();
     const wallet_path = try std.fmt.allocPrint(allocator, "{s}/wallets/{s}.wallet", .{ data_dir, wallet_name });
     defer allocator.free(wallet_path);
     

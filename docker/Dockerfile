@@ -18,12 +18,12 @@ RUN apt-get update && apt-get install -y \
     netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Zig 0.14.1
-RUN wget https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz && \
-    tar -xf zig-x86_64-linux-0.14.1.tar.xz && \
-    mv zig-x86_64-linux-0.14.1 /usr/local/zig && \
+# Install Zig 0.16.0-dev
+RUN wget https://ziglang.org/builds/zig-x86_64-linux-0.16.0-dev.2261+d6b3dd25a.tar.xz && \
+    tar -xf zig-x86_64-linux-0.16.0-dev.2261+d6b3dd25a.tar.xz && \
+    mv zig-x86_64-linux-0.16.0-dev.2261+d6b3dd25a /usr/local/zig && \
     ln -s /usr/local/zig/zig /usr/local/bin/zig && \
-    rm zig-x86_64-linux-0.14.1.tar.xz
+    rm zig-x86_64-linux-0.16.0-dev.2261+d6b3dd25a.tar.xz
 
 WORKDIR /zeicoin
 
