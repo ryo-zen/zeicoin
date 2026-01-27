@@ -82,11 +82,19 @@ pub const BlockVersion = enum(u32) {
 // Current block version used by the protocol
 pub const CURRENT_BLOCK_VERSION: u32 = @intFromEnum(BlockVersion.V0);
 
-// Mining constants - Network-specific coinbase maturity
-pub const COINBASE_MATURITY: u32 = switch (CURRENT_NETWORK) {
-    .testnet => 10, // TestNet: 10 blocks for faster testing
-    .mainnet => 100, // MainNet: 100 blocks for security
-};
+// Mining constants - Coinbase maturity (blocks before mining reward can be spent)
+// Note: This is a function because TEST_MODE is runtime-initialized
+pub fn getCoinbaseMaturity() u32 {
+    if (TEST_MODE) return 2; // Docker testing - very fast reorgs
+
+    return switch (CURRENT_NETWORK) {
+        .testnet => 10, // TestNet: 10 blocks for faster testing
+        .mainnet => 100, // MainNet: 100 blocks for security
+    };
+}
+
+// Keep const for backward compatibility (calls function)
+pub const COINBASE_MATURITY: u32 = 100; // Default production value
 
 // Bootstrap node configuration structure
 pub const BootstrapConfig = struct {
@@ -563,10 +571,18 @@ pub const DifficultyTarget = struct {
     /// Create initial difficulty target for network
     pub fn initial(network: NetworkType) DifficultyTarget {
         return switch (network) {
-            .testnet => DifficultyTarget{
-                .base_bytes = 0, // TEST: No leading zeros required
-                .threshold = 0x09FFFFFF, // TEST: 9ffffff as requested (approx 3.7% chance per hash)
-            },
+            .testnet => if (TEST_MODE)
+                // Docker/local testing mode - very easy difficulty for fast reorgs
+                DifficultyTarget{
+                    .base_bytes = 0, // No leading zeros required
+                    .threshold = 0x09FFFFFF, // ~3.7% chance per hash
+                }
+            else
+                // Production testnet - standard easy difficulty
+                DifficultyTarget{
+                    .base_bytes = 1, // 1 leading zero byte required
+                    .threshold = 0xFFFFFFF0, // EXTREMELY easy - instant blocks
+                },
             .mainnet => DifficultyTarget{
                 .base_bytes = 2,
                 .threshold = 0x00008000, // Middle of 2-byte range
@@ -1228,6 +1244,21 @@ pub const NetworkType = enum {
 /// Current network configuration
 pub const CURRENT_NETWORK: NetworkType = .testnet; // Change to .mainnet for production
 
+/// Test mode enables easier difficulty for Docker/local testing
+/// Set via ZEICOIN_TEST_MODE=true environment variable
+pub var TEST_MODE: bool = false;
+
+/// Initialize test mode from environment (call at startup)
+pub fn initTestMode() void {
+    if (util.getEnvVarOwned(std.heap.page_allocator, "ZEICOIN_TEST_MODE")) |mode_str| {
+        defer std.heap.page_allocator.free(mode_str);
+        TEST_MODE = std.mem.eql(u8, mode_str, "true") or std.mem.eql(u8, mode_str, "1");
+        if (TEST_MODE) {
+            log.warn("⚠️  TEST_MODE enabled - using easy difficulty for testing", .{});
+        }
+    } else |_| {}
+}
+
 /// Network-specific configurations
 pub const NetworkConfig = struct {
     randomx_mode: bool, // false = light (256MB), true = fast (2GB)
@@ -1288,10 +1319,6 @@ pub const ZenMining = struct {
     pub const RANDOMX_MODE: bool = NetworkConfig.current().randomx_mode;
     pub const DIFFICULTY_ADJUSTMENT_PERIOD: u64 = 20; // Adjust every 20 blocks (balanced security vs responsiveness)
     pub const MAX_ADJUSTMENT_FACTOR: f64 = 2.0; // Maximum 2x change per adjustment
-    pub const COINBASE_MATURITY: u32 = switch (CURRENT_NETWORK) {
-        .testnet => 10, // TestNet: 10 blocks for faster testing
-        .mainnet => 100, // MainNet: 100 blocks for security
-    };
 
     /// Halving interval - blocks between each reward halving
     /// TestNet: 100 blocks (~17 minutes at 10s blocks) for fast testing

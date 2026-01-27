@@ -635,8 +635,22 @@ pub const SyncManager = struct {
 
     /// Check if we can attempt sync at a given fork height (cooldown expired)
     /// Public API to allow server handlers to check before initiating sync on peer connection
-    pub fn canSyncAtForkHeight(self: *Self, fork_height: u32) bool {
-        log.info("🔍 [SYNC COOLDOWN] Checking if can sync at fork height {}", .{fork_height});
+    /// Overrides cooldown if peer height is significantly higher (clear evidence of longer chain)
+    pub fn canSyncAtForkHeight(self: *Self, fork_height: u32, peer_height: u32) bool {
+        log.info("🔍 [SYNC COOLDOWN] Checking if can sync at fork height {} (peer height: {})", .{ fork_height, peer_height });
+
+        // CRITICAL FIX: If peer is significantly ahead (5+ blocks), allow immediate sync
+        // This handles network partition scenarios where cooldown was added at old height
+        const height_diff = if (peer_height > fork_height) peer_height - fork_height else 0;
+        if (height_diff >= 5) {
+            log.info("🚀 [SYNC COOLDOWN] Peer is {} blocks ahead - overriding cooldown for clear longer chain", .{height_diff});
+            log.info("💡 [SYNC COOLDOWN] Cooldown bypass: peer has significant height advantage", .{});
+
+            // Clean up expired cooldowns while we're here
+            self.cleanupExpiredCooldowns();
+
+            return true;
+        }
 
         // Check if there's an active cooldown for this fork height
         if (self.fork_cooldowns.get(fork_height)) |cooldown_until| {
@@ -657,6 +671,30 @@ pub const SyncManager = struct {
 
         log.info("✅ [SYNC COOLDOWN] All checks passed - sync can proceed at height {}", .{fork_height});
         return true;
+    }
+
+    /// Clean up expired cooldowns to prevent memory bloat
+    fn cleanupExpiredCooldowns(self: *Self) void {
+        const now = util.getTime();
+        var expired_heights = std.array_list.Managed(u32).init(self.allocator);
+        defer expired_heights.deinit();
+
+        // Collect expired heights
+        var iter = self.fork_cooldowns.iterator();
+        while (iter.next()) |entry| {
+            if (now >= entry.value_ptr.*) {
+                expired_heights.append(entry.key_ptr.*) catch continue;
+            }
+        }
+
+        // Remove expired cooldowns
+        for (expired_heights.items) |height| {
+            _ = self.fork_cooldowns.remove(height);
+        }
+
+        if (expired_heights.items.len > 0) {
+            log.info("🧹 [SYNC COOLDOWN] Cleaned up {} expired cooldowns", .{expired_heights.items.len});
+        }
     }
 
     /// Get detailed sync status for monitoring and debugging
@@ -747,7 +785,7 @@ pub const SyncManager = struct {
             current_height;
 
         // Check fork cooldown before attempting sync
-        if (!self.canSyncAtForkHeight(current_height)) {
+        if (!self.canSyncAtForkHeight(current_height, target_height)) {
             log.debug("Sync recovery skipped - fork height in cooldown", .{});
             return;
         }

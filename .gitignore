@@ -91,6 +91,14 @@ fuzz/network_message_fuzz.zig
 /monitoring
 tests_dev/
 
+# === Test Outputs ===
+/test_broadcast_integration
+/test_zeicoin_data_tx_size
+/test_zeicoin_data_validation
+/test_zeicoin_data_tx
+/test_zeicoin_data_mempool
+/test_coinbase_maturity
+
 # === Other ===
 web/l2-test-app.html
 test_spinner3.zig

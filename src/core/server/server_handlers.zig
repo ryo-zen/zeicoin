@@ -115,8 +115,8 @@ pub const ServerHandlers = struct {
                 std.log.info("🔍 [FORK RESOLUTION] Sync manager available, initiating fork resolution", .{});
 
                 // Check fork cooldown before attempting fork resolution
-                const can_sync_at_height = sync_manager.canSyncAtForkHeight(our_height);
-                std.log.info("🔍 [FORK RESOLUTION] Cooldown check for height {}: {}", .{our_height, can_sync_at_height});
+                const can_sync_at_height = sync_manager.canSyncAtForkHeight(our_height, peer.height);
+                std.log.info("🔍 [FORK RESOLUTION] Cooldown check for height {} (peer at {}): {}", .{our_height, peer.height, can_sync_at_height});
 
                 if (!can_sync_at_height) {
                     std.log.info("⏳ [FORK RESOLUTION] Height {} in cooldown, deferring fork resolution", .{our_height});
@@ -162,8 +162,8 @@ pub const ServerHandlers = struct {
 
                 // CRITICAL FIX: Check fork cooldown before attempting sync on peer connection
                 // This prevents immediate sync attempts after fork-related disconnections
-                const can_sync_at_height = sync_manager.canSyncAtForkHeight(our_height);
-                std.log.info("🔍 [PEER CONNECT] Cooldown check for current height {}: {}", .{our_height, can_sync_at_height});
+                const can_sync_at_height = sync_manager.canSyncAtForkHeight(our_height, peer.height);
+                std.log.info("🔍 [PEER CONNECT] Cooldown check for current height {} (peer at {}): {}", .{our_height, peer.height, can_sync_at_height});
 
                 if (!can_sync_at_height) {
                     std.log.info("⏳ [PEER CONNECT] Current height {} in cooldown period, deferring sync", .{our_height});

@@ -18,9 +18,11 @@ x-common: &common
 # Common environment variables
 x-common-env: &common-env
   ZEICOIN_NETWORK: testnet
+  ZEICOIN_TEST_MODE: "true"  # Enable easy difficulty for Docker testing/reorg scenarios
   ZEICOIN_BIND_IP: 0.0.0.0
   ZEICOIN_P2P_PORT: 10801
-  ZEICOIN_SERVER: 0.0.0.0
+  ZEICOIN_API_PORT: 10802
+  ZEICOIN_SERVER: 127.0.0.1
 
 services:
   miner-1:

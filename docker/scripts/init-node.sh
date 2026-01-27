@@ -42,8 +42,11 @@ echo "Bootstrap: ${ZEICOIN_BOOTSTRAP}"
 if [ "$ZEICOIN_MINE_ENABLED" = "true" ]; then
     echo "Mining: Enabled (wallet: ${ZEICOIN_MINER_WALLET})"
 
+    # Determine data directory based on network
+    DATA_DIR="/zeicoin/zeicoin_data_${ZEICOIN_NETWORK}"
+
     # Create miner wallet if it doesn't exist
-    WALLET_FILE="/zeicoin/zeicoin_data/wallets/${ZEICOIN_MINER_WALLET}.wallet"
+    WALLET_FILE="${DATA_DIR}/wallets/${ZEICOIN_MINER_WALLET}.wallet"
     if [ ! -f "$WALLET_FILE" ]; then
         echo "Creating miner wallet: ${ZEICOIN_MINER_WALLET}..."
         if [ -n "$ZEICOIN_WALLET_PASSWORD" ]; then

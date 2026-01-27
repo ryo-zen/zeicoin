@@ -4,6 +4,7 @@
 const std = @import("std");
 const log = std.log.scoped(.server);
 const print = std.debug.print;
+const types = @import("../types/types.zig");
 const command_line = @import("command_line.zig");
 const initialization = @import("initialization.zig");
 const client_api = @import("client_api.zig");
@@ -39,6 +40,9 @@ pub fn main(init: std.process.Init) !void {
             log.info("⚠️  Warning: Failed to load .env file: {}", .{err});
         }
     };
+
+    // Initialize test mode from environment (must be after .env loading)
+    types.initTestMode();
 
     // Parse command line
     var config = command_line.parseArgs(allocator, args) catch |err| switch (err) {
@@ -88,7 +92,6 @@ pub fn main(init: std.process.Init) !void {
     };
 
     // Start RPC server
-    const types = @import("../types/types.zig");
     const data_dir = types.CURRENT_NETWORK.getDataDir();
     var rpc_server = try RPCServer.init(allocator, components.blockchain, data_dir, config.rpc_port);
     defer rpc_server.deinit();

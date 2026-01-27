@@ -200,8 +200,9 @@ pub const ChainOperations = struct {
         try self.chain_state.database.saveBlock(io, height, block);
 
         // Mature coinbase rewards if enough blocks have passed
-        if (height >= types.COINBASE_MATURITY) {
-            const maturity_height = height - types.COINBASE_MATURITY;
+        const coinbase_maturity = types.getCoinbaseMaturity();
+        if (height >= coinbase_maturity) {
+            const maturity_height = height - coinbase_maturity;
             try self.chain_state.matureCoinbaseRewards(io, maturity_height);
         }
 

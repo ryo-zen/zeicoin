@@ -261,9 +261,10 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
         // CRITICAL FIX: Index the new block in memory so getBlockHash/getHash works
         try ctx.blockchain.chain_state.indexBlock(block_height, new_block.hash());
 
-        // Check for matured coinbase rewards (100 block maturity)
-        if (block_height >= types.COINBASE_MATURITY) {
-            const maturity_height = block_height - types.COINBASE_MATURITY;
+        // Check for matured coinbase rewards
+        const coinbase_maturity = types.getCoinbaseMaturity();
+        if (block_height >= coinbase_maturity) {
+            const maturity_height = block_height - coinbase_maturity;
             try ctx.blockchain.chain_state.matureCoinbaseRewards(ctx.blockchain.io, maturity_height);
         }
 

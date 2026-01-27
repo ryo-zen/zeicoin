@@ -282,9 +282,10 @@ pub const ChainProcessor = struct {
     }
 
     fn matureCoinbaseRewards(self: *ChainProcessor, io: std.Io, current_height: u32) !void {
-        // Check if we have mature coinbase rewards (100 block maturity)
-        if (current_height >= types.COINBASE_MATURITY) {
-            const maturity_height = current_height - types.COINBASE_MATURITY;
+        // Check if we have mature coinbase rewards
+        const coinbase_maturity = types.getCoinbaseMaturity();
+        if (current_height >= coinbase_maturity) {
+            const maturity_height = current_height - coinbase_maturity;
             try self.chain_state.matureCoinbaseRewards(io, maturity_height);
         }
     }
