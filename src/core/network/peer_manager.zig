@@ -90,7 +90,10 @@ pub const Peer = struct {
     received_blocks_by_height: std.AutoHashMap(u32, types.Block),   // height -> block
     
     response_mutex: std.Thread.Mutex,  // Protects response queues and block caches
-    
+
+    // Stream reference for external close (PeerManager timeout wakeup)
+    stream: ?net.Stream,
+
     // Reference counting for thread-safe peer lifecycle
     ref_count: std.atomic.Value(u32),
 
@@ -135,6 +138,7 @@ pub const Peer = struct {
             .received_blocks = std.AutoHashMap([32]u8, types.Block).init(allocator),
             .received_blocks_by_height = std.AutoHashMap(u32, types.Block).init(allocator),
             .response_mutex = std.Thread.Mutex{},
+            .stream = null,
             .ref_count = std.atomic.Value(u32).init(1),
         };
     }
@@ -629,9 +633,14 @@ pub const PeerManager = struct {
         defer self.mutex.unlock();
 
         // Mark all peers as disconnected and signal shutdown
+        // Close streams to wake any blocked readers in PeerConnection.run()
         for (self.peers.items) |peer| {
             peer.state = .disconnected;
             peer.is_shutting_down.store(true, .release);
+            if (peer.stream) |s| {
+                s.close(self.io);
+                peer.stream = null;
+            }
         }
     }
 
@@ -793,6 +802,12 @@ pub const PeerManager = struct {
         while (i < self.peers.items.len) {
             const peer = self.peers.items[i];
             if (peer.isTimedOut()) {
+                // Close the stream to wake the blocked reader in PeerConnection.run()
+                if (peer.stream) |s| {
+                    s.close(self.io);
+                    peer.stream = null;  // Prevent double-close in PeerConnection.deinit()
+                }
+                peer.is_shutting_down.store(true, .release);
                 peer.release();
                 _ = self.peers.orderedRemove(i);
                 // Don't increment i since we removed an item

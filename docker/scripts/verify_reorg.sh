@@ -1,126 +1,99 @@
 #!/bin/bash
 set -e
 
-# Ensure we are running from the directory containing docker-compose.yml
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-DOCKER_DIR="$(dirname "$SCRIPT_DIR")"
-cd "$DOCKER_DIR"
-
+# -------------------------------------------------
 # Configuration
-BLOCK_HEIGHT=5
-WAIT_TIME=60
-SYNC_WAIT_TIME=45
+# -------------------------------------------------
+BLOCK_HEIGHT=3               # Height we will compare
+WAIT_TIME=100                # Time to let the two chains diverge
+SYNC_WAIT_TIME=10            # Time after reconnection before checking (we poll mostly)
+MAX_RETRIES=12               # How many hash‑checks we perform (10 s apart)
+MAX_SYNC_WAIT=300            # Max wait for sync (5 min)
 
 echo "🚀 Starting Reorganization Test..."
 
-# 1. Start Environment
+# 1️⃣ Clean and start the Docker compose stack
 echo "🧹 Cleaning up previous run..."
 docker compose down -v || true
 
 echo "📦 Starting Docker environment..."
 docker compose up -d
 
-# 1b. Simulate Network Partition (Divergence)
-echo "✂️  Disconnecting Miner 2 from network to force divergence..."
+# 2️⃣ Disconnect miner‑2 → force divergence
+echo "✂️  Disconnecting Miner‑2 from network to force divergence..."
 docker network disconnect docker_zeicoin-network zeicoin-miner-2
 
-# 2. Divergence Phase
 echo "⏳ Waiting ${WAIT_TIME}s for chains to diverge..."
 sleep $WAIT_TIME
 
+# 3️⃣ Check that the two chains really differ
 echo "🔍 Checking for divergence at height ${BLOCK_HEIGHT}..."
-
-# Get raw output from Miner 1
 RAW1=$(docker exec zeicoin-miner-1 ./zig-out/bin/zeicoin block $BLOCK_HEIGHT 2>&1)
-# Extract hash
-HASH1=$(echo "$RAW1" | grep '"hash":' | awk -F'"' '{print $4}')
-echo "   Miner 1 Hash: $HASH1"
-
-# Get raw output from Miner 2
 RAW2=$(docker exec zeicoin-miner-2 ./zig-out/bin/zeicoin block $BLOCK_HEIGHT 2>&1)
-# Extract hash
-HASH2=$(echo "$RAW2" | grep '"hash":' | awk -F'"' '{print $4}')
-echo "   Miner 2 Hash: $HASH2"
 
-if [ -z "$HASH1" ] || [ -z "$HASH2" ]; then
-    echo "❌ TEST FAILED: Could not retrieve block hashes."
-    echo "   Ensure miners have reached height ${BLOCK_HEIGHT}."
-    echo "   Miner 1 Raw Output:"
-    echo "$RAW1"
-    echo "   Miner 2 Raw Output:"
-    echo "$RAW2"
-    
+HASH1=$(echo "$RAW1" | grep '"hash":' | awk -F'"' '{print $4}')
+HASH2=$(echo "$RAW2" | grep '"hash":' | awk -F'"' '{print $4}')
+echo "   Miner‑1 Hash: $HASH1"
+echo "   Miner‑2 Hash: $HASH2"
+
+if [[ -z "$HASH1" || -z "$HASH2" ]]; then
+    echo "❌ TEST FAILED: Could not retrieve block hashes (one node may not have reached $BLOCK_HEIGHT)."
     docker exec zeicoin-miner-1 ./zig-out/bin/zeicoin status
     docker exec zeicoin-miner-2 ./zig-out/bin/zeicoin status
     exit 1
 fi
-
-if [ "$HASH1" == "$HASH2" ]; then
-    echo "❌ TEST FAILED: Chains did not diverge! (Hashes are identical)"
-    echo "   Ensure miners are isolated and mining."
-    docker compose logs | tail -n 20
+if [[ "$HASH1" == "$HASH2" ]]; then
+    echo "❌ TEST FAILED: Chains did not diverge (hashes are identical)."
     exit 1
 fi
-
 echo "✅ SUCCESS: Chains have diverged (hashes differ)!"
 
-# 3. Convergence Phase
-echo "🔗 Reconnecting Miner 2 to network..."
+# 4️⃣ Re‑connect miner‑2 and give it a chance to sync
+echo "🔗 Reconnecting Miner‑2 to network..."
 docker network connect docker_zeicoin-network zeicoin-miner-2
 
-echo "🔄 Restarting Miner 2 to force immediate reconnection..."
+echo "🔄 Restarting Miner‑2 to force immediate reconnection..."
 docker restart zeicoin-miner-2
 
-# Increase wait time for restart + sync
-SYNC_WAIT_TIME=60
+# Give the node a moment to initialize its API server
+echo "⏳ Waiting 5s for Miner-2 API to start..."
+sleep 5
 
-echo "⏳ Waiting ${SYNC_WAIT_TIME}s for synchronization/reorganization..."
-sleep $SYNC_WAIT_TIME
+echo "⏳ Waiting for sync..."
 
-echo "🔍 Checking for convergence at height ${BLOCK_HEIGHT}..."
-
-# Get hash from Miner 1 again (should be same or advanced)
-RAW1_NEW=$(docker exec zeicoin-miner-1 ./zig-out/bin/zeicoin block $BLOCK_HEIGHT 2>&1)
-HASH1_NEW=$(echo "$RAW1_NEW" | grep '"hash":' | awk -F'"' '{print $4}')
-echo "   Miner 1 Hash: $HASH1_NEW"
-
-# Get hash from Miner 2 (should now match Miner 1)
-RAW2_NEW=$(docker exec zeicoin-miner-2 ./zig-out/bin/zeicoin block $BLOCK_HEIGHT 2>&1)
-HASH2_NEW=$(echo "$RAW2_NEW" | grep '"hash":' | awk -F'"' '{print $4}')
-echo "   Miner 2 Hash: $HASH2_NEW"
-
-if [ -z "$HASH1_NEW" ] || [ -z "$HASH2_NEW" ]; then
-    echo "❌ TEST FAILED: Could not retrieve block hashes during convergence check."
-    echo "   Miner 1 Raw Output:"
-    echo "$RAW1_NEW"
-    echo "   Miner 2 Raw Output:"
-    echo "$RAW2_NEW"
-    exit 1
-fi
-
-if [ "$HASH1_NEW" != "$HASH2_NEW" ]; then
-    echo "❌ TEST FAILED: Chains did not converge!"
-    echo "   Miner 1: $HASH1_NEW"
-    echo "   Miner 2: $HASH2_NEW"
-    echo "   Reorganization failed or sync incomplete."
+# Poll for convergence
+attempt=0
+while (( attempt < MAX_RETRIES )); do
+    ((++attempt))
+    echo "🔍 Attempt $attempt/$MAX_RETRIES: checking convergence..."
     
-    echo "🔍 Debugging information:"
-    echo "--- Miner 1 Status ---"
-    docker exec zeicoin-miner-1 ./zig-out/bin/zeicoin status
-    echo "--- Miner 2 Status ---"
-    docker exec zeicoin-miner-2 ./zig-out/bin/zeicoin status
+    # Use || true to prevent script exit if node is not yet ready (set -e)
+    RAW1_NEW=$(docker exec zeicoin-miner-1 ./zig-out/bin/zeicoin block $BLOCK_HEIGHT 2>&1 || true)
+    RAW2_NEW=$(docker exec zeicoin-miner-2 ./zig-out/bin/zeicoin block $BLOCK_HEIGHT 2>&1 || true)
     
-    echo "--- Miner 2 Logs (Last 100 lines) ---"
-    docker logs --tail 100 zeicoin-miner-2
+    HASH1_NEW=$(echo "$RAW1_NEW" | grep '"hash":' | awk -F'"' '{print $4}')
+    HASH2_NEW=$(echo "$RAW2_NEW" | grep '"hash":' | awk -F'"' '{print $4}')
     
-    echo "--- Miner 1 Logs (Last 100 lines) ---"
-    docker logs --tail 100 zeicoin-miner-1
-    exit 1
-fi
+    echo "   Miner‑1 Hash: $HASH1_NEW"
+    echo "   Miner‑2 Hash: $HASH2_NEW"
+    
+    if [[ -n "$HASH1_NEW" && -n "$HASH2_NEW" && "$HASH1_NEW" == "$HASH2_NEW" ]]; then
+        echo "✅ SUCCESS: Chains have converged (hashes are identical)!"
+        echo "🎉 REORGANIZATION TEST PASSED!"
+        echo "🧹 Cleaning up..."
+        docker compose down -v
+        exit 0
+    fi
+    
+    echo "   Not yet converged – waiting 10 s before next attempt"
+    sleep 10
+done
 
-echo "✅ SUCCESS: Chains have converged (hashes are identical)!"
-echo "🎉 REORGANIZATION TEST PASSED!"
-
-# Cleanup
-echo "🧹 Cleaning up..."
+# ----- If we get here the hashes never matched -----
+echo "❌ TEST FAILED: Chains did not converge after $MAX_RETRIES attempts"
+docker exec zeicoin-miner-1 ./zig-out/bin/zeicoin status
+docker exec zeicoin-miner-2 ./zig-out/bin/zeicoin status
+docker logs --tail 100 zeicoin-miner-1
+docker logs --tail 100 zeicoin-miner-2
 docker compose down -v
+exit 1

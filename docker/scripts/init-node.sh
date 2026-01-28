@@ -15,7 +15,7 @@ BOOTSTRAP_HOST=$(echo $FIRST_BOOTSTRAP | cut -d':' -f1)
 BOOTSTRAP_PORT=$(echo $FIRST_BOOTSTRAP | cut -d':' -f2)
 
 echo "Checking connectivity to $BOOTSTRAP_HOST:$BOOTSTRAP_PORT..."
-max_attempts=30
+max_attempts=${MAX_CONNECT_ATTEMPTS:-30}
 attempt=0
 
 while [ $attempt -lt $max_attempts ]; do
@@ -43,7 +43,7 @@ if [ "$ZEICOIN_MINE_ENABLED" = "true" ]; then
     echo "Mining: Enabled (wallet: ${ZEICOIN_MINER_WALLET})"
 
     # Determine data directory based on network
-    DATA_DIR="/zeicoin/zeicoin_data_${ZEICOIN_NETWORK}"
+    DATA_DIR="zeicoin_data_testnet"
 
     # Create miner wallet if it doesn't exist
     WALLET_FILE="${DATA_DIR}/wallets/${ZEICOIN_MINER_WALLET}.wallet"

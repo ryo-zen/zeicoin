@@ -49,8 +49,11 @@ pub const PeerConnection = struct {
         self.current_io = null;
         // Clear the callback BEFORE closing the stream
         self.peer.setTcpSendCallback(null, null);
-        self.stream.close(io);
-        
+        // Only close if PeerManager hasn't already closed it (timeout wakeup)
+        if (self.peer.stream != null) {
+            self.stream.close(io);
+        }
+
         // Release peer reference
         self.peer.release();
     }
@@ -84,32 +87,36 @@ pub const PeerConnection = struct {
         try self.sendHandshake(io);
         self.peer.state = .handshaking;
 
-        // Connection loop
-        var buffer = try self.allocator.alloc(u8, 4096);
-        defer self.allocator.free(buffer);
+        // Blocking read loop — zero CPU while idle.
+        // PeerManager.cleanupTimedOut() closes the stream to wake a blocked reader on timeout.
+        var buffer: [4096]u8 = undefined;
 
         while (self.running) {
-            // Main connection loop - running flag provides safer shutdown signaling
-
-            // Check if peer is shutting down (from PeerManager)
             if (self.peer.is_shutting_down.load(.acquire)) {
                 break;
             }
 
-            // Read data with timeout
-            const msg = self.stream.socket.receive(io, buffer) catch |err| {
-                if (self.running) {
+            // Blocking read — suspends thread until data arrives or stream is closed
+            var dest = [1][]u8{&buffer};
+            const bytes_read = io.vtable.netRead(io.userdata, self.stream.socket.handle, &dest) catch |err| {
+                if (self.running and !self.peer.is_shutting_down.load(.acquire)) {
                     std.log.err("Read error from {}: {}", .{ self.peer, err });
                 }
                 break;
             };
-            
-            const bytes_read = msg.data.len;
 
             if (bytes_read == 0) {
-                // Safe peer disconnection logging - cache ID first to avoid use-after-free
+                // Peer closed connection gracefully
                 const peer_id = self.peer.id;
-                std.log.info("Peer {} disconnected (connection closed)", .{peer_id});
+                const is_localhost = switch (self.peer.address) {
+                    .ip4 => |ip4| ip4.bytes[0] == 127 and ip4.bytes[1] == 0 and ip4.bytes[2] == 0 and ip4.bytes[3] == 1,
+                    .ip6 => |ip6| std.mem.eql(u8, &ip6.bytes, &[_]u8{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1}),
+                };
+                if (!is_localhost) {
+                    std.log.info("Peer {} disconnected (connection closed)", .{peer_id});
+                } else {
+                    std.log.debug("Healthcheck probe disconnected (peer {})", .{peer_id});
+                }
                 break;
             }
 
@@ -156,6 +163,12 @@ pub const PeerConnection = struct {
                 } else {
                     std.log.debug("Peer {d} completed processing message", .{msg_peer_id});
                 }
+            }
+
+            // Opportunistic ping after processing — keeps ping logic in the same
+            // thread as pong handling to avoid races on ping_nonce / last_ping.
+            if (self.peer.needsPing()) {
+                self.sendPing() catch {};
             }
         }
 

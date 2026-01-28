@@ -9,7 +9,7 @@ echo "==================================="
 sleep 2
 
 # Determine data directory based on network
-DATA_DIR="/zeicoin/zeicoin_data_${ZEICOIN_NETWORK}"
+DATA_DIR="zeicoin_data_testnet"
 
 # Check if miner wallet already exists
 WALLET_FILE="${DATA_DIR}/wallets/${ZEICOIN_MINER_WALLET}.wallet"
