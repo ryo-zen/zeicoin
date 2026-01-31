@@ -3,6 +3,7 @@
 // Validates blocks, transactions, and enforces protocol rules
 
 const std = @import("std");
+const builtin = @import("builtin");
 const types = @import("../types/types.zig");
 const util = @import("../util/util.zig");
 const key = @import("../crypto/key.zig");
@@ -182,7 +183,7 @@ pub const ChainValidator = struct {
 
         // Check basic block structure
         if (!block.isValid()) {
-            log.warn("❌ Block validation failed: invalid block structure", .{});
+            if (!builtin.is_test) log.warn("❌ Block validation failed: invalid block structure", .{});
             return false;
         }
 

@@ -3,6 +3,7 @@
 // Simple account model with nonce-based double-spend protection
 
 const std = @import("std");
+const builtin = @import("builtin");
 const util = @import("../util/util.zig");
 const bech32 = @import("../crypto/bech32.zig");
 
@@ -381,14 +382,14 @@ pub const Transaction = struct {
     pub fn isValid(self: *const Transaction) bool {
         // Version validation - only version 0 is currently supported
         if (self.version != 0) {
-            log.warn("❌ Transaction invalid: unsupported version {}", .{self.version});
+            if (!builtin.is_test) log.warn("❌ Transaction invalid: unsupported version {}", .{self.version});
             return false;
         }
 
         // Size validation - prevent DoS with oversized transactions
         const tx_size = self.getSerializedSize();
         if (tx_size > TransactionLimits.MAX_TX_SIZE) {
-            log.warn("❌ Transaction invalid: size {} bytes exceeds maximum {} bytes", .{ tx_size, TransactionLimits.MAX_TX_SIZE });
+            if (!builtin.is_test) log.warn("❌ Transaction invalid: size {} bytes exceeds maximum {} bytes", .{ tx_size, TransactionLimits.MAX_TX_SIZE });
             return false;
         }
 
@@ -864,7 +865,7 @@ pub const Block = struct {
 
         // Regular blocks must have transactions
         if (self.transactions.len == 0) {
-            log.warn("❌ Block invalid: no transactions", .{});
+            if (!builtin.is_test) log.warn("❌ Block invalid: no transactions", .{});
             return false;
         }
 
