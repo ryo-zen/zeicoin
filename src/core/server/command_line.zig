@@ -95,15 +95,21 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Conf
     }
 
     // Handle environment variables for ports
-    if (util.getEnvVarOwned(allocator, "ZEICOIN_P2P_PORT")) |p2p_port_str| {
+    const p2p_port_env = util.getEnvVarOwned(allocator, "ZEICOIN_P2P_PORT") catch 
+                         util.getEnvVarOwned(allocator, "ZEICOIN_PORT") catch 
+                         null;
+    if (p2p_port_env) |p2p_port_str| {
         defer allocator.free(p2p_port_str);
         config.port = std.fmt.parseInt(u16, p2p_port_str, 10) catch config.port;
-    } else |_| {}
+    }
 
-    if (util.getEnvVarOwned(allocator, "ZEICOIN_API_PORT")) |api_port_str| {
+    const api_port_env = util.getEnvVarOwned(allocator, "ZEICOIN_API_PORT") catch 
+                         util.getEnvVarOwned(allocator, "ZEICOIN_CLIENT_PORT") catch 
+                         null;
+    if (api_port_env) |api_port_str| {
         defer allocator.free(api_port_str);
         config.api_port = std.fmt.parseInt(u16, api_port_str, 10) catch config.api_port;
-    } else |_| {}
+    }
 
     if (util.getEnvVarOwned(allocator, "ZEICOIN_RPC_PORT")) |rpc_port_str| {
         defer allocator.free(rpc_port_str);

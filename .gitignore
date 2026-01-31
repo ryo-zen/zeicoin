@@ -105,3 +105,4 @@ test_spinner3.zig
 AGENTS.md
 .envrc
 .gemini/settings.json
+/test_manual_data

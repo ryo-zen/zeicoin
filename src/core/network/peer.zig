@@ -223,7 +223,7 @@ pub const NetworkManager = struct {
                 error.EndOfStream => "connection closed",
                 else => @errorName(err),
             };
-            std.log.err("🔌 [NETWORK] {} disconnected ({s})", .{ peer, error_msg });
+            std.log.err("🔌 [NETWORK] Peer {} at {any} disconnected ({s})", .{ peer.id, peer.address, error_msg });
         };
         
         // Final check before peer removal
@@ -300,7 +300,7 @@ pub const NetworkManager = struct {
                         std.log.debug("Disconnect handler error: {}", .{handler_err});
                     };
                 }
-                std.log.err("Incoming peer {} error: {}", .{ peer, err });
+                std.log.err("Incoming peer {} error: {}", .{ peer.id, err });
             }
         };
         

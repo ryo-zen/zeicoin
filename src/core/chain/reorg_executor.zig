@@ -147,6 +147,11 @@ pub const ReorgExecutor = struct {
         if (blocks_to_revert > 0) {
             std.log.warn("🗑️  [REORG] Deleting {} replaced blocks from height {} to {}", .{blocks_to_revert, fork_height + 1, old_tip_height});
             try self.db.deleteBlocksFromHeight(fork_height + 1, old_tip_height);
+
+            // CRITICAL FIX: Update database height to new tip after deleting old blocks
+            // Without this, the database height stays at old_tip_height, causing inconsistency
+            try self.db.saveHeight(new_tip_height);
+            std.log.warn("📊 [REORG] Database height updated from {} to {}", .{old_tip_height, new_tip_height});
         }
 
         // Clean up old snapshot

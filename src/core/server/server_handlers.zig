@@ -92,8 +92,8 @@ pub const ServerHandlers = struct {
         const our_height = try self.blockchain.getHeight();
         const our_best_hash = try self.blockchain.getBestBlockHash();
 
-        std.log.info("👥 [PEER CONNECT] Peer {any} connected at height {} (our height: {})", .{
-            peer.address, peer.height, our_height
+        std.log.info("👥 [PEER CONNECT] Peer {} ({any}) connected at height {} (our height: {})", .{
+            peer.id, peer.address, peer.height, our_height
         });
         std.log.info("🔍 [PEER CONNECT] Peer state: {}, services: 0x{x}", .{peer.state, peer.services});
         std.log.info("🔍 [PEER CONNECT] Sync manager status: {}", .{self.blockchain.sync_manager != null});
@@ -798,39 +798,46 @@ fn onPeerConnectedGlobal(io: std.Io, peer: *network.Peer) anyerror!void {
 
 fn triggerStartSync(sync_manager: *sync.SyncManager, peer: *network.Peer, target_height: u32) void {
     defer peer.release();
-    // TODO: We need an Io instance here. For background threads, we might need a dedicated Io instance or pass it.
-    // For now, creating a temporary threaded Io for the background sync thread.
-    var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{ .environ = .empty });
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    sync_manager.startSync(io, peer, target_height, false) catch |err| {
-        std.log.err("Asynchronous startSync failed: {}", .{err});
-    };
+    // CRITICAL FIX: Use the global blockchain's io instance instead of creating a temporary one
+    // Temporary io instances get destroyed (defer deinit) before async work completes!
+    if (global_handler) |handler| {
+        const io = handler.blockchain.io;
+        sync_manager.startSync(io, peer, target_height, false) catch |err| {
+            std.log.err("Asynchronous startSync failed: {}", .{err});
+        };
+    } else {
+        std.log.err("Cannot trigger sync: global_handler is null", .{});
+    }
 }
 
 /// Trigger fork resolution with force_reorg=true for equal-height divergence
 fn triggerForkResolution(sync_manager: *sync.SyncManager, peer: *network.Peer, target_height: u32) void {
     defer peer.release();
-    var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{ .environ = .empty });
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    sync_manager.startSync(io, peer, target_height, true) catch |err| {
-        std.log.err("Asynchronous fork resolution failed: {}", .{err});
-    };
+    // CRITICAL FIX: Use the global blockchain's io instance instead of creating a temporary one
+    // Temporary io instances get destroyed (defer deinit) before async work completes!
+    if (global_handler) |handler| {
+        const io = handler.blockchain.io;
+        sync_manager.startSync(io, peer, target_height, true) catch |err| {
+            std.log.err("Asynchronous fork resolution failed: {}", .{err});
+        };
+    } else {
+        std.log.err("Cannot trigger fork resolution: global_handler is null", .{});
+    }
 }
 
 /// Global callback for sync manager to start sync from thread
 fn triggerPeerSync(sync_manager: *sync.SyncManager, peer: *network.Peer) void {
     defer peer.release();
-    var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{ .environ = .empty });
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    sync_manager.handlePeerSync(io, peer) catch |err| {
-        std.log.err("Asynchronous peer sync failed: {}", .{err});
-    };
+    // CRITICAL FIX: Use the global blockchain's io instance instead of creating a temporary one
+    // Temporary io instances get destroyed (defer deinit) before async work completes!
+    if (global_handler) |handler| {
+        const io = handler.blockchain.io;
+        sync_manager.handlePeerSync(io, peer) catch |err| {
+            std.log.err("Asynchronous peer sync failed: {}", .{err});
+        };
+    } else {
+        std.log.err("Cannot trigger peer sync: global_handler is null", .{});
+    }
 }
 
 fn onBlockGlobal(io: std.Io, peer: *network.Peer, msg: network.message_types.BlockMessage) anyerror!void {

@@ -8,8 +8,7 @@ const builtin = @import("builtin");
 pub const std_options: std.Options = .{
     .log_level = switch (builtin.mode) {
         .Debug => .debug,
-        .ReleaseSafe => .info,
-        .ReleaseFast, .ReleaseSmall => .warn,
+        .ReleaseSafe, .ReleaseFast, .ReleaseSmall => .info,
     },
 };
 

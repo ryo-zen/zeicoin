@@ -559,7 +559,7 @@ pub const Peer = struct {
     }
 
     /// Format peer for logging - safe version to prevent crashes
-    pub fn format(self: Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: *const Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = fmt;
         _ = options;
         

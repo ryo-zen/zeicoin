@@ -80,6 +80,9 @@ pub const SyncManager = struct {
     /// Current synchronization state tracking
     sync_state: SyncState,
 
+    /// Mutex for thread-safe state transitions
+    state_mutex: std.Thread.Mutex,
+
     /// List of failed peers for avoidance during peer selection
     failed_peers: std.array_list.Managed(*Peer),
 
@@ -122,6 +125,7 @@ pub const SyncManager = struct {
             .blockchain = blockchain,
             .batch_sync = batch_sync,
             .sync_state = .idle,
+            .state_mutex = .{},
             .failed_peers = std.array_list.Managed(*Peer).init(allocator),
             .last_state_save = 0,
             .sync_start_time = 0,
@@ -147,7 +151,7 @@ pub const SyncManager = struct {
     pub fn startSync(self: *Self, io: std.Io, peer: *Peer, target_height: u32, force_reorg: bool) !void {
         log.info("INITIATING BLOCKCHAIN SYNCHRONIZATION", .{});
         log.info("Session parameters:", .{});
-        log.info("   Target peer: {any}", .{peer.address});
+        log.info("   Target peer: Peer {} ({any})", .{peer.id, peer.address});
         log.info("   Target height: {}", .{target_height});
         log.info("   Force reorg: {}", .{force_reorg});
         log.info("   Current state: {}", .{self.sync_state});
@@ -191,16 +195,25 @@ pub const SyncManager = struct {
 
         // Check if sync can be started
         log.debug("STEP 1: Validating sync state...", .{});
+        self.state_mutex.lock();
         if (!self.sync_state.canStart()) {
+            const current_state = self.sync_state;
+            self.state_mutex.unlock();
             log.err("STEP 1 FAILED: Sync cannot be started", .{});
-            log.warn("Current state: {} (expected: idle, failed, or complete)", .{self.sync_state});
+            log.warn("Current state: {} (expected: idle, failed, or complete)", .{current_state});
             log.info("Suggestion: Wait for current sync to complete or call stopSync()", .{});
             return;
         }
         
         // Transition to analyzing state to prevent concurrent initiations
         self.sync_state = .analyzing;
-        errdefer self.sync_state = .failed;
+        self.state_mutex.unlock();
+        
+        errdefer {
+            self.state_mutex.lock();
+            self.sync_state = .failed;
+            self.state_mutex.unlock();
+        }
         
         log.debug("STEP 1 PASSED: Sync state allows new session", .{});
 
@@ -224,7 +237,7 @@ pub const SyncManager = struct {
             log.warn("🚫 [SYNC ABORT] Already synchronized - height diff {} < threshold {}", .{ height_diff, SYNC_CONFIG.MIN_SYNC_HEIGHT_DIFF });
             log.info("Local height {} >= target height {} (diff: {})", .{ current_height, target_height, height_diff });
             log.info("No synchronization needed - session complete", .{});
-            self.sync_state = .idle;
+            self.setState(.idle);
             return;
         }
         if (force_reorg and height_diff == 0) {
@@ -245,7 +258,7 @@ pub const SyncManager = struct {
 
                 // Keep mining paused
                 should_resume_mining = false;
-                self.sync_state = .failed;
+                self.setState(.failed);
 
                 return error.ForkDetectionFailed;
             };
@@ -275,7 +288,7 @@ pub const SyncManager = struct {
                     should_resume_mining = false;
 
                     // Set sync to failed state
-                    self.sync_state = .failed;
+                    self.setState(.failed);
 
                     // Return error
                     return error.ForkDetectionFailed;
@@ -300,7 +313,7 @@ pub const SyncManager = struct {
                     should_resume_mining = false;
 
                     // Set sync to failed state
-                    self.sync_state = .failed;
+                    self.setState(.failed);
 
                     // Return error
                     return error.ForkDetectionFailed;
@@ -309,7 +322,7 @@ pub const SyncManager = struct {
                 if (should_reorg) {
                     log.warn("🔄 [REORG DECISION] Peer chain has more work - reorganizing!", .{});
                     try self.executeBulkReorg(io, peer, fork_point, target_height);
-                    self.sync_state = .idle; // executeBulkReorg finishes sync
+                    self.setState(.idle); // executeBulkReorg finishes sync
                     return;
                 } else {
                     // PREFIX CASE: If fork_point == our tip, we're a prefix of peer's chain
@@ -328,7 +341,7 @@ pub const SyncManager = struct {
                             // Competing chain: peer has more blocks but less work (e.g. difficulty attack)
                             // In Bitcoin, we would just ignore this peer for now or wait for more work.
                             log.warn("⚠️  Peer has MORE blocks ({}) but LESS work. Ignoring sync request.", .{target_height});
-                            self.sync_state = .idle;
+                            self.setState(.idle);
                             return;
                         }
 
@@ -392,10 +405,10 @@ pub const SyncManager = struct {
             }
 
             // Update our state AFTER batch sync has successfully started
-            log.debug("STATE TRANSITION: {} → syncing", .{self.sync_state});
-            const old_state = self.sync_state;
-            self.sync_state = .syncing;
-            log.debug("State transition completed: {} → {}", .{ old_state, self.sync_state });
+            log.debug("STATE TRANSITION: {} → syncing", .{self.getSyncState()});
+            const old_state = self.getSyncState();
+            self.setState(.syncing);
+            log.debug("State transition completed: {} → {}", .{ old_state, self.getSyncState() });
             log.info("STEP 5 COMPLETED: ZSP-001 batch sync activated", .{});
         } else {
             log.warn("STEP 4 RESULT: Peer lacks batch sync capabilities", .{});
@@ -411,10 +424,10 @@ pub const SyncManager = struct {
             try self.startSequentialSync(io, peer, target_height);
 
             // Update our state AFTER sequential sync has started
-            log.debug("STATE TRANSITION: {} → syncing (sequential)", .{self.sync_state});
-            const old_state = self.sync_state;
-            self.sync_state = .syncing;
-            log.debug("State transition completed: {} → {}", .{ old_state, self.sync_state });
+            log.debug("STATE TRANSITION: {} → syncing (sequential)", .{self.getSyncState()});
+            const old_state = self.getSyncState();
+            self.setState(.syncing);
+            log.debug("State transition completed: {} → {}", .{ old_state, self.getSyncState() });
             log.info("STEP 5 COMPLETED: Sequential sync activated", .{});
         }
 
@@ -430,7 +443,7 @@ pub const SyncManager = struct {
         // Without this loop, blocks are cached but never retrieved or processed
         log.info("🔄 [SYNC POLL] Starting sync polling loop (polls every 5 seconds)", .{});
 
-        while (self.sync_state.isActive()) {
+        while (self.isActive()) {
             // Sleep for 5 seconds between polls
             self.blockchain.io.sleep(std.Io.Duration.fromSeconds(5), std.Io.Clock.awake) catch |sleep_err| {
                 log.warn("Sync poll sleep failed: {}", .{sleep_err});
@@ -440,22 +453,22 @@ pub const SyncManager = struct {
             const elapsed = util.getTime() - self.sync_start_time;
             if (elapsed > SYNC_CONFIG.SYNC_TIMEOUT) {
                 log.warn("🚨 [SYNC TIMEOUT] Synchronization timed out after {} seconds", .{elapsed});
-                self.sync_state = .failed;
+                self.setState(.failed);
                 break;
             }
 
             // Poll for new blocks and handle timeouts
             self.handleTimeouts() catch |err| {
                 log.err("❌ [SYNC POLL] Error during timeout handling: {}", .{err});
-                self.sync_state = .failed;
+                self.setState(.failed);
                 break;
             };
 
             // Update our state from batch sync
-            self.sync_state = self.batch_sync.getSyncState();
+            self.setState(self.batch_sync.getSyncState());
 
             // Handle sync failure
-            if (self.sync_state == .failed) {
+            if (self.getSyncState() == .failed) {
                 log.warn("🔴 [SYNC POLL] Sync failed, exiting polling loop", .{});
                 break;
             }
@@ -463,14 +476,14 @@ pub const SyncManager = struct {
             // Log progress periodically
             if (@mod(elapsed, 10) < 5) { // Log every ~10 seconds
                 log.info("📊 [SYNC PROGRESS] State: {}, Progress: {d:.1}%, Elapsed: {}s", .{
-                    self.sync_state,
+                    self.getSyncState(),
                     self.getProgress(),
                     elapsed,
                 });
             }
         }
 
-        log.info("🏁 [SYNC POLL] Polling loop ended - Final state: {}", .{self.sync_state});
+        log.info("🏁 [SYNC POLL] Polling loop ended - Final state: {}", .{self.getSyncState()});
     }
 
     /// Handle incoming batch of blocks from ZSP-001 protocol
@@ -483,7 +496,7 @@ pub const SyncManager = struct {
         log.info("   Block count: {} blocks", .{blocks.len});
         log.info("   Start height: {}", .{start_height});
         log.info("   └─ End height: {}", .{start_height + @as(u32, @intCast(blocks.len)) - 1});
-        log.info("   └─ Current sync state: {}", .{self.sync_state});
+        log.info("   └─ Current sync state: {}", .{self.getSyncState()});
         log.info("   └─ Progress: {d:.1}%", .{self.getProgress()});
 
         // CRITICAL: Validate bulk blocks for chain continuity before processing
@@ -501,12 +514,12 @@ pub const SyncManager = struct {
 
         // Update sync state based on batch sync state
         log.info("🔍 [SYNC MANAGER] Synchronizing state with batch sync protocol...", .{});
-        const old_sync_state = self.sync_state;
-        self.sync_state = self.batch_sync.getSyncState();
-        if (old_sync_state != self.sync_state) {
-            log.info("🔄 [SYNC MANAGER] STATE TRANSITION: {} → {}", .{ old_sync_state, self.sync_state });
+        const old_sync_state = self.getSyncState();
+        self.setState(self.batch_sync.getSyncState());
+        if (old_sync_state != self.getSyncState()) {
+            log.info("🔄 [SYNC MANAGER] STATE TRANSITION: {} → {}", .{ old_sync_state, self.getSyncState() });
         } else {
-            log.info("📊 [SYNC MANAGER] State remains: {}", .{self.sync_state});
+            log.info("📊 [SYNC MANAGER] State remains: {}", .{self.getSyncState()});
         }
 
         // Handle state persistence
@@ -538,7 +551,7 @@ pub const SyncManager = struct {
 
     /// Check for sync timeouts and handle recovery
     pub fn handleTimeouts(self: *Self) !void {
-        if (!self.sync_state.isActive()) return;
+        if (!self.isActive()) return;
 
         // CRITICAL: Retrieve blocks from peer cache before checking timeouts
         // This ensures blocks that have arrived are processed before timeout logic
@@ -548,23 +561,23 @@ pub const SyncManager = struct {
         try self.batch_sync.handleTimeouts();
 
         // Update our state based on batch sync state
-        self.sync_state = self.batch_sync.getSyncState();
+        self.setState(self.batch_sync.getSyncState());
     }
 
     /// Complete synchronization process
     pub fn completeSync(self: *Self) !void {
         log.info("[SYNC] Completing synchronization session", .{});
         log.info("[SYNC] Final statistics: state={}, progress={d:.1}%, failed_peers={}, duration={}s", .{
-            self.sync_state,
+            self.getSyncState(),
             self.getProgress(),
             self.failed_peers.items.len,
             self.getTime() - self.last_state_save,
         });
 
         // Update sync state
-        const old_state = self.sync_state;
-        self.sync_state = .complete;
-        log.debug("[SYNC] State transition: {} -> {}", .{ old_state, self.sync_state });
+        const old_state = self.getSyncState();
+        self.setState(.complete);
+        log.debug("[SYNC] State transition: {} -> {}", .{ old_state, self.getSyncState() });
 
         // Clear failed peers list on successful completion
         self.failed_peers.clearRetainingCapacity();
@@ -580,20 +593,31 @@ pub const SyncManager = struct {
         return self.batch_sync.getProgress();
     }
 
-    /// Get current sync state
-    pub fn getSyncState(self: *const Self) SyncState {
-        return self.sync_state;
+    /// Set the synchronization state in a thread-safe manner
+    fn setState(self: *Self, state: SyncState) void {
+        self.state_mutex.lock();
+        defer self.state_mutex.unlock();
+        self.sync_state = state;
     }
 
-    /// Check if sync is currently active
-    pub fn isActive(self: *const Self) bool {
+    /// Check if sync is active in a thread-safe manner
+    pub fn isActive(self: *Self) bool {
+        self.state_mutex.lock();
+        defer self.state_mutex.unlock();
         return self.sync_state.isActive();
+    }
+
+    /// Get detailed sync status for monitoring and debugging
+    pub fn getSyncState(self: *Self) SyncState {
+        self.state_mutex.lock();
+        defer self.state_mutex.unlock();
+        return self.sync_state;
     }
 
     /// Notify sync manager that a block was received and applied
     /// Called from onBlock handler when blocks arrive during active sync
     pub fn notifyBlockReceived(self: *Self, height: u32) void {
-        if (!self.sync_state.isActive()) return;
+        if (!self.isActive()) return;
 
         // Notify batch sync of the received block
         self.batch_sync.notifyBlockReceived(height);
@@ -601,14 +625,14 @@ pub const SyncManager = struct {
         // Update our state if batch sync completed
         if (self.batch_sync.isComplete()) {
             log.info("✅ [SYNC MANAGER] Batch sync completed, updating state", .{});
-            self.sync_state = .complete;
+            self.setState(.complete);
             self.sync_start_time = 0;
         }
     }
 
     /// Check if sync has timed out and reset state if needed
     pub fn checkTimeout(self: *Self) void {
-        if (self.sync_state.isActive() and self.sync_start_time > 0) {
+        if (self.isActive() and self.sync_start_time > 0) {
             const current_time = util.getTime();
             const elapsed_time = current_time - self.sync_start_time;
 
@@ -619,7 +643,7 @@ pub const SyncManager = struct {
                 // CRITICAL: Reset batch sync protocol state as well
                 self.batch_sync.failSync("Synchronization session timeout");
                 
-                self.sync_state = .idle;
+                self.setState(.idle);
                 self.sync_start_time = 0;
                 log.info("✅ [SYNC TIMEOUT] Sync state reset - ready for new sync attempts", .{});
             }
@@ -740,7 +764,7 @@ pub const SyncManager = struct {
             log.info("✅ [SYNC MANAGER] Sequential block {} applied", .{height});
         }
 
-        self.sync_state = .complete;
+        self.setState(.complete);
         log.info("✅ [SYNC MANAGER] Sequential sync completed", .{});
     }
 
@@ -758,16 +782,16 @@ pub const SyncManager = struct {
                 log.info("🔥 [FORK DETECTED] Peer height {} vs our height {}", .{peer.height, our_height});
                 
                 // If we are already syncing, cancel it to allow reorg check
-                if (self.sync_state.isActive()) {
+                if (self.isActive()) {
                     log.info("🔄 [REORG TRIGGER] Canceling active sync to handle competing chain", .{});
                     self.batch_sync.failSync("Canceled for reorganization");
-                    self.sync_state = .idle;
+                    self.setState(.idle);
                 }
                 
                 try self.startSync(io, peer, peer.height, false);
             } else if (peer.height > our_height) {
                 // Not competing, just ahead. Trigger normal sync if not already syncing.
-                if (self.sync_state.canStart()) {
+                if (self.getSyncState().canStart()) {
                     try self.startSync(io, peer, peer.height, false);
                 }
             }
@@ -842,11 +866,11 @@ pub const SyncManager = struct {
         log.info("✅ [SYNC RANGE] Parameters validated", .{});
 
         // Check current sync state
-        if (self.sync_state.isActive()) {
-            log.warn("⚠️ [SYNC RANGE] Sync already active - state: {}", .{self.sync_state});
+        if (self.isActive()) {
+            log.warn("⚠️ [SYNC RANGE] Sync already active - state: {}", .{self.getSyncState()});
             log.info("💡 [SYNC RANGE] Failing current sync to allow range sync", .{});
             self.batch_sync.failSync("Interrupted by block range sync");
-            self.sync_state = .idle;
+            self.setState(.idle);
         }
 
         log.info("🔄 [SYNC RANGE] Calling batch sync with custom height range", .{});

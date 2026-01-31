@@ -100,7 +100,7 @@ pub const PeerConnection = struct {
             var dest = [1][]u8{&buffer};
             const bytes_read = io.vtable.netRead(io.userdata, self.stream.socket.handle, &dest) catch |err| {
                 if (self.running and !self.peer.is_shutting_down.load(.acquire)) {
-                    std.log.err("Read error from {}: {}", .{ self.peer, err });
+                    std.log.err("Read error from peer {}: {}", .{ self.peer.id, err });
                 }
                 break;
             };
@@ -209,7 +209,7 @@ pub const PeerConnection = struct {
     fn handleMessage(self: *Self, io: std.Io, envelope: message_envelope.MessageEnvelope) !void {
         const msg_type = envelope.header.message_type;
 
-        std.log.debug("Received {} from {}", .{ msg_type, self.peer });
+        std.log.debug("Received {} from peer {}", .{ msg_type, self.peer.id });
 
         // Decode message
         var reader = std.Io.Reader.fixed(envelope.payload);
@@ -309,7 +309,7 @@ pub const PeerConnection = struct {
         _ = try self.peer.sendMessage(.handshake_ack, ack_msg);
 
         self.peer.state = .connected;
-        std.log.info("✅ [HANDSHAKE] Complete with {}: peer_height={}, our_height={}, agent={s}", .{ self.peer, handshake.start_height, our_height, handshake.user_agent });
+        std.log.info("✅ [HANDSHAKE] Complete with Peer {}: peer_height={}, our_height={}, agent={s}", .{ self.peer.id, handshake.start_height, our_height, handshake.user_agent });
 
         // Check for chain divergence
         if (handshake.start_height == our_height and !std.mem.eql(u8, &handshake.best_block_hash, &our_best_hash)) {
@@ -356,7 +356,7 @@ pub const PeerConnection = struct {
         if (self.peer.ping_nonce) |nonce| {
             if (pong.nonce == nonce) {
                 const latency = util.getTime() - self.peer.last_ping;
-                std.log.debug("Peer {} latency: {}ms", .{ self.peer, latency * 1000 });
+                std.log.debug("Peer {} latency: {}ms", .{ self.peer.id, latency * 1000 });
                 self.peer.ping_nonce = null;
             }
         }
@@ -495,8 +495,6 @@ fn tcpSendCallback(ctx: ?*anyopaque, data: []const u8) anyerror!void {
     const peer_id = self.peer.id; // Cache the ID
     std.log.debug("Peer {} writing {} bytes to TCP stream", .{ peer_id, data.len });
     const io = self.current_io.?;
-    var buf: [4096]u8 = undefined;
-    var writer = self.stream.writer(io, &buf);
+    var writer = self.stream.writer(io, &[_]u8{});
     try writer.interface.writeAll(data);
-    std.log.debug("Peer {} TCP write completed", .{peer_id});
 }
