@@ -219,7 +219,7 @@ pub const ZeiCoin = struct {
         defer genesis_block.deinit(self.allocator);
         for (genesis_block.transactions) |tx| {
             if (tx.isCoinbase()) {
-                try self.chain_state.processCoinbaseTransaction(self.io, tx, tx.recipient, 0, true);
+                try self.chain_state.processCoinbaseTransaction(self.io, tx, tx.recipient, 0, null, true);
             }
         }
         try self.database.saveBlock(self.io, 0, genesis_block);

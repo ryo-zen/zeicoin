@@ -86,7 +86,7 @@ pub const ChainManager = struct {
         }
         
         // Process transaction through state manager
-        try self.state.processTransaction(io, transaction, false);
+        try self.state.processTransaction(io, transaction, null, false);
     }
 
     /// Validate and accept a block if valid

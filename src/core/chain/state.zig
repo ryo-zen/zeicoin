@@ -163,7 +163,7 @@ pub const ChainState = struct {
     }
 
     /// Process a regular transaction and update account states
-    pub fn processTransaction(self: *Self, io: std.Io, tx: Transaction, force_processing: bool) !void {
+    pub fn processTransaction(self: *Self, io: std.Io, tx: Transaction, batch: ?*db.Database.WriteBatch, force_processing: bool) !void {
         // CRITICAL: Check for duplicate transaction before processing
         const tx_hash = tx.hash();
         if (!force_processing and self.database.hasTransaction(io, tx_hash)) {
@@ -256,12 +256,17 @@ pub const ChainState = struct {
         log.info("💰 [ACCOUNT UPDATE] RECIPIENT {s}: {d:.8} → {d:.8} ZEI (+{d:.8})", .{ recipient_addr_update, recipient_old_zei, recipient_new_zei, change_zei });
 
         // Save updated accounts to database
-        try self.database.saveAccount(tx.sender, sender_account);
-        try self.database.saveAccount(tx.recipient, recipient_account);
+        if (batch) |b| {
+            try b.saveAccount(tx.sender, sender_account);
+            try b.saveAccount(tx.recipient, recipient_account);
+        } else {
+            try self.database.saveAccount(tx.sender, sender_account);
+            try self.database.saveAccount(tx.recipient, recipient_account);
+        }
     }
 
     /// Process a coinbase transaction (mining reward)
-    pub fn processCoinbaseTransaction(self: *Self, io: std.Io, coinbase_tx: Transaction, miner_address: Address, current_height: u32, force_processing: bool) !void {
+    pub fn processCoinbaseTransaction(self: *Self, io: std.Io, coinbase_tx: Transaction, miner_address: Address, current_height: u32, batch: ?*db.Database.WriteBatch, force_processing: bool) !void {
         // CRITICAL: Check for duplicate coinbase transaction before processing
         const tx_hash = coinbase_tx.hash();
         if (!force_processing and self.database.hasTransaction(io, tx_hash)) {
@@ -302,7 +307,9 @@ pub const ChainState = struct {
             // Genesis block pre-mine allocations are immediately mature
             miner_account.balance += coinbase_tx.amount;
             // Genesis pre-mine is immediately circulating
-            try self.database.addToCirculatingSupply(coinbase_tx.amount);
+            if (batch == null) {
+                try self.database.addToCirculatingSupply(coinbase_tx.amount);
+            }
         } else {
             log.info("🔍 [COINBASE TX] Regular block - adding {} ZEI to immature balance", .{coinbase_tx.amount});
             // Regular mining rewards go to immature balance (100 block maturity)
@@ -310,7 +317,9 @@ pub const ChainState = struct {
         }
 
         // Update total supply (includes both mature and immature coins)
-        try self.database.addToTotalSupply(coinbase_tx.amount);
+        if (batch == null) {
+            try self.database.addToTotalSupply(coinbase_tx.amount);
+        }
 
         const balance_after = @as(f64, @floatFromInt(miner_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
         const immature_after = @as(f64, @floatFromInt(miner_account.immature_balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
@@ -335,7 +344,11 @@ pub const ChainState = struct {
         });
 
         // Save miner account
-        try self.database.saveAccount(miner_address, miner_account);
+        if (batch) |b| {
+            try b.saveAccount(miner_address, miner_account);
+        } else {
+            try self.database.saveAccount(miner_address, miner_account);
+        }
     }
 
     /// Clear all account state for rebuild
@@ -365,10 +378,10 @@ pub const ChainState = struct {
             for (block.transactions) |tx| {
                 if (self.isCoinbaseTransaction(tx)) {
                     // Use the canonical coinbase processing logic
-                    try self.processCoinbaseTransaction(io, tx, tx.recipient, @intCast(height), true);
+                    try self.processCoinbaseTransaction(io, tx, tx.recipient, @intCast(height), null, true);
                 } else {
                     // Use the canonical regular transaction processing logic
-                    try self.processTransaction(io, tx, true);
+                    try self.processTransaction(io, tx, null, true);
                 }
             }
         }
@@ -516,7 +529,7 @@ pub const ChainState = struct {
                 }
 
                 log.info("🔍 [BLOCK TX] Processing coinbase transaction {} at height {}", .{ i, current_height });
-                try self.processCoinbaseTransaction(io, tx, tx.recipient, current_height, force_processing);
+                try self.processCoinbaseTransaction(io, tx, tx.recipient, current_height, null, force_processing);
             }
         }
 
@@ -532,7 +545,7 @@ pub const ChainState = struct {
                 }
 
                 log.info("🔍 [BLOCK TX] Processing regular transaction {} at height {}", .{ i, current_height });
-                try self.processTransaction(io, tx, force_processing);
+                try self.processTransaction(io, tx, null, force_processing);
             }
         }
 

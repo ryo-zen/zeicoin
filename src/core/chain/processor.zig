@@ -245,40 +245,103 @@ pub const ChainProcessor = struct {
     }
 
     fn processBlockTransactions(self: *ChainProcessor, io: std.Io, transactions: []const types.Transaction, height: u32) !void {
-        // SAFETY: Check for valid transactions array
+        // Handle empty blocks
         if (transactions.len == 0) {
             log.info("⚠️ [SAFETY] Block has no transactions at height {}", .{height});
-            return; // Empty block is valid
+            return;
         }
 
+        // PHASE 1: Pre-validate ALL transactions (read-only checks)
+        log.info("🔍 [PHASE 1] Validating {} transactions before applying", .{transactions.len});
+
         for (transactions, 0..) |tx, i| {
-            // SAFETY: Check transaction bounds and validity
+            // Bounds check
             if (i >= transactions.len) {
-                log.info("❌ [SAFETY] Transaction index {} >= array length {}", .{ i, transactions.len });
                 return error.TransactionIndexOutOfBounds;
             }
 
-            // Log transaction processing
-            const tx_hash = tx.hash();
-            const amount_zei = @as(f64, @floatFromInt(tx.amount)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-            const sender_addr = bech32.encodeAddress(self.allocator, tx.sender, types.CURRENT_NETWORK) catch "<invalid>";
-            defer if (!std.mem.eql(u8, sender_addr, "<invalid>")) self.allocator.free(sender_addr);
-            const recipient_addr = bech32.encodeAddress(self.allocator, tx.recipient, types.CURRENT_NETWORK) catch "<invalid>";
-            defer if (!std.mem.eql(u8, recipient_addr, "<invalid>")) self.allocator.free(recipient_addr);
-            log.info("📦 [BLOCK PROCESS] Processing transaction {}/{}: {x} ({d:.8} ZEI from {s} to {s})", .{ i + 1, transactions.len, tx_hash[0..8], amount_zei, sender_addr, recipient_addr });
-
-            // SAFETY: Validate transaction structure before processing
+            // Structure validation
             if (!tx.isValid()) {
-                log.info("❌ [SAFETY] Invalid transaction {} in block at height {}", .{ i, height });
+                log.info("❌ [PHASE 1] Invalid transaction {} at height {}", .{i, height});
                 return error.InvalidTransaction;
             }
 
-            if (tx.isCoinbase()) {
-                try self.chain_state.processCoinbaseTransaction(io, tx, tx.recipient, height, false);
-            } else {
-                try self.chain_state.processTransaction(io, tx, false);
+            // For regular transactions, validate signature, balance, nonce
+            if (!tx.isCoinbase()) {
+                const sender = try self.chain_state.getAccount(io, tx.sender);
+                const total_cost = try std.math.add(u64, tx.amount, tx.fee);
+
+                if (sender.balance < total_cost) {
+                    log.info("❌ [PHASE 1] Insufficient balance for tx {}", .{i});
+                    return error.InsufficientBalance;
+                }
+
+                if (tx.nonce != sender.nonce) {
+                    log.info("❌ [PHASE 1] Invalid nonce for tx {}", .{i});
+                    return error.InvalidNonce;
+                }
             }
         }
+
+        log.info("✅ [PHASE 1] All transactions validated", .{});
+
+        // PHASE 2: Apply ALL transactions atomically via WriteBatch
+        log.info("🔄 [PHASE 2] Applying {} transactions atomically", .{transactions.len});
+
+        var batch = self.chain_state.database.createWriteBatch();
+        defer batch.deinit();
+        errdefer {
+            log.warn("❌ [PHASE 2] Batch application failed - rolling back", .{});
+        }
+
+        // Track supply changes for coinbase transactions
+        var total_supply_delta: u64 = 0;
+        var circulating_supply_delta: u64 = 0;
+
+        for (transactions, 0..) |tx, i| {
+            const tx_hash = tx.hash();
+            log.info("📦 [PHASE 2] Processing tx {}/{}: {x}", .{
+                i + 1, transactions.len, tx_hash[0..8]
+            });
+
+            if (tx.isCoinbase()) {
+                // Track supply increase
+                total_supply_delta += tx.amount;
+                if (height == 0) {
+                    circulating_supply_delta += tx.amount; // Genesis pre-mine
+                }
+
+                try self.chain_state.processCoinbaseTransaction(
+                    io, tx, tx.recipient, height, &batch, false
+                );
+            } else {
+                try self.chain_state.processTransaction(
+                    io, tx, &batch, false
+                );
+            }
+        }
+
+        // Apply supply changes to batch
+        if (total_supply_delta > 0) {
+            const current_total = self.chain_state.database.getTotalSupply();
+            const new_total = try std.math.add(u64, current_total, total_supply_delta);
+            try batch.updateTotalSupply(new_total);
+
+            log.info("📈 [SUPPLY] Total supply: {} → {}", .{current_total, new_total});
+        }
+
+        if (circulating_supply_delta > 0) {
+            const current_circ = self.chain_state.database.getCirculatingSupply();
+            const new_circ = try std.math.add(u64, current_circ, circulating_supply_delta);
+            try batch.updateCirculatingSupply(new_circ);
+
+            log.info("📈 [SUPPLY] Circulating supply: {} → {}", .{current_circ, new_circ});
+        }
+
+        // ATOMIC COMMIT: All-or-nothing
+        try batch.commit();
+
+        log.info("✅ [PHASE 2] {} transactions committed atomically", .{transactions.len});
     }
 
     fn matureCoinbaseRewards(self: *ChainProcessor, io: std.Io, current_height: u32) !void {

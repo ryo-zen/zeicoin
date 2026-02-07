@@ -994,6 +994,34 @@ pub const Database = struct {
             }
         }
 
+        pub fn updateTotalSupply(self: *WriteBatch, new_supply: u64) !void {
+            const key = "meta:total_supply";
+            var buffer: [8]u8 = undefined;
+            std.mem.writeInt(u64, &buffer, new_supply, .little);
+
+            c.rocksdb_writebatch_put(
+                self.batch,
+                key.ptr,
+                key.len,
+                &buffer,
+                buffer.len,
+            );
+        }
+
+        pub fn updateCirculatingSupply(self: *WriteBatch, new_supply: u64) !void {
+            const key = "meta:circulating_supply";
+            var buffer: [8]u8 = undefined;
+            std.mem.writeInt(u64, &buffer, new_supply, .little);
+
+            c.rocksdb_writebatch_put(
+                self.batch,
+                key.ptr,
+                key.len,
+                &buffer,
+                buffer.len,
+            );
+        }
+
         pub fn deinit(self: *WriteBatch) void {
             if (self.batch) |batch| {
                 c.rocksdb_writebatch_destroy(batch);

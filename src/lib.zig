@@ -8,7 +8,8 @@ pub const miner = @import("core/miner/main.zig");
 
 // Chain management components
 pub const chain = struct {
-    pub const state = @import("core/chain/state.zig");
+    pub const ChainState = @import("core/chain/state.zig").ChainState;
+    pub const ChainProcessor = @import("core/chain/processor.zig").ChainProcessor;
     pub const validator = @import("core/chain/validator.zig");
 };
 
@@ -35,6 +36,9 @@ pub const protocol = struct {
 pub const sync = @import("core/sync/sync.zig");
 
 // Storage components
+pub const storage = struct {
+    pub const Database = @import("core/storage/db.zig").Database;
+};
 pub const db = @import("core/storage/db.zig");
 pub const serialize = @import("core/storage/serialize.zig");
 
