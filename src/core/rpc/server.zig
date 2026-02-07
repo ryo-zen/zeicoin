@@ -436,6 +436,22 @@ pub const RPCServer = struct {
         return try format.formatSuccess(self.allocator, result, req.id);
     }
 
+    // ========== Helper Functions ==========
+
+    /// Safely validate and convert JSON integer to u64
+    /// Returns error if value is negative or out of range
+    fn validateU64FromJson(value: i64) !u64 {
+        if (value < 0) return error.NegativeValue;
+        return @intCast(value);
+    }
+
+    /// Safely convert usize to u32
+    /// Returns error if value exceeds u32 max
+    fn validateU32FromUsize(value: usize) !u32 {
+        if (value > std.math.maxInt(u32)) return error.ValueTooLarge;
+        return @intCast(value);
+    }
+
     // ========== Method Handlers ==========
 
     fn handlePing(self: *RPCServer) ![]const u8 {
@@ -452,7 +468,8 @@ pub const RPCServer = struct {
 
     fn handleGetMempoolSize(self: *RPCServer) ![]const u8 {
         const size = self.blockchain.mempool_manager.getTransactionCount();
-        const response = rpc_types.GetMempoolSizeResponse{ .size = @intCast(size) };
+        const size_u32 = try validateU32FromUsize(size);
+        const response = rpc_types.GetMempoolSizeResponse{ .size = size_u32 };
         return try format.formatResult(self.allocator, rpc_types.GetMempoolSizeResponse, response);
     }
 
@@ -461,6 +478,7 @@ pub const RPCServer = struct {
         const database = try self.ensureSecondaryDb();
         const height = try database.getHeight();
         const mempool_size = self.blockchain.mempool_manager.getTransactionCount();
+        const mempool_size_u32 = try validateU32FromUsize(mempool_size);
         const is_mining = self.blockchain.mining_manager != null;
         const peer_count: u32 = 0; // TODO: Get from network manager
 
@@ -470,7 +488,7 @@ pub const RPCServer = struct {
             .version = "0.1.0",
             .network = network_str,
             .height = height,
-            .mempool_size = @intCast(mempool_size),
+            .mempool_size = mempool_size_u32,
             .is_mining = is_mining,
             .peer_count = peer_count,
         };
@@ -664,12 +682,47 @@ pub const RPCServer = struct {
             );
         };
 
-        // Extract numeric fields
-        const amount = @as(u64, @intCast(params_obj.get("amount").?.integer));
-        const fee = @as(u64, @intCast(params_obj.get("fee").?.integer));
-        const nonce = @as(u64, @intCast(params_obj.get("nonce").?.integer));
-        const timestamp = @as(u64, @intCast(params_obj.get("timestamp").?.integer));
-        const expiry_height = @as(u64, @intCast(params_obj.get("expiry_height").?.integer));
+        // Extract and validate numeric fields
+        const amount = validateU64FromJson(params_obj.get("amount").?.integer) catch {
+            return try format.formatError(
+                self.allocator,
+                rpc_types.ErrorCode.invalid_params,
+                "Invalid amount: must be non-negative integer",
+                null,
+            );
+        };
+        const fee = validateU64FromJson(params_obj.get("fee").?.integer) catch {
+            return try format.formatError(
+                self.allocator,
+                rpc_types.ErrorCode.invalid_params,
+                "Invalid fee: must be non-negative integer",
+                null,
+            );
+        };
+        const nonce = validateU64FromJson(params_obj.get("nonce").?.integer) catch {
+            return try format.formatError(
+                self.allocator,
+                rpc_types.ErrorCode.invalid_params,
+                "Invalid nonce: must be non-negative integer",
+                null,
+            );
+        };
+        const timestamp = validateU64FromJson(params_obj.get("timestamp").?.integer) catch {
+            return try format.formatError(
+                self.allocator,
+                rpc_types.ErrorCode.invalid_params,
+                "Invalid timestamp: must be non-negative integer",
+                null,
+            );
+        };
+        const expiry_height = validateU64FromJson(params_obj.get("expiry_height").?.integer) catch {
+            return try format.formatError(
+                self.allocator,
+                rpc_types.ErrorCode.invalid_params,
+                "Invalid expiry_height: must be non-negative integer",
+                null,
+            );
+        };
 
         // Parse signature (hex string to bytes)
         const signature_hex = params_obj.get("signature").?.string;
@@ -742,4 +795,76 @@ pub const RPCServer = struct {
 };
 
 // ========== Tests ==========
+
+test "validateU64FromJson - valid positive values" {
+    const allocator = std.testing.allocator;
+    _ = allocator;
+
+    // Valid positive values
+    try std.testing.expectEqual(@as(u64, 0), try RPCServer.validateU64FromJson(0));
+    try std.testing.expectEqual(@as(u64, 100), try RPCServer.validateU64FromJson(100));
+    try std.testing.expectEqual(@as(u64, 1000000), try RPCServer.validateU64FromJson(1000000));
+
+    // Max i64 value should work
+    const max_i64: i64 = std.math.maxInt(i64);
+    try std.testing.expectEqual(@as(u64, @intCast(max_i64)), try RPCServer.validateU64FromJson(max_i64));
+}
+
+test "validateU64FromJson - rejects negative values" {
+    const allocator = std.testing.allocator;
+    _ = allocator;
+
+    // SECURITY: Negative values must be rejected
+    try std.testing.expectError(error.NegativeValue, RPCServer.validateU64FromJson(-1));
+    try std.testing.expectError(error.NegativeValue, RPCServer.validateU64FromJson(-100));
+    try std.testing.expectError(error.NegativeValue, RPCServer.validateU64FromJson(-1000000));
+
+    // Min i64 (most negative) must be rejected
+    const min_i64: i64 = std.math.minInt(i64);
+    try std.testing.expectError(error.NegativeValue, RPCServer.validateU64FromJson(min_i64));
+}
+
+test "validateU32FromUsize - valid values" {
+    const allocator = std.testing.allocator;
+    _ = allocator;
+
+    // Valid small values
+    try std.testing.expectEqual(@as(u32, 0), try RPCServer.validateU32FromUsize(0));
+    try std.testing.expectEqual(@as(u32, 100), try RPCServer.validateU32FromUsize(100));
+    try std.testing.expectEqual(@as(u32, 1000), try RPCServer.validateU32FromUsize(1000));
+
+    // Max u32 value should work
+    const max_u32: usize = std.math.maxInt(u32);
+    try std.testing.expectEqual(@as(u32, @intCast(max_u32)), try RPCServer.validateU32FromUsize(max_u32));
+}
+
+test "validateU32FromUsize - rejects overflow on 64-bit" {
+    const allocator = std.testing.allocator;
+    _ = allocator;
+
+    // Only test on 64-bit systems where usize > u32
+    if (@sizeOf(usize) > @sizeOf(u32)) {
+        // Value exceeding u32 max must be rejected
+        const too_large: usize = @as(usize, std.math.maxInt(u32)) + 1;
+        try std.testing.expectError(error.ValueTooLarge, RPCServer.validateU32FromUsize(too_large));
+
+        // Much larger value
+        const very_large: usize = 0xFFFFFFFFFFFF;
+        try std.testing.expectError(error.ValueTooLarge, RPCServer.validateU32FromUsize(very_large));
+    }
+}
+
+test "RPC integer overflow attack prevention" {
+    const allocator = std.testing.allocator;
+    _ = allocator;
+
+    // SECURITY TEST: Simulate malicious JSON-RPC request with negative amount
+    // This would have wrapped to huge u64 value before the fix
+    const malicious_amount: i64 = -1000;
+    const result = RPCServer.validateU64FromJson(malicious_amount);
+
+    // Must be rejected, not silently converted to 18446744073709550616
+    try std.testing.expectError(error.NegativeValue, result);
+}
+
 // Integration tests in build.zig
