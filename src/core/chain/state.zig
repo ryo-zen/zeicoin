@@ -40,6 +40,10 @@ pub const ChainState = struct {
 
     allocator: std.mem.Allocator,
 
+    // State root cache (optimization for mining loop)
+    cached_state_root: [32]u8,
+    state_dirty: bool, // true = needs recalculation
+
     const Self = @This();
 
     /// Helper method to format address for logging in ChainState context
@@ -56,6 +60,8 @@ pub const ChainState = struct {
             .block_index = block_index.BlockIndex.init(allocator),
             .mutex = .{},
             .allocator = allocator,
+            .cached_state_root = std.mem.zeroes([32]u8), // Placeholder
+            .state_dirty = true, // Force calculation on first access
         };
     }
 
@@ -136,6 +142,9 @@ pub const ChainState = struct {
             return account;
         } else |err| switch (err) {
             db.DatabaseError.NotFound => {
+                // CACHE INVALIDATION: Creating new account changes state
+                self.state_dirty = true;
+
                 // Create new account with zero balance
                 const new_account = types.Account{
                     .address = address,
@@ -170,6 +179,9 @@ pub const ChainState = struct {
             log.info("🚫 [DUPLICATE TX] Transaction {x} already exists in blockchain - SKIPPING to prevent double-spend", .{tx_hash[0..8]});
             return; // Skip processing duplicate transaction
         }
+
+        // CACHE INVALIDATION: Account state will change
+        self.state_dirty = true;
 
         log.info("🔍 [TX VALIDATION] =============================================", .{});
         log.info("🔍 [TX VALIDATION] Processing transaction:", .{});
@@ -274,6 +286,9 @@ pub const ChainState = struct {
             return; // Skip processing duplicate coinbase transaction
         }
 
+        // CACHE INVALIDATION: Miner account state will change
+        self.state_dirty = true;
+
         // SECURITY: Validate supply cap before processing coinbase
         const current_supply = self.database.getTotalSupply();
         if (current_supply + coinbase_tx.amount > types.MAX_SUPPLY) {
@@ -353,6 +368,9 @@ pub const ChainState = struct {
 
     /// Clear all account state for rebuild
     pub fn clearAllAccounts(self: *Self) !void {
+        // CACHE INVALIDATION: All accounts being deleted
+        self.state_dirty = true;
+
         // Use the new batch deletion capability in Database
         // This ensures no "dirty state" remains from reverted blocks
         try self.database.deleteAllAccounts();
@@ -393,6 +411,9 @@ pub const ChainState = struct {
             return; // Nothing to rollback
         }
 
+        // CACHE INVALIDATION: State being rebuilt from scratch
+        self.state_dirty = true;
+
         // Remove blocks from index that will be rolled back
         self.removeBlocksFromIndex(target_height + 1);
 
@@ -414,6 +435,9 @@ pub const ChainState = struct {
         if (target_height >= current_height) {
             return; // Nothing to rollback
         }
+
+        // CACHE INVALIDATION: State being reverted
+        self.state_dirty = true;
 
         // Remove blocks from index that will be rolled back
         self.removeBlocksFromIndex(target_height + 1);
@@ -437,6 +461,9 @@ pub const ChainState = struct {
 
     /// Replay coinbase transaction during state rebuild
     fn replayCoinbaseTransaction(self: *Self, io: std.Io, tx: Transaction) !void {
+        // CACHE INVALIDATION: Replay modifies account state
+        self.state_dirty = true;
+
         var miner_account = self.getAccount(io, tx.recipient) catch types.Account{
             .address = tx.recipient,
             .balance = 0,
@@ -452,6 +479,9 @@ pub const ChainState = struct {
 
     /// Replay regular transaction during state rebuild
     fn replayRegularTransaction(self: *Self, io: std.Io, tx: Transaction) !void {
+        // CACHE INVALIDATION: Replay modifies account state
+        self.state_dirty = true;
+
         // Get sender account (might not exist in test scenario)
         var sender_account = self.getAccount(io, tx.sender) catch {
             // In test scenarios, we might have pre-funded accounts that don't exist in blocks
@@ -488,6 +518,9 @@ pub const ChainState = struct {
             return;
         };
         defer mature_block.deinit(self.allocator);
+
+        // CACHE INVALIDATION: Immature balances moving to mature changes state
+        self.state_dirty = true;
 
         // Process coinbase transactions in the mature block
         for (mature_block.transactions) |tx| {
@@ -574,19 +607,27 @@ pub const ChainState = struct {
     /// This creates a cryptographic commitment to the entire account state
     /// Any change to any account balance or nonce will change the root
     pub fn calculateStateRoot(self: *Self) ![32]u8 {
+        // OPTIMIZATION: Return cached value if state hasn't changed
+        if (!self.state_dirty) {
+            log.debug("🌳 [STATE ROOT CACHE HIT] Returning cached value: {x}", .{self.cached_state_root});
+            return self.cached_state_root;
+        }
+
+        log.debug("🌳 [STATE ROOT CACHE MISS] Recalculating (state was modified)", .{});
+
         // Structure to collect account hashes
         const AccountHashCollector = struct {
             hashes: *std.array_list.Managed([32]u8),
-            
+
             pub fn callback(account: types.Account, user_data: ?*anyopaque) bool {
                 const collector = @as(*@This(), @ptrCast(@alignCast(user_data.?)));
-                
+
                 // Hash the account state using our Merkle tree utility
                 const account_hash = util.MerkleTree.hashAccountState(account);
                 collector.hashes.append(account_hash) catch {
                     return false; // Stop iteration on allocation error
                 };
-                
+
                 return true; // Continue iteration
             }
         };
@@ -596,11 +637,15 @@ pub const ChainState = struct {
         defer account_hashes.deinit();
 
         var collector = AccountHashCollector{ .hashes = &account_hashes };
-        
+
         try self.database.iterateAccounts(AccountHashCollector.callback, &collector);
 
         // Calculate Merkle root from all account hashes
         const root = try util.MerkleTree.calculateRoot(self.allocator, account_hashes.items);
+
+        // CACHE UPDATE: Store result and mark clean
+        self.cached_state_root = root;
+        self.state_dirty = false;
 
         const account_count = account_hashes.items.len;
         log.info("🌳 [STATE ROOT] Calculated from {} accounts: {x}", .{ account_count, root });
