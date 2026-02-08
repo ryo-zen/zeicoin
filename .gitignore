@@ -106,3 +106,6 @@ AGENTS.md
 .envrc
 .gemini/settings.json
 /test_manual_data
+server_debug.log
+node1.log
+node2.log

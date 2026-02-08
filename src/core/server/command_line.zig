@@ -103,8 +103,8 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Conf
         config.port = std.fmt.parseInt(u16, p2p_port_str, 10) catch config.port;
     }
 
-    const api_port_env = util.getEnvVarOwned(allocator, "ZEICOIN_API_PORT") catch 
-                         util.getEnvVarOwned(allocator, "ZEICOIN_CLIENT_PORT") catch 
+    const api_port_env = util.getEnvVarOwned(allocator, "ZEICOIN_CLIENT_PORT") catch 
+                         util.getEnvVarOwned(allocator, "ZEICOIN_API_PORT") catch 
                          null;
     if (api_port_env) |api_port_str| {
         defer allocator.free(api_port_str);
