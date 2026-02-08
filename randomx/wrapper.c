@@ -69,37 +69,41 @@ void randomx_destroy_context(randomx_context* ctx) {
 randomx_context* randomx_init_fast(const char* key, size_t key_size) {
     randomx_context* ctx = malloc(sizeof(randomx_context));
     if (!ctx) return NULL;
-    
+
+    // Flags for FAST mode: full memory + JIT
+    // Note: RANDOMX_FLAG_LARGE_PAGES requires special permissions, omitted for compatibility
+    randomx_flags flags = RANDOMX_FLAG_FULL_MEM | RANDOMX_FLAG_JIT;
+
     // Create cache
-    ctx->cache = randomx_alloc_cache(RANDOMX_FLAG_DEFAULT);
+    ctx->cache = randomx_alloc_cache(flags);
     if (!ctx->cache) {
         free(ctx);
         return NULL;
     }
-    
+
     // Initialize cache
     randomx_init_cache(ctx->cache, key, key_size);
-    
+
     // Allocate dataset (2GB)
-    ctx->dataset = randomx_alloc_dataset(RANDOMX_FLAG_DEFAULT);
+    ctx->dataset = randomx_alloc_dataset(flags);
     if (!ctx->dataset) {
         randomx_release_cache(ctx->cache);
         free(ctx);
         return NULL;
     }
-    
+
     // Initialize dataset from cache
     randomx_init_dataset(ctx->dataset, ctx->cache, 0, randomx_dataset_item_count());
-    
+
     // Create VM with dataset (fast mode)
-    ctx->vm = randomx_create_vm(RANDOMX_FLAG_DEFAULT, NULL, ctx->dataset);
+    ctx->vm = randomx_create_vm(flags, NULL, ctx->dataset);
     if (!ctx->vm) {
         randomx_release_dataset(ctx->dataset);
         randomx_release_cache(ctx->cache);
         free(ctx);
         return NULL;
     }
-    
+
     return ctx;
 }
 

@@ -152,10 +152,10 @@ fn handleWatchStatus(allocator: std.mem.Allocator, io: std.Io) !void {
 
             if (first_iteration) {
                 // First iteration: print normally
-                print("{s} Block: {s: >3} | Peers: {s: >2} | Mempool: {s: >3} | Hash: {s: >5} H/s", .{ frame, height orelse "?", peers orelse "?", pending orelse "?", hashrate orelse "0.0" });
+                print("{s} Now Mining Block: {s: >3} | Peers: {s: >2} | Mempool: {s: >3} | Hash: {s: >5} H/s", .{ frame, height orelse "?", peers orelse "?", pending orelse "?", hashrate orelse "0.0" });
             } else {
                 // Update: carriage return, clear entire line, then print (prevents white streak)
-                print("\r\x1b[2K{s} Block: {s: >3} | Peers: {s: >2} | Mempool: {s: >3} | Hash: {s: >5} H/s", .{ frame, height orelse "?", peers orelse "?", pending orelse "?", hashrate orelse "0.0" });
+                print("\r\x1b[2K{s} Now Mining Block: {s: >3} | Peers: {s: >2} | Mempool: {s: >3} | Hash: {s: >5} H/s", .{ frame, height orelse "?", peers orelse "?", pending orelse "?", hashrate orelse "0.0" });
             }
             frame_counter += 1;
         } else {
