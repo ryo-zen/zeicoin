@@ -187,3 +187,6 @@ pub fn formatZEI(allocator: std.mem.Allocator, amount_zei: u64) ![]u8 {
         return std.fmt.allocPrint(allocator, "{}.{d:0>5} ZEI", .{ zei_coins, @as(u64, @intFromFloat(decimal * types.PROGRESS.DECIMAL_PRECISION_MULTIPLIER)) });
     }
 }
+
+/// PostgreSQL interface (minimal libpq wrapper)
+pub const postgres = @import("postgres.zig");

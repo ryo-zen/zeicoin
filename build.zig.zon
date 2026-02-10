@@ -4,14 +4,8 @@
     .fingerprint = 0x6d42938f4de07d4f,
     .minimum_zig_version = "0.16.0-dev.2255+d417441f4",
     .dependencies = .{
-        .pg = .{
-            .url = "git+https://github.com/karlseguin/pg.zig?ref=master#842541eb22a6da1e43a2e78c1b20b5ea88aa9366",
-            .hash = "1220d3e812c70f5afb84db55797b3ac896c506435aaf8b98f990c12a719a36d8a030",
-        },
-        .zap = .{
-            .url = "https://github.com/zigzap/zap/archive/refs/tags/v0.8.0.tar.gz",
-            .hash = "12209936c3333b53b53edcf453b1670babb9ae8c2197b1ca627c01e72670e20c1a21",
-        },
+        // pg.zig removed - using libpq C library instead for Zig 0.16 compatibility
+        // .zap - Not needed for indexer, not Zig 0.16 compatible yet
     },
     .paths = .{
         "build.zig",

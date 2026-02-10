@@ -11,6 +11,7 @@ const serialize = @import("../storage/serialize.zig");
 const key = @import("../crypto/key.zig");
 const bech32 = @import("../crypto/bech32.zig");
 const util = @import("../util/util.zig");
+const postgres = util.postgres;
 
 pub const CLIENT_API_PORT: u16 = 10802;
 const MAX_TRANSACTIONS_PER_SESSION = 100;
@@ -22,7 +23,9 @@ pub const ClientApiServer = struct {
     running: std.atomic.Value(bool),
     bind_address: []const u8,
     port: u16,
-    
+    pg_conn: ?postgres.Connection,
+    pg_enabled: bool,
+
     const Self = @This();
 
     fn sendResponse(io: std.Io, connection: net.Stream, data: []const u8) !void {
@@ -34,21 +37,26 @@ pub const ClientApiServer = struct {
     }
 
     pub fn init(allocator: std.mem.Allocator, blockchain: *zen.ZeiCoin, bind_address: []const u8, port: u16) Self {
-        return .{ 
+        return .{
             .allocator = allocator,
             .blockchain = blockchain,
             .server = null,
             .running = std.atomic.Value(bool).init(false),
             .bind_address = bind_address,
             .port = port,
+            .pg_conn = null,
+            .pg_enabled = false,
         };
     }
-    
+
     pub fn deinit(self: *Self) void {
         self.stop();
         if (self.server) |*server| {
             const io = self.blockchain.io;
             server.deinit(io);
+        }
+        if (self.pg_conn) |*conn| {
+            conn.deinit();
         }
     }
 
@@ -569,48 +577,151 @@ pub const ClientApiServer = struct {
     }
     
     fn handleGetHistory(self: *Self, io: std.Io, connection: net.Stream, message: []const u8) !void {
-        // TODO: This implementation is O(N) where N is blockchain height.
-        // It iterates through EVERY block to find transactions for an address.
-        // For production use, this MUST be replaced with:
-        // 1. A secondary index in RocksDB (Address -> [TxHash])
-        // 2. Or integration with the PostgreSQL Indexer
-        const address_str = std.mem.trim(u8, message[12..], " \n\r"); 
-        const address = types.Address.fromString(self.allocator, address_str) catch return;
-        const chain_height = try self.blockchain.getHeight();
-        var transactions = std.array_list.Managed(struct {
-            height: u64,
-            hash: [32]u8,
-            tx_type: []const u8,
-            amount: u64,
-            fee: u64,
-            timestamp: u64,
-            confirmations: u64,
-            counterparty: types.Address,
-        }).init(self.allocator);
-        defer transactions.deinit();
-        
-        var height: u64 = 0;
-        while (height <= chain_height) : (height += 1) {
-            const block = self.blockchain.database.getBlock(io, @intCast(height)) catch continue;
-            for (block.transactions) |tx| {
-                var involves = false; var t_type: []const u8 = ""; var cp: types.Address = undefined;
-                if (tx.sender.isZero()) {
-                    if (tx.recipient.equals(address)) { involves = true; t_type = "COINBASE"; cp = types.Address.zero(); }
-                } else if (tx.sender.equals(address)) { involves = true; t_type = "SENT"; cp = tx.recipient; }
-                else if (tx.recipient.equals(address)) { involves = true; t_type = "RECEIVED"; cp = tx.sender; }
-                if (involves) {
-                    try transactions.append(.{ .height = height, .hash = tx.hash(), .tx_type = t_type, .amount = tx.amount, .fee = tx.fee, .timestamp = tx.timestamp, .confirmations = chain_height - height + 1, .counterparty = cp });
-                }
-            }
+        const address_str = std.mem.trim(u8, message[12..], " \n\r");
+
+        // Attempt to initialize PostgreSQL if not already done
+        if (!self.pg_enabled and self.pg_conn == null) {
+            self.initPostgres() catch |err| {
+                log.warn("PostgreSQL not available for GET_HISTORY: {}", .{err});
+                const error_msg =
+                    \\ERROR: Transaction history requires PostgreSQL indexer
+                    \\
+                    \\To enable fast history queries:
+                    \\1. Install PostgreSQL: sudo apt install postgresql libpq-dev
+                    \\2. Create database: createdb zeicoin_testnet
+                    \\3. Run schema: psql zeicoin_testnet < sql/timescaledb_schema.sql
+                    \\4. Set password: export ZEICOIN_DB_PASSWORD=yourpassword
+                    \\5. Run indexer: ./zig-out/bin/zeicoin_indexer (when available)
+                    \\
+                    \\Note: O(N) blockchain scan was removed for performance reasons.
+                    \\Use PostgreSQL indexer for production transaction history.
+                    \\
+                ;
+                try sendResponse(io, connection, error_msg);
+                return;
+            };
         }
+
+        // Use PostgreSQL fast path
+        if (self.pg_conn) |*conn| {
+            return self.handleGetHistoryPostgres(io, connection, address_str, conn) catch |err| {
+                log.err("PostgreSQL query failed: {}", .{err});
+                const error_msg = "ERROR: Database query failed\n";
+                try sendResponse(io, connection, error_msg);
+            };
+        }
+
+        // Should never reach here
+        const error_msg = "ERROR: History not available\n";
+        try sendResponse(io, connection, error_msg);
+    }
+
+    /// Initialize PostgreSQL connection (lazy)
+    fn initPostgres(self: *Self) !void {
+        if (self.pg_conn != null) return; // Already initialized
+
+        // Load config from environment
+        const password = util.getEnvVarOwned(self.allocator, "ZEICOIN_DB_PASSWORD") catch {
+            return error.PostgresNotConfigured;
+        };
+        defer self.allocator.free(password);
+
+        const host = util.getEnvVarOwned(self.allocator, "ZEICOIN_DB_HOST") catch
+            try self.allocator.dupe(u8, "127.0.0.1");
+        defer self.allocator.free(host);
+
+        const dbname = util.getEnvVarOwned(self.allocator, "ZEICOIN_DB_NAME") catch blk: {
+            const name = if (types.CURRENT_NETWORK == .testnet) "zeicoin_testnet" else "zeicoin_mainnet";
+            break :blk try self.allocator.dupe(u8, name);
+        };
+        defer self.allocator.free(dbname);
+
+        const user = util.getEnvVarOwned(self.allocator, "ZEICOIN_DB_USER") catch
+            try self.allocator.dupe(u8, "zeicoin");
+        defer self.allocator.free(user);
+
+        const port_str = util.getEnvVarOwned(self.allocator, "ZEICOIN_DB_PORT") catch null;
+        const port: u16 = if (port_str) |p| blk: {
+            defer self.allocator.free(p);
+            break :blk std.fmt.parseInt(u16, p, 10) catch 5432;
+        } else 5432;
+
+        const conninfo = try postgres.buildConnString(self.allocator, host, port, dbname, user, password);
+        defer self.allocator.free(conninfo);
+
+        self.pg_conn = try postgres.Connection.init(self.allocator, conninfo);
+        self.pg_enabled = true;
+        log.info("PostgreSQL connected for GET_HISTORY: {s}@{s}:{}/{s}", .{ user, host, port, dbname });
+    }
+
+    /// Handle GET_HISTORY using PostgreSQL (fast O(log N) query)
+    fn handleGetHistoryPostgres(
+        self: *Self,
+        io: std.Io,
+        connection: net.Stream,
+        address_str: []const u8,
+        pg_conn: *postgres.Connection,
+    ) !void {
+        const chain_height = try self.blockchain.getHeight();
+
+        // Query PostgreSQL for transactions involving this address
+        const sql =
+            \\SELECT hash, block_height, timestamp_ms, sender, recipient, amount, fee, nonce
+            \\FROM transactions
+            \\WHERE sender = $1 OR recipient = $1
+            \\ORDER BY block_height DESC, nonce DESC
+            \\LIMIT 1000
+        ;
+
+        const sql_z = try self.allocator.dupeZ(u8, sql);
+        defer self.allocator.free(sql_z);
+
+        const addr_z = try self.allocator.dupeZ(u8, address_str);
+        defer self.allocator.free(addr_z);
+
+        const params = [_][:0]const u8{addr_z};
+        var result = try pg_conn.queryParams(sql_z, &params);
+        defer result.deinit();
+
+        // Build response
         var response = std.array_list.Managed(u8).init(self.allocator);
         defer response.deinit();
-        try response.print("HISTORY:{}\n", .{transactions.items.len});
-        for (transactions.items) |tx| {
-            const cp_b32 = try tx.counterparty.toBech32(self.allocator, types.CURRENT_NETWORK);
-            defer self.allocator.free(cp_b32);
-            try response.print("{}|{x}|{s}|{}|{}|{}|{}|{s}\n", .{tx.height, tx.hash, tx.tx_type, tx.amount, tx.fee, tx.timestamp, tx.confirmations, cp_b32});
+
+        const row_count = result.rowCount();
+        try response.print("HISTORY:{}\n", .{row_count});
+
+        var row: usize = 0;
+        while (row < row_count) : (row += 1) {
+            const hash_str = result.getValue(row, 0) orelse continue;
+            const height_str = result.getValue(row, 1) orelse continue;
+            const timestamp_str = result.getValue(row, 2) orelse continue;
+            const sender_str = result.getValue(row, 3) orelse continue;
+            const recipient_str = result.getValue(row, 4) orelse continue;
+            const amount_str = result.getValue(row, 5) orelse continue;
+            const fee_str = result.getValue(row, 6) orelse continue;
+
+            const height = try std.fmt.parseInt(u32, height_str, 10);
+            const confirmations = chain_height - height + 1;
+
+            // Determine tx_type and counterparty
+            const is_coinbase = std.mem.eql(u8, sender_str, "0000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+            const is_sent = std.mem.eql(u8, sender_str, address_str);
+
+            const tx_type: []const u8 = if (is_coinbase) "COINBASE" else if (is_sent) "SENT" else "RECEIVED";
+            const counterparty = if (is_coinbase) "tzei1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqrg9v3e" else if (is_sent) recipient_str else sender_str;
+
+            try response.print("{s}|{s}|{s}|{s}|{s}|{s}|{}|{s}\n", .{
+                height_str,
+                hash_str,
+                tx_type,
+                amount_str,
+                fee_str,
+                timestamp_str,
+                confirmations,
+                counterparty,
+            });
         }
+
         try sendResponse(io, connection, response.items);
     }
 };

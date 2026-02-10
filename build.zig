@@ -3,21 +3,14 @@ const build_helpers = @import("build_helpers.zig");
 const package_name = "zeicoin";
 const package_path = "src/lib.zig";
 
-// NOTE: External dependencies (pg, zap) are commented out for Zig 0.16.0 migration.
-// These are only needed for optional analytics features (indexer, transaction_api).
-// Core blockchain (zen_server, CLI) has ZERO dependencies except RocksDB.
+// NOTE: External Zig dependencies removed - using libpq C library for PostgreSQL.
+// Core blockchain (zen_server, CLI) has ZERO external dependencies.
+// System libraries: RocksDB (blockchain storage), libpq (optional PostgreSQL analytics)
 //
 // List of external dependencies that this package requires.
-// const external_dependencies = [_]build_helpers.Dependency{
-//     .{
-//         .name = "pg",
-//         .module_name = "pg",
-//     },
-//     .{
-//         .name = "zap",
-//         .module_name = "zap",
-//     },
-// };
+const external_dependencies = [_]build_helpers.Dependency{
+    // All external dependencies removed - using C libraries instead
+};
 
 pub fn build(b: *std.Build) !void {
     // Standard target options allows the person running `zig build` to choose
@@ -34,7 +27,7 @@ pub fn build(b: *std.Build) !void {
     // **************************************************************
     // *            HANDLE DEPENDENCY MODULES                       *
     // **************************************************************
-    // NOTE: Dependencies commented out - not needed for core blockchain
+    // No external Zig module dependencies - using C libraries (libpq, rocksdb)
     // const deps = build_helpers.generateModuleDependencies(
     //     b,
     //     &external_dependencies,
@@ -55,8 +48,11 @@ pub fn build(b: *std.Build) !void {
         .link_libc = true,
     });
 
-    // Link RocksDB to the module (only system dependency for core blockchain)
+    // Link RocksDB to the module (system dependency for core blockchain)
     zeicoin_module.linkSystemLibrary("rocksdb", .{});
+
+    // Link libpq to the module (PostgreSQL for optional analytics/indexer)
+    zeicoin_module.linkSystemLibrary("pq", .{});
 
     // Expose zeicoin as a public module
     try b.modules.put(b.dupe(package_name), zeicoin_module);
@@ -140,49 +136,45 @@ pub fn build(b: *std.Build) !void {
     }
 
     // **************************************************************
-    // *              ANALYTICS EXECUTABLES - COMMENTED OUT        *
-    // *              (Require pg/zap dependencies)                 *
+    // *              ANALYTICS EXECUTABLES                         *
+    // *              (Require pg dependency - now compatible)      *
     // **************************************************************
 
-    // NOTE: The following executables are commented out because they require
-    // pg.zig and zap dependencies which are not yet compatible with Zig 0.16.0.
-    // They will be re-enabled once dependencies are updated or replaced.
+    // NOTE: pg.zig has been updated for Zig 0.16.0 compatibility (ryo-zen fork).
+    // The following executables are now enabled:
     //
-    // - zeicoin_indexer (requires pg)
-    // - transaction_api (requires pg + zap)
-    // - error_monitor (requires pg)
+    // - zeicoin_indexer (requires pg) - ENABLED
+    // - transaction_api (requires pg + zap) - DISABLED (zap not yet compatible)
+    // - error_monitor (requires pg) - DISABLED (not needed)
     //
     // Core blockchain functionality (zen_server + CLI) works without these.
 
     // **************************************************************
     // *              ZEICOIN INDEXER AS AN EXECUTABLE              *
     // **************************************************************
+    // NOTE: Indexer temporarily disabled while migrating from pg.zig to libpq
+    // The indexer is an optional analytics tool - core blockchain works without it
+    // TODO: Refactor indexer to use zeicoin.util.postgres wrapper
     // {
-    //     const exe = b.addExecutable(.{
-    //         .name = "zeicoin_indexer",
+    //     const indexer_module = b.createModule(.{
     //         .root_source_file = b.path("src/apps/indexer.zig"),
     //         .target = target,
     //         .optimize = optimize,
+    //         .link_libc = true,
     //     });
-    //     // Add dependency modules to the executable.
-    //     for (deps) |mod| exe.root_module.addImport(
-    //         mod.name,
-    //         mod.module,
-    //     );
-    //     exe.root_module.addImport("zeicoin", zeicoin_module);
-    //     exe.linkLibC();
-    //     // Link RocksDB
-    //     exe.linkSystemLibrary("rocksdb");
-    //
+    //     indexer_module.addImport("zeicoin", zeicoin_module);
+    //     indexer_module.linkSystemLibrary("rocksdb", .{});
+    //     indexer_module.linkSystemLibrary("pq", .{});
+    //     const exe = b.addExecutable(.{
+    //         .name = "zeicoin_indexer",
+    //         .root_module = indexer_module,
+    //     });
     //     b.installArtifact(exe);
-    //
     //     const run_cmd = b.addRunArtifact(exe);
     //     run_cmd.step.dependOn(b.getInstallStep());
-    //
     //     if (b.args) |args| {
     //         run_cmd.addArgs(args);
     //     }
-    //
     //     const run_step = b.step("run-indexer", "Run the zeicoin indexer");
     //     run_step.dependOn(&run_cmd.step);
     // }

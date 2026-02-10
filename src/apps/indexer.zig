@@ -1,14 +1,16 @@
 // indexer.zig - PostgreSQL blockchain indexer for ZeiCoin
 const std = @import("std");
-const pg = @import("pg");
 const zeicoin = @import("zeicoin");
 const types = zeicoin.types;
 const serialize = zeicoin.serialize;
 const db = zeicoin.db;
 const util = zeicoin.util;
-const l2_service = @import("l2_service.zig");
+const postgres = util.postgres;
+// L2 service temporarily disabled - needs import path fixes for Zig 0.16
+// const l2_service = @import("l2_service.zig");
 
-const Pool = pg.Pool;
+const Connection = postgres.Connection;
+const QueryResult = postgres.QueryResult;
 const DatabaseError = zeicoin.db.DatabaseError;
 const print = std.debug.print;
 
@@ -322,9 +324,9 @@ fn updateLastIndexedHeight(pool: *Pool, height: u32) !void {
 }
 
 fn indexBlock(pool: *Pool, allocator: std.mem.Allocator, indexer: *Indexer, height: u32) !void {
-    // Initialize L2 service for enhancement confirmation  
-    var l2_svc = l2_service.L2Service.init(allocator, pool);
-    
+    // L2 service temporarily disabled - needs import path fixes for Zig 0.16
+    // var l2_svc = l2_service.L2Service.init(allocator, pool);
+
     // Load block from indexer (uses secondary instance)
     var block = try indexer.getBlock(height);
     defer block.deinit(allocator);
@@ -377,46 +379,26 @@ fn indexBlock(pool: *Pool, allocator: std.mem.Allocator, indexer: *Indexer, heig
     // Insert transactions
     for (block.transactions, 0..) |tx, pos| {
         try indexTransaction(pool, allocator, &tx, height, &hash_hex, @intCast(pos));
-        
-        // Check for pending L2 enhancements to confirm
-        if (!tx.isCoinbase()) {
-            // Convert addresses to bech32 for L2 matching
-            const sender_bech32 = try tx.sender.toBech32(allocator, types.CURRENT_NETWORK);
-            defer allocator.free(sender_bech32);
-            
-            const recipient_bech32 = try tx.recipient.toBech32(allocator, types.CURRENT_NETWORK);
-            defer allocator.free(recipient_bech32);
-            
-            // Query for pending enhancements matching this transaction
-            const pending_enhancements = l2_svc.queryEnhancementsBySenderRecipient(
-                sender_bech32,
-                recipient_bech32,
-                .pending
-            ) catch |err| {
-                std.log.warn("Failed to query L2 enhancements: {}", .{err});
-                continue;
-            };
-            defer l2_svc.freeEnhancements(pending_enhancements);
-            
-            // Confirm the first matching enhancement
-            if (pending_enhancements.len > 0) {
-                const enhancement = pending_enhancements[0];
-                const tx_hash = tx.hash();
-                var tx_hash_hex: [64]u8 = undefined;
-                _ = try std.fmt.bufPrint(&tx_hash_hex, "{x}", .{&tx_hash});
-                
-                l2_svc.confirmEnhancement(
-                    enhancement.temp_id,
-                    &tx_hash_hex,
-                    height
-                ) catch |err| {
-                    std.log.warn("Failed to confirm L2 enhancement {s}: {}", .{enhancement.temp_id, err});
-                    continue;
-                };
-                
-                std.log.info("✅ Confirmed L2 enhancement {s} with tx {s}", .{enhancement.temp_id, &tx_hash_hex});
-            }
-        }
+
+        // L2 enhancement confirmation temporarily disabled
+        // TODO: Re-enable once l2_service import paths are fixed for Zig 0.16
+        // if (!tx.isCoinbase()) {
+        //     const sender_bech32 = try tx.sender.toBech32(allocator, types.CURRENT_NETWORK);
+        //     defer allocator.free(sender_bech32);
+        //     const recipient_bech32 = try tx.recipient.toBech32(allocator, types.CURRENT_NETWORK);
+        //     defer allocator.free(recipient_bech32);
+        //     const pending_enhancements = l2_svc.queryEnhancementsBySenderRecipient(
+        //         sender_bech32, recipient_bech32, .pending
+        //     ) catch |err| { continue; };
+        //     defer l2_svc.freeEnhancements(pending_enhancements);
+        //     if (pending_enhancements.len > 0) {
+        //         const enhancement = pending_enhancements[0];
+        //         const tx_hash = tx.hash();
+        //         var tx_hash_hex: [64]u8 = undefined;
+        //         _ = try std.fmt.bufPrint(&tx_hash_hex, "{x}", .{&tx_hash});
+        //         l2_svc.confirmEnhancement(enhancement.temp_id, &tx_hash_hex, height) catch continue;
+        //     }
+        // }
     }
 
     // Commit transaction
