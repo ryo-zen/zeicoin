@@ -29,11 +29,10 @@ pub const ClientApiServer = struct {
     const Self = @This();
 
     fn sendResponse(io: std.Io, connection: net.Stream, data: []const u8) !void {
-        // Use a tiny 1-byte buffer to ensure std.Io.net.Writer 
-        // doesn't trap small responses in a larger default buffer.
         var tiny_buf: [1]u8 = undefined;
         var writer = connection.writer(io, &tiny_buf);
         try writer.interface.writeAll(data);
+        try writer.interface.flush();
     }
 
     pub fn init(allocator: std.mem.Allocator, blockchain: *zen.ZeiCoin, bind_address: []const u8, port: u16) Self {

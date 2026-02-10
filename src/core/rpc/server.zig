@@ -194,7 +194,8 @@ pub const RPCServer = struct {
             {
                 var write_buf: [4096]u8 = undefined;
                 var writer = connection.writer(io, &write_buf);
-                _ = writer.interface.writeAll(http_response) catch {};
+                writer.interface.writeAll(http_response) catch {};
+                writer.interface.flush() catch {};
             }
             return;
         };
@@ -213,8 +214,12 @@ pub const RPCServer = struct {
         {
             var write_buf: [4096]u8 = undefined;
             var writer = connection.writer(io, &write_buf);
-            _ = writer.interface.writeAll(http_response) catch |err| {
+            writer.interface.writeAll(http_response) catch |err| {
                 log.err("Write error: {}", .{err});
+                return;
+            };
+            writer.interface.flush() catch |err| {
+                log.err("Flush error: {}", .{err});
             };
         }
     }

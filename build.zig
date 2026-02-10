@@ -180,28 +180,34 @@ pub fn build(b: *std.Build) !void {
     // **************************************************************
     // *           TRANSACTION API AS AN EXECUTABLE                 *
     // **************************************************************
-    // {
-    //     const exe = b.addExecutable(.{
-    //         .name = "transaction_api",
-    //         .root_source_file = b.path("src/apps/transaction_api.zig"),
-    //         .target = target,
-    //         .optimize = optimize,
-    //     });
-    //     // Add dependency modules
-    //     for (deps) |mod| exe.root_module.addImport(
-    //         mod.name,
-    //         mod.module,
-    //     );
-    //     exe.root_module.addImport("zeicoin", zeicoin_module);
-    //     exe.linkLibC();
-    //
-    //     b.installArtifact(exe);
-    //
-    //     const run_cmd = b.addRunArtifact(exe);
-    //     run_cmd.step.dependOn(b.getInstallStep());
-    //     const run_step = b.step("run-transaction-api", "Run the transaction API server (port 8080)");
-    //     run_step.dependOn(&run_cmd.step);
-    // }
+    {
+        const api_module = b.createModule(.{
+            .root_source_file = b.path("src/apps/transaction_api.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+
+        api_module.addImport("zeicoin", zeicoin_module);
+        api_module.linkSystemLibrary("pq", .{});
+
+        const exe = b.addExecutable(.{
+            .name = "transaction_api",
+            .root_module = api_module,
+        });
+
+        b.installArtifact(exe);
+
+        const run_cmd = b.addRunArtifact(exe);
+        run_cmd.step.dependOn(b.getInstallStep());
+
+        if (b.args) |args| {
+            run_cmd.addArgs(args);
+        }
+
+        const run_step = b.step("run-transaction-api", "Run the transaction API server (port 8080)");
+        run_step.dependOn(&run_cmd.step);
+    }
 
     // **************************************************************
     // *              RECOVERY TOOL                                 *

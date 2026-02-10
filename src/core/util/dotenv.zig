@@ -77,6 +77,18 @@ pub const DotEnv = struct {
             const key = std.mem.trim(u8, trimmed[0..eq_pos.?], " \t");
             var value = std.mem.trim(u8, trimmed[eq_pos.? + 1..], " \t");
 
+            // Strip inline comments (only for unquoted values)
+            if (value.len >= 2 and value[0] != '"' and value[0] != '\'') {
+                // Look for " #" or "\t#" pattern (hash preceded by whitespace)
+                var i: usize = 1;
+                while (i < value.len) : (i += 1) {
+                    if (value[i] == '#' and (value[i - 1] == ' ' or value[i - 1] == '\t')) {
+                        value = std.mem.trim(u8, value[0 .. i - 1], " \t");
+                        break;
+                    }
+                }
+            }
+
             // Remove quotes if present
             if (value.len >= 2) {
                 if ((value[0] == '"' and value[value.len - 1] == '"') or
@@ -192,17 +204,27 @@ pub fn loadForNetwork(allocator: std.mem.Allocator) !void {
     var dotenv = DotEnv.init(allocator);
     defer dotenv.deinit(); // Clean up after applying to environment
 
-    // First, load base configuration to get ZEICOIN_NETWORK
-    dotenv.loadFromFile(io, ".env") catch |err| {
-        if (err != error.FileNotFound) {
-            return err;
+    // 1. Check if ZEICOIN_NETWORK is set in the OS environment
+    var network: []const u8 = "testnet"; // Default
+    var network_from_env = false;
+
+    if (c.getenv("ZEICOIN_NETWORK")) |n| {
+        network = std.mem.span(n);
+        network_from_env = true;
+    } else {
+        // Not in OS env, try loading .env to find it
+        dotenv.loadFromFile(io, ".env") catch |err| {
+            if (err != error.FileNotFound) {
+                return err;
+            }
+        };
+        
+        if (dotenv.get("ZEICOIN_NETWORK")) |n| {
+            network = n;
         }
-    };
+    }
 
-    // Determine which network-specific file to load based on ZEICOIN_NETWORK
-    const network = dotenv.get("ZEICOIN_NETWORK") orelse "testnet"; // Default to testnet
-
-    // Load network-specific configuration
+    // 2. Load network-specific configuration
     const network_file = if (std.mem.eql(u8, network, "mainnet"))
         ".env.mainnet"
     else
@@ -214,13 +236,24 @@ pub fn loadForNetwork(allocator: std.mem.Allocator) !void {
         }
     };
 
-    // Load local overrides (git-ignored)
+    // 3. Load local overrides (git-ignored)
     dotenv.loadFromFile(io, ".env.local") catch |err| {
         if (err != error.FileNotFound) {
             return err;
         }
     };
     
+    // 4. Load .env ONLY if we didn't find the network in the OS env
+    // This allows .env to act as a "local dev default" but prevents it 
+    // from conflicting when the network is explicitly set (e.g. by systemd)
+    if (!network_from_env) {
+         dotenv.loadFromFile(io, ".env") catch |err| {
+            if (err != error.FileNotFound) {
+                return err;
+            }
+        };
+    }
+
     // Apply to environment (setenv copies, so we can free after)
     try dotenv.applyToEnvironment();
     

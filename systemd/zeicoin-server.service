@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=/root/zeicoin
-EnvironmentFile=-/root/zeicoin/.env
+EnvironmentFile=-/root/zeicoin/.env.testnet
 EnvironmentFile=-/root/zeicoin/.env.local
 Environment="ZEICOIN_SERVER=127.0.0.1"
 Environment="ZEICOIN_BOOTSTRAP=209.38.31.77:10801,134.199.170.129:10801"

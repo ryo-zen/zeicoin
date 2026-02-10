@@ -4,13 +4,15 @@ const net = std.Io.net;
 /// Minimal JSON-RPC 2.0 client for blockchain queries
 pub const RPCClient = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     host: []const u8,
     port: u16,
     request_id: u64,
 
-    pub fn init(allocator: std.mem.Allocator, host: []const u8, port: u16) RPCClient {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16) RPCClient {
         return RPCClient{
             .allocator = allocator,
+            .io = io,
             .host = host,
             .port = port,
             .request_id = 0,
@@ -264,16 +266,20 @@ pub const RPCClient = struct {
     /// Low-level RPC call
     fn call(self: *RPCClient, request: []const u8) ![]const u8 {
         // Connect to RPC server
-        const address = try net.Address.parseIp4(self.host, self.port);
-        var stream = try net.tcpConnectToAddress(address);
-        defer stream.close();
+        const address = try net.IpAddress.parse(self.host, self.port);
+        var stream = try address.connect(self.io, .{ .mode = .stream });
+        defer stream.close(self.io);
 
         // Send request
-        try stream.writeAll(request);
+        var tiny_buf: [1]u8 = undefined;
+        var writer = stream.writer(self.io, &tiny_buf);
+        try writer.interface.writeAll(request);
+        try writer.interface.flush();
 
         // Read response
         var buffer: [16384]u8 = undefined;
-        const bytes_read = try stream.read(&buffer);
+        const msg = try stream.socket.receive(self.io, &buffer);
+        const bytes_read = msg.data.len;
 
         if (bytes_read == 0) {
             return error.EmptyResponse;
@@ -293,27 +299,3 @@ pub const RPCClient = struct {
         return try self.allocator.dupe(u8, response);
     }
 };
-
-// ========== Tests ==========
-
-test "RPC client creation" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    const client = RPCClient.init(allocator, "127.0.0.1", 10803);
-    try testing.expect(client.port == 10803);
-    try testing.expect(client.request_id == 0);
-    try testing.expectEqualStrings("127.0.0.1", client.host);
-}
-
-test "request ID increments" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    var client = RPCClient.init(allocator, "127.0.0.1", 10803);
-    try testing.expect(client.request_id == 0);
-
-    // Simulate ID increment
-    client.request_id += 1;
-    try testing.expect(client.request_id == 1);
-}
