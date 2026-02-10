@@ -2,200 +2,51 @@
 const std = @import("std");
 const zeicoin = @import("zeicoin");
 const types = zeicoin.types;
-const serialize = zeicoin.serialize;
 const db = zeicoin.db;
 const util = zeicoin.util;
 const postgres = util.postgres;
-// L2 service temporarily disabled - needs import path fixes for Zig 0.16
-// const l2_service = @import("l2_service.zig");
+const Allocator = std.mem.Allocator;
 
-const Connection = postgres.Connection;
-const QueryResult = postgres.QueryResult;
-const DatabaseError = zeicoin.db.DatabaseError;
-const print = std.debug.print;
-
-/// PostgreSQL connection config
-pub const PgConfig = struct {
-    host: []const u8,
-    port: u16,
-    database: []const u8,
-    user: []const u8,
-    password: []const u8,  // Required - no default
-    pool_size: u32,
-    batch_size: u32,
-    timeout: u32,
-};
-
-/// Load configuration from environment variables (required)
-fn loadConfig(allocator: std.mem.Allocator) !PgConfig {
-    // Get database name 
-    const database = if (util.getEnvVarOwned(allocator, "ZEICOIN_DB_NAME")) |db_name| 
-        db_name
-    else |_| blk: {
-        // Fallback to network-based naming
-        const network_db = if (types.CURRENT_NETWORK == .testnet) "zeicoin_testnet" else "zeicoin_mainnet";
-        break :blk try allocator.dupe(u8, network_db);
-    };
-    errdefer allocator.free(database);
-    
-    // Get host
-    const host = util.getEnvVarOwned(allocator, "ZEICOIN_DB_HOST") catch 
-        try allocator.dupe(u8, "127.0.0.1");
-    errdefer allocator.free(host);
-    
-    // Get port
-    const port_str = util.getEnvVarOwned(allocator, "ZEICOIN_DB_PORT") catch null;
-    const port = if (port_str) |p| blk: {
-        defer allocator.free(p);
-        break :blk std.fmt.parseInt(u16, p, 10) catch 5432;
-    } else 5432;
-    
-    // Get user (with default for convenience)
-    const user = util.getEnvVarOwned(allocator, "ZEICOIN_DB_USER") catch 
-        try allocator.dupe(u8, "zeicoin");
-    errdefer allocator.free(user);
-    
-    // Get password (required - no default for security)
-    const password = util.getEnvVarOwned(allocator, "ZEICOIN_DB_PASSWORD") catch |err| {
-        std.log.err("❌ ZEICOIN_DB_PASSWORD environment variable is required", .{});
-        std.log.err("   Set it in your .env file or export it:", .{});
-        std.log.err("   export ZEICOIN_DB_PASSWORD=your_password_here", .{});
-        return err;
-    };
-    errdefer allocator.free(password);
-    
-    // Get pool size
-    const pool_size_str = util.getEnvVarOwned(allocator, "ZEICOIN_DB_POOL_SIZE") catch null;
-    const pool_size = if (pool_size_str) |p| blk: {
-        defer allocator.free(p);
-        break :blk std.fmt.parseInt(u32, p, 10) catch 5;
-    } else 5;
-    
-    // Get batch size
-    const batch_size_str = util.getEnvVarOwned(allocator, "ZEICOIN_DB_BATCH_SIZE") catch null;
-    const batch_size = if (batch_size_str) |b| blk: {
-        defer allocator.free(b);
-        break :blk std.fmt.parseInt(u32, b, 10) catch 10;
-    } else 10;
-    
-    // Get timeout
-    const timeout_str = util.getEnvVarOwned(allocator, "ZEICOIN_DB_TIMEOUT") catch null;
-    const timeout = if (timeout_str) |t| blk: {
-        defer allocator.free(t);
-        break :blk std.fmt.parseInt(u32, t, 10) catch 10000;
-    } else 10000;
-    
-    return PgConfig{
-        .host = host,
-        .port = port,
-        .database = database,
-        .user = user,
-        .password = password,
-        .pool_size = pool_size,
-        .batch_size = batch_size,
-        .timeout = timeout,
-    };
+// Helper to format strings and ensure they are null-terminated for PostgreSQL C API
+fn fmtz(a: Allocator, comptime f: []const u8, args: anytype) ![:0]const u8 {
+    return try a.dupeZ(u8, try std.fmt.allocPrint(a, f, args));
 }
 
+// Execute a SQL query with parameters and immediately clean up the result
+fn exec(conn: *postgres.Connection, sql: [:0]const u8, params: []const [:0]const u8) !void {
+    var res = try conn.queryParams(sql, params);
+    res.deinit();
+}
 
-/// Concurrent blockchain indexer using RocksDB secondary instance
+// Indexer manages the blockchain database connection (RocksDB)
 pub const Indexer = struct {
-    allocator: std.mem.Allocator,
+    allocator: Allocator,
     io: std.Io,
     blockchain_path: []const u8,
     secondary_path: []const u8,
-    config: PgConfig,
-    database: ?db.Database,
-    last_checked_height: u32,
+    database: ?db.Database = null,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, blockchain_path: []const u8, config: PgConfig) !Indexer {
-        const secondary_path = try std.fmt.allocPrint(allocator, "{s}_indexer_secondary", .{blockchain_path});
-        
-        return Indexer{
-            .allocator = allocator,
-            .io = io,
-            .blockchain_path = blockchain_path,
-            .secondary_path = secondary_path,
-            .config = config,
-            .database = null,
-            .last_checked_height = 0,
-        };
+    pub fn init(a: Allocator, io: std.Io, path: []const u8) !Indexer {
+        return .{ .allocator = a, .io = io, .blockchain_path = path,
+            .secondary_path = try std.fmt.allocPrint(a, "{s}_indexer_secondary", .{path}) };
     }
 
     pub fn deinit(self: *Indexer) void {
-        if (self.database) |*database| {
-            database.deinit();
-        }
+        if (self.database) |*d| d.deinit();
         self.allocator.free(self.secondary_path);
     }
 
-    /// Initialize secondary database connection
-    pub fn initSecondaryDatabase(self: *Indexer) !void {
-        if (self.database != null) return; // Already initialized
-        
-        // Try secondary instance first (concurrent access)
-        self.database = db.Database.initSecondary(
-            self.allocator, 
-            self.io,
-            self.blockchain_path, 
-            self.secondary_path
-        ) catch |err| switch (err) {
-            DatabaseError.OpenFailed => {
-                std.log.info("⚠️  Secondary instance failed, trying primary (mining node may be stopped)", .{});
-                // Fallback to primary instance if secondary fails
-                self.database = db.Database.init(self.allocator, self.io, self.blockchain_path) catch |primary_err| {
-                    std.log.err("❌ Cannot access blockchain database in any mode", .{});
-                    std.log.err("   Primary error: {}", .{primary_err});  
-                    std.log.err("   Secondary error: {}", .{err});
-                    std.log.err("🛑 Ensure zen_server is running or database exists", .{});
-                    return primary_err;
-                };
-                return;
-            },
-            else => return err,
-        };
-        
-        std.log.info("✅ Secondary database initialized: {s}", .{self.secondary_path});
-    }
-
-    /// Get the current blockchain height with secondary instance sync
-    pub fn getBlockchainHeight(self: *Indexer) !u32 {
+    // Ensures we can read the blockchain; falls back to primary if secondary fails
+    pub fn ensureDb(self: *Indexer) !*db.Database {
         if (self.database == null) {
-            try self.initSecondaryDatabase();
+            self.database = db.Database.initSecondary(self.allocator, self.io, self.blockchain_path, self.secondary_path) catch |err| blk: {
+                if (err != db.DatabaseError.OpenFailed) return err;
+                std.log.info("⚠️ Falling back to primary DB", .{});
+                break :blk try db.Database.init(self.allocator, self.io, self.blockchain_path);
+            };
         }
-        
-        var database = &self.database.?;
-        
-        // Try to catch up with primary database changes
-        database.catchUpWithPrimary() catch |err| {
-            std.log.warn("Failed to sync with primary: {}", .{err});
-        };
-        
-        const height = try database.getHeight();
-        self.last_checked_height = height;
-        return height;
-    }
-
-    /// Check if new blocks are available since last check
-    pub fn hasNewBlocks(self: *Indexer) !bool {
-        const current_height = try self.getBlockchainHeight();
-        return current_height > self.last_checked_height;
-    }
-
-    /// Get block safely with error handling
-    pub fn getBlock(self: *Indexer, height: u32) !types.Block {
-        if (self.database == null) {
-            try self.initSecondaryDatabase();
-        }
-        
-        var database = &self.database.?;
-        
-        // Try to catch up with primary before reading
-        database.catchUpWithPrimary() catch |err| {
-            std.log.warn("Failed to sync with primary: {}", .{err});
-        };
-        
-        return try database.getBlock(height);
+        _ = self.database.?.catchUpWithPrimary() catch {};
+        return &self.database.?;
     }
 };
 
@@ -203,321 +54,107 @@ pub fn main(init: std.process.Init) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
-
-    // Configuration
-    const blockchain_path = switch (types.CURRENT_NETWORK) {
-        .testnet => "zeicoin_data_testnet",
-        .mainnet => "zeicoin_data_mainnet",
-    };
-
-    std.log.info("🚀 Starting ZeiCoin PostgreSQL Indexer", .{});
-    std.log.info("📁 Blockchain path: {s}", .{blockchain_path});
-    std.log.info("🌐 Network: {s}", .{@tagName(types.CURRENT_NETWORK)});
-
-    // Load .env files first
-    zeicoin.dotenv.loadForNetwork(std.heap.page_allocator) catch |err| {
-        if (err != error.FileNotFound) {
-            std.log.warn("Failed to load .env file: {}", .{err});
-        }
-    };
     
-    // Load configuration from environment variables (required)
-    const config = try loadConfig(allocator);
-    defer {
-        allocator.free(config.host);
-        allocator.free(config.database);
-        allocator.free(config.user);
-        allocator.free(config.password);
-    }
+    // Arena for configuration and database connection lifetime
+    var arena_s = std.heap.ArenaAllocator.init(allocator);
+    defer arena_s.deinit();
+    const arena = arena_s.allocator();
 
-    std.log.info("🗄️ Database: {s}@{s}:{d}/{s}", .{ config.user, config.host, config.port, config.database });
+    zeicoin.dotenv.loadForNetwork(allocator) catch {};
+    
+    // Database configuration from environment
+    const host = util.getEnvVarOwned(arena, "ZEICOIN_DB_HOST") catch try arena.dupe(u8, "127.0.0.1");
+    const port = if (util.getEnvVarOwned(arena, "ZEICOIN_DB_PORT")) |p| std.fmt.parseInt(u16, p, 10) catch 5432 else |_| 5432;
+    const database = util.getEnvVarOwned(arena, "ZEICOIN_DB_NAME") catch try arena.dupe(u8, if (types.CURRENT_NETWORK == .testnet) "zeicoin_testnet" else "zeicoin_mainnet");
+    const user = util.getEnvVarOwned(arena, "ZEICOIN_DB_USER") catch try arena.dupe(u8, "zeicoin");
+    const password = try util.getEnvVarOwned(arena, "ZEICOIN_DB_PASSWORD");
 
-    // Create connection pool using config
-    var pool = try pg.Pool.init(allocator, .{
-        .size = @intCast(config.pool_size),
-        .connect = .{
-            .port = config.port,
-            .host = config.host,
-        },
-        .auth = .{
-            .username = config.user,
-            .database = config.database,
-            .password = config.password,
-            .timeout = 10_000,
-        },
-    });
-    defer pool.deinit();
+    const conninfo = try postgres.buildConnString(arena, host, port, database, user, password);
+    var conn = try postgres.Connection.init(allocator, conninfo);
+    defer conn.deinit();
 
-    std.log.info("✅ Connected to PostgreSQL pool!", .{});
+    std.log.info("🚀 Indexer started on {s}@{s}:{d}/{s}", .{user, host, port, database});
 
-    // Test the connection
-    var result = try pool.query("SELECT version()", .{});
-    defer result.deinit();
+    var idx = try Indexer.init(allocator, init.io, if (types.CURRENT_NETWORK == .testnet) "zeicoin_data_testnet" else "zeicoin_data_mainnet");
+    defer idx.deinit();
 
-    while (try result.next()) |row| {
-        const version = row.get([]const u8, 0);
-        std.log.info("📊 PostgreSQL version: {s}", .{version});
-    }
+    // Check where we left off
+    const last_h = blk: {
+        var res = try conn.query("SELECT value FROM indexer_state WHERE key = 'last_indexed_height'");
+        defer res.deinit();
+        break :blk if (res.rowCount() > 0) try std.fmt.parseInt(u32, res.getValue(0, 0).?, 10) else null;
+    };
 
-    // Get last indexed height
-    const last_height_opt = try getLastIndexedHeight(pool);
-    if (last_height_opt) |h| {
-        std.log.info("📈 Last indexed height: {}", .{h});
-    } else {
-        std.log.info("📈 Last indexed height: none (starting from genesis)", .{});
-    }
+    var h = if (last_h) |lh| lh + 1 else 0;
+    const current = try (try idx.ensureDb()).getHeight();
 
-    // Initialize indexer
-    var indexer = try Indexer.init(allocator, init.io, blockchain_path, config);
-    defer indexer.deinit();
+    // Main indexing loop: process each block since last height
+    while (h <= current) : (h += 1) {
+        var block = try (try idx.ensureDb()).getBlock(init.io, h);
+        defer block.deinit(allocator);
 
-    // Get current blockchain height
-    const current_height = try indexer.getBlockchainHeight();
-    std.log.info("📊 Current blockchain height: {}", .{current_height});
+        // Per-block arena for temporary strings used in SQL queries
+        var tx_arena_s = std.heap.ArenaAllocator.init(allocator);
+        defer tx_arena_s.deinit();
+        const tx_arena = tx_arena_s.allocator();
 
-    // Determine starting height (0 for genesis, last_height + 1 for continuation)
-    const start_height = if (last_height_opt) |h| h + 1 else 0;
+        var b_res = try conn.query("BEGIN");
+        b_res.deinit();
+        errdefer if (conn.query("ROLLBACK")) |res| {
+            var r = res;
+            r.deinit();
+        } else |_| {};
 
-    if (start_height <= current_height) {
-        std.log.info("🔄 Indexing blocks {} to {}...", .{ start_height, current_height });
+        const hash = block.hash();
+        const h_hex = try fmtz(tx_arena, "{x}", .{&hash});
+        const p_hex = try fmtz(tx_arena, "{x}", .{&block.header.previous_hash});
+        
+        var fees: u64 = 0;
+        for (block.transactions) |tx| if (!tx.isCoinbase()) { fees += tx.fee; };
 
-        // Index new blocks
-        var height = start_height;
-        while (height <= current_height) : (height += 1) {
-            try indexBlock(pool, allocator, &indexer, height);
+        // Insert block metadata
+        try exec(&conn, "INSERT INTO blocks (timestamp, timestamp_ms, height, hash, previous_hash, difficulty, nonce, tx_count, total_fees, size) VALUES (to_timestamp($1/1000.0), $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            &.{ try fmtz(tx_arena, "{}", .{block.header.timestamp}), try fmtz(tx_arena, "{}", .{block.header.timestamp}), try fmtz(tx_arena, "{}", .{h}), h_hex, p_hex, try fmtz(tx_arena, "{}", .{block.header.difficulty}), try fmtz(tx_arena, "{}", .{block.header.nonce}), try fmtz(tx_arena, "{}", .{block.transactions.len}), try fmtz(tx_arena, "{}", .{fees}), try fmtz(tx_arena, "{}", .{block.getSize()}) });
 
-            // Update last indexed height
-            try updateLastIndexedHeight(pool, height);
+        // Process each transaction in the block
+        for (block.transactions, 0..) |tx, pos| {
+            const tx_hash = tx.hash();
+            const tx_hex = try fmtz(tx_arena, "{x}", .{&tx_hash});
+            const sender = if (tx.isCoinbase()) try tx_arena.dupeZ(u8, "coinbase") else try tx_arena.dupeZ(u8, try tx.sender.toBech32(tx_arena, types.CURRENT_NETWORK));
+            const recipient = try tx_arena.dupeZ(u8, try tx.recipient.toBech32(tx_arena, types.CURRENT_NETWORK));
+            const ts = try fmtz(tx_arena, "{}", .{tx.timestamp});
+            const h_str = try fmtz(tx_arena, "{}", .{h});
 
-            std.log.info("✅ Indexed block {}", .{height});
+            try exec(&conn, "INSERT INTO transactions (block_timestamp, timestamp_ms, hash, block_height, block_hash, position, sender, recipient, amount, fee, nonce) VALUES (to_timestamp($1/1000.0), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                &.{ ts, ts, tx_hex, h_str, h_hex, try fmtz(tx_arena, "{}", .{pos}), sender, recipient, try fmtz(tx_arena, "{}", .{tx.amount}), try fmtz(tx_arena, "{}", .{tx.fee}), try fmtz(tx_arena, "{}", .{tx.nonce}) });
+
+            // Update balances
+            if (!tx.isCoinbase()) {
+                const diff = try fmtz(tx_arena, "{}", .{@as(i64, 0) - @as(i64, @intCast(tx.amount + tx.fee))});
+                try exec(&conn, "SELECT update_account_balance_simple($1, $2, $3, to_timestamp($4/1000.0)::timestamp, true)", &.{ sender, diff, h_str, ts });
+            }
+            try exec(&conn, "SELECT update_account_balance_simple($1, $2, $3, to_timestamp($4/1000.0)::timestamp, false)", &.{ recipient, try fmtz(tx_arena, "{}", .{tx.amount}), h_str, ts });
         }
-    } else {
-        std.log.info("✨ Already up to date!", .{});
-    }
 
-    // Show some statistics
-    try showStats(pool);
+        // Update indexer state and commit
+        try exec(&conn, "INSERT INTO indexer_state (key, value, updated_at) VALUES ('last_indexed_height', $1, CURRENT_TIMESTAMP) ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = CURRENT_TIMESTAMP", &.{try fmtz(tx_arena, "{}", .{h})});
+        var c_res = try conn.query("COMMIT");
+        c_res.deinit();
+        std.log.info("✅ Indexed block {}", .{h});
+    }
+    try showStats(&conn);
 }
 
-fn getLastIndexedHeight(pool: *Pool) !?u32 {
-    var result = try pool.query("SELECT value FROM indexer_state WHERE key = 'last_indexed_height'", .{});
-    defer result.deinit();
-
-    while (try result.next()) |row| {
-        const value_str = row.get([]const u8, 0);
-        return try std.fmt.parseInt(u32, value_str, 10);
+fn showStats(conn: *postgres.Connection) !void {
+    const q = .{ .{"Total Blocks", "SELECT COUNT(*) FROM blocks"}, .{"Total Transactions", "SELECT COUNT(*) FROM transactions"}, .{"Active Accounts", "SELECT COUNT(*) FROM accounts WHERE balance > 0"} };
+    std.log.info("\n📊 Stats:", .{});
+    inline for (q) |s| {
+        var r = try conn.query(s[1]);
+        defer r.deinit();
+        std.log.info("   {s}: {s}", .{ s[0], r.getValue(0, 0) orelse "0" });
     }
-
-    return null; // No previous indexing - need to start from genesis
-}
-
-fn updateLastIndexedHeight(pool: *Pool, height: u32) !void {
-    var buf: [20]u8 = undefined;
-    const height_str = try std.fmt.bufPrint(&buf, "{}", .{height});
-
-    _ = try pool.exec(
-        \\INSERT INTO indexer_state (key, value, updated_at) 
-        \\VALUES ('last_indexed_height', $1, CURRENT_TIMESTAMP)
-        \\ON CONFLICT (key) 
-        \\DO UPDATE SET value = $1, updated_at = CURRENT_TIMESTAMP
-    , .{height_str});
-}
-
-fn indexBlock(pool: *Pool, allocator: std.mem.Allocator, indexer: *Indexer, height: u32) !void {
-    // L2 service temporarily disabled - needs import path fixes for Zig 0.16
-    // var l2_svc = l2_service.L2Service.init(allocator, pool);
-
-    // Load block from indexer (uses secondary instance)
-    var block = try indexer.getBlock(height);
-    defer block.deinit(allocator);
-
-    // Begin transaction
-    _ = try pool.exec("BEGIN", .{});
-    errdefer _ = pool.exec("ROLLBACK", .{}) catch {};
-
-    // Calculate block hash
-    const block_hash = block.hash();
-    var hash_hex: [64]u8 = undefined;
-    _ = try std.fmt.bufPrint(&hash_hex, "{x}", .{&block_hash});
-
-    // Calculate previous hash hex
-    var prev_hash_hex: [64]u8 = undefined;
-    _ = try std.fmt.bufPrint(&prev_hash_hex, "{x}", .{&block.header.previous_hash});
-
-    // Calculate total fees
-    var total_fees: u64 = 0;
-    for (block.transactions) |tx| {
-        if (!tx.isCoinbase()) {
-            total_fees += tx.fee;
-        }
-    }
-
-    // Create timestamp string for PostgreSQL
-    // Block timestamps are in milliseconds, store directly
-    const timestamp_ms = block.header.timestamp;
-    const timestamp_str = try std.fmt.allocPrint(allocator, "{}", .{timestamp_ms});
-    defer allocator.free(timestamp_str);
-
-
-    // Insert block using standard PostgreSQL approach (TimescaleDB best practice)
-    _ = try pool.exec(
-        \\INSERT INTO blocks (timestamp, timestamp_ms, height, hash, previous_hash, difficulty, nonce, tx_count, total_fees, size)
-        \\VALUES (to_timestamp($1/1000.0), $2, $3, $4, $5, $6, $7, $8, $9, $10)
-    , .{
-        timestamp_str,
-        timestamp_ms,
-        height,
-        &hash_hex,
-        &prev_hash_hex,
-        block.header.difficulty,
-        block.header.nonce,
-        block.transactions.len,
-        total_fees,
-        block.getSize(),
-    });
-
-    // Insert transactions
-    for (block.transactions, 0..) |tx, pos| {
-        try indexTransaction(pool, allocator, &tx, height, &hash_hex, @intCast(pos));
-
-        // L2 enhancement confirmation temporarily disabled
-        // TODO: Re-enable once l2_service import paths are fixed for Zig 0.16
-        // if (!tx.isCoinbase()) {
-        //     const sender_bech32 = try tx.sender.toBech32(allocator, types.CURRENT_NETWORK);
-        //     defer allocator.free(sender_bech32);
-        //     const recipient_bech32 = try tx.recipient.toBech32(allocator, types.CURRENT_NETWORK);
-        //     defer allocator.free(recipient_bech32);
-        //     const pending_enhancements = l2_svc.queryEnhancementsBySenderRecipient(
-        //         sender_bech32, recipient_bech32, .pending
-        //     ) catch |err| { continue; };
-        //     defer l2_svc.freeEnhancements(pending_enhancements);
-        //     if (pending_enhancements.len > 0) {
-        //         const enhancement = pending_enhancements[0];
-        //         const tx_hash = tx.hash();
-        //         var tx_hash_hex: [64]u8 = undefined;
-        //         _ = try std.fmt.bufPrint(&tx_hash_hex, "{x}", .{&tx_hash});
-        //         l2_svc.confirmEnhancement(enhancement.temp_id, &tx_hash_hex, height) catch continue;
-        //     }
-        // }
-    }
-
-    // Commit transaction
-    _ = try pool.exec("COMMIT", .{});
-}
-
-fn indexTransaction(
-    pool: *Pool,
-    allocator: std.mem.Allocator,
-    tx: *const types.Transaction,
-    block_height: u32,
-    block_hash: []const u8,
-    position: u32,
-) !void {
-    // Calculate transaction hash
-    const tx_hash = tx.hash();
-    var tx_hash_hex: [64]u8 = undefined;
-    _ = try std.fmt.bufPrint(&tx_hash_hex, "{x}", .{&tx_hash});
-
-    // Convert addresses to bech32
-    var sender_str: [70]u8 = undefined;
-    var recipient_str: [70]u8 = undefined;
-
-    if (tx.sender.isZero()) {
-        @memcpy(sender_str[0..8], "coinbase");
-        sender_str[8] = 0;
-    } else {
-        const sender_bech32 = try tx.sender.toBech32(allocator, types.CURRENT_NETWORK);
-        defer allocator.free(sender_bech32);
-        @memcpy(sender_str[0..sender_bech32.len], sender_bech32);
-        sender_str[sender_bech32.len] = 0;
-    }
-
-    const recipient_bech32 = try tx.recipient.toBech32(allocator, types.CURRENT_NETWORK);
-    defer allocator.free(recipient_bech32);
-    @memcpy(recipient_str[0..recipient_bech32.len], recipient_bech32);
-    recipient_str[recipient_bech32.len] = 0;
-
-    // Create timestamp string for transaction (store milliseconds directly)
-    const tx_timestamp_ms = tx.timestamp;
-    const tx_timestamp_str = try std.fmt.allocPrint(allocator, "{}", .{tx_timestamp_ms});
-    defer allocator.free(tx_timestamp_str);
-
-
-    // Insert transaction (TimescaleDB hypertable)
-    _ = try pool.exec(
-        \\INSERT INTO transactions (block_timestamp, timestamp_ms, hash, block_height, block_hash, position, sender, recipient, amount, fee, nonce)
-        \\VALUES (to_timestamp($1/1000.0), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-    , .{
-        tx_timestamp_str,
-        tx_timestamp_ms,
-        &tx_hash_hex,
-        block_height,
-        block_hash,
-        position,
-        std.mem.sliceTo(&sender_str, 0),
-        std.mem.sliceTo(&recipient_str, 0),
-        tx.amount,
-        tx.fee,
-        tx.nonce,
-    });
-
-    // Update account balances using TimescaleDB function
-    if (!tx.sender.isZero()) {
-        // Deduct from sender
-        _ = try pool.exec(
-            \\SELECT update_account_balance_simple($1, $2, $3, to_timestamp($4/1000.0)::timestamp, true)
-        , .{
-            std.mem.sliceTo(&sender_str, 0),
-            @as(i64, 0) - @as(i64, @intCast(tx.amount + tx.fee)),
-            block_height,
-            tx_timestamp_str,
-        });
-    }
-
-    // Add to recipient
-    _ = try pool.exec(
-        \\SELECT update_account_balance_simple($1, $2, $3, to_timestamp($4/1000.0)::timestamp, false)
-    , .{
-        std.mem.sliceTo(&recipient_str, 0),
-        @as(i64, @intCast(tx.amount)),
-        block_height,
-        tx_timestamp_str,
-    });
-}
-
-fn showStats(pool: *Pool) !void {
-    std.log.info("\n📊 Blockchain Statistics:", .{});
-
-    // Total blocks
-    var blocks_result = try pool.query("SELECT COUNT(*) FROM blocks", .{});
-    defer blocks_result.deinit();
-    while (try blocks_result.next()) |row| {
-        const count = row.get(i64, 0);
-        std.log.info("   Total blocks: {}", .{count});
-    }
-
-    // Total transactions
-    var txs_result = try pool.query("SELECT COUNT(*) FROM transactions", .{});
-    defer txs_result.deinit();
-    while (try txs_result.next()) |row| {
-        const count = row.get(i64, 0);
-        std.log.info("   Total transactions: {}", .{count});
-    }
-
-    // Total accounts
-    var accounts_result = try pool.query("SELECT COUNT(*) FROM accounts WHERE balance > 0", .{});
-    defer accounts_result.deinit();
-    while (try accounts_result.next()) |row| {
-        const count = row.get(i64, 0);
-        std.log.info("   Active accounts: {}", .{count});
-    }
-
-    // Total supply - cast to BIGINT for pg.zig compatibility
-    var supply_result = try pool.query("SELECT CAST(COALESCE(SUM(balance), 0) AS BIGINT) FROM accounts", .{});
-    defer supply_result.deinit();
-    while (try supply_result.next()) |row| {
-        const supply = row.get(i64, 0);
-        const supply_zei = @as(f64, @floatFromInt(supply)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-        std.log.info("   Total supply: {d:.8} ZEI", .{supply_zei});
-    }
+    var r = try conn.query("SELECT CAST(COALESCE(SUM(balance), 0) AS BIGINT) FROM accounts");
+    defer r.deinit();
+    const supply = std.fmt.parseInt(i64, r.getValue(0, 0) orelse "0", 10) catch 0;
+    std.log.info("   Total Supply: {d:.8} ZEI", .{@as(f64, @floatFromInt(supply)) / @as(f64, @floatFromInt(types.ZEI_COIN))});
 }

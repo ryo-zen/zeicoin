@@ -152,32 +152,30 @@ pub fn build(b: *std.Build) !void {
     // **************************************************************
     // *              ZEICOIN INDEXER AS AN EXECUTABLE              *
     // **************************************************************
-    // NOTE: Indexer temporarily disabled while migrating from pg.zig to libpq
-    // The indexer is an optional analytics tool - core blockchain works without it
-    // TODO: Refactor indexer to use zeicoin.util.postgres wrapper
-    // {
-    //     const indexer_module = b.createModule(.{
-    //         .root_source_file = b.path("src/apps/indexer.zig"),
-    //         .target = target,
-    //         .optimize = optimize,
-    //         .link_libc = true,
-    //     });
-    //     indexer_module.addImport("zeicoin", zeicoin_module);
-    //     indexer_module.linkSystemLibrary("rocksdb", .{});
-    //     indexer_module.linkSystemLibrary("pq", .{});
-    //     const exe = b.addExecutable(.{
-    //         .name = "zeicoin_indexer",
-    //         .root_module = indexer_module,
-    //     });
-    //     b.installArtifact(exe);
-    //     const run_cmd = b.addRunArtifact(exe);
-    //     run_cmd.step.dependOn(b.getInstallStep());
-    //     if (b.args) |args| {
-    //         run_cmd.addArgs(args);
-    //     }
-    //     const run_step = b.step("run-indexer", "Run the zeicoin indexer");
-    //     run_step.dependOn(&run_cmd.step);
-    // }
+    // Indexer uses libpq wrapper (migrated from pg.zig for Zig 0.16)
+    {
+        const indexer_module = b.createModule(.{
+            .root_source_file = b.path("src/apps/indexer.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        indexer_module.addImport("zeicoin", zeicoin_module);
+        indexer_module.linkSystemLibrary("rocksdb", .{});
+        indexer_module.linkSystemLibrary("pq", .{});
+        const exe = b.addExecutable(.{
+            .name = "zeicoin_indexer",
+            .root_module = indexer_module,
+        });
+        b.installArtifact(exe);
+        const run_cmd = b.addRunArtifact(exe);
+        run_cmd.step.dependOn(b.getInstallStep());
+        if (b.args) |args| {
+            run_cmd.addArgs(args);
+        }
+        const run_step = b.step("run-indexer", "Run the zeicoin indexer");
+        run_step.dependOn(&run_cmd.step);
+    }
 
     // **************************************************************
     // *           TRANSACTION API AS AN EXECUTABLE                 *
@@ -233,33 +231,31 @@ pub fn build(b: *std.Build) !void {
     }
 
     // **************************************************************
-    // *              ERROR MONITOR - COMMENTED OUT                 *
+    // *              ERROR MONITOR                                 *
     // **************************************************************
-    // {
-    //     const exe = b.addExecutable(.{
-    //         .name = "error_monitor",
-    //         .root_source_file = b.path("src/apps/error_monitor.zig"),
-    //         .target = target,
-    //         .optimize = optimize,
-    //     });
-    //     // Add dependency modules
-    //     for (deps) |mod| exe.root_module.addImport(
-    //         mod.name,
-    //         mod.module,
-    //     );
-    //     // Add internal modules
-    //     exe.root_module.addImport("zeicoin", zeicoin_module);
-    //
-    //     exe.linkLibC();
-    //     exe.linkSystemLibrary("rocksdb");
-    //
-    //     b.installArtifact(exe);
-    //
-    //     const run_cmd = b.addRunArtifact(exe);
-    //     run_cmd.step.dependOn(b.getInstallStep());
-    //     const run_step = b.step("run-error-monitor", "Run the error monitor");
-    //     run_step.dependOn(&run_cmd.step);
-    // }
+    {
+        const monitor_module = b.createModule(.{
+            .root_source_file = b.path("src/apps/error_monitor.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+
+        monitor_module.addImport("zeicoin", zeicoin_module);
+        monitor_module.linkSystemLibrary("pq", .{});
+
+        const exe = b.addExecutable(.{
+            .name = "zeicoin_error_monitor",
+            .root_module = monitor_module,
+        });
+
+        b.installArtifact(exe);
+
+        const run_cmd = b.addRunArtifact(exe);
+        run_cmd.step.dependOn(b.getInstallStep());
+        const run_step = b.step("run-error-monitor", "Run the error monitor");
+        run_step.dependOn(&run_cmd.step);
+    }
 
     // **************************************************************
     // *              CHECK FOR FAST FEEDBACK LOOP                  *
