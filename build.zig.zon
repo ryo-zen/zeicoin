@@ -5,7 +5,7 @@
     .minimum_zig_version = "0.16.0-dev.2255+d417441f4",
     .dependencies = .{
         // pg.zig removed - using libpq C library instead for Zig 0.16 compatibility
-        // .zap - Not needed for indexer, not Zig 0.16 compatible yet
+        // .zap removed - now using std.Io.net HttpServer
     },
     .paths = .{
         "build.zig",

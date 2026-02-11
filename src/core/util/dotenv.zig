@@ -204,57 +204,35 @@ pub fn loadForNetwork(allocator: std.mem.Allocator) !void {
     var dotenv = DotEnv.init(allocator);
     defer dotenv.deinit(); // Clean up after applying to environment
 
-    // 1. Check if ZEICOIN_NETWORK is set in the OS environment
-    var network: []const u8 = "testnet"; // Default
-    var network_from_env = false;
+    // 1. Load base .env first (defaults)
+    dotenv.loadFromFile(io, ".env") catch |err| {
+        if (err != error.FileNotFound) return err;
+    };
 
+    // 2. Determine network
+    var network: []const u8 = "testnet"; // Default
     if (c.getenv("ZEICOIN_NETWORK")) |n| {
         network = std.mem.span(n);
-        network_from_env = true;
-    } else {
-        // Not in OS env, try loading .env to find it
-        dotenv.loadFromFile(io, ".env") catch |err| {
-            if (err != error.FileNotFound) {
-                return err;
-            }
-        };
-        
-        if (dotenv.get("ZEICOIN_NETWORK")) |n| {
-            network = n;
-        }
+    } else if (dotenv.get("ZEICOIN_NETWORK")) |n| {
+        network = n;
     }
 
-    // 2. Load network-specific configuration
+    // 3. Load network-specific configuration (overwrites .env)
     const network_file = if (std.mem.eql(u8, network, "mainnet"))
         ".env.mainnet"
     else
         ".env.testnet";
 
     dotenv.loadFromFile(io, network_file) catch |err| {
-        if (err != error.FileNotFound) {
-            return err;
-        }
+        if (err != error.FileNotFound) return err;
     };
 
-    // 3. Load local overrides (git-ignored)
+    // 4. Load local overrides (git-ignored, highest priority among files)
     dotenv.loadFromFile(io, ".env.local") catch |err| {
-        if (err != error.FileNotFound) {
-            return err;
-        }
+        if (err != error.FileNotFound) return err;
     };
-    
-    // 4. Load .env ONLY if we didn't find the network in the OS env
-    // This allows .env to act as a "local dev default" but prevents it 
-    // from conflicting when the network is explicitly set (e.g. by systemd)
-    if (!network_from_env) {
-         dotenv.loadFromFile(io, ".env") catch |err| {
-            if (err != error.FileNotFound) {
-                return err;
-            }
-        };
-    }
 
-    // Apply to environment (setenv copies, so we can free after)
+    // Apply to environment (setenv overwrite=0 ensures OS env takes absolute precedence)
     try dotenv.applyToEnvironment();
     
     env_loaded = true;
