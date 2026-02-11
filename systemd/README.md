@@ -85,8 +85,7 @@ systemctl status zeicoin-indexer.service
 
 ```bash
 # Check database sync
-ZEICOIN_DB_PASSWORD=yourpass psql -h localhost -U zeicoin -d zeicoin_testnet \
-  -c "SELECT MAX(height) FROM blocks"
+ZEICOIN_DB_PASSWORD=yourpass psql -h localhost -U zeicoin -d zeicoin_testnet \ -c "SELECT MAX(height) FROM blocks"
 
 # Compare with blockchain
 ZEICOIN_SERVER=127.0.0.1 ./zig-out/bin/zeicoin status | grep Height
