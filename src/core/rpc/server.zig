@@ -485,7 +485,12 @@ pub const RPCServer = struct {
         const mempool_size = self.blockchain.mempool_manager.getTransactionCount();
         const mempool_size_u32 = try validateU32FromUsize(mempool_size);
         const is_mining = self.blockchain.mining_manager != null;
-        const peer_count: u32 = 0; // TODO: Get from network manager
+        const peer_count = blk: {
+            if (self.blockchain.network_coordinator.getNetworkManager()) |network_manager| {
+                break :blk try validateU32FromUsize(network_manager.getConnectedPeerCount());
+            }
+            break :blk 0;
+        };
 
         const network_str = if (types.CURRENT_NETWORK == .testnet) "testnet" else "mainnet";
 

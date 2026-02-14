@@ -1144,15 +1144,45 @@ pub const SyncManager = struct {
             if (network_mgr.peer_manager.getBestPeerForSync()) |peer| {
                 // Check if this peer is in our failed list
                 if (blockchain.sync_manager) |manager| {
+                    var is_failed = false;
                     for (manager.failed_peers.items) |failed| {
                         if (failed == peer) {
+                            is_failed = true;
                             // Release it since we aren't using it
                             peer.release();
-                            return null; // TODO: Implement better rotation
+                            break;
                         }
                     }
+                    if (!is_failed) {
+                        return peer;
+                    }
+                } else {
+                    return peer;
                 }
-                return peer;
+            }
+
+            // Fallback: rotate across connected peers and pick the highest non-failed peer
+            if (blockchain.sync_manager) |manager| {
+                var connected_peers = std.array_list.Managed(*Peer).init(blockchain.allocator);
+                defer connected_peers.deinit();
+
+                network_mgr.peer_manager.getConnectedPeers(&connected_peers) catch return null;
+
+                var best_id: ?u64 = null;
+                var best_height: u32 = 0;
+                for (connected_peers.items) |candidate| {
+                    if (manager.isPeerFailed(candidate)) continue;
+
+                    if (best_id == null or candidate.height > best_height) {
+                        best_id = candidate.id;
+                        best_height = candidate.height;
+                    }
+                }
+
+                if (best_id) |peer_id| {
+                    // Acquire a stable reference before returning.
+                    return network_mgr.peer_manager.getPeer(peer_id);
+                }
             }
         }
         return null;
