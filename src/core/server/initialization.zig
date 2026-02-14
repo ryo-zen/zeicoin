@@ -377,6 +377,7 @@ fn initializeMiningSystem(blockchain: *zen.ZeiCoin, io: std.Io, miner_wallet_nam
         if (blockchain.mining_manager == null) {
             const mining_context = miner_mod.MiningContext{
                 .allocator = allocator,
+                .io = blockchain.io,
                 .database = blockchain.database,
                 .mempool_manager = blockchain.mempool_manager,
                 .mining_state = &blockchain.mining_state,

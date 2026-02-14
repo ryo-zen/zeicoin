@@ -550,6 +550,7 @@ pub const BlockSyncProtocol = struct {
         // Always use RandomX validation for consistent security
         const mining_context = miner_mod.MiningContext{
             .allocator = self.context.allocator,
+            .io = self.context.io,
             .database = self.context.database,
             .mempool_manager = undefined, // Not needed for validation
             .mining_state = undefined, // Not needed for validation

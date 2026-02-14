@@ -44,7 +44,7 @@ pub fn validateBlockPoW(ctx: MiningContext, block: types.Block) !bool {
     const mode: randomx.RandomXMode = if (types.ZenMining.RANDOMX_MODE) .fast else .light;
     
     // Initialize RandomX context with proper error handling
-    var rx_ctx = randomx.RandomXContext.init(ctx.allocator, ctx.blockchain.io, &hex_key, mode) catch |err| {
+    var rx_ctx = randomx.RandomXContext.init(ctx.allocator, ctx.io, &hex_key, mode) catch |err| {
         log.warn("❌ RandomX initialization failed: {}", .{err});
         return false;
     };

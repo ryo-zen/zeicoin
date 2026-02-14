@@ -521,6 +521,7 @@ pub const ZeiCoin = struct {
     pub fn zenMineBlock(self: *ZeiCoin, miner_keypair: @import("crypto/key.zig").KeyPair) !types.Block {
         const ctx = miner_mod.MiningContext{
             .allocator = self.allocator,
+            .io = self.io,
             .database = self.database,
             .mempool_manager = self.mempool_manager,
             .mining_state = &self.mining_state,
