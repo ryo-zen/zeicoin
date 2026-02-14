@@ -404,10 +404,10 @@ pub const SyncManager = struct {
                 try self.batch_sync.startSync(peer, target_height);
             }
 
-            // Update our state AFTER batch sync has successfully started
-            log.debug("STATE TRANSITION: {} → syncing", .{self.getSyncState()});
+            // Mirror protocol state (may be .syncing or .complete for no-op sync)
+            log.debug("STATE TRANSITION: {} → {}", .{ self.getSyncState(), self.batch_sync.getSyncState() });
             const old_state = self.getSyncState();
-            self.setState(.syncing);
+            self.setState(self.batch_sync.getSyncState());
             log.debug("State transition completed: {} → {}", .{ old_state, self.getSyncState() });
             log.info("STEP 5 COMPLETED: ZSP-001 batch sync activated", .{});
         } else {
@@ -438,6 +438,11 @@ pub const SyncManager = struct {
         log.info("Next state save: {} seconds", .{SYNC_CONFIG.STATE_SAVE_INTERVAL});
 
         log.info("SYNCHRONIZATION SESSION SUCCESSFULLY STARTED!", .{});
+
+        if (!self.isActive()) {
+            log.info("✅ [SYNC POLL] No active sync work required - current state: {}", .{self.getSyncState()});
+            return;
+        }
 
         // CRITICAL FIX #4: Polling loop to retrieve blocks and handle timeouts
         // Without this loop, blocks are cached but never retrieved or processed

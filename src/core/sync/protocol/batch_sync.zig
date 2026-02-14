@@ -496,6 +496,10 @@ pub const BatchSyncProtocol = struct {
             log.info("✅ [BATCH SYNC] STEP 3 RESULT: Already synchronized - no sync needed", .{});
             log.info("ℹ️ [BATCH SYNC] Local height {} >= target height {}", .{ current_height, target_height });
             log.info("🏁 [BATCH SYNC] Sync session completed immediately", .{});
+            self.sync_state = .complete;
+            self.sync_peer = null;
+            self.start_height = current_height;
+            self.target_height = current_height;
             return;
         }
         log.info("✅ [BATCH SYNC] STEP 3 PASSED: Sync required ({} blocks behind)", .{blocks_to_sync});
