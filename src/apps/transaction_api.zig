@@ -230,17 +230,32 @@ const HttpServer = struct {
 };
 
 fn handleNonce(allocator: std.mem.Allocator, address: []const u8) ![]const u8 {
-    const nonce = rpc.getNonce(address) catch return error.RPCFailed;
+    _ = bech32.decodeAddress(allocator, address) catch {
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"invalid address\"}}", .{});
+    };
+    const nonce = rpc.getNonce(address) catch {
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"rpc unavailable\"}}", .{});
+    };
     return try std.fmt.allocPrint(allocator, "{{\"nonce\":{d}}}", .{nonce});
 }
 
 fn handleBalance(allocator: std.mem.Allocator, address: []const u8) ![]const u8 {
-    const result = rpc.getBalance(address) catch return error.RPCFailed;
+    _ = bech32.decodeAddress(allocator, address) catch {
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"invalid address\"}}", .{});
+    };
+    const result = rpc.getBalance(address) catch {
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"rpc unavailable\"}}", .{});
+    };
     return try std.fmt.allocPrint(allocator, "{{\"balance\":{d},\"nonce\":{d}}}", .{ result.balance, result.nonce });
 }
 
 fn handleAccount(allocator: std.mem.Allocator, address: []const u8) ![]const u8 {
-    const result = rpc.getBalance(address) catch return error.RPCFailed;
+    _ = bech32.decodeAddress(allocator, address) catch {
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"invalid address\"}}", .{});
+    };
+    const result = rpc.getBalance(address) catch {
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"rpc unavailable\"}}", .{});
+    };
     return try std.fmt.allocPrint(
         allocator,
         "{{\"address\":\"{s}\",\"balance\":{d},\"nonce\":{d},\"tx_count\":0,\"total_received\":{d},\"total_sent\":0}}",

@@ -46,6 +46,42 @@ This directory contains systemd service files for running ZeiCoin as a productio
    sudo systemctl daemon-reload
    ```
 
+## Service Helper Script (`zeicoin-services`)
+
+Use `systemd/zeicoin-services` as a wrapper for start/stop/status/logs.
+
+### Deploy to Server
+
+From your local machine:
+
+```bash
+scp systemd/zeicoin-services root@<server-ip>:/root/zeicoin/systemd/zeicoin-services
+```
+
+On the server:
+
+```bash
+chmod +x /root/zeicoin/systemd/zeicoin-services
+ln -sf /root/zeicoin/systemd/zeicoin-services /usr/local/bin/zeicoin-services
+```
+
+### Usage
+
+```bash
+zeicoin-services status
+zeicoin-services restart
+zeicoin-services logs monitor
+```
+
+### Notes
+
+- Set `ZEICOIN_HOME` if your install path is not `/root/zeicoin`.
+- The script manages:
+  - `zeicoin-mining.service`
+  - `zeicoin-transaction-api.service`
+  - `zeicoin-indexer.timer`
+  - `zeicoin-error-monitor.service`
+
 ## Crash Recovery (Unlocking)
 
 The services are configured with `ExecStartPre` logic to handle hard crashes. If the node crashes, RocksDB often leaves a `LOCK` file behind that prevents restarting. Our services automatically:

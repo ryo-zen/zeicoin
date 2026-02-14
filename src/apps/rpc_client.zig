@@ -114,9 +114,13 @@ pub const RPCClient = struct {
 
         const parsed = try std.json.parseFromSlice(
             struct {
-                result: struct {
+                result: ?struct {
                     nonce: u64,
-                },
+                } = null,
+                @"error": ?struct {
+                    code: i32,
+                    message: ?[]const u8 = null,
+                } = null,
             },
             self.allocator,
             response,
@@ -124,7 +128,9 @@ pub const RPCClient = struct {
         );
         defer parsed.deinit();
 
-        return parsed.value.result.nonce;
+        if (parsed.value.@"error" != null) return error.RPCRequestFailed;
+        const result = parsed.value.result orelse return error.InvalidRPCResponse;
+        return result.nonce;
     }
 
     /// Get account balance and nonce
@@ -143,10 +149,14 @@ pub const RPCClient = struct {
 
         const parsed = try std.json.parseFromSlice(
             struct {
-                result: struct {
+                result: ?struct {
                     balance: u64,
                     nonce: u64,
-                },
+                } = null,
+                @"error": ?struct {
+                    code: i32,
+                    message: ?[]const u8 = null,
+                } = null,
             },
             self.allocator,
             response,
@@ -154,9 +164,12 @@ pub const RPCClient = struct {
         );
         defer parsed.deinit();
 
+        if (parsed.value.@"error" != null) return error.RPCRequestFailed;
+        const result = parsed.value.result orelse return error.InvalidRPCResponse;
+
         return .{
-            .balance = parsed.value.result.balance,
-            .nonce = parsed.value.result.nonce,
+            .balance = result.balance,
+            .nonce = result.nonce,
         };
     }
 
