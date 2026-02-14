@@ -129,7 +129,11 @@ pub fn miningThreadFn(ctx: MiningContext, miner_keypair: key.KeyPair, mining_add
         // Mine the block
         log.info("🔨 Mining thread: Calling zenMineBlock (mempool has {} transactions)", .{ctx.mempool_manager.getTransactionCount()});
         var block = core.zenMineBlock(ctx, miner_keypair, mining_address) catch |err| {
-            log.info("❌ [MINING ERROR] Height {} - {}", .{ current_height, err });
+            if (err == error.MiningFailed) {
+                log.info("ℹ️ [MINING] Height {} attempt ended without a solution", .{current_height});
+            } else {
+                log.warn("⚠️ [MINING] Height {} unexpected error: {}", .{ current_height, err });
+            }
             ctx.blockchain.io.sleep(std.Io.Duration.fromSeconds(1), std.Io.Clock.awake) catch {}; // Wait 1 second before retry
             continue;
         };

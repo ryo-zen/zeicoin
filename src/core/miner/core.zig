@@ -284,7 +284,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
         return new_block;
     } else {
         const height = ctx.blockchain.getHeight() catch 0;
-        log.info("😔 [MINING TIMEOUT] Height {} - nonce not found (the universe wasn't ready)", .{height});
+        log.info("ℹ️ [MINING] Height {} attempt ended without finding a nonce before timeout", .{height});
         // Free block memory and return error
         new_block.deinit(ctx.allocator);
         return error.MiningFailed;

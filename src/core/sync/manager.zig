@@ -157,13 +157,8 @@ pub const SyncManager = struct {
         log.info("   Current state: {}", .{self.sync_state});
         log.info("   Failed peers: {}", .{self.failed_peers.items.len});
 
-        // CRITICAL: Pause mining during sync/reorg to prevent race conditions
-        // Mining interference can cause BlockRequestTimeout, InvalidPreviousHash errors, and reorg failures
         const was_mining = self.blockchain.mining_state.active.load(.acquire);
-        if (was_mining) {
-            self.blockchain.mining_state.active.store(false, .release);
-            log.info("⏸️  [SYNC] Paused mining for synchronization/reorganization", .{});
-        }
+        var did_pause_mining = false;
 
         // Track whether mining should resume (will be set to false if fork detection fails)
         var should_resume_mining = was_mining;
@@ -171,7 +166,7 @@ pub const SyncManager = struct {
         // Ensure mining resumes when sync completes successfully
         // IMPORTANT: Don't resume mining if in failed state (fork detection failed)
         defer {
-            if (should_resume_mining) {
+            if (did_pause_mining and should_resume_mining) {
                 // CRITICAL FIX: Mining thread exits when active flag is set to false
                 // The thread handle remains non-null, but the thread has terminated
                 // We must stop the thread properly (join + clear handle) then restart it
@@ -187,7 +182,7 @@ pub const SyncManager = struct {
                     };
                     log.info("▶️  [SYNC] Mining thread restarted after synchronization/reorganization", .{});
                 }
-            } else if (was_mining) {
+            } else if (did_pause_mining and was_mining) {
                 log.warn("⏸️  [SYNC] Mining remains paused - sync failed (will retry after cooldown)", .{});
                 log.warn("💡 [SYNC] Mining will resume after successful sync or manual intervention", .{});
             }
@@ -234,7 +229,7 @@ pub const SyncManager = struct {
         log.info("   Peer height: {}", .{peer.height});
 
         if (height_diff < SYNC_CONFIG.MIN_SYNC_HEIGHT_DIFF and !force_reorg) {
-            log.warn("🚫 [SYNC ABORT] Already synchronized - height diff {} < threshold {}", .{ height_diff, SYNC_CONFIG.MIN_SYNC_HEIGHT_DIFF });
+            log.info("ℹ️ [SYNC] Already synchronized - height diff {} < threshold {}", .{ height_diff, SYNC_CONFIG.MIN_SYNC_HEIGHT_DIFF });
             log.info("Local height {} >= target height {} (diff: {})", .{ current_height, target_height, height_diff });
             log.info("No synchronization needed - session complete", .{});
             self.setState(.idle);
@@ -244,6 +239,13 @@ pub const SyncManager = struct {
             log.info("🔄 [FORCE REORG] Bypassing height check for equal-height fork resolution", .{});
         }
         log.info("STEP 2 PASSED: Sync required ({} blocks behind, force_reorg={})", .{ height_diff, force_reorg });
+
+        // Pause mining only when a real sync/reorg session is actually going to proceed.
+        if (was_mining) {
+            self.blockchain.mining_state.active.store(false, .release);
+            did_pause_mining = true;
+            log.info("⏸️  [SYNC] Paused mining for synchronization/reorganization", .{});
+        }
 
         // STEP 2.5: Check for competing chain (divergent chain from common ancestor)
         // CRITICAL: We check for divergence even if heights are equal, as we might be on a fork.
@@ -778,27 +780,15 @@ pub const SyncManager = struct {
     pub fn handlePeerSync(self: *Self, io: std.Io, peer: *Peer) !void {
         const our_height = try getBlockchainHeight();
         
-        // If peer is ahead or at equal height (might be a fork), check for sync/reorg
-        if (peer.height >= our_height and peer.height > 0) {
-            // Check for divergence
-            const is_competing = try self.detectCompetingChain(io, peer);
-            
-            if (is_competing) {
-                log.info("🔥 [FORK DETECTED] Peer height {} vs our height {}", .{peer.height, our_height});
-                
-                // If we are already syncing, cancel it to allow reorg check
-                if (self.isActive()) {
-                    log.info("🔄 [REORG TRIGGER] Canceling active sync to handle competing chain", .{});
-                    self.batch_sync.failSync("Canceled for reorganization");
-                    self.setState(.idle);
-                }
-                
+        // Only run sync/fork checks when peer is strictly ahead.
+        // Equal-height checks are handled by explicit fork-resolution paths.
+        if (peer.height > our_height and peer.height > 0) {
+            // Delegate all fork detection and sync decisions to startSync().
+            // This avoids duplicate fork_detector requests for the same peer/height.
+            if (self.getSyncState().canStart()) {
                 try self.startSync(io, peer, peer.height, false);
-            } else if (peer.height > our_height) {
-                // Not competing, just ahead. Trigger normal sync if not already syncing.
-                if (self.getSyncState().canStart()) {
-                    try self.startSync(io, peer, peer.height, false);
-                }
+            } else {
+                log.debug("Skipping peer sync trigger while sync state is {}", .{self.getSyncState()});
             }
         }
     }
@@ -833,6 +823,13 @@ pub const SyncManager = struct {
         if (target_height > current_height) {
             const blocks_behind = target_height - current_height;
             log.info("🔄 [SYNC MANAGER] Restarting sync with recovery peer ({} blocks behind)", .{blocks_behind});
+
+            // A concurrent peer-triggered sync may have already started.
+            // Avoid duplicate fork detection/sync sessions.
+            if (!self.getSyncState().canStart()) {
+                log.debug("🔄 [SYNC MANAGER] Recovery skipped - sync state is {}", .{self.getSyncState()});
+                return;
+            }
             
             // TODO: We need an Io instance here. For background recovery thread, creating a temporary one.
             var threaded = std.Io.Threaded.init(self.allocator, .{ .environ = .empty });
@@ -931,8 +928,14 @@ pub const SyncManager = struct {
             return false;
         }
 
-        // If fork point is less than current height, we have divergence
-        if (fork_point < current_height or fork_point < peer_height) {
+        // Prefix cases are normal extensions, not competing chains.
+        if (fork_point == current_height or fork_point == peer_height) {
+            log.debug("✅ [FORK DETECT] Chains are prefix-compatible", .{});
+            return false;
+        }
+
+        // True divergence: both chains have blocks after the common fork point.
+        if (fork_point < current_height and fork_point < peer_height) {
             log.warn("🔥 [FORK DETECT] Chains diverged at height {}!", .{fork_point});
             log.warn("   Our blocks after fork: {}", .{current_height - fork_point});
             log.warn("   Peer blocks after fork: {}", .{peer_height - fork_point});
