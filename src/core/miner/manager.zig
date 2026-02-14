@@ -24,12 +24,18 @@ pub const MiningManager = struct {
 
     /// Start the mining thread
     pub fn startMining(self: *MiningManager, miner_keypair: key.KeyPair) !void {
-        if (self.context.mining_state.active.load(.acquire)) {
-            return; // Already mining
+        self.context.mining_state.mutex.lock();
+        defer self.context.mining_state.mutex.unlock();
+
+        if (self.context.mining_state.thread != null or self.context.mining_state.active.load(.acquire)) {
+            return; // Already mining or thread still shutting down
         }
 
         self.context.mining_state.active.store(true, .release);
-        self.context.mining_state.thread = try std.Thread.spawn(.{}, miningThreadFn, .{ self.context, miner_keypair, self.mining_address });
+        self.context.mining_state.thread = std.Thread.spawn(.{}, miningThreadFn, .{ self.context, miner_keypair, self.mining_address }) catch |err| {
+            self.context.mining_state.active.store(false, .release);
+            return err;
+        };
         log.info("⛏️ Mining thread started successfully", .{});
     }
 
@@ -44,18 +50,18 @@ pub const MiningManager = struct {
 
     /// Stop the mining thread
     pub fn stopMining(self: *MiningManager) void {
-        if (!self.context.mining_state.active.load(.acquire)) {
-            return; // Not mining
-        }
-
+        self.context.mining_state.mutex.lock();
         self.context.mining_state.active.store(false, .release);
         self.context.mining_state.condition.signal(); // Wake up the thread if it's waiting
 
-        if (self.context.mining_state.thread) |thread| {
-            thread.join();
-            self.context.mining_state.thread = null;
+        const thread = self.context.mining_state.thread;
+        self.context.mining_state.thread = null;
+        self.context.mining_state.mutex.unlock();
+
+        if (thread) |t| {
+            t.join();
+            log.info("⛏️  Mining thread stopped", .{});
         }
-        log.info("⛏️  Mining thread stopped", .{});
     }
 
     /// Mine a single block (public API)
@@ -132,14 +138,7 @@ pub fn miningThreadFn(ctx: MiningContext, miner_keypair: key.KeyPair, mining_add
         // Successfully mined - the block is already added to chain in zenMineBlock
         const block_height = ctx.blockchain.getHeight() catch 0;
         log.info("✅ Block #{} mined by background thread", .{block_height});
-
-        // Broadcast block to network peers
-        if (ctx.network) |net_mgr| {
-            net_mgr.broadcastBlock(block) catch |err| {
-                log.info("⚠️  Failed to broadcast block: {}", .{err});
-            };
-            log.info("📡 Block broadcasted to {} peers", .{net_mgr.getConnectedPeerCount()});
-        }
+        // Block propagation is handled inside zenMineBlock via blockchain.broadcastNewBlock().
     }
 
     log.info("⛏️  Mining thread stopped", .{});

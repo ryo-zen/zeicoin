@@ -165,9 +165,11 @@ pub const RPCServer = struct {
         var buffer: [8192]u8 = undefined;
         const io = self.blockchain.io;
         const msg = connection.socket.receive(io, &buffer) catch |err| {
-            log.err("Read error: {}", .{err});
-            connection.close(io);
-            _ = self.active_connections.fetchSub(1, .acq_rel);
+            if (err == error.ConnectionResetByPeer) {
+                log.debug("RPC client disconnected during read: {}", .{err});
+            } else {
+                log.err("Read error: {}", .{err});
+            }
             return;
         };
         const bytes_read = msg.data.len;
