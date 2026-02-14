@@ -644,21 +644,34 @@ pub const PeerManager = struct {
         }
     }
 
+    fn extractMappedIpv4(ip6_bytes: [16]u8) ?[4]u8 {
+        // IPv4-mapped IPv6: ::ffff:a.b.c.d
+        if (!std.mem.eql(u8, ip6_bytes[0..10], &[_]u8{0} ** 10)) return null;
+        if (ip6_bytes[10] != 0xff or ip6_bytes[11] != 0xff) return null;
+        return .{ ip6_bytes[12], ip6_bytes[13], ip6_bytes[14], ip6_bytes[15] };
+    }
+
+    fn sameIpIgnoringPort(a: net.IpAddress, b: net.IpAddress) bool {
+        return switch (a) {
+            .ip4 => |a4| switch (b) {
+                .ip4 => |b4| std.mem.eql(u8, &a4.bytes, &b4.bytes),
+                .ip6 => |b6| if (extractMappedIpv4(b6.bytes)) |mapped| std.mem.eql(u8, &a4.bytes, &mapped) else false,
+            },
+            .ip6 => |a6| switch (b) {
+                .ip6 => |b6| std.mem.eql(u8, &a6.bytes, &b6.bytes),
+                .ip4 => |b4| if (extractMappedIpv4(a6.bytes)) |mapped| std.mem.eql(u8, &mapped, &b4.bytes) else false,
+            },
+        };
+    }
+
     /// Add a new peer connection
     pub fn addPeer(self: *Self, address: net.IpAddress) !*Peer {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        // SECURITY: Check if IP already has a connection (ignore port to prevent dual connections)
+        // SECURITY: Check if IP already has a connection (compare IP only, ignore port)
         for (self.peers.items) |peer| {
-            // Compare IP addresses by converting to string representation
-            const peer_ip = peer.address.getPort();
-            const new_ip = address.getPort();
-            _ = peer_ip;
-            _ = new_ip;
-
-            // For now, use simpler exact address matching until proper IP comparison is implemented
-            if (peer.address.eql(&address)) {
+            if (sameIpIgnoringPort(peer.address, address)) {
                 return error.AlreadyConnected;
             }
         }

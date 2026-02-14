@@ -14,7 +14,7 @@ Environment="ZEICOIN_DB_NAME=zeicoin_testnet"
 Environment="ZEICOIN_DB_USER=zeicoin"
 Environment="ZEICOIN_MONITOR_MIN_SEVERITY=MEDIUM"
 
-ExecStart=/root/zeicoin/zig-out/bin/error_monitor
+ExecStart=/root/zeicoin/zig-out/bin/zeicoin_error_monitor
 Restart=always
 RestartSec=5
 StandardOutput=journal

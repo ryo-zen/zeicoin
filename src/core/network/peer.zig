@@ -453,7 +453,9 @@ pub const NetworkManager = struct {
     fn calculateBackoff(consecutive_failures: u32) u32 {
         const base: u32 = 5; // 5 seconds base
         const max_backoff: u32 = 300; // 5 minutes max
-        const backoff = base * std.math.pow(u32, 2, consecutive_failures);
+        // Cap exponent to prevent u32 overflow (5 * 2^6 = 320 > max_backoff)
+        const capped = @min(consecutive_failures, 6);
+        const backoff = base * std.math.pow(u32, 2, capped);
         return @min(backoff, max_backoff);
     }
 
