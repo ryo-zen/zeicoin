@@ -10,6 +10,9 @@ const util = @import("../util/util.zig");
 
 // Global handler for function pointer access
 var global_handler: ?*ServerHandlers = null;
+var get_block_hash_log_mutex: std.Thread.Mutex = .{};
+var get_block_hash_last_log_time: i64 = 0;
+var get_block_hash_suppressed_count: u32 = 0;
 
 // Clear global handler (call during cleanup)
 pub fn clearGlobalHandler() void {
@@ -517,7 +520,25 @@ pub const ServerHandlers = struct {
     }
 
     fn onGetBlockHash(self: *Self, io: std.Io, peer: *network.Peer, msg: network.message_types.GetBlockHashMessage) !void {
-        std.log.info("🔍 [GET_BLOCK_HASH] Request for height {} from {any}", .{ msg.height, peer.address });
+        const now = util.getTime();
+        get_block_hash_log_mutex.lock();
+        defer get_block_hash_log_mutex.unlock();
+
+        if (now - get_block_hash_last_log_time >= 5) {
+            if (get_block_hash_suppressed_count > 0) {
+                std.log.info(
+                    "🔍 [GET_BLOCK_HASH] Request for height {} from {any} (suppressed {} repetitive requests in last window)",
+                    .{ msg.height, peer.address, get_block_hash_suppressed_count },
+                );
+            } else {
+                std.log.info("🔍 [GET_BLOCK_HASH] Request for height {} from {any}", .{ msg.height, peer.address });
+            }
+            get_block_hash_last_log_time = now;
+            get_block_hash_suppressed_count = 0;
+        } else {
+            get_block_hash_suppressed_count += 1;
+            std.log.debug("🔍 [GET_BLOCK_HASH] Request for height {} from {any}", .{ msg.height, peer.address });
+        }
         _ = io;
         
         // Get block hash at requested height using chain_state

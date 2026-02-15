@@ -321,67 +321,67 @@ pub const ChainValidator = struct {
     /// Validate a block during synchronization (more lenient)
     /// Full sync validation from node.zig with detailed logging
     pub fn validateSyncBlock(self: *Self, block: *const Block, expected_height: u32) !bool {
-        log.warn("🔍 validateSyncBlock: Starting validation for height {}", .{expected_height});
+        log.debug("🔍 validateSyncBlock: Starting validation for height {}", .{expected_height});
 
         // CRITICAL: Check for duplicate block hash even during sync
         const block_hash = block.hash();
         if (self.chain_state.hasBlock(block_hash)) {
             const existing_height = self.chain_state.block_index.getHeight(block_hash) orelse unreachable;
-            log.warn("❌ [SYNC] Block validation failed: duplicate block hash {x} already exists at height {}", .{ block_hash[0..8], existing_height });
+            log.debug("❌ [SYNC] Block validation failed: duplicate block hash {x} already exists at height {}", .{ block_hash[0..8], existing_height });
             return false;
         }
 
         // Special validation for genesis block (height 0)
         if (expected_height == 0) {
-            log.warn("🔍 validateSyncBlock: Processing genesis block (height 0)", .{});
+            log.debug("🔍 validateSyncBlock: Processing genesis block (height 0)", .{});
 
             // Detailed genesis validation debugging
-            log.warn("🔍 Genesis validation details:", .{});
-            log.warn("   Block timestamp: {}", .{block.header.timestamp});
-            log.warn("   Expected genesis timestamp: {}", .{types.Genesis.timestamp()});
-            // log.warn("   Block previous_hash: {x}", .{&block.header.previous_hash});
-            log.warn("   Block difficulty: {}", .{block.header.difficulty});
-            log.warn("   Block nonce: 0x{X}", .{block.header.nonce});
-            log.warn("   Block transaction count: {}", .{block.txCount()});
+            log.debug("🔍 Genesis validation details:", .{});
+            log.debug("   Block timestamp: {}", .{block.header.timestamp});
+            log.debug("   Expected genesis timestamp: {}", .{types.Genesis.timestamp()});
+            // log.debug("   Block previous_hash: {x}", .{&block.header.previous_hash});
+            log.debug("   Block difficulty: {}", .{block.header.difficulty});
+            log.debug("   Block nonce: 0x{X}", .{block.header.nonce});
+            log.debug("   Block transaction count: {}", .{block.txCount()});
 
             _ = block.hash(); // Block hash calculated but not used in release mode
-            // log.warn("   Block hash: {x}", .{&block_hash});
-            // log.warn("   Expected genesis hash: {x}", .{&genesis.getCanonicalGenesisHash()});
+            // log.debug("   Block hash: {x}", .{&block_hash});
+            // log.debug("   Expected genesis hash: {x}", .{&genesis.getCanonicalGenesisHash()});
 
             if (!genesis.validateGenesis(block.*)) {
-                log.warn("❌ Genesis block validation failed: not canonical genesis", .{});
-                log.warn("❌ Genesis validation failed - detailed comparison above", .{});
+                log.debug("❌ Genesis block validation failed: not canonical genesis", .{});
+                log.debug("❌ Genesis validation failed - detailed comparison above", .{});
                 return false;
             }
-            log.warn("✅ Genesis block validation passed", .{});
+            log.debug("✅ Genesis block validation passed", .{});
             return true; // Genesis block passed validation
         }
 
-        log.warn("🔍 validateSyncBlock: About to check basic block structure for height {}", .{expected_height});
-        log.warn("🔍 validateSyncBlock: Block pointer address: {*}", .{&block});
+        log.debug("🔍 validateSyncBlock: About to check basic block structure for height {}", .{expected_height});
+        log.debug("🔍 validateSyncBlock: Block pointer address: {*}", .{&block});
 
         // Try to access block fields safely first
-        log.warn("🔍 validateSyncBlock: Checking block field access...", .{});
+        log.debug("🔍 validateSyncBlock: Checking block field access...", .{});
 
         // Check if we can access basic fields
         const tx_count = block.txCount();
-        log.warn("🔍 validateSyncBlock: Block transaction count: {}", .{tx_count});
+        log.debug("🔍 validateSyncBlock: Block transaction count: {}", .{tx_count});
 
         const timestamp = block.header.timestamp;
-        log.warn("🔍 validateSyncBlock: Block timestamp: {}", .{timestamp});
+        log.debug("🔍 validateSyncBlock: Block timestamp: {}", .{timestamp});
 
         const difficulty = block.header.difficulty;
-        log.warn("🔍 validateSyncBlock: Block difficulty: {}", .{difficulty});
+        log.debug("🔍 validateSyncBlock: Block difficulty: {}", .{difficulty});
 
-        log.warn("🔍 validateSyncBlock: Basic field access successful, now calling isValid()...", .{});
+        log.debug("🔍 validateSyncBlock: Basic field access successful, now calling isValid()...", .{});
 
         // Check basic block structure
         if (!block.isValid()) {
-            log.warn("❌ Block validation failed: invalid block structure at height {}", .{expected_height});
+            log.debug("❌ Block validation failed: invalid block structure at height {}", .{expected_height});
             return false;
         }
 
-        log.warn("✅ Basic block structure validation passed for height {}", .{expected_height});
+        log.debug("✅ Basic block structure validation passed for height {}", .{expected_height});
 
         // Timestamp validation for sync blocks (more lenient than normal validation)
         const current_time = util.getTime();
@@ -391,16 +391,16 @@ pub const ChainValidator = struct {
         const sync_future_allowance = types.TimestampValidation.MAX_FUTURE_TIME * 2; // 4 hours
         if (block_time_seconds > current_time + sync_future_allowance) {
             const future_seconds = block_time_seconds - current_time;
-            log.warn("❌ Sync block timestamp too far in future: {} seconds ahead", .{future_seconds});
+            log.debug("❌ Sync block timestamp too far in future: {} seconds ahead", .{future_seconds});
             return false;
         }
 
-        log.warn("🔍 validateSyncBlock: Checking proof-of-work for height {}", .{expected_height});
+        log.debug("🔍 validateSyncBlock: Checking proof-of-work for height {}", .{expected_height});
 
         // SECURITY: Calculate required difficulty for sync blocks
         var difficulty_calc = @import("difficulty.zig").DifficultyCalculator.init(self.allocator, self.chain_state.database);
         const required_difficulty = difficulty_calc.calculateNextDifficulty() catch {
-            log.warn("❌ Failed to calculate required difficulty for sync block", .{});
+            log.debug("❌ Failed to calculate required difficulty for sync block", .{});
             return false;
         };
 
@@ -408,14 +408,14 @@ pub const ChainValidator = struct {
         const claimed_difficulty = block.header.getDifficultyTarget();
         if (claimed_difficulty.toU64() != required_difficulty.toU64()) {
             // ENHANCED: Log detailed sync block difficulty calculation chain
-            log.warn("❌ SECURITY: Sync block difficulty mismatch detected!", .{});
-            log.warn("   📊 Required difficulty: {} (base_bytes={}, threshold=0x{X})", .{ required_difficulty.toU64(), required_difficulty.base_bytes, required_difficulty.threshold });
-            log.warn("   📦 Sync block claimed difficulty: {} (base_bytes={}, threshold=0x{X})", .{ claimed_difficulty.toU64(), claimed_difficulty.base_bytes, claimed_difficulty.threshold });
-            log.warn("   🔍 Block height: {}, timestamp: {}", .{ expected_height, block.header.timestamp });
+            log.debug("❌ SECURITY: Sync block difficulty mismatch detected!", .{});
+            log.debug("   📊 Required difficulty: {} (base_bytes={}, threshold=0x{X})", .{ required_difficulty.toU64(), required_difficulty.base_bytes, required_difficulty.threshold });
+            log.debug("   📦 Sync block claimed difficulty: {} (base_bytes={}, threshold=0x{X})", .{ claimed_difficulty.toU64(), claimed_difficulty.base_bytes, claimed_difficulty.threshold });
+            log.debug("   🔍 Block height: {}, timestamp: {}", .{ expected_height, block.header.timestamp });
             
             // Log detailed calculation chain for sync debugging
             self.logDifficultyCalculationChain(expected_height) catch |err| {
-                log.warn("   ⚠️ Failed to log sync difficulty calculation chain: {}", .{err});
+                log.debug("   ⚠️ Failed to log sync difficulty calculation chain: {}", .{err});
             };
             
             return false;
@@ -433,10 +433,10 @@ pub const ChainValidator = struct {
             .blockchain = undefined, // Not needed for validation
         };
         if (!try miner_mod.validateBlockPoW(mining_context, block.*)) {
-            log.warn("❌ RandomX proof-of-work validation failed for height {}", .{expected_height});
+            log.debug("❌ RandomX proof-of-work validation failed for height {}", .{expected_height});
             return false;
         }
-        log.warn("✅ Proof-of-work validation passed for height {}", .{expected_height});
+        log.debug("✅ Proof-of-work validation passed for height {}", .{expected_height});
 
         // NOTE: State root validation is skipped during sync because:
         // 1. The block's state_root represents the state AFTER applying this block's transactions
@@ -446,91 +446,91 @@ pub const ChainValidator = struct {
         //    - Proof-of-work validation (ensures block is valid)
         //    - Balance checks during transaction application
         // State root validation is only meaningful for blocks we're creating, not syncing
-        log.warn("ℹ️ [SYNC] Skipping state root validation (validated after transaction application)", .{});
+        log.debug("ℹ️ [SYNC] Skipping state root validation (validated after transaction application)", .{});
 
         // SECURITY: Validate coinbase transaction during sync
         if (!try self.validateCoinbaseSync(block, expected_height)) {
-            log.warn("❌ [SYNC] Coinbase validation failed for block {}", .{expected_height});
+            log.debug("❌ [SYNC] Coinbase validation failed for block {}", .{expected_height});
             return false;
         }
 
-        log.warn("🔍 validateSyncBlock: Checking previous hash links for height {}", .{expected_height});
+        log.debug("🔍 validateSyncBlock: Checking previous hash links for height {}", .{expected_height});
 
         // Check previous hash links correctly (only if we have previous blocks)
         if (expected_height > 0) {
             const current_height = try self.chain_state.getHeight();
-            log.warn("   Current blockchain height: {}", .{current_height});
-            log.warn("   Expected block height: {}", .{expected_height});
+            log.debug("   Current blockchain height: {}", .{current_height});
+            log.debug("   Expected block height: {}", .{expected_height});
 
             if (expected_height > current_height) {
                 // During sync, we might not have the previous block yet - skip this check
-                log.warn("⚠️ Skipping previous hash check during sync (height {} > current {})", .{ expected_height, current_height });
+                log.debug("⚠️ Skipping previous hash check during sync (height {} > current {})", .{ expected_height, current_height });
             } else if (expected_height == current_height) {
                 // We're about to add this block - check against our current tip
-                log.warn("   Checking previous hash against current blockchain tip", .{});
+                log.debug("   Checking previous hash against current blockchain tip", .{});
                 var prev_block = try self.getBlockByHeight(expected_height - 1);
                 defer prev_block.deinit(self.allocator);
 
                 const prev_hash = prev_block.hash();
-                // log.warn("   Previous block hash in chain: {x}", .{&prev_hash});
-                // log.warn("   Block's previous_hash field: {x}", .{&block.header.previous_hash});
+                // log.debug("   Previous block hash in chain: {x}", .{&prev_hash});
+                // log.debug("   Block's previous_hash field: {x}", .{&block.header.previous_hash});
 
                 if (!std.mem.eql(u8, &block.header.previous_hash, &prev_hash)) {
-                    log.warn("❌ Previous hash validation failed during sync", .{});
-                    // log.warn("   Expected: {x}", .{&prev_hash});
-                    // log.warn("   Received: {x}", .{&block.header.previous_hash});
-                    log.warn("⚠️ This might indicate a fork - skipping hash validation during sync", .{});
+                    log.debug("❌ Previous hash validation failed during sync", .{});
+                    // log.debug("   Expected: {x}", .{&prev_hash});
+                    // log.debug("   Received: {x}", .{&block.header.previous_hash});
+                    log.debug("⚠️ This might indicate a fork - skipping hash validation during sync", .{});
                     // During sync, we trust the peer's chain - skip this validation
                 }
             } else {
                 // We already have this block height - this shouldn't happen during normal sync
-                log.warn("⚠️ Unexpected: trying to sync block {} but we already have height {}", .{ expected_height, current_height });
+                log.debug("⚠️ Unexpected: trying to sync block {} but we already have height {}", .{ expected_height, current_height });
             }
         }
 
-        log.warn("🔍 validateSyncBlock: Validating {} transactions for height {}", .{ block.txCount(), expected_height });
+        log.debug("🔍 validateSyncBlock: Validating {} transactions for height {}", .{ block.txCount(), expected_height });
 
         // For sync blocks, validate transaction structure but skip balance checks
         // The balance validation will happen naturally when transactions are processed
         for (block.transactions, 0..) |tx, i| {
-            log.warn("   🔍 Validating transaction {} of {}", .{ i, block.txCount() - 1 });
+            log.debug("   🔍 Validating transaction {} of {}", .{ i, block.txCount() - 1 });
 
             // Skip coinbase transaction (first one) - it doesn't need signature validation
             if (i == 0) {
-                log.warn("   ✅ Skipping coinbase transaction validation", .{});
+                log.debug("   ✅ Skipping coinbase transaction validation", .{});
                 continue;
             }
 
-            log.warn("   🔍 Checking transaction structure...", .{});
+            log.debug("   🔍 Checking transaction structure...", .{});
 
             // Basic transaction structure validation only
             if (!tx.isValid()) {
-                log.warn("❌ Transaction {} structure validation failed", .{i});
+                log.debug("❌ Transaction {} structure validation failed", .{i});
                 _ = tx.sender.toBytes(); // Sender bytes calculated but not used in release mode
                 _ = tx.recipient.toBytes(); // Recipient bytes calculated but not used in release mode
-                // log.warn("   Sender: {x}", .{&sender_bytes});
-                // log.warn("   Recipient: {x}", .{&recipient_bytes});
-                log.warn("   Amount: {}", .{tx.amount});
-                log.warn("   Fee: {}", .{tx.fee});
-                log.warn("   Nonce: {}", .{tx.nonce});
-                log.warn("   Timestamp: {}", .{tx.timestamp});
+                // log.debug("   Sender: {x}", .{&sender_bytes});
+                // log.debug("   Recipient: {x}", .{&recipient_bytes});
+                log.debug("   Amount: {}", .{tx.amount});
+                log.debug("   Fee: {}", .{tx.fee});
+                log.debug("   Nonce: {}", .{tx.nonce});
+                log.debug("   Timestamp: {}", .{tx.timestamp});
                 return false;
             }
-            log.warn("   ✅ Transaction {} structure validation passed", .{i});
+            log.debug("   ✅ Transaction {} structure validation passed", .{i});
 
-            log.warn("   🔍 Checking transaction signature...", .{});
+            log.debug("   🔍 Checking transaction signature...", .{});
 
             // Signature validation (but no balance check)
             if (!try self.validateTransactionSignatureDetailed(tx)) {
-                log.warn("❌ Transaction {} signature validation failed", .{i});
-                // log.warn("   Public key: {x}", .{&tx.sender_public_key});
-                // log.warn("   Signature: {x}", .{&tx.signature});
+                log.debug("❌ Transaction {} signature validation failed", .{i});
+                // log.debug("   Public key: {x}", .{&tx.sender_public_key});
+                // log.debug("   Signature: {x}", .{&tx.signature});
                 return false;
             }
-            log.warn("   ✅ Transaction {} signature validation passed", .{i});
+            log.debug("   ✅ Transaction {} signature validation passed", .{i});
         }
 
-        log.warn("✅ Sync block {} structure and signatures validated", .{expected_height});
+        log.debug("✅ Sync block {} structure and signatures validated", .{expected_height});
         return true;
     }
 
