@@ -210,6 +210,38 @@ pub fn build(b: *std.Build) !void {
     }
 
     // **************************************************************
+    // *           L2 SERVICE AS AN EXECUTABLE                      *
+    // **************************************************************
+    {
+        const l2_module = b.createModule(.{
+            .root_source_file = b.path("src/apps/l2_service.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+
+        l2_module.addImport("zeicoin", zeicoin_module);
+        l2_module.linkSystemLibrary("pq", .{});
+
+        const exe = b.addExecutable(.{
+            .name = "l2_service",
+            .root_module = l2_module,
+        });
+
+        b.installArtifact(exe);
+
+        const run_cmd = b.addRunArtifact(exe);
+        run_cmd.step.dependOn(b.getInstallStep());
+
+        if (b.args) |args| {
+            run_cmd.addArgs(args);
+        }
+
+        const run_step = b.step("run-l2", "Run the L2 messaging service (port 8081)");
+        run_step.dependOn(&run_cmd.step);
+    }
+
+    // **************************************************************
     // *              RECOVERY TOOL                                 *
     // **************************************************************
     {
