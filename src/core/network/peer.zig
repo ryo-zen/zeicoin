@@ -259,7 +259,13 @@ pub const NetworkManager = struct {
                     io.sleep(std.Io.Duration.fromMilliseconds(100), std.Io.Clock.awake) catch {};
                     continue;
                 },
-                else => return err,
+                else => {
+                    // Keep accept thread alive on transient accept errors.
+                    if (!self.isRunning()) return;
+                    std.log.warn("Accept failed: {} (continuing)", .{err});
+                    io.sleep(std.Io.Duration.fromMilliseconds(100), std.Io.Clock.awake) catch {};
+                    continue;
+                },
             };
             
             // Check connection limit for incoming connections too

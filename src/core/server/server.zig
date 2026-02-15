@@ -119,8 +119,8 @@ pub fn main(init: std.process.Init) !void {
     var last_status_time = util.getTime();
     var last_reconnection_check = util.getTime();
     var last_sync_retry_check = util.getTime();
+    var last_mining_start_attempt = util.getTime() - 5;
     var mining_started = false;
-    var initial_sync_done = false;
     const io = components.blockchain.io;
 
     while (running.load(.acquire)) {
@@ -157,21 +157,15 @@ pub fn main(init: std.process.Init) !void {
 
         // Mining start logic
         if (!mining_started and components.blockchain.mining_manager != null) {
-            const should_start_mining = blk: {
-                const peer_stats = components.network_manager.getPeerStats();
-                if (peer_stats.connected == 0) {
-                    if (!initial_sync_done) {
-                        io.sleep(std.Io.Duration.fromSeconds(5), std.Io.Clock.awake) catch {};
-                        initial_sync_done = true;
-                        break :blk true;
-                    } else break :blk false;
-                }
-                if (components.sync_manager.isActive()) break :blk false;
-                break :blk true;
-            };
+            const peer_stats = components.network_manager.getPeerStats();
+            const sync_blocking_start = peer_stats.connected > 0 and components.sync_manager.isActive();
+            const retry_due = now - last_mining_start_attempt >= 5;
 
-            if (should_start_mining) {
-                if (startMiningAfterSync(&components)) mining_started = true;
+            if (!sync_blocking_start and retry_due) {
+                last_mining_start_attempt = now;
+                if (startMiningAfterSync(&components)) {
+                    mining_started = true;
+                }
             }
         }
 
