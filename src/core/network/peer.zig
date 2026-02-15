@@ -46,6 +46,14 @@ pub const NetworkManager = struct {
 
     const Self = @This();
     const MAX_ACTIVE_CONNECTIONS = 100;
+
+    inline fn isRunning(self: *const Self) bool {
+        return @atomicLoad(bool, &self.running, .acquire);
+    }
+
+    inline fn setRunning(self: *Self, value: bool) void {
+        @atomicStore(bool, &self.running, value, .release);
+    }
     
     pub fn init(
         allocator: std.mem.Allocator,
@@ -109,8 +117,8 @@ pub const NetworkManager = struct {
         });
         
         // Set running to true so connection threads can proceed
-        self.running = true;
-        std.log.info("Network manager started, running={}", .{self.running});
+        self.setRunning(true);
+        std.log.info("Network manager started, running={}", .{self.isRunning()});
         
         std.log.info("Listening on {}", .{address});
     }
@@ -139,9 +147,12 @@ pub const NetworkManager = struct {
         errdefer _ = self.active_connections.fetchSub(1, .acq_rel);
         
         // Spawn connection thread
-        const thread = try std.Thread.spawn(.{}, runPeerConnection, .{
+        const thread = std.Thread.spawn(.{}, runPeerConnection, .{
             self, peer
-        });
+        }) catch |err| {
+            self.peer_manager.removePeer(peer.id);
+            return err;
+        };
         thread.detach();
         std.log.info("Spawned connection thread for peer {}", .{peer.id});
     }
@@ -156,8 +167,8 @@ pub const NetworkManager = struct {
         io.sleep(std.Io.Duration.fromMilliseconds(100), std.Io.Clock.awake) catch {};
         
         // Check if we're shutting down at the very start
-        std.log.info("Checking if network is running: {}", .{self.running});
-        if (!self.running) {
+        std.log.info("Checking if network is running: {}", .{self.isRunning()});
+        if (!self.isRunning()) {
             std.log.warn("Peer connection aborted - network shutting down (self.running=false)", .{});
             return;
         }
@@ -167,7 +178,7 @@ pub const NetworkManager = struct {
         const io_connect = self.io;
         const stream = peer.address.connect(io_connect, .{ .mode = .stream }) catch |err| {
             // Check running state before ANY access to self
-            if (!self.running) {
+            if (!self.isRunning()) {
                 std.log.debug("Connection failed during shutdown, skipping cleanup", .{});
                 return;
             }
@@ -187,7 +198,7 @@ pub const NetworkManager = struct {
         const io_conn = self.io;
 
         // Check again before initializing connection
-        if (!self.running) {
+        if (!self.isRunning()) {
             stream.close(io_conn);
             return;
         }
@@ -201,7 +212,7 @@ pub const NetworkManager = struct {
         // Run connection loop
         conn.run(io_conn) catch |err| {
             // Check running state before logging
-            if (!self.running) {
+            if (!self.isRunning()) {
                 std.log.debug("Peer error during shutdown, skipping log", .{});
                 return;
             }
@@ -228,7 +239,7 @@ pub const NetworkManager = struct {
         };
         
         // Final check before peer removal
-        if (!self.running) {
+        if (!self.isRunning()) {
             std.log.debug("Skipping peer removal during shutdown", .{});
             return;
         }
@@ -240,8 +251,8 @@ pub const NetworkManager = struct {
     pub fn acceptConnections(self: *Self) !void {
         if (self.server == null) return error.NotListening;
         
-        self.running = true;
-        while (self.running) {
+        self.setRunning(true);
+        while (self.isRunning()) {
             const io = self.io;
             const connection = self.server.?.accept(io) catch |err| switch (err) {
                 error.WouldBlock => {
@@ -271,9 +282,13 @@ pub const NetworkManager = struct {
             errdefer _ = self.active_connections.fetchSub(1, .acq_rel);
 
             // Handle in thread
-            const thread = try std.Thread.spawn(.{}, handleIncomingConnection, .{
+            const thread = std.Thread.spawn(.{}, handleIncomingConnection, .{
                 self, peer, connection
-            });
+            }) catch |err| {
+                connection.close(io);
+                self.peer_manager.removePeer(peer.id);
+                return err;
+            };
             thread.detach();
         }
     }
@@ -282,7 +297,7 @@ pub const NetworkManager = struct {
         defer _ = self.active_connections.fetchSub(1, .acq_rel);
         const io = self.io;
         // Check if shutting down
-        if (!self.running) {
+        if (!self.isRunning()) {
             stream.close(io);
             return;
         }
@@ -295,7 +310,7 @@ pub const NetworkManager = struct {
         
         conn.run(io) catch |err| {
             // Only log if still running
-            if (self.running) {
+            if (self.isRunning()) {
                 // Call disconnect handler if available
                 if (self.message_handler.onPeerDisconnected) |onDisconnect| {
                     onDisconnect(peer, err) catch |handler_err| {
@@ -307,14 +322,14 @@ pub const NetworkManager = struct {
         };
         
         // Only remove peer if still running
-        if (self.running) {
+        if (self.isRunning()) {
             self.peer_manager.removePeer(peer.id);
         }
     }
     
     /// Start network (convenience method that calls listen)
-    pub fn start(self: *Self, port: u16) !void {
-        try self.listen(port);
+    pub fn start(self: *Self, address_str: []const u8, port: u16) !void {
+        try self.listen(address_str, port);
     }
     
     /// Add a peer by string address (parses and delegates to connectToPeer)
