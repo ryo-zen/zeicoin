@@ -249,3 +249,12 @@ zeicoin.target
 - Logs go to systemd journal (use journalctl to view)
 - Services have auto-restart on failure
 - Indexer runs every 30 seconds via timer
+
+
+## Service Restarts
+
+Use the helper script for consistent service management:
+
+```bash
+./systemd/zeicoin-services.sh restart
+```

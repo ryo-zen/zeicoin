@@ -285,9 +285,10 @@ pub const NetworkManager = struct {
             const thread = std.Thread.spawn(.{}, handleIncomingConnection, .{
                 self, peer, connection
             }) catch |err| {
+                std.log.err("Failed to spawn incoming connection thread: {}", .{err});
                 connection.close(io);
                 self.peer_manager.removePeer(peer.id);
-                return err;
+                continue;
             };
             thread.detach();
         }
