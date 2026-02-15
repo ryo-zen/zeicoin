@@ -13,6 +13,7 @@ Environment="ZEICOIN_DB_HOST=127.0.0.1"
 Environment="ZEICOIN_DB_NAME=zeicoin_testnet"
 Environment="ZEICOIN_DB_USER=zeicoin"
 Environment="ZEICOIN_MONITOR_MIN_SEVERITY=MEDIUM"
+Environment="ZEICOIN_MONITOR_SERVICE=zeicoin-mining.service"
 
 ExecStart=/root/zeicoin/zig-out/bin/zeicoin_error_monitor
 Restart=always

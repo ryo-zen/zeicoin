@@ -136,6 +136,7 @@ pub const NetworkManager = struct {
         
         // Increment active connections counter
         _ = self.active_connections.fetchAdd(1, .acq_rel);
+        errdefer _ = self.active_connections.fetchSub(1, .acq_rel);
         
         // Spawn connection thread
         const thread = try std.Thread.spawn(.{}, runPeerConnection, .{
@@ -267,6 +268,7 @@ pub const NetworkManager = struct {
 
             // Increment active connections counter for incoming connections
             _ = self.active_connections.fetchAdd(1, .acq_rel);
+            errdefer _ = self.active_connections.fetchSub(1, .acq_rel);
 
             // Handle in thread
             const thread = try std.Thread.spawn(.{}, handleIncomingConnection, .{
