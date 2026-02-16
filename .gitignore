@@ -30,6 +30,7 @@ tasks.json
 .mcp.json
 server.log
 logs
+.obsidian
 
 # === Documentation & Markdown ===
 .CLAUDE.md
