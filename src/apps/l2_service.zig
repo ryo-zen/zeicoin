@@ -1,5 +1,5 @@
 // l2_service.zig - Consolidated L2 Messaging Service and REST API for ZeiCoin
-// Provides transaction enhancements, messaging capabilities, and HTTP API endpoints
+// Provides transaction messages, messaging capabilities, and HTTP API endpoints
 
 const std = @import("std");
 const zeicoin = @import("zeicoin");
@@ -78,14 +78,14 @@ const DBPool = struct {
     }
 };
 
-/// L2 Enhancement status
-pub const EnhancementStatus = enum {
+/// L2 Message status
+pub const MessageStatus = enum {
     draft,
     pending,
     confirmed,
     failed,
 
-    pub fn toString(self: EnhancementStatus) []const u8 {
+    pub fn toString(self: MessageStatus) []const u8 {
         return switch (self) {
             .draft => "draft",
             .pending => "pending",
@@ -94,7 +94,7 @@ pub const EnhancementStatus = enum {
         };
     }
 
-    pub fn fromString(str: []const u8) !EnhancementStatus {
+    pub fn fromString(str: []const u8) !MessageStatus {
         if (std.mem.eql(u8, str, "draft")) return .draft;
         if (std.mem.eql(u8, str, "pending")) return .pending;
         if (std.mem.eql(u8, str, "confirmed")) return .confirmed;
@@ -103,8 +103,8 @@ pub const EnhancementStatus = enum {
     }
 };
 
-/// Transaction Enhancement structure
-pub const TransactionEnhancement = struct {
+/// Transaction Message structure
+pub const L2MessageRecord = struct {
     id: ?u32 = null,
     tx_hash: ?[]const u8 = null,
     temp_id: []const u8,
@@ -116,7 +116,7 @@ pub const TransactionEnhancement = struct {
     reference_id: ?[]const u8 = null,
     is_private: bool = false,
     is_editable: bool = true,
-    status: EnhancementStatus = .draft,
+    status: MessageStatus = .draft,
     confirmation_block_height: ?u32 = null,
     created_at: ?i64 = null,
     updated_at: ?i64 = null,
@@ -165,8 +165,8 @@ pub const L2Service = struct {
         };
     }
 
-    /// Create a new transaction enhancement draft
-    pub fn createEnhancement(
+    /// Create a new transaction message draft
+    pub fn createMessage(
         self: *Self,
         sender: []const u8,
         recipient: ?[]const u8,
@@ -176,21 +176,12 @@ pub const L2Service = struct {
         reference_id: ?[]const u8,
         is_private: bool,
     ) ![]const u8 {
-        // Convert tags to PostgreSQL array format
-        var tags_array = std.array_list.Managed(u8).init(self.allocator);
-        defer tags_array.deinit();
-
-        try tags_array.append('{');
-        for (tags, 0..) |tag, i| {
-            if (i > 0) try tags_array.append(',');
-            try tags_array.append('"');
-            try tags_array.appendSlice(tag);
-            try tags_array.append('"');
-        }
-        try tags_array.append('}');
+        _ = tags;
+        _ = reference_id;
+        _ = is_private;
 
         const sql =
-            \\SELECT create_transaction_enhancement($1, $2, $3, $4::text[], $5, $6, $7::boolean)::text
+            \\SELECT create_l2_message($1, $2, $3, $4)::text
         ;
         const sql_z = try self.allocator.dupeZ(u8, sql);
         defer self.allocator.free(sql_z);
@@ -201,22 +192,14 @@ pub const L2Service = struct {
         defer self.allocator.free(recipient_z);
         const message_z = try self.allocator.dupeZ(u8, message orelse "");
         defer self.allocator.free(message_z);
-        const tags_z = try self.allocator.dupeZ(u8, tags_array.items);
-        defer self.allocator.free(tags_z);
         const category_z = try self.allocator.dupeZ(u8, category orelse "");
         defer self.allocator.free(category_z);
-        const reference_id_z = try self.allocator.dupeZ(u8, reference_id orelse "");
-        defer self.allocator.free(reference_id_z);
-        const is_private_z: [:0]const u8 = if (is_private) "true" else "false";
 
         const params = [_][:0]const u8{
             sender_z,
             recipient_z,
             message_z,
-            tags_z,
             category_z,
-            reference_id_z,
-            is_private_z,
         };
 
         var conn = try self.pool.acquire();
@@ -226,19 +209,19 @@ pub const L2Service = struct {
         defer result.deinit();
 
         if (result.rowCount() > 0) {
-            const temp_id_val = result.getValue(0, 0) orelse return error.FailedToCreateEnhancement;
+            const temp_id_val = result.getValue(0, 0) orelse return error.FailedToCreateMessage;
             const temp_id = try self.allocator.dupe(u8, temp_id_val);
-            log.info("Created enhancement draft with temp_id: {s}", .{temp_id});
+            log.info("Created message draft with temp_id: {s}", .{temp_id});
             return temp_id;
         }
 
-        return error.FailedToCreateEnhancement;
+        return error.FailedToCreateMessage;
     }
 
-    /// Update enhancement status to pending (when transaction submitted)
-    pub fn setEnhancementPending(self: *Self, temp_id: []const u8) !void {
+    /// Update message status to pending (when transaction submitted)
+    pub fn setMessagePending(self: *Self, temp_id: []const u8) !void {
         const sql =
-            \\SELECT set_enhancement_pending($1::uuid)
+            \\SELECT set_l2_message_pending($1::uuid)
         ;
         const sql_z = try self.allocator.dupeZ(u8, sql);
         defer self.allocator.free(sql_z);
@@ -254,26 +237,26 @@ pub const L2Service = struct {
         defer result.deinit();
 
         if (result.rowCount() > 0) {
-            const success_val = result.getValue(0, 0) orelse return error.FailedToUpdateEnhancement;
+            const success_val = result.getValue(0, 0) orelse return error.FailedToUpdateMessage;
             if (std.mem.eql(u8, success_val, "t") or std.mem.eql(u8, success_val, "true")) {
-                log.info("Set enhancement {s} to pending", .{temp_id});
+                log.info("Set message {s} to pending", .{temp_id});
             } else {
-                return error.EnhancementNotFound;
+                return error.MessageNotFound;
             }
         } else {
-            return error.FailedToUpdateEnhancement;
+            return error.FailedToUpdateMessage;
         }
     }
 
-    /// Confirm enhancement when transaction is mined
-    pub fn confirmEnhancement(
+    /// Confirm message when transaction is mined
+    pub fn confirmMessage(
         self: *Self,
         temp_id: []const u8,
         tx_hash: []const u8,
         block_height: u32,
     ) !void {
         const sql =
-            \\SELECT confirm_transaction_enhancement($1::uuid, $2, $3)
+            \\SELECT confirm_l2_message($1::uuid, $2, $3)
         ;
         const sql_z = try self.allocator.dupeZ(u8, sql);
         defer self.allocator.free(sql_z);
@@ -295,65 +278,65 @@ pub const L2Service = struct {
         defer result.deinit();
 
         if (result.rowCount() > 0) {
-            const success_val = result.getValue(0, 0) orelse return error.FailedToConfirmEnhancement;
+            const success_val = result.getValue(0, 0) orelse return error.FailedToConfirmMessage;
             if (std.mem.eql(u8, success_val, "t") or std.mem.eql(u8, success_val, "true")) {
-                log.info("Confirmed enhancement {s} with tx_hash {s} at height {}", .{ temp_id, tx_hash, block_height });
+                log.info("Confirmed message {s} with tx_hash {s} at height {}", .{ temp_id, tx_hash, block_height });
             } else {
-                log.warn("Enhancement {s} not found or already confirmed", .{temp_id});
+                log.warn("Message {s} not found or already confirmed", .{temp_id});
             }
         }
     }
 
-    /// Query enhancements by sender and recipient
-    pub fn queryEnhancementsBySenderRecipient(
+    /// Query messages by sender and recipient
+    pub fn queryMessagesBySenderRecipient(
         self: *Self,
         sender: []const u8,
         recipient: []const u8,
-        status: EnhancementStatus,
-    ) ![]TransactionEnhancement {
+        status: MessageStatus,
+    ) ![]L2MessageRecord {
         _ = sender;
         _ = recipient;
         _ = status;
 
         // TODO: Implement with proper SQL
-        var enhancements = std.array_list.Managed(TransactionEnhancement).init(self.allocator);
-        return enhancements.toOwnedSlice();
+        var messages = std.array_list.Managed(L2MessageRecord).init(self.allocator);
+        return messages.toOwnedSlice();
     }
 
-    /// Free memory allocated for TransactionEnhancement array
-    pub fn freeEnhancements(self: *Self, enhancements: []TransactionEnhancement) void {
-        for (enhancements) |enhancement| {
-            if (enhancement.tx_hash) |h| self.allocator.free(h);
-            self.allocator.free(enhancement.temp_id);
-            self.allocator.free(enhancement.sender_address);
-            if (enhancement.recipient_address) |r| self.allocator.free(r);
-            if (enhancement.message) |m| self.allocator.free(m);
-            if (enhancement.category) |c| self.allocator.free(c);
-            if (enhancement.reference_id) |r| self.allocator.free(r);
+    /// Free memory allocated for L2MessageRecord array
+    pub fn freeMessages(self: *Self, messages: []L2MessageRecord) void {
+        for (messages) |message| {
+            if (message.tx_hash) |h| self.allocator.free(h);
+            self.allocator.free(message.temp_id);
+            self.allocator.free(message.sender_address);
+            if (message.recipient_address) |r| self.allocator.free(r);
+            if (message.message) |m| self.allocator.free(m);
+            if (message.category) |c| self.allocator.free(c);
+            if (message.reference_id) |r| self.allocator.free(r);
         }
-        self.allocator.free(enhancements);
+        self.allocator.free(messages);
     }
 
-    /// Query enhancements with filters
-    pub fn queryEnhancements(
+    /// Query messages with filters
+    pub fn queryMessages(
         self: *Self,
         sender: ?[]const u8,
         recipient: ?[]const u8,
-        status: EnhancementStatus,
+        status: MessageStatus,
         limit: u32,
-    ) ![]TransactionEnhancement {
+    ) ![]L2MessageRecord {
         _ = sender;
         _ = recipient;
         _ = status;
         _ = limit;
 
         // TODO: Implement complex query with result parsing
-        var enhancements = std.array_list.Managed(TransactionEnhancement).init(self.allocator);
-        return enhancements.toOwnedSlice();
+        var messages = std.array_list.Managed(L2MessageRecord).init(self.allocator);
+        return messages.toOwnedSlice();
     }
 
-    /// Get enhanced transaction by hash
-    pub fn getEnhancedTransaction(self: *Self, tx_hash: []const u8) !?TransactionEnhancement {
+    /// Get message by transaction hash
+    pub fn getMessageByTransaction(self: *Self, tx_hash: []const u8) !?L2MessageRecord {
         _ = self;
         _ = tx_hash;
 
@@ -361,43 +344,43 @@ pub const L2Service = struct {
         return null;
     }
 
-    /// Get enhanced transactions for an address
-    pub fn getEnhancedTransactionsForAddress(
+    /// Get messages for an address
+    pub fn getMessagesForAddress(
         self: *Self,
         address: []const u8,
         limit: u32,
         offset: u32,
-    ) ![]TransactionEnhancement {
+    ) ![]L2MessageRecord {
         _ = address;
         _ = limit;
         _ = offset;
 
-        var enhancements = std.array_list.Managed(TransactionEnhancement).init(self.allocator);
+        var messages = std.array_list.Managed(L2MessageRecord).init(self.allocator);
 
-        return enhancements.toOwnedSlice();
+        return messages.toOwnedSlice();
     }
 
-    /// Search enhanced transactions by message content
-    pub fn searchEnhancedTransactions(
+    /// Search messages by message content
+    pub fn searchMessages(
         self: *Self,
         search_query: []const u8,
         address: ?[]const u8,
         limit: u32,
-    ) ![]TransactionEnhancement {
+    ) ![]L2MessageRecord {
         _ = search_query;
         _ = address;
         _ = limit;
 
-        var results = std.array_list.Managed(TransactionEnhancement).init(self.allocator);
+        var results = std.array_list.Managed(L2MessageRecord).init(self.allocator);
 
         return results.toOwnedSlice();
     }
 
-    /// Clean up orphaned enhancements (pending for too long)
-    pub fn cleanupOrphanedEnhancements(self: *Self) !u32 {
+    /// Clean up orphaned messages (pending for too long)
+    pub fn cleanupOrphanedMessages(self: *Self) !u32 {
         const sql_str = try std.fmt.allocPrint(
             self.allocator,
-            "SELECT cleanup_orphaned_enhancements()",
+            "SELECT cleanup_orphaned_l2_messages()",
             .{},
         );
         defer self.allocator.free(sql_str);
@@ -415,7 +398,7 @@ pub const L2Service = struct {
             const count_val = result.getValue(0, 0) orelse return 0;
             const count = std.fmt.parseInt(u32, count_val, 10) catch 0;
             if (count > 0) {
-                log.info("Cleaned up {} orphaned enhancements", .{count});
+                log.info("Cleaned up {} orphaned L2 messages", .{count});
             }
             return count;
         }
@@ -428,9 +411,9 @@ pub const L2Service = struct {
     }
 };
 
-/// Create transaction enhancement endpoint
-/// POST /api/l2/enhancements
-fn handleCreateEnhancement(service: *L2Service, allocator: std.mem.Allocator, body: []const u8) ![]const u8 {
+/// Create L2 message endpoint
+/// POST /api/l2/messages
+fn handleCreateMessage(service: *L2Service, allocator: std.mem.Allocator, body: []const u8) ![]const u8 {
     const parsed = std.json.parseFromSlice(struct {
         sender: []const u8,
         recipient: ?[]const u8 = null,
@@ -446,7 +429,7 @@ fn handleCreateEnhancement(service: *L2Service, allocator: std.mem.Allocator, bo
 
     const data = parsed.value;
 
-    const temp_id = service.createEnhancement(
+    const temp_id = service.createMessage(
         data.sender,
         data.recipient,
         data.message,
@@ -455,32 +438,32 @@ fn handleCreateEnhancement(service: *L2Service, allocator: std.mem.Allocator, bo
         data.reference_id,
         data.is_private,
     ) catch |err| {
-        log.err("Failed to create enhancement: {}", .{err});
-        return try std.fmt.allocPrint(allocator, "{{\"error\":\"Failed to create enhancement\"}}", .{});
+        log.err("Failed to create message: {}", .{err});
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"Failed to create message\"}}", .{});
     };
     defer allocator.free(temp_id);
 
     return try std.fmt.allocPrint(allocator, "{{\"success\":true,\"temp_id\":\"{s}\",\"status\":\"draft\"}}", .{temp_id});
 }
 
-/// Update enhancement to pending status
-/// PUT /api/l2/enhancements/{temp_id}/pending
-fn handleSetEnhancementPending(service: *L2Service, allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+/// Update message to pending status
+/// PUT /api/l2/messages/{temp_id}/pending
+fn handleSetMessagePending(service: *L2Service, allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     const temp_id = extractTempIdFromPath(path) catch {
         return try std.fmt.allocPrint(allocator, "{{\"error\":\"Invalid temp_id in path\"}}", .{});
     };
 
-    service.setEnhancementPending(temp_id) catch |err| {
-        log.err("Failed to update enhancement: {}", .{err});
-        return try std.fmt.allocPrint(allocator, "{{\"error\":\"Failed to update enhancement\"}}", .{});
+    service.setMessagePending(temp_id) catch |err| {
+        log.err("Failed to update message: {}", .{err});
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"Failed to update message\"}}", .{});
     };
 
     return try std.fmt.allocPrint(allocator, "{{\"success\":true,\"temp_id\":\"{s}\",\"status\":\"pending\"}}", .{temp_id});
 }
 
-/// Confirm enhancement with transaction hash
-/// PUT /api/l2/enhancements/{temp_id}/confirm
-fn handleConfirmEnhancement(service: *L2Service, allocator: std.mem.Allocator, path: []const u8, body: []const u8) ![]const u8 {
+/// Confirm message with transaction hash
+/// PUT /api/l2/messages/{temp_id}/confirm
+fn handleConfirmMessage(service: *L2Service, allocator: std.mem.Allocator, path: []const u8, body: []const u8) ![]const u8 {
     const temp_id = extractTempIdFromPath(path) catch {
         return try std.fmt.allocPrint(allocator, "{{\"error\":\"Invalid temp_id in path\"}}", .{});
     };
@@ -495,21 +478,21 @@ fn handleConfirmEnhancement(service: *L2Service, allocator: std.mem.Allocator, p
 
     const data = parsed.value;
 
-    service.confirmEnhancement(
+    service.confirmMessage(
         temp_id,
         data.tx_hash,
         data.block_height,
     ) catch |err| {
-        log.err("Failed to confirm enhancement: {}", .{err});
-        return try std.fmt.allocPrint(allocator, "{{\"error\":\"Failed to confirm enhancement\"}}", .{});
+        log.err("Failed to confirm message: {}", .{err});
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"Failed to confirm message\"}}", .{});
     };
 
     return try std.fmt.allocPrint(allocator, "{{\"success\":true,\"temp_id\":\"{s}\",\"tx_hash\":\"{s}\",\"status\":\"confirmed\"}}", .{ temp_id, data.tx_hash });
 }
 
-/// Get enhanced transactions for an address
-/// GET /api/transactions/enhanced?address={address}&limit={limit}&offset={offset}
-fn handleGetEnhancedTransactions(service: *L2Service, allocator: std.mem.Allocator, query: []const u8) ![]const u8 {
+/// Get messages for an address
+/// GET /api/transactions/messages?address={address}&limit={limit}&offset={offset}
+fn handleGetMessages(service: *L2Service, allocator: std.mem.Allocator, query: []const u8) ![]const u8 {
     const address = parseQueryParam(query, "address") orelse {
         return try std.fmt.allocPrint(allocator, "{{\"error\":\"Missing address parameter\"}}", .{});
     };
@@ -517,14 +500,14 @@ fn handleGetEnhancedTransactions(service: *L2Service, allocator: std.mem.Allocat
     const limit = parseQueryParamInt(query, "limit") orelse 50;
     const offset = parseQueryParamInt(query, "offset") orelse 0;
 
-    // Note: getEnhancedTransactionsForAddress is currently a stub
-    const transactions = service.getEnhancedTransactionsForAddress(
+    // Note: getMessagesForAddress is currently a stub
+    const transactions = service.getMessagesForAddress(
         address,
         @intCast(limit),
         @intCast(offset),
     ) catch |err| {
-        log.err("Failed to get enhanced transactions: {}", .{err});
-        return try std.fmt.allocPrint(allocator, "{{\"error\":\"Failed to retrieve transactions\"}}", .{});
+        log.err("Failed to get messages: {}", .{err});
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"Failed to retrieve messages\"}}", .{});
     };
     defer allocator.free(transactions);
 
@@ -532,9 +515,9 @@ fn handleGetEnhancedTransactions(service: *L2Service, allocator: std.mem.Allocat
     return try std.fmt.allocPrint(allocator, "{{\"transactions\":[],\"count\":{},\"offset\":{},\"limit\":{}}}", .{ transactions.len, offset, limit });
 }
 
-/// Search enhanced transactions by message content
+/// Search messages by message content
 /// GET /api/l2/search?q={query}&address={address}&limit={limit}
-fn handleSearchEnhancedTransactions(service: *L2Service, allocator: std.mem.Allocator, query_string: []const u8) ![]const u8 {
+fn handleSearchMessages(service: *L2Service, allocator: std.mem.Allocator, query_string: []const u8) ![]const u8 {
     const search_query = parseQueryParam(query_string, "q") orelse {
         return try std.fmt.allocPrint(allocator, "{{\"error\":\"Missing search query\"}}", .{});
     };
@@ -542,13 +525,13 @@ fn handleSearchEnhancedTransactions(service: *L2Service, allocator: std.mem.Allo
     const address = parseQueryParam(query_string, "address");
     const limit = parseQueryParamInt(query_string, "limit") orelse 50;
 
-    // Note: searchEnhancedTransactions is currently a stub
-    const results = service.searchEnhancedTransactions(
+    // Note: searchMessages is currently a stub
+    const results = service.searchMessages(
         search_query,
         address,
         @intCast(limit),
     ) catch |err| {
-        log.err("Failed to search transactions: {}", .{err});
+        log.err("Failed to search messages: {}", .{err});
         return try std.fmt.allocPrint(allocator, "{{\"error\":\"Search failed\"}}", .{});
     };
     defer allocator.free(results);
@@ -755,35 +738,35 @@ const HttpServer = struct {
             return try handleHealthCheck(self.l2_service, self.allocator);
         }
 
-        // POST /api/l2/enhancements
-        if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/api/l2/enhancements")) {
+        // POST /api/l2/messages
+        if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/api/l2/messages")) {
             return .{
                 .status = 200,
-                .body = try handleCreateEnhancement(self.l2_service, self.allocator, body),
+                .body = try handleCreateMessage(self.l2_service, self.allocator, body),
             };
         }
 
-        // PUT /api/l2/enhancements/{temp_id}/pending
-        if (std.mem.eql(u8, method, "PUT") and std.mem.startsWith(u8, path, "/api/l2/enhancements/") and std.mem.endsWith(u8, path, "/pending")) {
+        // PUT /api/l2/messages/{temp_id}/pending
+        if (std.mem.eql(u8, method, "PUT") and std.mem.startsWith(u8, path, "/api/l2/messages/") and std.mem.endsWith(u8, path, "/pending")) {
             return .{
                 .status = 200,
-                .body = try handleSetEnhancementPending(self.l2_service, self.allocator, path),
+                .body = try handleSetMessagePending(self.l2_service, self.allocator, path),
             };
         }
 
-        // PUT /api/l2/enhancements/{temp_id}/confirm
-        if (std.mem.eql(u8, method, "PUT") and std.mem.startsWith(u8, path, "/api/l2/enhancements/") and std.mem.endsWith(u8, path, "/confirm")) {
+        // PUT /api/l2/messages/{temp_id}/confirm
+        if (std.mem.eql(u8, method, "PUT") and std.mem.startsWith(u8, path, "/api/l2/messages/") and std.mem.endsWith(u8, path, "/confirm")) {
             return .{
                 .status = 200,
-                .body = try handleConfirmEnhancement(self.l2_service, self.allocator, path, body),
+                .body = try handleConfirmMessage(self.l2_service, self.allocator, path, body),
             };
         }
 
-        // GET /api/transactions/enhanced
-        if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/api/transactions/enhanced")) {
+        // GET /api/transactions/messages
+        if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/api/transactions/messages")) {
             return .{
                 .status = 200,
-                .body = try handleGetEnhancedTransactions(self.l2_service, self.allocator, query),
+                .body = try handleGetMessages(self.l2_service, self.allocator, query),
             };
         }
 
@@ -791,7 +774,7 @@ const HttpServer = struct {
         if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/api/l2/search")) {
             return .{
                 .status = 200,
-                .body = try handleSearchEnhancedTransactions(self.l2_service, self.allocator, query),
+                .body = try handleSearchMessages(self.l2_service, self.allocator, query),
             };
         }
 

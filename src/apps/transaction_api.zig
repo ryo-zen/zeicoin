@@ -226,6 +226,28 @@ const HttpServer = struct {
             return try handleTransaction(self.allocator, body);
         }
 
+        // POST /api/l2/messages
+        if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/api/l2/messages"))
+        {
+            return try handleCreateL2Message(self.allocator, body);
+        }
+
+        // PUT /api/l2/messages/{temp_id}/pending
+        if (std.mem.eql(u8, method, "PUT") and
+            (std.mem.startsWith(u8, path, "/api/l2/messages/") and
+            std.mem.endsWith(u8, path, "/pending")))
+        {
+            return try handleSetL2MessagePending(self.allocator, path);
+        }
+
+        // PUT /api/l2/messages/{temp_id}/confirm
+        if (std.mem.eql(u8, method, "PUT") and
+            (std.mem.startsWith(u8, path, "/api/l2/messages/") and
+            std.mem.endsWith(u8, path, "/confirm")))
+        {
+            return try handleConfirmL2Message(self.allocator, path, body);
+        }
+
         // POST /faucet
         if (std.mem.eql(u8, path, "/faucet") and std.mem.eql(u8, method, "POST")) {
             return try faucet_service.handleRequest(self.allocator, db_pool, body);
@@ -416,6 +438,154 @@ fn handleTransaction(allocator: std.mem.Allocator, body: []const u8) ![]const u8
     defer allocator.free(tx_hash);
 
     return try std.fmt.allocPrint(allocator, "{{\"success\":true,\"tx_hash\":\"{s}\"}}", .{tx_hash});
+}
+
+fn handleCreateL2Message(allocator: std.mem.Allocator, body: []const u8) ![]const u8 {
+    const parsed = std.json.parseFromSlice(
+        struct {
+            sender: []const u8,
+            recipient: ?[]const u8 = null,
+            message: ?[]const u8 = null,
+            category: ?[]const u8 = null,
+        },
+        allocator,
+        body,
+        .{},
+    ) catch {
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"invalid json\"}}", .{});
+    };
+    defer parsed.deinit();
+
+    const payload = parsed.value;
+
+    const sql =
+        \\SELECT create_l2_message($1, $2, $3, $4)::text
+    ;
+    const sql_z = try allocator.dupeZ(u8, sql);
+    defer allocator.free(sql_z);
+
+    const sender_z = try allocator.dupeZ(u8, payload.sender);
+    defer allocator.free(sender_z);
+    const recipient_z = try allocator.dupeZ(u8, payload.recipient orelse "");
+    defer allocator.free(recipient_z);
+    const message_z = try allocator.dupeZ(u8, payload.message orelse "");
+    defer allocator.free(message_z);
+    const category_z = try allocator.dupeZ(u8, payload.category orelse "");
+    defer allocator.free(category_z);
+
+    const params = [_][:0]const u8{ sender_z, recipient_z, message_z, category_z };
+
+    var conn = try db_pool.acquire();
+    defer db_pool.release(conn);
+
+    var result = try conn.queryParams(sql_z, &params);
+    defer result.deinit();
+    if (result.rowCount() == 0) {
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"failed to create message\"}}", .{});
+    }
+
+    const temp_id = result.getValue(0, 0) orelse {
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"failed to create message\"}}", .{});
+    };
+
+    return try std.fmt.allocPrint(
+        allocator,
+        "{{\"success\":true,\"temp_id\":\"{s}\",\"status\":\"draft\"}}",
+        .{temp_id},
+    );
+}
+
+fn handleSetL2MessagePending(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+    const temp_id = extractTempIdFromPath(path) catch {
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"invalid temp_id\"}}", .{});
+    };
+
+    const sql =
+        \\SELECT set_l2_message_pending($1::uuid)
+    ;
+    const sql_z = try allocator.dupeZ(u8, sql);
+    defer allocator.free(sql_z);
+
+    const temp_id_z = try allocator.dupeZ(u8, temp_id);
+    defer allocator.free(temp_id_z);
+    const params = [_][:0]const u8{temp_id_z};
+
+    var conn = try db_pool.acquire();
+    defer db_pool.release(conn);
+
+    var result = try conn.queryParams(sql_z, &params);
+    defer result.deinit();
+    if (result.rowCount() == 0) {
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"message not found\"}}", .{});
+    }
+
+    return try std.fmt.allocPrint(
+        allocator,
+        "{{\"success\":true,\"temp_id\":\"{s}\",\"status\":\"pending\"}}",
+        .{temp_id},
+    );
+}
+
+fn handleConfirmL2Message(allocator: std.mem.Allocator, path: []const u8, body: []const u8) ![]const u8 {
+    const temp_id = extractTempIdFromPath(path) catch {
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"invalid temp_id\"}}", .{});
+    };
+
+    const parsed = std.json.parseFromSlice(
+        struct {
+            tx_hash: []const u8,
+            block_height: u32,
+        },
+        allocator,
+        body,
+        .{},
+    ) catch {
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"invalid json\"}}", .{});
+    };
+    defer parsed.deinit();
+
+    const payload = parsed.value;
+    const block_height = try std.fmt.allocPrint(allocator, "{d}", .{payload.block_height});
+    defer allocator.free(block_height);
+
+    const sql =
+        \\SELECT confirm_l2_message($1::uuid, $2, $3)
+    ;
+    const sql_z = try allocator.dupeZ(u8, sql);
+    defer allocator.free(sql_z);
+
+    const temp_id_z = try allocator.dupeZ(u8, temp_id);
+    defer allocator.free(temp_id_z);
+    const tx_hash_z = try allocator.dupeZ(u8, payload.tx_hash);
+    defer allocator.free(tx_hash_z);
+    const block_height_z = try allocator.dupeZ(u8, block_height);
+    defer allocator.free(block_height_z);
+    const params = [_][:0]const u8{ temp_id_z, tx_hash_z, block_height_z };
+
+    var conn = try db_pool.acquire();
+    defer db_pool.release(conn);
+
+    var result = try conn.queryParams(sql_z, &params);
+    defer result.deinit();
+    if (result.rowCount() == 0) {
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"message not found\"}}", .{});
+    }
+
+    return try std.fmt.allocPrint(
+        allocator,
+        "{{\"success\":true,\"temp_id\":\"{s}\",\"tx_hash\":\"{s}\",\"status\":\"confirmed\"}}",
+        .{ temp_id, payload.tx_hash },
+    );
+}
+
+fn extractTempIdFromPath(path: []const u8) ![]const u8 {
+    var iter = std.mem.tokenizeScalar(u8, path, '/');
+    while (iter.next()) |part| {
+        if (part.len == 36 and std.mem.indexOfScalar(u8, part, '-') != null) {
+            return part;
+        }
+    }
+    return error.TempIdNotFound;
 }
 
 pub fn main(init: std.process.Init) !void {
