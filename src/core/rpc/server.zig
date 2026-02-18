@@ -597,7 +597,7 @@ pub const RPCServer = struct {
         // Get transaction from secondary database
         const database = try self.ensureSecondaryDb();
         const io = self.blockchain.io;
-        const tx = database.getTransactionByHash(io, tx_hash) catch {
+        const tx_with_height = database.getTransactionWithHeightByHash(io, tx_hash) catch {
             // Check mempool if not found in database
             const mempool_tx = self.blockchain.mempool_manager.getTransaction(tx_hash) orelse {
                 return try format.formatError(
@@ -627,6 +627,8 @@ pub const RPCServer = struct {
             };
             return try format.formatResult(self.allocator, rpc_types.GetTransactionResponse, response);
         };
+        var tx = tx_with_height.transaction;
+        defer tx.deinit(self.allocator);
 
         const types = @import("../types/types.zig");
 
@@ -646,7 +648,7 @@ pub const RPCServer = struct {
             .timestamp = tx.timestamp,
             .expiry_height = tx.expiry_height,
             .status = "confirmed",
-            .block_height = null, // TODO: Get block height from transaction metadata
+            .block_height = tx_with_height.block_height,
         };
         return try format.formatResult(self.allocator, rpc_types.GetTransactionResponse, response);
     }

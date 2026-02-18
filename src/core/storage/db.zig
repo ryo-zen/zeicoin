@@ -41,6 +41,11 @@ pub const Database = struct {
     const TOTAL_SUPPLY_KEY = "meta:total_supply";
     const CIRCULATING_SUPPLY_KEY = "meta:circulating_supply";
 
+    pub const TransactionWithHeight = struct {
+        transaction: types.Transaction,
+        block_height: u32,
+    };
+
     pub fn init(allocator: std.mem.Allocator, io: std.Io, base_path: []const u8) !Database {
         var self = Database{
             .db = null,
@@ -824,6 +829,11 @@ pub const Database = struct {
     }
 
     pub fn getTransactionByHash(self: *Database, io: std.Io, hash: [32]u8) !types.Transaction {
+        const tx_with_height = try self.getTransactionWithHeightByHash(io, hash);
+        return tx_with_height.transaction;
+    }
+
+    pub fn getTransactionWithHeightByHash(self: *Database, io: std.Io, hash: [32]u8) !TransactionWithHeight {
         _ = io;
         const it = c.rocksdb_create_iterator(self.db, self.read_options);
         defer c.rocksdb_iter_destroy(it);
@@ -857,7 +867,10 @@ pub const Database = struct {
                     defer aw.deinit();
                     try serialize.serialize(&aw.writer, tx);
                     var tx_reader = std.Io.Reader.fixed(aw.written());
-                    return try serialize.deserialize(&tx_reader, types.Transaction, self.allocator);
+                    return .{
+                        .transaction = try serialize.deserialize(&tx_reader, types.Transaction, self.allocator),
+                        .block_height = block.height,
+                    };
                 }
             }
 

@@ -37,7 +37,7 @@ pub fn formatError(allocator: std.mem.Allocator, code: types.ErrorCode, data: ?[
 
     if (data) |d| {
         try aw.writer.writeAll(",\"data\":");
-        try aw.writer.writeAll(d);
+        try std.json.Stringify.value(d, .{}, &aw.writer);
     }
 
     try aw.writer.writeAll("},\"id\":");
@@ -108,11 +108,11 @@ test "format error response with data" {
     const allocator = std.testing.allocator;
 
     const id = std.json.Value{ .integer = 1 };
-    const data = "{\"size\":10000}";
+    const data = "InvalidTransaction";
     const response = try formatError(allocator, types.ErrorCode.mempool_full, data, id);
     defer allocator.free(response);
 
-    try std.testing.expect(std.mem.indexOf(u8, response, "\"data\":{\"size\":10000}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"data\":\"InvalidTransaction\"") != null);
 }
 
 test "format result object" {

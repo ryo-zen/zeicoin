@@ -1,5 +1,6 @@
 const std = @import("std");
 const net = std.Io.net;
+const log = std.log.scoped(.rpc_client);
 
 /// Minimal JSON-RPC 2.0 client for blockchain queries
 pub const RPCClient = struct {
@@ -253,15 +254,23 @@ pub const RPCClient = struct {
         );
         defer self.allocator.free(request);
 
-        const response = try self.call(request);
+        const response = self.call(request) catch |err| {
+            log.err("submitTransaction call failed: {}", .{err});
+            return err;
+        };
         defer self.allocator.free(response);
 
         const parsed = try std.json.parseFromSlice(
             struct {
-                result: struct {
+                result: ?struct {
                     success: bool,
-                    tx_hash: ?[]const u8,
-                },
+                    tx_hash: ?[]const u8 = null,
+                } = null,
+                @"error": ?struct {
+                    code: i32,
+                    message: []const u8,
+                    data: ?[]const u8 = null,
+                } = null,
             },
             self.allocator,
             response,
@@ -269,11 +278,22 @@ pub const RPCClient = struct {
         );
         defer parsed.deinit();
 
-        if (!parsed.value.result.success) {
+        if (parsed.value.@"error") |rpc_err| {
+            if (rpc_err.data) |data| {
+                log.warn("submitTransaction rejected: code={} message='{s}' data='{s}'", .{ rpc_err.code, rpc_err.message, data });
+            } else {
+                log.warn("submitTransaction rejected: code={} message='{s}'", .{ rpc_err.code, rpc_err.message });
+            }
+            return error.RPCRequestFailed;
+        }
+
+        const result = parsed.value.result orelse return error.InvalidRPCResponse;
+        if (!result.success) {
             return error.TransactionFailed;
         }
 
-        return try self.allocator.dupe(u8, parsed.value.result.tx_hash orelse "");
+        const tx_hash = result.tx_hash orelse return error.InvalidRPCResponse;
+        return try self.allocator.dupe(u8, tx_hash);
     }
 
     /// Low-level RPC call

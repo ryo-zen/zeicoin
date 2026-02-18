@@ -1,15 +1,16 @@
 const std = @import("std");
 const zeicoin = @import("zeicoin");
-const wallet_mod = zeicoin.wallet;
 const types = zeicoin.types;
 const bech32 = zeicoin.bech32;
 const util = zeicoin.util;
 const postgres = util.postgres;
 const RPCClient = @import("rpc_client.zig").RPCClient;
+const faucet = @import("faucet.zig");
 const net = std.Io.net;
 
 var rpc: RPCClient = undefined;
 var db_pool: *DBPool = undefined;
+var faucet_service: faucet.FaucetService = undefined;
 
 const log = std.log.scoped(.api);
 
@@ -223,6 +224,11 @@ const HttpServer = struct {
         // POST /api/transaction
         if (std.mem.eql(u8, path, "/api/transaction") and std.mem.eql(u8, method, "POST")) {
             return try handleTransaction(self.allocator, body);
+        }
+
+        // POST /faucet
+        if (std.mem.eql(u8, path, "/faucet") and std.mem.eql(u8, method, "POST")) {
+            return try faucet_service.handleRequest(self.allocator, db_pool, body);
         }
 
         return try self.allocator.dupe(u8, "{\"error\":\"not found\"}");
@@ -454,6 +460,10 @@ pub fn main(init: std.process.Init) !void {
     defer db_pool.deinit();
 
     std.log.info("✅ Connected to PostgreSQL ({s})", .{db_name});
+
+    faucet_service = faucet.FaucetService.init(allocator, init.io, &rpc);
+    defer faucet_service.deinit();
+    faucet_service.loadFromEnv();
 
     // Start HTTP server
     var server = HttpServer.init(allocator, init.io, 8080);
