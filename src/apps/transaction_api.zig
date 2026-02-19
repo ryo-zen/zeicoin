@@ -335,11 +335,14 @@ fn handleTransactionHistory(allocator: std.mem.Allocator, address: []const u8, q
     const offset_str = try std.fmt.allocPrint(allocator, "{d}", .{offset});
     defer allocator.free(offset_str);
 
-    const sql = 
-        \\SELECT hash, block_height, sender, recipient, amount, fee, nonce, timestamp_ms
-        \\FROM transactions
-        \\WHERE sender = $1 OR recipient = $1
-        \\ORDER BY block_height DESC, position DESC
+    const sql =
+        \\SELECT t.hash, t.block_height, t.sender, t.recipient,
+        \\       t.amount, t.fee, t.nonce, t.timestamp_ms,
+        \\       m.message, m.category
+        \\FROM transactions t
+        \\LEFT JOIN l2_messages m ON m.tx_hash = t.hash
+        \\WHERE t.sender = $1 OR t.recipient = $1
+        \\ORDER BY t.block_height DESC, t.position DESC
         \\LIMIT $2 OFFSET $3
     ;
 
@@ -380,11 +383,25 @@ fn handleTransactionHistory(allocator: std.mem.Allocator, address: []const u8, q
         const fee = result.getValue(i, 5) orelse "0";
         const nonce = result.getValue(i, 6) orelse "0";
         const timestamp_ms = result.getValue(i, 7) orelse "0";
+        const message = result.getValue(i, 8);
+        const category = result.getValue(i, 9);
+
+        const message_json = if (message) |m|
+            try std.fmt.allocPrint(allocator, "\"{s}\"", .{m})
+        else
+            try allocator.dupe(u8, "null");
+        defer allocator.free(message_json);
+
+        const category_json = if (category) |c|
+            try std.fmt.allocPrint(allocator, "\"{s}\"", .{c})
+        else
+            try allocator.dupe(u8, "null");
+        defer allocator.free(category_json);
 
         const tx_json = try std.fmt.allocPrint(
             allocator,
-            "{{\"hash\":\"{s}\",\"block_height\":{s},\"sender\":\"{s}\",\"recipient\":\"{s}\",\"amount\":{s},\"fee\":{s},\"nonce\":{s},\"timestamp\":{s}}}",
-            .{ hash, block_height, sender, recipient, amount, fee, nonce, timestamp_ms },
+            "{{\"hash\":\"{s}\",\"block_height\":{s},\"sender\":\"{s}\",\"recipient\":\"{s}\",\"amount\":{s},\"fee\":{s},\"nonce\":{s},\"timestamp\":{s},\"message\":{s},\"category\":{s}}}",
+            .{ hash, block_height, sender, recipient, amount, fee, nonce, timestamp_ms, message_json, category_json },
         );
         defer allocator.free(tx_json);
         try response.appendSlice(tx_json);
