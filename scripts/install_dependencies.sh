@@ -81,48 +81,6 @@ case $OS in
         ;;
 esac
 
-# Install Zig
-echo "⚡ Installing Zig programming language..."
-ZIG_VERSION="0.14.1"
-ZIG_TARBALL="zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
-ZIG_DIR="zig-x86_64-linux-${ZIG_VERSION}"
-INSTALL_PATH="/opt/zig-${ZIG_VERSION}"
-SYMLINK="/usr/local/bin/zig"
-
-# Check if Zig is already installed
-if command -v zig &> /dev/null; then
-    CURRENT_VERSION=$(zig version)
-    if [ "$CURRENT_VERSION" = "$ZIG_VERSION" ]; then
-        echo "✅ Zig $ZIG_VERSION already installed"
-    else
-        echo "⚠️  Zig $CURRENT_VERSION found, upgrading to $ZIG_VERSION..."
-        sudo rm -f "$SYMLINK"
-    fi
-else
-    echo "📥 Downloading Zig $ZIG_VERSION..."
-fi
-
-if [ ! -f "$SYMLINK" ] || [ "$(zig version 2>/dev/null)" != "$ZIG_VERSION" ]; then
-    # Download and install Zig
-    cd /tmp
-    wget -q "https://ziglang.org/download/${ZIG_VERSION}/${ZIG_TARBALL}"
-    
-    echo "📦 Extracting Zig..."
-    tar -xf "${ZIG_TARBALL}"
-    
-    echo "🏗️  Installing Zig to $INSTALL_PATH..."
-    sudo rm -rf "${INSTALL_PATH}" 2>/dev/null || true
-    sudo mv "${ZIG_DIR}" "${INSTALL_PATH}"
-    
-    echo "🔗 Creating symlink..."
-    sudo ln -sf "${INSTALL_PATH}/zig" "${SYMLINK}"
-    
-    echo "🧹 Cleaning up..."
-    rm "${ZIG_TARBALL}"
-    
-    cd - > /dev/null
-fi
-
 # Install RocksDB
 echo "🗄️  Installing RocksDB database..."
 case $OS in
@@ -214,17 +172,11 @@ for cmd in gcc make cmake git curl wget; do
     fi
 done
 
-# Check Zig specifically
+# Check Zig
 if command -v zig &> /dev/null; then
-    ZIG_INSTALLED_VERSION=$(zig version)
-    echo "✅ Zig: $ZIG_INSTALLED_VERSION at $(command -v zig)"
-    if [ "$ZIG_INSTALLED_VERSION" = "$ZIG_VERSION" ]; then
-        echo "   ✅ Correct version installed"
-    else
-        echo "   ⚠️  Version mismatch (expected $ZIG_VERSION)"
-    fi
+    echo "✅ Zig: $(zig version) at $(command -v zig)"
 else
-    echo "❌ Zig: Not found or not in PATH"
+    echo "⚠️  Zig: Not installed — run ./scripts/update_zig_nightly.sh"
 fi
 
 echo ""
@@ -232,13 +184,13 @@ echo "🎉 Dependency installation complete!"
 echo ""
 echo "📋 Summary:"
 echo "  ✅ Core development tools (gcc, make, cmake, git)"
-echo "  ✅ Zig programming language v$ZIG_VERSION"
+echo "  ⚠️  Zig: install separately via ./scripts/update_zig_nightly.sh"
 echo "  ✅ Additional server utilities"
 echo "  ✅ Firewall configuration (if available)"
 echo ""
 echo "🚀 Next steps:"
-echo "  1. Run: cd ~/zeicoin && ./scripts/setup.sh"
-echo "  2. Start server: ./scripts/start_zei_server.sh"
+echo "  1. Install Zig: ./scripts/update_zig_nightly.sh  (transfers correct version from local machine)"
+echo "  2. Build: cd ~/zeicoin && zig build -Doptimize=ReleaseFast"
 echo ""
 echo "🔧 Troubleshooting:"
 echo "  - If Zig not in PATH: source ~/.bashrc or logout/login"
