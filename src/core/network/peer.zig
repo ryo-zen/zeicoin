@@ -287,11 +287,15 @@ pub const NetworkManager = struct {
             _ = self.active_connections.fetchAdd(1, .acq_rel);
             errdefer _ = self.active_connections.fetchSub(1, .acq_rel);
 
+            // Add ref for the connection thread (released in conn.deinit via handleIncomingConnection)
+            peer.addRef();
+
             // Handle in thread
             const thread = std.Thread.spawn(.{}, handleIncomingConnection, .{
                 self, peer, connection
             }) catch |err| {
                 std.log.err("Failed to spawn incoming connection thread: {}", .{err});
+                peer.release(); // Undo the addRef since thread never started
                 connection.close(io);
                 self.peer_manager.removePeer(peer.id);
                 continue;
@@ -328,9 +332,12 @@ pub const NetworkManager = struct {
             }
         };
         
-        // Only remove peer if still running
+        // Release the thread's reference to the peer.
+        // removePeer calls peer.release() internally; if shutting down, release directly.
         if (self.isRunning()) {
             self.peer_manager.removePeer(peer.id);
+        } else {
+            peer.release();
         }
     }
     

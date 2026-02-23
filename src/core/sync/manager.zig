@@ -1219,10 +1219,11 @@ pub const SyncManager = struct {
 
             // For height 1, validate against genesis block (height 0)
             if (height == 1) {
-                const genesis_block = blockchain.database.getBlock(io, 0) catch {
+                var genesis_block = blockchain.database.getBlock(io, 0) catch {
                     log.info("❌ [SYNC VALIDATION] Failed to get genesis block", .{});
                     return false;
                 };
+                defer genesis_block.deinit(blockchain.allocator);
 
                 const genesis_hash = genesis_block.hash();
                 if (!std.mem.eql(u8, &block.header.previous_hash, &genesis_hash)) {
@@ -1237,10 +1238,11 @@ pub const SyncManager = struct {
             // For height > 1, validate against previous block
             if (height > 1) {
                 const prev_height = height - 1;
-                const prev_block = blockchain.database.getBlock(io, prev_height) catch {
+                var prev_block = blockchain.database.getBlock(io, prev_height) catch {
                     log.info("❌ [SYNC VALIDATION] Failed to get block at height {}", .{prev_height});
                     return false;
                 };
+                defer prev_block.deinit(blockchain.allocator);
 
                 const prev_hash = prev_block.hash();
                 if (!std.mem.eql(u8, &block.header.previous_hash, &prev_hash)) {

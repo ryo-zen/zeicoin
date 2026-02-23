@@ -81,6 +81,39 @@ case $OS in
         ;;
 esac
 
+# Install PostgreSQL client library (required for zeicoin_error_monitor)
+echo "🐘 Installing PostgreSQL client library..."
+case $OS in
+    ubuntu|debian)
+        sudo apt install -y libpq-dev
+        ;;
+    centos|rhel)
+        if command -v dnf &> /dev/null; then
+            sudo dnf install -y libpq-devel
+        else
+            sudo yum install -y postgresql-devel
+        fi
+        ;;
+    fedora)
+        sudo dnf install -y libpq-devel
+        ;;
+    arch)
+        sudo pacman -S --noconfirm postgresql-libs
+        ;;
+    *)
+        echo "⚠️  Please install PostgreSQL client library manually for your OS"
+        echo "   Ubuntu/Debian: sudo apt install libpq-dev"
+        echo "   Fedora/CentOS: sudo dnf install libpq-devel"
+        echo "   Arch Linux: sudo pacman -S postgresql-libs"
+        ;;
+esac
+
+if pkg-config --exists libpq 2>/dev/null || [ -f "/usr/lib/x86_64-linux-gnu/libpq.so" ] || [ -f "/usr/lib/libpq.so" ]; then
+    echo "✅ PostgreSQL client library installed successfully!"
+else
+    echo "⚠️  PostgreSQL client library verification failed, but continuing..."
+fi
+
 # Install RocksDB
 echo "🗄️  Installing RocksDB database..."
 case $OS in
@@ -185,6 +218,7 @@ echo ""
 echo "📋 Summary:"
 echo "  ✅ Core development tools (gcc, make, cmake, git)"
 echo "  ⚠️  Zig: install separately via ./scripts/update_zig_nightly.sh"
+echo "  ✅ PostgreSQL client library (libpq)"
 echo "  ✅ Additional server utilities"
 echo "  ✅ Firewall configuration (if available)"
 echo ""

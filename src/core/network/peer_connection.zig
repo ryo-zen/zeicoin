@@ -54,6 +54,13 @@ pub const PeerConnection = struct {
             self.stream.close(io);
         }
 
+        // Free user_agent allocated by this connection's allocator.
+        // Must be done here (not in Peer.deinit) to match the allocator used in handleHandshake.
+        if (self.peer.user_agent.len > 0) {
+            self.allocator.free(self.peer.user_agent);
+            self.peer.user_agent = &[_]u8{};
+        }
+
         // Release peer reference
         self.peer.release();
     }
