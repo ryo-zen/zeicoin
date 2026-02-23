@@ -619,9 +619,12 @@ pub const PeerManager = struct {
         defer self.mutex.unlock();
 
         for (self.peers.items) |peer| {
-            // Signal shutdown to prevent hanging threads (Fixes memory leak)
-            peer.is_shutting_down.store(true, .release);
-            peer.release();
+            // stop() already waited up to 5s for connection threads to finish.
+            // Force full cleanup regardless of remaining reference count so all
+            // peer resources (received_blocks, wire buffers, etc.) are freed.
+            const alloc = peer.allocator;
+            peer.deinit();
+            alloc.destroy(peer);
         }
         self.peers.deinit();
         self.known_addresses.deinit();
@@ -638,6 +641,9 @@ pub const PeerManager = struct {
             peer.state = .disconnected;
             peer.is_shutting_down.store(true, .release);
             if (peer.stream) |s| {
+                // shutdown() interrupts any blocked netRead in the connection thread.
+                // close() alone does not reliably unblock a recv() on Linux.
+                s.shutdown(self.io, .recv) catch {};
                 s.close(self.io);
                 peer.stream = null;
             }

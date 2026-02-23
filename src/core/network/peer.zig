@@ -239,13 +239,12 @@ pub const NetworkManager = struct {
         };
         
         // conn.deinit() (deferred) released PeerConnection's ref.
-        // The thread's ref (added in connectToPeer before spawn) must be released here.
-        // removePeer releases the PeerManager's ref when running normally.
+        // removePeer releases PeerManager's reference when running.
         if (self.isRunning()) {
             self.peer_manager.removePeer(peer.id);
-        } else {
-            peer.release(); // release thread's ref; PeerManager.deinit() releases PM's ref
         }
+        // Always release thread's reference.
+        peer.release();
     }
     
     /// Accept incoming connections
@@ -311,6 +310,8 @@ pub const NetworkManager = struct {
         // Check if shutting down
         if (!self.isRunning()) {
             stream.close(io);
+            // Release thread's reference; PeerManager retains ownership until manager shutdown.
+            peer.release();
             return;
         }
 
@@ -333,13 +334,12 @@ pub const NetworkManager = struct {
             }
         };
         
-        // Release the thread's reference to the peer.
-        // removePeer calls peer.release() internally; if shutting down, release directly.
+        // removePeer releases PeerManager's reference when running.
         if (self.isRunning()) {
             self.peer_manager.removePeer(peer.id);
-        } else {
-            peer.release();
         }
+        // Always release thread's reference.
+        peer.release();
     }
     
     /// Start network (convenience method that calls listen)

@@ -965,14 +965,6 @@ pub const BatchSyncProtocol = struct {
         log.debug("🔍 [BLOCK RETRIEVAL] Checking peer cache for pending blocks", .{});
 
         var blocks_retrieved: u32 = 0;
-        var batch_blocks = std.array_list.Managed(Block).init(self.allocator);
-        defer {
-            // Clean up any blocks we couldn't process
-            for (batch_blocks.items) |*block| {
-                block.deinit(self.allocator);
-            }
-            batch_blocks.deinit();
-        }
 
         // Check each active batch for available blocks
         var iter = self.batch_tracker.active_batches.iterator();
@@ -983,8 +975,16 @@ pub const BatchSyncProtocol = struct {
 
             log.debug("🔍 [BLOCK RETRIEVAL] Checking batch starting at height {}", .{start_height});
 
+            // Own blocks retrieved from peer cache for this batch; always free after use.
+            var batch_blocks = std.array_list.Managed(Block).init(self.allocator);
+            defer {
+                for (batch_blocks.items) |*block| {
+                    block.deinit(self.allocator);
+                }
+                batch_blocks.deinit();
+            }
+
             // Try to retrieve all blocks in this batch
-            batch_blocks.clearRetainingCapacity();
             var all_blocks_available = true;
 
             for (0..batch_size) |i| {
@@ -1007,12 +1007,9 @@ pub const BatchSyncProtocol = struct {
                     start_height,
                 });
 
-                // Pass the blocks to handleBatchBlocks for processing
+                // Pass blocks to batch processing.
                 try self.handleBatchBlocks(batch_blocks.items, start_height);
                 blocks_retrieved += batch_size;
-
-                // Don't clean up blocks in defer - they're now owned by handleBatchBlocks
-                batch_blocks.clearRetainingCapacity();
             }
         }
 
