@@ -80,21 +80,12 @@ pub const NetworkManager = struct {
     }
     
     pub fn deinit(self: *Self) void {
-        // Fast shutdown: just clean up resources without complex thread synchronization
-        // Set flags atomically
-        @atomicStore(bool, &self.stopped, true, .release);
-        @atomicStore(bool, &self.running, false, .release);
-        
-        // Clean up server immediately
-        if (self.server) |*server| {
-            const io = self.io;
-            server.deinit(io);
-            self.server = null;
-        }
-        
-        // Clean up peer manager
+        // stop() is idempotent - closes connections and waits for all threads to finish
+        self.stop();
+
+        // Now safe to release PM's peer refs; all connection threads have exited
         self.peer_manager.deinit();
-        
+
         // Clean up bootstrap nodes if we own them
         if (self.owns_bootstrap_nodes and self.bootstrap_nodes.len > 0) {
             for (self.bootstrap_nodes) |node| {
@@ -102,8 +93,6 @@ pub const NetworkManager = struct {
             }
             self.allocator.free(self.bootstrap_nodes);
         }
-        
-        // Process will exit soon anyway, so threads will be cleaned up by OS
     }
     
     /// Start listening for connections
@@ -141,15 +130,19 @@ pub const NetworkManager = struct {
         std.log.info("Attempting to connect to peer at {}", .{address});
         const peer = try self.peer_manager.addPeer(address);
         std.log.info("Added peer {} to peer manager", .{peer.id});
-        
+
+        // Add ref for the connection thread (released in runPeerConnection)
+        peer.addRef();
+
         // Increment active connections counter
         _ = self.active_connections.fetchAdd(1, .acq_rel);
         errdefer _ = self.active_connections.fetchSub(1, .acq_rel);
-        
+
         // Spawn connection thread
         const thread = std.Thread.spawn(.{}, runPeerConnection, .{
             self, peer
         }) catch |err| {
+            peer.release(); // Undo addRef since thread never started
             self.peer_manager.removePeer(peer.id);
             return err;
         };
@@ -170,6 +163,7 @@ pub const NetworkManager = struct {
         std.log.info("Checking if network is running: {}", .{self.isRunning()});
         if (!self.isRunning()) {
             std.log.warn("Peer connection aborted - network shutting down (self.running=false)", .{});
+            peer.release(); // Release thread's ref; PeerManager.deinit() handles the other
             return;
         }
         
@@ -180,9 +174,10 @@ pub const NetworkManager = struct {
             // Check running state before ANY access to self
             if (!self.isRunning()) {
                 std.log.debug("Connection failed during shutdown, skipping cleanup", .{});
+                peer.release(); // Release thread's ref; PeerManager.deinit() handles the other
                 return;
             }
-            
+
             // Only log and remove if still running
             // ConnectionRefused is expected for bootstrap nodes that are down - not a critical error
             if (err == error.ConnectionRefused) {
@@ -190,7 +185,8 @@ pub const NetworkManager = struct {
             } else {
                 std.log.warn("TCP connection failed to {}: {} - continuing operation", .{ peer.address, err });
             }
-            self.peer_manager.removePeer(peer.id);
+            self.peer_manager.removePeer(peer.id); // Releases PeerManager's ref
+            peer.release(); // Release thread's ref → ref hits 0 → peer destroyed
             return;
         };
         std.log.info("TCP connection established successfully to peer {} at {}", .{ peer.id, peer.address });
@@ -200,51 +196,56 @@ pub const NetworkManager = struct {
         // Check again before initializing connection
         if (!self.isRunning()) {
             stream.close(io_conn);
+            peer.release(); // Release thread's ref; PeerManager.deinit() handles the other
             return;
         }
 
         // Register stream on peer so PeerManager can close it on timeout to wake the blocked reader
         peer.stream = stream;
 
-        var conn = PeerConnection.init(self.allocator, peer, stream, self.message_handler);
-        defer conn.deinit(io_conn);
-        
-        // Run connection loop
-        conn.run(io_conn) catch |err| {
-            // Check running state before logging
-            if (!self.isRunning()) {
-                std.log.debug("Peer error during shutdown, skipping log", .{});
-                return;
-            }
-            
-            // Call disconnect handler if available
-            if (self.message_handler.onPeerDisconnected) |onDisconnect| {
-                onDisconnect(peer, err) catch |handler_err| {
-                    std.log.debug("Disconnect handler error: {}", .{handler_err});
-                };
-            }
-            
-            // Format friendly error message
-            const error_msg = switch (err) {
-                error.ConnectionResetByPeer => "connection reset by peer",
-                error.ConnectionRefused => "connection refused",
-                error.ConnectionTimedOut => "connection timed out",
-                error.NetworkUnreachable => "network unreachable",
-                error.HostUnreachable => "host unreachable",
-                error.BrokenPipe => "connection broken",
-                error.EndOfStream => "connection closed",
-                else => @errorName(err),
-            };
-            std.log.err("🔌 [NETWORK] Peer {} at {any} disconnected ({s})", .{ peer.id, peer.address, error_msg });
-        };
-        
-        // Final check before peer removal
+        // Re-check after registering stream: stop() may have run in the window before stream was set
         if (!self.isRunning()) {
-            std.log.debug("Skipping peer removal during shutdown", .{});
+            stream.close(io_conn);
+            peer.stream = null;
+            peer.release();
             return;
         }
+
+        var conn = PeerConnection.init(self.allocator, peer, stream, self.message_handler);
+        defer conn.deinit(io_conn);
+
+        // Run connection loop
+        conn.run(io_conn) catch |err| {
+            // Only log if still running — skip noisy errors during shutdown
+            if (self.isRunning()) {
+                if (self.message_handler.onPeerDisconnected) |onDisconnect| {
+                    onDisconnect(peer, err) catch |handler_err| {
+                        std.log.debug("Disconnect handler error: {}", .{handler_err});
+                    };
+                }
+                const error_msg = switch (err) {
+                    error.ConnectionResetByPeer => "connection reset by peer",
+                    error.ConnectionRefused => "connection refused",
+                    error.ConnectionTimedOut => "connection timed out",
+                    error.NetworkUnreachable => "network unreachable",
+                    error.HostUnreachable => "host unreachable",
+                    error.BrokenPipe => "connection broken",
+                    error.EndOfStream => "connection closed",
+                    else => @errorName(err),
+                };
+                std.log.err("🔌 [NETWORK] Peer {} at {any} disconnected ({s})", .{ peer.id, peer.address, error_msg });
+            }
+            // No early return — fall through to the ref release below
+        };
         
-        self.peer_manager.removePeer(peer.id);
+        // conn.deinit() (deferred) released PeerConnection's ref.
+        // The thread's ref (added in connectToPeer before spawn) must be released here.
+        // removePeer releases the PeerManager's ref when running normally.
+        if (self.isRunning()) {
+            self.peer_manager.removePeer(peer.id);
+        } else {
+            peer.release(); // release thread's ref; PeerManager.deinit() releases PM's ref
+        }
     }
     
     /// Accept incoming connections
