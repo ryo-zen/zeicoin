@@ -14,9 +14,11 @@ const RPCServer = @import("../rpc/server.zig").RPCServer;
 
 // Signal handling for graceful shutdown
 var running = std.atomic.Value(bool).init(true);
+var interrupted = std.atomic.Value(bool).init(false);
 
 fn signalHandler(sig: std.posix.SIG) callconv(.c) void {
     _ = sig;
+    interrupted.store(true, .release);
     running.store(false, .release);
     // Signal received - main loop will exit and trigger defer cleanup
 }
@@ -25,10 +27,17 @@ pub fn main(init: std.process.Init) !void {
     // Print banner
     printBanner();
 
-    // Setup allocator
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    // Setup allocator: GPA in debug builds for leak detection, page_allocator in release.
+    // On Ctrl-C (interrupted), skip GPA leak check to avoid false-positives from
+    // threads that didn't exit before the shutdown timeout.
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
+    defer if (comptime @import("builtin").mode == .Debug) {
+        if (!interrupted.load(.acquire)) _ = gpa.deinit();
+    };
+    const allocator = if (comptime @import("builtin").mode == .Debug)
+        gpa.allocator()
+    else
+        std.heap.page_allocator;
 
     // Get args
     const args = try std.process.Args.toSlice(init.minimal.args, allocator);

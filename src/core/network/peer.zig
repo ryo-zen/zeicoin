@@ -83,8 +83,13 @@ pub const NetworkManager = struct {
         // stop() is idempotent - closes connections and waits for all threads to finish
         self.stop();
 
-        // Now safe to release PM's peer refs; all connection threads have exited
-        self.peer_manager.deinit();
+        // Only clean up peers if all threads exited cleanly. If the shutdown timed
+        // out and threads are still alive, skip peer_manager.deinit() to avoid
+        // destroying peer resources that live threads are still using. The OS will
+        // reclaim memory on process exit.
+        if (self.active_connections.load(.acquire) == 0) {
+            self.peer_manager.deinit();
+        }
 
         // Clean up bootstrap nodes if we own them
         if (self.owns_bootstrap_nodes and self.bootstrap_nodes.len > 0) {
