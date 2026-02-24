@@ -254,19 +254,19 @@ pub const ChainProcessor = struct {
         // PHASE 1: Pre-validate ALL transactions (read-only checks)
         log.info("🔍 [PHASE 1] Validating {} transactions before applying", .{transactions.len});
 
-        for (transactions, 0..) |tx, i| {
-            // Bounds check
-            if (i >= transactions.len) {
-                return error.TransactionIndexOutOfBounds;
-            }
+        // Track nonce increments within this block per sender so that multiple
+        // transactions from the same sender in one block validate correctly.
+        var pending_nonces = std.AutoHashMap(types.Address, u64).init(self.chain_state.allocator);
+        defer pending_nonces.deinit();
 
+        for (transactions, 0..) |tx, i| {
             // Structure validation
             if (!tx.isValid()) {
                 log.info("❌ [PHASE 1] Invalid transaction {} at height {}", .{i, height});
                 return error.InvalidTransaction;
             }
 
-            // For regular transactions, validate signature, balance, nonce
+            // For regular transactions, validate balance and nonce
             if (!tx.isCoinbase()) {
                 const sender = try self.chain_state.getAccount(io, tx.sender);
                 const total_cost = try std.math.add(u64, tx.amount, tx.fee);
@@ -276,10 +276,13 @@ pub const ChainProcessor = struct {
                     return error.InsufficientBalance;
                 }
 
-                if (tx.nonce != sender.nonce) {
+                // Use pending nonce if this sender already appeared earlier in the block
+                const expected_nonce = pending_nonces.get(tx.sender) orelse sender.nonce;
+                if (tx.nonce < expected_nonce) {
                     log.info("❌ [PHASE 1] Invalid nonce for tx {}", .{i});
                     return error.InvalidNonce;
                 }
+                try pending_nonces.put(tx.sender, tx.nonce + 1);
             }
         }
 

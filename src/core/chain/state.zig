@@ -241,8 +241,10 @@ pub const ChainState = struct {
 
         sender_account.balance -= total_cost;
 
-        // Check for nonce overflow
-        sender_account.nonce = std.math.add(u64, sender_account.nonce, 1) catch {
+        // Advance nonce to tx.nonce + 1 to stay consistent with the actual nonce used.
+        // Transactions may have future nonces (>= expected), so we set nonce = tx.nonce + 1
+        // rather than blindly incrementing, ensuring the next expected nonce is correct.
+        sender_account.nonce = std.math.add(u64, tx.nonce, 1) catch {
             return error.NonceOverflow;
         };
 

@@ -163,7 +163,8 @@ pub const NetworkManager = struct {
         std.log.info("Checking if network is running: {}", .{self.isRunning()});
         if (!self.isRunning()) {
             std.log.warn("Peer connection aborted - network shutting down (self.running=false)", .{});
-            peer.release(); // Release thread's ref; PeerManager.deinit() handles the other
+            self.peer_manager.removePeer(peer.id);
+            peer.release();
             return;
         }
         
@@ -174,7 +175,8 @@ pub const NetworkManager = struct {
             // Check running state before ANY access to self
             if (!self.isRunning()) {
                 std.log.debug("Connection failed during shutdown, skipping cleanup", .{});
-                peer.release(); // Release thread's ref; PeerManager.deinit() handles the other
+                self.peer_manager.removePeer(peer.id);
+                peer.release();
                 return;
             }
 
@@ -196,7 +198,8 @@ pub const NetworkManager = struct {
         // Check again before initializing connection
         if (!self.isRunning()) {
             stream.close(io_conn);
-            peer.release(); // Release thread's ref; PeerManager.deinit() handles the other
+            self.peer_manager.removePeer(peer.id);
+            peer.release();
             return;
         }
 
@@ -207,6 +210,7 @@ pub const NetworkManager = struct {
         if (!self.isRunning()) {
             stream.close(io_conn);
             peer.stream = null;
+            self.peer_manager.removePeer(peer.id);
             peer.release();
             return;
         }
@@ -250,7 +254,11 @@ pub const NetworkManager = struct {
     /// Accept incoming connections
     pub fn acceptConnections(self: *Self) !void {
         if (self.server == null) return error.NotListening;
-        
+
+        // Include accept loop in shutdown thread accounting.
+        _ = self.active_connections.fetchAdd(1, .acq_rel);
+        defer _ = self.active_connections.fetchSub(1, .acq_rel);
+
         self.setRunning(true);
         while (self.isRunning()) {
             const io = self.io;
@@ -267,7 +275,13 @@ pub const NetworkManager = struct {
                     continue;
                 },
             };
-            
+
+            // Shutdown may have begun while accept() was blocked.
+            if (!self.isRunning()) {
+                connection.close(io);
+                return;
+            }
+
             // Check connection limit for incoming connections too
             const current_connections = self.active_connections.load(.acquire);
             if (current_connections >= MAX_ACTIVE_CONNECTIONS) {
@@ -282,6 +296,13 @@ pub const NetworkManager = struct {
                 connection.close(io);
                 continue;
             };
+
+            // If shutdown started after addPeer, immediately unwind ownership.
+            if (!self.isRunning()) {
+                connection.close(io);
+                self.peer_manager.removePeer(peer.id);
+                continue;
+            }
 
             // Increment active connections counter for incoming connections
             _ = self.active_connections.fetchAdd(1, .acq_rel);
@@ -310,7 +331,7 @@ pub const NetworkManager = struct {
         // Check if shutting down
         if (!self.isRunning()) {
             stream.close(io);
-            // Release thread's reference; PeerManager retains ownership until manager shutdown.
+            self.peer_manager.removePeer(peer.id);
             peer.release();
             return;
         }

@@ -359,6 +359,7 @@ pub const BlockProcessor = struct {
             // Find the best peer to sync with
             if (self.blockchain.network_coordinator.getNetworkManager()) |network| {
                 if (network.peer_manager.getBestPeerForSync()) |best_peer| {
+                    defer best_peer.release();
                     // Use libp2p-powered batch sync for improved performance
                     try sync_manager.startSync(best_peer, best_peer.height, false);
                     log.info("libp2p batch auto-sync triggered due to orphan block with peer height {}", .{best_peer.height});

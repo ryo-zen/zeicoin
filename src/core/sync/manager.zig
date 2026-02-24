@@ -815,8 +815,7 @@ pub const SyncManager = struct {
             return;
         };
 
-        // Increment reference count for the duration of startSync (which might block)
-        new_peer.addRef();
+        // getNextAvailablePeer() already returns an addRef'd peer.
         defer new_peer.release();
 
         // Only sync if target is higher than current

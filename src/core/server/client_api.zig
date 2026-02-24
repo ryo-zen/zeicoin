@@ -325,7 +325,7 @@ pub const ClientApiServer = struct {
             return;
         };
         
-        const block = self.blockchain.getBlockByHeight(height) catch |err| switch (err) {
+        var block = self.blockchain.getBlockByHeight(height) catch |err| switch (err) {
             error.NotFound => {
                 try sendResponse(io, connection, "ERROR: Block not found\n");
                 return;
@@ -337,6 +337,7 @@ pub const ClientApiServer = struct {
                 return;
             },
         };
+        defer block.deinit(self.blockchain.allocator);
         
         const block_hash = block.hash();
         var hash_hex: [64]u8 = undefined;
