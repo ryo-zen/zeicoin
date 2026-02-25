@@ -2,7 +2,7 @@ name: Test
 
 on:
   push:
-    branches: [ main, feature/* ]
+    branches: [ main, feature/*, refactor/* ]
   pull_request:
     branches: [ main ]
 
@@ -27,12 +27,13 @@ jobs:
           pkg-config \
           librocksdb-dev \
           libc6-dev \
-          ca-certificates
+          ca-certificates \
+          libpq-dev
 
     - name: Setup Zig
-      uses: goto-bus-stop/setup-zig@v2
+      uses: mlugg/setup-zig@v2
       with:
-        version: 0.14.1
+        version: 0.16.0-dev.2193+fc517bd01
 
     - name: Verify Zig installation
       run: |
