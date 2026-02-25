@@ -41,7 +41,7 @@ pub const Indexer = struct {
         if (self.database == null) {
             self.database = db.Database.initSecondary(self.allocator, self.io, self.blockchain_path, self.secondary_path) catch |err| blk: {
                 if (err != db.DatabaseError.OpenFailed) return err;
-                std.log.info("⚠️ Falling back to primary DB", .{});
+                std.log.info("⚠️ Falling back to primary RocksDB", .{});
                 break :blk try db.Database.init(self.allocator, self.io, self.blockchain_path);
             };
         }
@@ -140,13 +140,13 @@ pub fn main(init: std.process.Init) !void {
         try exec(&conn, "INSERT INTO indexer_state (key, value, updated_at) VALUES ('last_indexed_height', $1, CURRENT_TIMESTAMP) ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = CURRENT_TIMESTAMP", &.{try fmtz(tx_arena, "{}", .{h})});
         var c_res = try conn.query("COMMIT");
         c_res.deinit();
-        std.log.info("✅ Indexed block {}", .{h});
+        std.log.info("✅ Block {} indexed to PostgreSQL", .{h});
     }
     try showStats(&conn);
 }
 
 fn showStats(conn: *postgres.Connection) !void {
-    const q = .{ .{"Total Blocks", "SELECT COUNT(*) FROM blocks"}, .{"Total Transactions", "SELECT COUNT(*) FROM transactions"}, .{"Active Accounts", "SELECT COUNT(*) FROM accounts WHERE balance > 0"} };
+    const q = .{ .{"Total Blocks Mined", "SELECT COUNT(*) FROM blocks"}, .{"Total Transactions", "SELECT COUNT(*) FROM transactions"}, .{"Active Accounts", "SELECT COUNT(*) FROM accounts WHERE balance > 0"} };
     std.log.info("\n📊 Stats:", .{});
     inline for (q) |s| {
         var r = try conn.query(s[1]);
