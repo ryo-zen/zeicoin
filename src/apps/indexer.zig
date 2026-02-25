@@ -146,7 +146,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn showStats(conn: *postgres.Connection) !void {
-    const q = .{ .{"Total Blocks Mined", "SELECT COUNT(*) FROM blocks"}, .{"Total Transactions", "SELECT COUNT(*) FROM transactions"}, .{"Active Accounts", "SELECT COUNT(*) FROM accounts WHERE balance > 0"} };
+    const q = .{ .{"Total Blocks Mined", "SELECT COUNT(*) FROM blocks WHERE height > 0"}, .{"Total Transactions", "SELECT COUNT(*) FROM transactions"}, .{"Active Accounts", "SELECT COUNT(*) FROM accounts WHERE balance > 0"} };
     std.log.info("\n📊 Stats:", .{});
     inline for (q) |s| {
         var r = try conn.query(s[1]);
