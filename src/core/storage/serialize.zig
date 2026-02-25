@@ -20,7 +20,7 @@ pub const SerializeError = error{
     EndOfStream,
     InvalidData,
     UnsupportedType,
-} || std.mem.Allocator.Error;
+} || std.mem.Allocator.Error || std.Io.Writer.Error || std.Io.Reader.Error;
 
 /// Serialize any value to a writer
 pub fn serialize(writer: anytype, value: anytype) SerializeError!void {
@@ -112,7 +112,7 @@ pub fn serialize(writer: anytype, value: anytype) SerializeError!void {
         },
 
         // Optional types
-        .optional => |_| {
+        .optional => {
             if (value) |val| {
                 try serialize(writer, @as(u8, 1)); // Present
                 try serialize(writer, val);
@@ -164,7 +164,7 @@ pub fn deserialize(reader: anytype, comptime T: type, allocator: std.mem.Allocat
 
             if (array_info.child == u8) {
                 // Byte array
-                _ = try reader.readAll(&result);
+                try reader.readSliceAll(&result);
             } else {
                 // Generic array
                 for (&result) |*item| {
@@ -187,7 +187,7 @@ pub fn deserialize(reader: anytype, comptime T: type, allocator: std.mem.Allocat
                     if (ptr_info.child == u8) {
                         // String/byte slice
                         const data = try allocator.alloc(u8, len);
-                        _ = try reader.readAll(data);
+                        try reader.readSliceAll(data);
                         return data;
                     } else {
                         // Generic slice
@@ -220,7 +220,7 @@ pub fn deserialize(reader: anytype, comptime T: type, allocator: std.mem.Allocat
             if (struct_info.layout == .@"extern") {
                 var result: T = undefined;
                 const bytes = std.mem.asBytes(&result);
-                _ = try reader.readAll(bytes);
+                try reader.readSliceAll(bytes);
                 return result;
             } else {
                 // For regular structs, deserialize each field
@@ -254,7 +254,7 @@ fn serializeInt(writer: anytype, value: anytype) !void {
 
 fn deserializeInt(reader: anytype, comptime T: type) !T {
     var bytes: [@sizeOf(T)]u8 = undefined;
-    _ = try reader.readAll(&bytes);
+    try reader.readSliceAll(&bytes);
     return std.mem.bytesToValue(T, &bytes);
 }
 
@@ -263,7 +263,7 @@ fn serializeBool(writer: anytype, value: bool) !void {
 }
 
 fn deserializeBool(reader: anytype) !bool {
-    const byte = try reader.readByte();
+    const byte = try reader.takeByte();
     return byte != 0;
 }
 
@@ -274,7 +274,7 @@ fn serializeU256(writer: anytype, value: u256) !void {
 
 fn deserializeU256(reader: anytype) !u256 {
     var bytes: [32]u8 = undefined;
-    _ = try reader.readAll(&bytes);
+    try reader.readSliceAll(&bytes);
     return std.mem.bytesToValue(u256, &bytes);
 }
 
@@ -285,22 +285,22 @@ fn serializeFloat(writer: anytype, value: anytype) !void {
 
 fn deserializeFloat(reader: anytype, comptime T: type) !T {
     var bytes: [@sizeOf(T)]u8 = undefined;
-    _ = try reader.readAll(&bytes);
+    try reader.readSliceAll(&bytes);
     return std.mem.bytesToValue(T, &bytes);
 }
 
 // Convenience functions for common use cases
 pub fn serializeToBytes(allocator: std.mem.Allocator, value: anytype) ![]u8 {
-    var list = std.ArrayList(u8).init(allocator);
-    defer list.deinit();
+    var collecting = std.Io.Writer.Allocating.init(allocator);
+    defer collecting.deinit();
 
-    try serialize(list.writer(), value);
-    return list.toOwnedSlice();
+    try serialize(&collecting.writer, value);
+    return try collecting.toOwnedSlice();
 }
 
 pub fn deserializeFromBytes(data: []const u8, comptime T: type, allocator: std.mem.Allocator) !T {
-    var stream = std.io.fixedBufferStream(data);
-    return deserialize(stream.reader(), T, allocator);
+    var reader = std.Io.Reader.fixed(data);
+    return deserialize(&reader, T, allocator);
 }
 
 /// Serialize a BlockHeader to a writer
@@ -342,10 +342,10 @@ pub fn readBlock(reader: anytype, allocator: std.mem.Allocator) !types.Block {
     const header = try types.BlockHeader.deserialize(reader);
 
     // Deserialize height
-    const height = try reader.readInt(u32, .little);
+    const height = try reader.takeInt(u32, .little);
 
     // Deserialize transaction count
-    const tx_count = try reader.readInt(u32, .little);
+    const tx_count = try reader.takeInt(u32, .little);
 
     if (tx_count > 100000) {
         log.warn("Suspicious transaction count: {}", .{tx_count});
@@ -404,30 +404,30 @@ pub fn readTransaction(reader: anytype, allocator: std.mem.Allocator) !types.Tra
     // This errdefer will clean up any partially allocated data if an error occurs below
     errdefer tx.deinit(allocator);
 
-    tx.version = try reader.readInt(u16, .little);
-    tx.flags = @bitCast(try reader.readInt(u16, .little));
-    _ = try reader.readAll(std.mem.asBytes(&tx.sender));
-    _ = try reader.readAll(std.mem.asBytes(&tx.recipient));
-    tx.amount = try reader.readInt(u64, .little);
-    tx.fee = try reader.readInt(u64, .little);
-    tx.nonce = try reader.readInt(u64, .little);
-    tx.timestamp = try reader.readInt(u64, .little);
-    tx.expiry_height = try reader.readInt(u64, .little);
-    _ = try reader.readAll(&tx.sender_public_key);
-    _ = try reader.readAll(std.mem.asBytes(&tx.signature));
-    tx.script_version = try reader.readInt(u16, .little);
+    tx.version = try reader.takeInt(u16, .little);
+    tx.flags = @bitCast(try reader.takeInt(u16, .little));
+    try reader.readSliceAll(std.mem.asBytes(&tx.sender));
+    try reader.readSliceAll(std.mem.asBytes(&tx.recipient));
+    tx.amount = try reader.takeInt(u64, .little);
+    tx.fee = try reader.takeInt(u64, .little);
+    tx.nonce = try reader.takeInt(u64, .little);
+    tx.timestamp = try reader.takeInt(u64, .little);
+    tx.expiry_height = try reader.takeInt(u64, .little);
+    try reader.readSliceAll(&tx.sender_public_key);
+    try reader.readSliceAll(std.mem.asBytes(&tx.signature));
+    tx.script_version = try reader.takeInt(u16, .little);
 
-    const witness_len = try reader.readInt(u32, .little);
+    const witness_len = try reader.takeInt(u32, .little);
     if (witness_len > 0) {
         const witness_buf = try allocator.alloc(u8, witness_len);
-        _ = try reader.readAll(witness_buf);
+        try reader.readSliceAll(witness_buf);
         tx.witness_data = witness_buf;
     }
 
-    const extra_len = try reader.readInt(u32, .little);
+    const extra_len = try reader.takeInt(u32, .little);
     if (extra_len > 0) {
         const extra_buf = try allocator.alloc(u8, extra_len);
-        _ = try reader.readAll(extra_buf);
+        try reader.readSliceAll(extra_buf);
         tx.extra_data = extra_buf;
     }
 
@@ -436,40 +436,38 @@ pub fn readTransaction(reader: anytype, allocator: std.mem.Allocator) !types.Tra
 
 // Tests
 test "serialize basic types" {
-    var buffer = std.ArrayList(u8).init(testing.allocator);
-    defer buffer.deinit();
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
 
     // Test integers
-    try serialize(buffer.writer(), @as(u32, 42));
-    try serialize(buffer.writer(), @as(i64, -123));
+    try serialize(&aw.writer, @as(u32, 42));
+    try serialize(&aw.writer, @as(i64, -123));
 
     // Test boolean
-    try serialize(buffer.writer(), true);
-    try serialize(buffer.writer(), false);
+    try serialize(&aw.writer, true);
+    try serialize(&aw.writer, false);
 
     // Test float
-    try serialize(buffer.writer(), @as(f32, 3.14));
-
+    try serialize(&aw.writer, @as(f32, 3.14));
     // Verify we have data
-    try testing.expect(buffer.items.len > 0);
+    try testing.expect(aw.written().len > 0);
 }
 
 test "deserialize basic types" {
-    var buffer = std.ArrayList(u8).init(testing.allocator);
-    defer buffer.deinit();
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
 
     // Serialize test data
-    try serialize(buffer.writer(), @as(u32, 42));
-    try serialize(buffer.writer(), true);
-    try serialize(buffer.writer(), @as(f32, 3.14));
+    try serialize(&aw.writer, @as(u32, 42));
+    try serialize(&aw.writer, true);
+    try serialize(&aw.writer, @as(f32, 3.14));
 
     // Deserialize
-    var stream = std.io.fixedBufferStream(buffer.items);
-    const reader = stream.reader();
+    var reader = std.Io.Reader.fixed(aw.written());
 
-    const val1 = try deserialize(reader, u32, testing.allocator);
-    const val2 = try deserialize(reader, bool, testing.allocator);
-    const val3 = try deserialize(reader, f32, testing.allocator);
+    const val1 = try deserialize(&reader, u32, testing.allocator);
+    const val2 = try deserialize(&reader, bool, testing.allocator);
+    const val3 = try deserialize(&reader, f32, testing.allocator);
 
     try testing.expectEqual(@as(u32, 42), val1);
     try testing.expectEqual(true, val2);
@@ -477,15 +475,14 @@ test "deserialize basic types" {
 }
 
 test "serialize strings" {
-    var buffer = std.ArrayList(u8).init(testing.allocator);
-    defer buffer.deinit();
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
 
     const test_string = "Hello ZeiCoin!";
-    try serialize(buffer.writer(), test_string);
-
+    try serialize(&aw.writer, test_string);
     // Deserialize
-    var stream = std.io.fixedBufferStream(buffer.items);
-    const result = try deserialize(stream.reader(), []const u8, testing.allocator);
+    var reader = std.Io.Reader.fixed(aw.written());
+    const result = try deserialize(&reader, []const u8, testing.allocator);
     defer testing.allocator.free(result);
 
     try testing.expectEqualStrings(test_string, result);
@@ -498,8 +495,8 @@ test "serialize structs" {
         active: bool,
     };
 
-    var buffer = std.ArrayList(u8).init(testing.allocator);
-    defer buffer.deinit();
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
 
     const test_data = TestStruct{
         .id = 123,
@@ -507,11 +504,10 @@ test "serialize structs" {
         .active = true,
     };
 
-    try serialize(buffer.writer(), test_data);
-
+    try serialize(&aw.writer, test_data);
     // Deserialize
-    var stream = std.io.fixedBufferStream(buffer.items);
-    const result = try deserialize(stream.reader(), TestStruct, testing.allocator);
+    var reader = std.Io.Reader.fixed(aw.written());
+    const result = try deserialize(&reader, TestStruct, testing.allocator);
     defer testing.allocator.free(result.name);
 
     try testing.expectEqual(@as(u32, 123), result.id);
@@ -520,21 +516,19 @@ test "serialize structs" {
 }
 
 test "serialize optionals" {
-    var buffer = std.ArrayList(u8).init(testing.allocator);
-    defer buffer.deinit();
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
 
     const some_value: ?u32 = 42;
     const null_value: ?u32 = null;
 
-    try serialize(buffer.writer(), some_value);
-    try serialize(buffer.writer(), null_value);
-
+    try serialize(&aw.writer, some_value);
+    try serialize(&aw.writer, null_value);
     // Deserialize
-    var stream = std.io.fixedBufferStream(buffer.items);
-    const reader = stream.reader();
+    var reader = std.Io.Reader.fixed(aw.written());
 
-    const result1 = try deserialize(reader, ?u32, testing.allocator);
-    const result2 = try deserialize(reader, ?u32, testing.allocator);
+    const result1 = try deserialize(&reader, ?u32, testing.allocator);
+    const result2 = try deserialize(&reader, ?u32, testing.allocator);
 
     try testing.expectEqual(@as(?u32, 42), result1);
     try testing.expectEqual(@as(?u32, null), result2);

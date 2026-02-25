@@ -1,4 +1,5 @@
 const std = @import("std");
+const util = @import("util.zig");
 
 /// Spinner represents an animated loading indicator with frames and timing
 pub const Spinner = struct {
@@ -396,7 +397,7 @@ pub fn getSpinner(name: []const u8) ?Spinner {
 
 /// Get a random spinner
 pub fn getRandomSpinner() Spinner {
-    var prng = std.Random.DefaultPrng.init(@intCast(std.time.timestamp()));
+    var prng = std.Random.DefaultPrng.init(@intCast(util.getTime()));
     const random = prng.random();
     const index = random.intRangeAtMost(usize, 0, all_spinners.len - 1);
     return all_spinners[index].*;
@@ -406,12 +407,13 @@ pub fn getRandomSpinner() Spinner {
 pub fn example() !void {
     var renderer = try SpinnerRenderer.init(dots, "Loading...");
     try renderer.start();
+    const io = std.Io.Threaded.global_single_threaded.ioBasic();
 
     // Simulate work
     var i: u32 = 0;
     while (i < 50) : (i += 1) {
         try renderer.update();
-        std.time.sleep(100 * std.time.ns_per_ms);
+        io.sleep(std.Io.Duration.fromMilliseconds(100), std.Io.Clock.awake) catch {};
     }
 
     renderer.stopWithMessage("✅ Done!");

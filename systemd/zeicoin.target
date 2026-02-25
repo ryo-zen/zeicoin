@@ -1,6 +1,6 @@
 [Unit]
 Description=ZeiCoin Blockchain Services
-Wants=zeicoin-mining.service zeicoin-transaction-api.service zeicoin-cli-bridge.service zeicoin-indexer.timer zeicoin-error-monitor.service
+Wants=zeicoin-mining.service zeicoin-transaction-api.service zeicoin-indexer.timer zeicoin-error-monitor.service
 After=network.target postgresql.service
 
 [Install]

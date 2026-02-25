@@ -18,9 +18,11 @@ x-common: &common
 # Common environment variables
 x-common-env: &common-env
   ZEICOIN_NETWORK: testnet
+  ZEICOIN_TEST_MODE: "true"  # Enable easy difficulty for Docker testing/reorg scenarios
   ZEICOIN_BIND_IP: 0.0.0.0
   ZEICOIN_P2P_PORT: 10801
-  ZEICOIN_SERVER: 0.0.0.0
+  ZEICOIN_API_PORT: 10802
+  ZEICOIN_SERVER: 127.0.0.1
 
 services:
   miner-1:
@@ -31,7 +33,7 @@ services:
       - "10802:10802"  # Client API
       - "10803:10803"  # RPC
     volumes:
-      - miner1-data:/zeicoin/zeicoin_data
+      - miner1-data:/zeicoin/zeicoin_data_testnet
     environment:
       <<: *common-env
       ZEICOIN_BOOTSTRAP: ""  # Seed node - no bootstrap needed
@@ -48,13 +50,14 @@ services:
       - "10812:10802"
       - "10813:10803"
     volumes:
-      - miner2-data:/zeicoin/zeicoin_data
+      - miner2-data:/zeicoin/zeicoin_data_testnet
     environment:
       <<: *common-env
       ZEICOIN_BOOTSTRAP: miner-1:10801
       ZEICOIN_MINE_ENABLED: true
       ZEICOIN_MINER_WALLET: miner2
       ZEICOIN_WALLET_PASSWORD: miner123
+      MAX_CONNECT_ATTEMPTS: 5
     depends_on:
       miner-1:
         condition: service_healthy
@@ -68,11 +71,11 @@ services:
       - "10822:10802"
       - "10823:10803"
     volumes:
-      - node1-data:/zeicoin/zeicoin_data
+      - node1-data:/zeicoin/zeicoin_data_testnet
     environment:
       <<: *common-env
       ZEICOIN_BOOTSTRAP: miner-1:10801,miner-2:10801
-      ZEICOIN_MINE_ENABLED: false
+      ZEICOIN_MINE_ENABLED: true
     depends_on:
       miner-1:
         condition: service_healthy

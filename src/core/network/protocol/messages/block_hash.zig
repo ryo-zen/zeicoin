@@ -11,21 +11,22 @@ pub const BlockHashMessage = struct {
     exists: bool, // false if peer doesn't have block at this height
 
     pub fn serialize(self: BlockHashMessage, writer: anytype) !void {
-        try writer.writeInt(u32, self.height, .big);
-        try writer.writeAll(&self.hash);
-        try writer.writeByte(if (self.exists) 1 else 0);
+        var w = writer;
+        try w.writeInt(u32, self.height, .big);
+        try w.writeAll(&self.hash);
+        try w.writeByte(if (self.exists) 1 else 0);
     }
 
     pub fn deserialize(reader: anytype) !BlockHashMessage {
         var msg: BlockHashMessage = undefined;
-        msg.height = try reader.readInt(u32, .big);
-        _ = try reader.readAll(&msg.hash);
-        const exists_byte = try reader.readByte();
+        msg.height = try reader.takeInt(u32, .big);
+        try reader.readSliceAll(&msg.hash);
+        const exists_byte = try reader.takeByte();
         msg.exists = exists_byte != 0;
         return msg;
     }
 
-    pub fn encode(self: BlockHashMessage, writer: anytype) !void {
+    pub fn encode(self: *const BlockHashMessage, writer: anytype) !void {
         try self.serialize(writer);
     }
 

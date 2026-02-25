@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const types = @import("../types/types.zig");
-const ArrayList = std.ArrayList;
+const ArrayList = std.array_list.Managed;
 const Mutex = std.Thread.Mutex;
 
 // Type aliases for clarity

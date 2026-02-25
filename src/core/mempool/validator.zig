@@ -19,7 +19,6 @@ const Hash = types.Hash;
 /// Specific validation error types for detailed error reporting
 pub const ValidationError = error{
     InvalidStructure,
-    ReplayTransaction,
     TransactionExpired,
     InvalidAmount,
     InvalidNonce,
@@ -31,32 +30,31 @@ pub const ValidationError = error{
 /// Transaction validator for mempool operations
 /// - Validates transaction structure and cryptographic signatures
 /// - Checks nonce sequences and account balances
-/// - Provides replay protection and expiry validation
+/// - Provides expiry validation
 /// - Integrates with chain state for account queries
 pub const TransactionValidator = struct {
     // Chain state reference for account queries
     chain_state: *ChainState,
-    
-    // Processed transaction history for replay protection
-    processed_transactions: std.ArrayList(Hash),
-    
+    io: std.Io,
+
     // Resource management
     allocator: std.mem.Allocator,
-    
+
     const Self = @This();
-    
+
     /// Initialize transaction validator
-    pub fn init(allocator: std.mem.Allocator, chain_state: *ChainState) Self {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, chain_state: *ChainState) Self {
         return .{
             .chain_state = chain_state,
-            .processed_transactions = std.ArrayList(Hash).init(allocator),
+            .io = io,
             .allocator = allocator,
         };
     }
-    
+
     /// Cleanup resources
     pub fn deinit(self: *Self) void {
-        self.processed_transactions.deinit();
+        _ = self;
+        // No resources to clean up
     }
     
     /// Validate transaction completely
@@ -65,39 +63,33 @@ pub const TransactionValidator = struct {
         if (!tx.isValid()) {
             return false;
         }
-        
-        // 2. Check replay protection
-        if (self.isReplayTransaction(tx)) {
-            log.info("❌ Transaction already processed - replay attempt blocked", .{});
-            return false;
-        }
-        
-        // 3. Check expiry
+
+        // 2. Check expiry
         if (!try self.validateExpiry(tx)) {
             return false;
         }
-        
-        // 4. Check amount sanity
+
+        // 3. Check amount sanity
         if (!self.validateAmount(tx)) {
             return false;
         }
-        
-        // 5. Check self-transfer (warn but allow)
+
+        // 4. Check self-transfer (warn but allow)
         if (tx.sender.equals(tx.recipient)) {
             log.info("⚠️ Self-transfer detected (wasteful but allowed)", .{});
         }
-        
-        // 6. Validate nonce
+
+        // 5. Validate nonce
         if (!try self.validateNonce(tx)) {
             return false;
         }
-        
-        // 7. Validate balance and fees
+
+        // 6. Validate balance and fees
         if (!try self.validateBalance(tx)) {
             return false;
         }
-        
-        // 8. Validate signature
+
+        // 7. Validate signature
         if (!self.validateSignature(tx)) {
             return false;
         }
@@ -111,57 +103,38 @@ pub const TransactionValidator = struct {
         if (!tx.isValid()) {
             return ValidationError.InvalidStructure;
         }
-        
-        // 2. Check replay protection
-        if (self.isReplayTransaction(tx)) {
-            log.info("❌ Transaction already processed - replay attempt blocked", .{});
-            return ValidationError.ReplayTransaction;
-        }
-        
-        // 3. Check expiry
+
+        // 2. Check expiry
         if (!(self.validateExpiry(tx) catch false)) {
             return ValidationError.TransactionExpired;
         }
-        
-        // 4. Check amount sanity
+
+        // 3. Check amount sanity
         if (!self.validateAmount(tx)) {
             return ValidationError.InvalidAmount;
         }
-        
-        // 5. Check self-transfer (warn but allow)
+
+        // 4. Check self-transfer (warn but allow)
         if (tx.sender.equals(tx.recipient)) {
             log.info("⚠️ Self-transfer detected (wasteful but allowed)", .{});
         }
-        
-        // 6. Validate nonce
+
+        // 5. Validate nonce
         if (!(self.validateNonce(tx) catch false)) {
             return ValidationError.InvalidNonce;
         }
-        
-        // 7. Validate balance and fees
+
+        // 6. Validate balance and fees
         self.validateBalanceWithError(tx) catch |err| {
             return err;
         };
-        
-        // 8. Validate signature
+
+        // 7. Validate signature
         if (!self.validateSignature(tx)) {
             return ValidationError.InvalidSignature;
         }
     }
-    
-    /// Check if transaction is a replay attempt
-    pub fn isReplayTransaction(self: *Self, tx: Transaction) bool {
-        const tx_hash = tx.hash();
-        
-        for (self.processed_transactions.items) |processed_hash| {
-            if (std.mem.eql(u8, &processed_hash, &tx_hash)) {
-                return true;
-            }
-        }
-        
-        return false;
-    }
-    
+
     /// Validate transaction expiry
     pub fn validateExpiry(self: *Self, tx: Transaction) !bool {
         const current_height = try self.chain_state.getHeight();
@@ -198,7 +171,7 @@ pub const TransactionValidator = struct {
     
     /// Validate transaction nonce
     pub fn validateNonce(self: *Self, tx: Transaction) !bool {
-        const sender_account = try self.chain_state.getAccount(tx.sender);
+        const sender_account = try self.chain_state.getAccount(self.io, tx.sender);
         const expected_nonce = sender_account.nextNonce();
         
         // Allow nonce to be equal or higher than expected (for queuing future transactions)
@@ -224,7 +197,7 @@ pub const TransactionValidator = struct {
     
     /// Validate sender balance and fees
     pub fn validateBalance(self: *Self, tx: Transaction) !bool {
-        const sender_account = try self.chain_state.getAccount(tx.sender);
+        const sender_account = try self.chain_state.getAccount(self.io, tx.sender);
         
         // Check minimum fee
         if (tx.fee < types.ZenFees.MIN_FEE) {
@@ -248,7 +221,7 @@ pub const TransactionValidator = struct {
     
     /// Validate sender balance and fees with specific error reporting
     pub fn validateBalanceWithError(self: *Self, tx: Transaction) !void {
-        const sender_account = self.chain_state.getAccount(tx.sender) catch {
+        const sender_account = self.chain_state.getAccount(self.io, tx.sender) catch {
             return ValidationError.InvalidNonce; // Account not found, treat as invalid nonce
         };
         
@@ -282,32 +255,7 @@ pub const TransactionValidator = struct {
         }
         return true;
     }
-    
-    /// Mark transaction as processed (for replay protection)
-    pub fn markAsProcessed(self: *Self, tx: Transaction) !void {
-        const tx_hash = tx.hash();
-        try self.processed_transactions.append(tx_hash);
-    }
-    
-    /// Clean up old processed transactions to prevent memory growth
-    pub fn cleanupProcessedTransactions(self: *Self) void {
-        const MAX_PROCESSED_TXS = 1000;
-        const KEEP_RECENT_TXS = 500;
-        
-        if (self.processed_transactions.items.len > MAX_PROCESSED_TXS) {
-            const items_to_remove = self.processed_transactions.items.len - KEEP_RECENT_TXS;
-            
-            // Remove oldest transactions (first items in the list)
-            for (0..items_to_remove) |_| {
-                _ = self.processed_transactions.orderedRemove(0);
-            }
-            
-            log.info("🧹 Cleaned {} old processed transactions (kept {} recent)", .{
-                items_to_remove, KEEP_RECENT_TXS
-            });
-        }
-    }
-    
+
     /// Validate transaction for network acceptance (stricter validation)
     pub fn validateNetworkTransaction(self: *Self, tx: Transaction) !bool {
         // Apply all standard validations
@@ -323,13 +271,12 @@ pub const TransactionValidator = struct {
     
     /// Get validation statistics
     pub fn getValidationStats(self: *Self) ValidationStats {
-        return ValidationStats{
-            .processed_transactions = self.processed_transactions.items.len,
-        };
+        _ = self;
+        return ValidationStats{};
     }
 };
 
 /// Validation statistics for monitoring
 pub const ValidationStats = struct {
-    processed_transactions: usize,
+    // Stats can be added here as needed
 };

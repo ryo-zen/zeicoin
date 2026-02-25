@@ -30,13 +30,14 @@ Key features include an account-based transaction model, concurrent blockchain a
 - **Analytics Platform** - TimescaleDB integration with REST API (optional)
 - **P2P Networking** - Custom binary protocol with CRC32 integrity
 - **High Performance** - ~15 tps, concurrent indexing, efficient sync protocols
-- **Layer 2 Messaging** - Rich transaction metadata with PostgreSQL indexing (in development, optional)
+- **Layer 2 Messaging** - Rich transaction metadata with PostgreSQL indexing (testnet, optional)
+- **Testnet Faucet** - Rate-limited signed ZEI distribution for testnet (optional)
 
 ## Quick Start
 
 ### Prerequisites
 
-- **Zig** 0.14.1
+- **Zig** 0.16.0-dev.2193+fc517bd01 (nightly)
 - **RandomX** proof-of-work mining algorithm
 - **RocksDB** libraries (`librocksdb-dev` on Ubuntu/Debian)
 - **Memory**: 2GB+ RAM recommended. For 1GB nodes, **4GB of swap is required** (see `systemd/README.md`).
@@ -79,7 +80,7 @@ ZEICOIN_SERVER=127.0.0.1 ./zig-out/bin/zeicoin wallet create miner
 ZEICOIN_SERVER=127.0.0.1 ./zig-out/bin/zen_server --mine miner
 
 # Connect to bootstrap nodes (automatic from .env)
-# Default bootstrap: 209.38.31.77:10801, 134.199.170.129:10801
+# Default bootstrap: 209.38.31.77:10801, 134.199.170.129:10801, 209.38.84.23:10801
 ```
 
 ### CLI Usage
@@ -155,7 +156,7 @@ zeicoin/
 
 #### Network Protocol
 - **Ports**: P2P (10801), Client API (10802), JSON-RPC (10803), REST API (8080)
-- **Bootstrap Nodes**: 209.38.31.77:10801, 134.199.170.129:10801 (might add more in future)
+- **Bootstrap Nodes**: 209.38.31.77:10801, 134.199.170.129:10801, 209.38.84.23:10801, 209.38.84.23:10801
 - **Address Format**: Bech32 with BLAKE3 hashing (tzei1... for TestNet, zei1... for MainNet)
 - **Message Types**: Handshake, Ping/Pong, Block, Transaction, GetBlocks, GetPeers, BlockHash
 - **Integrity**: CRC32 checksums on all messages
@@ -168,17 +169,16 @@ zeicoin/
 - **Password Requirements**: Minimum 8 characters
 - **Memory Protection**: Passwords cleared after use
 
-## Layer 2 Messaging System (In Development)
+## Layer 2 Messaging System (TestNet)
 
 > [!NOTE]
-> Layer 2 is an optional feature currently in development. Running a ZeiCoin node does **not** require PostgreSQL or any L2 components. The core blockchain operates independently with just RocksDB.
+> Layer 2 is an optional feature for testnet. Running a ZeiCoin node does **not** require PostgreSQL or any L2 components. The core blockchain operates independently with just RocksDB.
 
-ZeiCoin will feature an optional Layer 2 messaging layer that adds rich metadata to blockchain transactions.
+ZeiCoin includes an optional Layer 2 messaging layer that adds rich metadata to blockchain transactions.
 
-### Features (Planned)
-- **Transaction Enhancement**: Add messages, categories, and metadata to ZEI transactions
+### Features
+- **Transaction Messages**: Attach messages, categories, and metadata to ZEI transactions
 - **Auto-Linking**: Indexer automatically links L2 messages to confirmed blockchain transactions
-- **Web Interface**: Full-featured web UI for sending enhanced transactions
 - **REST API**: Complete API for L2 message management and querying
 
 ### Requirements
@@ -186,11 +186,22 @@ ZeiCoin will feature an optional Layer 2 messaging layer that adds rich metadata
 - **L2 Features**: PostgreSQL 12+ (optional, only if you want L2 messaging)
 - **Analytics**: TimescaleDB (optional, only if you want analytics dashboards)
 
-### Future L2 Workflow
-1. Create enhancement with message/metadata (draft status)
+### L2 Workflow
+1. Create message with metadata (draft status)
 2. Update to pending before sending transaction
 3. Send actual ZEI transaction on blockchain
 4. Indexer automatically confirms L2 message with tx_hash
+
+## Testnet Faucet (TestNet)
+
+> [!NOTE]
+> The faucet is an optional testnet service for distributing test ZEI. It is not part of the core node.
+
+The testnet faucet distributes small amounts of ZEI to new addresses with rate limiting and signed payouts to prevent abuse.
+
+- **Rate Limiting**: One payout per address per time window
+- **Signed Payouts**: All faucet transactions are cryptographically signed
+- **REST API**: Simple endpoint to request testnet ZEI
 
 ## Analytics & Data Infrastructure (Optional)
 
@@ -317,7 +328,7 @@ zig build clean
 - **Address Prefix**: `tzei1...`
 - **Mining Mode**: Light (256MB RAM)
 - **Difficulty**: 0xF0000000 (easy)
-- **Bootstrap Nodes**: 209.38.31.77:10801, 134.199.170.129:10801
+- **Bootstrap Nodes**: 209.38.31.77:10801, 134.199.170.129:10801, 209.38.84.23:10801
 - **Database**: `zeicoin_testnet`
 
 ### MainNet (Future)

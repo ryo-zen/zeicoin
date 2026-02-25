@@ -7,14 +7,15 @@ Requires=postgresql.service
 Type=simple
 User=root
 WorkingDirectory=/root/zeicoin
-EnvironmentFile=-/root/zeicoin/.env
+EnvironmentFile=-/root/zeicoin/.env.testnet
 EnvironmentFile=-/root/zeicoin/.env.local
 Environment="ZEICOIN_DB_HOST=127.0.0.1"
 Environment="ZEICOIN_DB_NAME=zeicoin_testnet"
 Environment="ZEICOIN_DB_USER=zeicoin"
 Environment="ZEICOIN_MONITOR_MIN_SEVERITY=MEDIUM"
+Environment="ZEICOIN_MONITOR_SERVICE=zeicoin-mining.service"
 
-ExecStart=/root/zeicoin/zig-out/bin/error_monitor
+ExecStart=/root/zeicoin/zig-out/bin/zeicoin_error_monitor
 Restart=always
 RestartSec=5
 StandardOutput=journal

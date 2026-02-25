@@ -70,8 +70,36 @@ echo -e "${BLUE}🧹 Cleaning up existing test wallets...${NC}"
 rm -f zeicoin_data_testnet/wallets/miner.wallet 2>/dev/null || true
 rm -f zeicoin_data_testnet/wallets/alan.wallet 2>/dev/null || true
 rm -f zeicoin_data_testnet/wallets/test_*.wallet 2>/dev/null || true
+
+# Swap bootstrap config to disable external connections
+if [ -f config/bootstrap_testnet.json ]; then
+    cp config/bootstrap_testnet.json config/bootstrap_testnet.json.bak
+fi
+echo '{ "network": "testnet", "nodes": [] }' > config/bootstrap_testnet.json
+
+# Function to cleanup
+cleanup() {
+    echo -e "${YELLOW}🧹 Cleaning up...${NC}"
+    kill $SERVER_PID 2>/dev/null || true
+    wait $SERVER_PID 2>/dev/null || true
+    # Extra cleanup to ensure all zen_server processes are killed
+    pkill -f zen_server 2>/dev/null || true
+    
+    # Restore bootstrap config
+    if [ -f config/bootstrap_testnet.json.bak ]; then
+        mv config/bootstrap_testnet.json.bak config/bootstrap_testnet.json
+    fi
+    
+    # Clean up test wallets
+    rm -f wallets/test_cli_*.json 2>/dev/null || true
+    rm -f server_test.log 2>/dev/null || true
+}
+
+# Trap to ensure cleanup on exit
+trap cleanup EXIT
+
 # Start server without mining first (will add mining wallet later)
-ZEICOIN_SERVER=127.0.0.1 timeout 180s ./zig-out/bin/zen_server > server_test.log 2>&1 &
+ZEICOIN_BOOTSTRAP="" ZEICOIN_SERVER=127.0.0.1 timeout 180s ./zig-out/bin/zen_server > server_test.log 2>&1 &
 SERVER_PID=$!
 
 # Give server time to start
@@ -92,28 +120,13 @@ done
 echo "DEBUG: Final server check before tests..."
 if ! zeicoin_cmd status >/dev/null 2>&1; then
     echo "DEBUG: Server died after startup - checking process..."
-    if ! kill -0 $SERVER_PID 2>/dev/null; then
+    if ! kill -0 $SERVER_PID 2>/dev/null;
+     then
         echo "DEBUG: Server process $SERVER_PID has died"
         echo "DEBUG: Server log tail:"
         tail -20 server_test.log
     fi
 fi
-
-# Function to cleanup
-cleanup() {
-    echo -e "${YELLOW}🧹 Cleaning up...${NC}"
-    kill $SERVER_PID 2>/dev/null || true
-    wait $SERVER_PID 2>/dev/null || true
-    # Extra cleanup to ensure all zen_server processes are killed
-    pkill -f zen_server 2>/dev/null || true
-    
-    # Clean up test wallets
-    rm -f wallets/test_cli_*.json 2>/dev/null || true
-    rm -f server_test.log 2>/dev/null || true
-}
-
-# Trap to ensure cleanup on exit
-trap cleanup EXIT
 
 echo ""
 echo -e "${YELLOW}📋 Testing CLI Commands${NC}"

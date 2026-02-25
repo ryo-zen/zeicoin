@@ -54,7 +54,7 @@ pub const ChainProcessor = struct {
     }
 
     /// Apply a valid block to the blockchain
-    pub fn addBlockToChain(self: *ChainProcessor, block: types.Block, height: u32) !void {
+    pub fn addBlockToChain(self: *ChainProcessor, io: std.Io, block: types.Block, height: u32) !void {
         // SAFETY: Basic validation - these should not be null in normal operation
 
         // Check if block already exists to prevent double-processing during sync replay
@@ -64,7 +64,7 @@ pub const ChainProcessor = struct {
         }
 
         const block_hash = block.hash();
-        log.info("📦 [BLOCK PROCESS] Block #{} received with {} transactions (hash: {s})", .{ height, block.txCount(), std.fmt.fmtSliceHexLower(block_hash[0..8]) });
+        log.info("📦 [BLOCK PROCESS] Block #{} received with {} transactions (hash: {x})", .{ height, block.txCount(), block_hash[0..8] });
 
         // SAFETY: Check transaction array bounds
         if (block.transactions.len > 10000) { // Reasonable upper limit
@@ -73,13 +73,13 @@ pub const ChainProcessor = struct {
         }
 
         // Process all transactions in the block
-        try self.processBlockTransactions(block.transactions, height);
+        try self.processBlockTransactions(io, block.transactions, height);
 
         // Calculate cumulative chain work (critical for reorganization)
         var block_with_work = block;
         const block_work = block.header.getWork();
         const prev_chain_work = if (height > 0) blk: {
-            var prev_block = try self.database.getBlock(height - 1);
+            var prev_block = try self.database.getBlock(io, height - 1);
             defer prev_block.deinit(self.allocator);
             break :blk prev_block.chain_work;
         } else 0;
@@ -91,14 +91,14 @@ pub const ChainProcessor = struct {
         });
 
         // Save block to database with chain work
-        try self.database.saveBlock(height, block_with_work);
+        try self.database.saveBlock(io, height, block_with_work);
 
         // Update block index for O(1) lookups in reorganizations
         const index_block_hash = block.hash();
         try self.chain_state.indexBlock(height, index_block_hash);
 
         // Mature any coinbase rewards that have reached 100 confirmations
-        try self.matureCoinbaseRewards(height);
+        try self.matureCoinbaseRewards(io, height);
 
         // Remove processed transactions from mempool
         self.cleanMempool(block);
@@ -110,22 +110,22 @@ pub const ChainProcessor = struct {
     }
 
     /// Apply a valid block to the blockchain (internal)
-    pub fn applyBlock(self: *ChainProcessor, block: types.Block) !void {
+    pub fn applyBlock(self: *ChainProcessor, io: std.Io, block: types.Block) !void {
         // Get the current height - this is the height for the new block
         const block_height = try self.database.getHeight();
 
         // Process all transactions in the block
-        try self.processBlockTransactions(block.transactions, block_height);
+        try self.processBlockTransactions(io, block.transactions, block_height);
 
         // Save block to database at the current height
-        try self.database.saveBlock(block_height, block);
+        try self.database.saveBlock(io, block_height, block);
 
         // Update block index for O(1) lookups in reorganizations
         const block_hash = block.hash();
         try self.chain_state.indexBlock(block_height, block_hash);
 
         // Mature any coinbase rewards that have reached 100 confirmations
-        try self.matureCoinbaseRewards(block_height);
+        try self.matureCoinbaseRewards(io, block_height);
 
         // Remove processed transactions from mempool
         self.cleanMempool(block);
@@ -134,12 +134,12 @@ pub const ChainProcessor = struct {
     }
 
     /// Accept a block after validation (used in reorganization and sync)
-    pub fn acceptBlock(self: *ChainProcessor, block: types.Block) !void {
+    pub fn acceptBlock(self: *ChainProcessor, io: std.Io, block: types.Block) !void {
         const block_hash = block.hash();
         
         // CRITICAL FIX: Check if block hash already exists anywhere in the chain
         if (self.chain_state.getBlockHeight(block_hash)) |existing_height| {
-            log.info("🔄 [SYNC DEDUP] Block with hash {s} already exists at height {}, skipping processing to prevent double-spend", .{ std.fmt.fmtSliceHexLower(block_hash[0..8]), existing_height });
+            log.info("🔄 [SYNC DEDUP] Block with hash {x} already exists at height {}, skipping processing to prevent double-spend", .{ block_hash[0..8], existing_height });
             return; // Skip processing but don't error - this is expected during sync replay
         }
 
@@ -148,15 +148,15 @@ pub const ChainProcessor = struct {
         // CRITICAL: Verify this block builds on our current chain tip
         // The block's previous_hash must match our current tip's hash
         if (current_height > 0) {
-            var current_tip = try self.database.getBlock(current_height);
+            var current_tip = try self.database.getBlock(io, current_height);
             defer current_tip.deinit(self.allocator);
             const current_tip_hash = current_tip.hash();
             
             if (!std.mem.eql(u8, &block.header.previous_hash, &current_tip_hash)) {
                 log.warn("⚠️ [FORK DETECTED] Block doesn't connect to our chain tip", .{});
-                log.warn("   📊 Our tip at height {}: {s}", .{ current_height, std.fmt.fmtSliceHexLower(&current_tip_hash) });
-                log.warn("   📦 Block's previous_hash: {s}", .{ std.fmt.fmtSliceHexLower(&block.header.previous_hash) });
-                log.warn("   🔀 Block hash: {s}", .{ std.fmt.fmtSliceHexLower(&block_hash) });
+                log.warn("   📊 Our tip at height {}: {x}", .{ current_height, current_tip_hash });
+                log.warn("   📦 Block's previous_hash: {x}", .{ &block.header.previous_hash });
+                log.warn("   🔀 Block hash: {x}", .{ &block_hash });
                 log.warn("   📏 Block height: {}", .{block.height});
 
                 // Block doesn't connect to our chain - store as orphan
@@ -178,8 +178,8 @@ pub const ChainProcessor = struct {
             const genesis_hash = genesis.getCanonicalGenesisHash();
             if (!std.mem.eql(u8, &block.header.previous_hash, &genesis_hash)) {
                 log.warn("❌ [BLOCK REJECT] Block at height 1 must reference genesis", .{});
-                log.warn("   📊 Genesis hash: {s}", .{ std.fmt.fmtSliceHexLower(&genesis_hash) });
-                log.warn("   📦 Block's previous_hash: {s}", .{ std.fmt.fmtSliceHexLower(&block.header.previous_hash) });
+                log.warn("   📊 Genesis hash: {x}", .{ &genesis_hash });
+                log.warn("   📦 Block's previous_hash: {x}", .{ &block.header.previous_hash });
                 return error.InvalidPreviousHash;
             }
         }
@@ -199,13 +199,13 @@ pub const ChainProcessor = struct {
         }
 
         // Process transactions
-        try self.processBlockTransactions(block.transactions, target_height);
+        try self.processBlockTransactions(io, block.transactions, target_height);
 
         // Calculate cumulative chain work (critical for reorganization)
         var block_with_work = block;
         const block_work = block.header.getWork();
         const prev_chain_work = if (target_height > 0) blk: {
-            var prev_block = try self.database.getBlock(target_height - 1);
+            var prev_block = try self.database.getBlock(io, target_height - 1);
             defer prev_block.deinit(self.allocator);
             break :blk prev_block.chain_work;
         } else 0;
@@ -217,7 +217,7 @@ pub const ChainProcessor = struct {
         });
 
         // Save to database with chain work
-        try self.database.saveBlock(target_height, block_with_work);
+        try self.database.saveBlock(io, target_height, block_with_work);
 
         // Update block index for O(1) lookups in reorganizations
         const index_block_hash = block.hash();
@@ -230,7 +230,7 @@ pub const ChainProcessor = struct {
         self.cleanMempool(block);
 
         // FIX: Check if any orphan blocks can now be processed after adding this block
-        self.processOrphanBlocks() catch |err| {
+        self.processOrphanBlocks(io) catch |err| {
             log.warn("⚠️ [ORPHAN PROCESS] Error processing orphans: {}", .{err});
             // Continue - orphan processing failures shouldn't stop block acceptance
         };
@@ -244,48 +244,115 @@ pub const ChainProcessor = struct {
         }
     }
 
-    fn processBlockTransactions(self: *ChainProcessor, transactions: []const types.Transaction, height: u32) !void {
-        // SAFETY: Check for valid transactions array
+    fn processBlockTransactions(self: *ChainProcessor, io: std.Io, transactions: []const types.Transaction, height: u32) !void {
+        // Handle empty blocks
         if (transactions.len == 0) {
             log.info("⚠️ [SAFETY] Block has no transactions at height {}", .{height});
-            return; // Empty block is valid
+            return;
         }
 
+        // PHASE 1: Pre-validate ALL transactions (read-only checks)
+        log.info("🔍 [PHASE 1] Validating {} transactions before applying", .{transactions.len});
+
+        // Track nonce increments within this block per sender so that multiple
+        // transactions from the same sender in one block validate correctly.
+        var pending_nonces = std.AutoHashMap(types.Address, u64).init(self.chain_state.allocator);
+        defer pending_nonces.deinit();
+
         for (transactions, 0..) |tx, i| {
-            // SAFETY: Check transaction bounds and validity
-            if (i >= transactions.len) {
-                log.info("❌ [SAFETY] Transaction index {} >= array length {}", .{ i, transactions.len });
-                return error.TransactionIndexOutOfBounds;
-            }
-
-            // Log transaction processing
-            const tx_hash = tx.hash();
-            const amount_zei = @as(f64, @floatFromInt(tx.amount)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-            const sender_addr = bech32.encodeAddress(self.allocator, tx.sender, types.CURRENT_NETWORK) catch "<invalid>";
-            defer if (!std.mem.eql(u8, sender_addr, "<invalid>")) self.allocator.free(sender_addr);
-            const recipient_addr = bech32.encodeAddress(self.allocator, tx.recipient, types.CURRENT_NETWORK) catch "<invalid>";
-            defer if (!std.mem.eql(u8, recipient_addr, "<invalid>")) self.allocator.free(recipient_addr);
-            log.info("📦 [BLOCK PROCESS] Processing transaction {}/{}: {s} ({d:.8} ZEI from {s} to {s})", .{ i + 1, transactions.len, std.fmt.fmtSliceHexLower(tx_hash[0..8]), amount_zei, sender_addr, recipient_addr });
-
-            // SAFETY: Validate transaction structure before processing
+            // Structure validation
             if (!tx.isValid()) {
-                log.info("❌ [SAFETY] Invalid transaction {} in block at height {}", .{ i, height });
+                log.info("❌ [PHASE 1] Invalid transaction {} at height {}", .{i, height});
                 return error.InvalidTransaction;
             }
 
-            if (tx.isCoinbase()) {
-                try self.chain_state.processCoinbaseTransaction(tx, tx.recipient, height, false);
-            } else {
-                try self.chain_state.processTransaction(tx, false);
+            // For regular transactions, validate balance and nonce
+            if (!tx.isCoinbase()) {
+                const sender = try self.chain_state.getAccount(io, tx.sender);
+                const total_cost = try std.math.add(u64, tx.amount, tx.fee);
+
+                if (sender.balance < total_cost) {
+                    log.info("❌ [PHASE 1] Insufficient balance for tx {}", .{i});
+                    return error.InsufficientBalance;
+                }
+
+                // Use pending nonce if this sender already appeared earlier in the block
+                const expected_nonce = pending_nonces.get(tx.sender) orelse sender.nonce;
+                if (tx.nonce < expected_nonce) {
+                    log.info("❌ [PHASE 1] Invalid nonce for tx {}", .{i});
+                    return error.InvalidNonce;
+                }
+                try pending_nonces.put(tx.sender, tx.nonce + 1);
             }
         }
+
+        log.info("✅ [PHASE 1] All transactions validated", .{});
+
+        // PHASE 2: Apply ALL transactions atomically via WriteBatch
+        log.info("🔄 [PHASE 2] Applying {} transactions atomically", .{transactions.len});
+
+        var batch = self.chain_state.database.createWriteBatch();
+        defer batch.deinit();
+        errdefer {
+            log.warn("❌ [PHASE 2] Batch application failed - rolling back", .{});
+        }
+
+        // Track supply changes for coinbase transactions
+        var total_supply_delta: u64 = 0;
+        var circulating_supply_delta: u64 = 0;
+
+        for (transactions, 0..) |tx, i| {
+            const tx_hash = tx.hash();
+            log.info("📦 [PHASE 2] Processing tx {}/{}: {x}", .{
+                i + 1, transactions.len, tx_hash[0..8]
+            });
+
+            if (tx.isCoinbase()) {
+                // Track supply increase
+                total_supply_delta += tx.amount;
+                if (height == 0) {
+                    circulating_supply_delta += tx.amount; // Genesis pre-mine
+                }
+
+                try self.chain_state.processCoinbaseTransaction(
+                    io, tx, tx.recipient, height, &batch, false
+                );
+            } else {
+                try self.chain_state.processTransaction(
+                    io, tx, &batch, false
+                );
+            }
+        }
+
+        // Apply supply changes to batch
+        if (total_supply_delta > 0) {
+            const current_total = self.chain_state.database.getTotalSupply();
+            const new_total = try std.math.add(u64, current_total, total_supply_delta);
+            try batch.updateTotalSupply(new_total);
+
+            log.info("📈 [SUPPLY] Total supply: {} → {}", .{current_total, new_total});
+        }
+
+        if (circulating_supply_delta > 0) {
+            const current_circ = self.chain_state.database.getCirculatingSupply();
+            const new_circ = try std.math.add(u64, current_circ, circulating_supply_delta);
+            try batch.updateCirculatingSupply(new_circ);
+
+            log.info("📈 [SUPPLY] Circulating supply: {} → {}", .{current_circ, new_circ});
+        }
+
+        // ATOMIC COMMIT: All-or-nothing
+        try batch.commit();
+
+        log.info("✅ [PHASE 2] {} transactions committed atomically", .{transactions.len});
     }
 
-    fn matureCoinbaseRewards(self: *ChainProcessor, current_height: u32) !void {
-        // Check if we have mature coinbase rewards (100 block maturity)
-        if (current_height >= types.COINBASE_MATURITY) {
-            const maturity_height = current_height - types.COINBASE_MATURITY;
-            try self.chain_state.matureCoinbaseRewards(maturity_height);
+    fn matureCoinbaseRewards(self: *ChainProcessor, io: std.Io, current_height: u32) !void {
+        // Check if we have mature coinbase rewards
+        const coinbase_maturity = types.getCoinbaseMaturity();
+        if (current_height >= coinbase_maturity) {
+            const maturity_height = current_height - coinbase_maturity;
+            try self.chain_state.matureCoinbaseRewards(io, maturity_height);
         }
     }
 
@@ -301,7 +368,7 @@ pub const ChainProcessor = struct {
         }
     }
 
-    fn estimateCumulativeWork(self: *ChainProcessor, height: u32) !types.ChainWork {
+    fn estimateCumulativeWork(self: *ChainProcessor, io: std.Io, height: u32) !types.ChainWork {
         // SAFETY: Check for reasonable height bounds
         if (height > 1000000) { // Sanity check - 1M blocks
             log.info("❌ [SAFETY] Height {} too large for cumulative work calculation", .{height});
@@ -310,7 +377,7 @@ pub const ChainProcessor = struct {
 
         var total_work: types.ChainWork = 0;
         for (0..height + 1) |h| {
-            var block = self.database.getBlock(@intCast(h)) catch {
+            var block = self.database.getBlock(io, @intCast(h)) catch {
                 // Skip missing blocks instead of crashing
                 log.info("⚠️ [SAFETY] Missing block at height {} during work calculation", .{h});
                 continue;
@@ -378,7 +445,7 @@ pub const ChainProcessor = struct {
 
     /// Execute bulk chain reorganization
     /// Called by sync manager when a competing longer chain is detected
-    pub fn executeBulkReorg(self: *ChainProcessor, new_blocks: []const types.Block) !void {
+    pub fn executeBulkReorg(self: *ChainProcessor, io: std.Io, new_blocks: []const types.Block) !void {
         const current_height = try self.database.getHeight();
         const new_tip_height = if (new_blocks.len > 0) new_blocks[new_blocks.len - 1].height else current_height;
 
@@ -386,7 +453,7 @@ pub const ChainProcessor = struct {
         log.warn("   📦 Blocks to process: {}", .{new_blocks.len});
 
         // Execute the reorganization
-        const result = try self.reorg_executor.executeReorg(current_height, new_tip_height, new_blocks);
+        const result = try self.reorg_executor.executeReorg(io, current_height, new_tip_height, new_blocks);
 
         if (result.success) {
             log.warn("✅ [BULK REORG] Chain reorganization successful!", .{});
@@ -407,13 +474,13 @@ pub const ChainProcessor = struct {
 
     /// Process orphan blocks after a new block is added to the chain
     /// Checks if any orphans are now ready to be connected
-    fn processOrphanBlocks(self: *ChainProcessor) anyerror!void {
+    fn processOrphanBlocks(self: *ChainProcessor, io: std.Io) anyerror!void {
         log.info("🔍 [ORPHAN PROCESS] Checking orphan pool for processable blocks", .{});
         log.info("   📊 Current orphan count: {}", .{self.orphan_pool.size()});
 
         // Get the current chain tip
         const current_height = try self.database.getHeight();
-        var current_tip = try self.database.getBlock(current_height);
+        var current_tip = try self.database.getBlock(io, current_height);
         defer current_tip.deinit(self.allocator);
         const current_tip_hash = current_tip.hash();
 
@@ -421,7 +488,7 @@ pub const ChainProcessor = struct {
         if (self.orphan_pool.getOrphansByParent(current_tip_hash)) |orphan_blocks| {
             defer {
                 // Clean up the ArrayList wrapper
-                var list = std.ArrayList(types.Block).fromOwnedSlice(self.allocator, @constCast(orphan_blocks));
+                var list = std.array_list.Managed(types.Block).fromOwnedSlice(self.allocator, @constCast(orphan_blocks));
                 for (list.items) |*block| {
                     block.deinit(self.allocator);
                 }
@@ -433,14 +500,14 @@ pub const ChainProcessor = struct {
             // Process each orphan block
             for (orphan_blocks) |orphan_block| {
                 const orphan_hash = orphan_block.hash();
-                log.info("   📦 Processing orphan block at height {} (hash: {s})", .{
+                log.info("   📦 Processing orphan block at height {} (hash: {x})", .{
                     orphan_block.height,
-                    std.fmt.fmtSliceHexLower(orphan_hash[0..8]),
+                    orphan_hash[0..8],
                 });
 
                 // Try to accept the orphan block
                 // Note: We don't catch errors here - let them propagate up
-                try self.acceptBlock(orphan_block);
+                try self.acceptBlock(io, orphan_block);
 
                 log.info("   ✅ Orphan block processed successfully", .{});
             }

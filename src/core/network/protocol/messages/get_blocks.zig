@@ -24,7 +24,7 @@ pub const GetBlocksMessage = struct {
         allocator.free(self.hashes);
     }
     
-    pub fn encode(self: Self, writer: anytype) !void {
+    pub fn encode(self: *const Self, writer: anytype) !void {
         try writer.writeInt(u32, @intCast(self.hashes.len), .little);
         
         for (self.hashes) |hash| {
@@ -33,7 +33,7 @@ pub const GetBlocksMessage = struct {
     }
     
     pub fn decode(allocator: std.mem.Allocator, reader: anytype) !Self {
-        const count = try reader.readInt(u32, .little);
+        const count = try reader.takeInt(u32, .little);
         if (count > protocol.MAX_BLOCKS_PER_MESSAGE) {
             return error.TooManyBlocks;
         }
@@ -42,7 +42,7 @@ pub const GetBlocksMessage = struct {
         errdefer allocator.free(hashes);
         
         for (hashes) |*hash| {
-            try reader.readNoEof(hash);
+            try reader.readSliceAll(hash);
         }
         
         return Self{ .hashes = hashes };
@@ -66,13 +66,12 @@ test "GetBlocksMessage encode/decode" {
     var msg = try GetBlocksMessage.init(allocator, &hashes);
     defer msg.deinit(allocator);
     
-    var buffer = std.ArrayList(u8).init(allocator);
-    defer buffer.deinit();
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try msg.encode(&aw.writer);
     
-    try msg.encode(buffer.writer());
-    
-    var stream = std.io.fixedBufferStream(buffer.items);
-    var decoded = try GetBlocksMessage.decode(allocator, stream.reader());
+    var reader = std.Io.Reader.fixed(aw.written());
+    var decoded = try GetBlocksMessage.decode(allocator, &reader);
     defer decoded.deinit(allocator);
     
     try std.testing.expectEqual(msg.hashes.len, decoded.hashes.len);

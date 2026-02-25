@@ -12,7 +12,15 @@ pub const GenesisBlocks = struct {
     /// Created: 2025-09-09 09:09:09.090 UTC
     /// Purpose: Development, testing, and experimentation
     pub const TESTNET = struct {
-        pub const HASH: [32]u8 = [_]u8{ 0x6d, 0x31, 0xc6, 0x04, 0x14, 0x24, 0x5f, 0xdb, 0x41, 0x87, 0x9c, 0xd2, 0xa3, 0x62, 0x4f, 0xb3, 0x6e, 0xb4, 0x96, 0x3b, 0x9b, 0x07, 0x21, 0xf5, 0x24, 0x69, 0x7d, 0xd3, 0x9b, 0xff, 0x7f, 0x0a };
+        // TESTNET.HASH - DO NOT CHANGE (consensus critical)
+        // This is the hash of the actual genesis block content
+        // MUST match production network (209/134 nodes)
+        pub const HASH: [32]u8 = [_]u8{
+            0x6d, 0x31, 0xc6, 0x04, 0x14, 0x24, 0x5f, 0xdb,
+            0x41, 0x87, 0x9c, 0xd2, 0xa3, 0x62, 0x4f, 0xb3,
+            0x6e, 0xb4, 0x96, 0x3b, 0x9b, 0x07, 0x21, 0xf5,
+            0x24, 0x69, 0x7d, 0xd3, 0x9b, 0xff, 0x7f, 0x0a
+        };
 
         pub const MESSAGE = "ZeiCoin TestNet Genesis - A minimal digital currency written in ⚡Zig";
         pub const TIMESTAMP: u64 = 1757408949090; // September 9, 2025 09:09:09.090 UTC
@@ -125,8 +133,8 @@ pub fn validateGenesis(block: types.Block) bool {
     if (!std.mem.eql(u8, &block_hash, &canonical_hash)) {
         const log = std.log.scoped(.chain);
         log.info("❌ Genesis validation failed: hash mismatch", .{});
-        log.info("   Expected: {s}", .{std.fmt.fmtSliceHexLower(&canonical_hash)});
-        log.info("   Received: {s}", .{std.fmt.fmtSliceHexLower(&block_hash)});
+        log.info("   Expected: {x}", .{&canonical_hash});
+        log.info("   Received: {x}", .{&block_hash});
         return false;
     }
 
@@ -235,4 +243,42 @@ test "Genesis block validation" {
 
     const log = std.log.scoped(.chain);
     log.info("✅ Genesis block validation tests passed", .{});
+}
+
+test "Verify Alice Genesis Address" {
+    const bip39 = @import("../crypto/bip39.zig");
+    const hd = @import("../crypto/hd.zig");
+    const allocator = std.testing.allocator;
+
+    const mnemonic = "useful humor stage innocent obvious detail project tribe vehicle bulb burst cable dignity asthma wisdom tilt settle light slight clean bring scrap outside detail";
+    const seed = bip39.mnemonicToSeed(mnemonic, "");
+    
+    // Derive master key
+    const master = hd.HDKey.fromSeed(seed);
+    
+    // Derive path m/44'/882'/0'/0/0
+    // 44' = 44 | 0x80000000 = 2147483692
+    // 882' = 882 | 0x80000000 = 2147484530
+    // 0' = 0 | 0x80000000 = 2147483648
+    // 0 = 0
+    // 0 = 0
+    const path = [_]u32{
+        44 | 0x80000000,
+        882 | 0x80000000,
+        0 | 0x80000000,
+        0,
+        0
+    };
+    
+    const derived = try hd.derivePath(&master, &path);
+    const address = derived.getAddress();
+    
+    // Encode to string to compare
+    const address_str = try address.toBech32(allocator, .testnet);
+    defer allocator.free(address_str);
+    
+    // Compare with Alice's address in genesis
+    const expected = "tzei1qqdewjya5ckmcz9pmr0duwrzx04jdvysdyw8ykl0";
+    
+    try std.testing.expectEqualStrings(expected, address_str);
 }

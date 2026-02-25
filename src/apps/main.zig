@@ -8,8 +8,7 @@ const builtin = @import("builtin");
 pub const std_options: std.Options = .{
     .log_level = switch (builtin.mode) {
         .Debug => .debug,
-        .ReleaseSafe => .info,
-        .ReleaseFast, .ReleaseSmall => .warn,
+        .ReleaseSafe, .ReleaseFast, .ReleaseSmall => .info,
     },
 };
 
@@ -17,7 +16,7 @@ pub const std_options: std.Options = .{
 const zeicoin = @import("zeicoin");
 const server = zeicoin.server;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     // Forward to the server's main function
-    try server.main();
+    try server.main(init);
 }

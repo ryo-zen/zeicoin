@@ -8,16 +8,17 @@ pub const GetBlockHashMessage = struct {
     height: u32,
 
     pub fn serialize(self: GetBlockHashMessage, writer: anytype) !void {
-        try writer.writeInt(u32, self.height, .big);
+        var w = writer;
+        try w.writeInt(u32, self.height, .big);
     }
 
     pub fn deserialize(reader: anytype) !GetBlockHashMessage {
         return GetBlockHashMessage{
-            .height = try reader.readInt(u32, .big),
+            .height = try reader.takeInt(u32, .big),
         };
     }
 
-    pub fn encode(self: GetBlockHashMessage, writer: anytype) !void {
+    pub fn encode(self: *const GetBlockHashMessage, writer: anytype) !void {
         try self.serialize(writer);
     }
 

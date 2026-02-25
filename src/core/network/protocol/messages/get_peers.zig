@@ -4,7 +4,7 @@
 const std = @import("std");
 
 pub const GetPeersMessage = struct {
-    pub fn encode(self: GetPeersMessage, writer: anytype) !void {
+    pub fn encode(self: *const GetPeersMessage, writer: anytype) !void {
         _ = self;
         _ = writer;
         // Empty message

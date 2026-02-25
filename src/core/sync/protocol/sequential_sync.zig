@@ -17,7 +17,7 @@ const Peer = net.Peer;
 /// Request a single block by hash from a peer
 /// Used for error recovery when batch requests fail
 pub fn requestBlock(peer: *Peer, hash: Hash) !Block {
-    log.debug("Requesting block by hash: {s}", .{std.fmt.fmtSliceHexLower(&hash)});
+    log.debug("Requesting block by hash: {x}", .{&hash});
     
     // Send single block request
     try peer.sendGetBlockByHash(hash);
@@ -29,15 +29,16 @@ pub fn requestBlock(peer: *Peer, hash: Hash) !Block {
     while (util.getTime() - start_time < timeout_ms / 1000) {
         // Check if block has arrived
         if (peer.getReceivedBlock(hash)) |block| {
-            log.info("Block received by hash: {s}", .{std.fmt.fmtSliceHexLower(&hash)});
+            log.info("Block received by hash: {x}", .{&hash});
             return block;
         }
         
         // Small delay to avoid busy waiting
-        std.time.sleep(100 * std.time.ns_per_ms);
+        const io = std.Io.Threaded.global_single_threaded.ioBasic();
+        io.sleep(std.Io.Duration.fromMilliseconds(100), std.Io.Clock.awake) catch {};
     }
     
-    log.warn("Block request timed out: {s}", .{std.fmt.fmtSliceHexLower(&hash)});
+    log.warn("Block request timed out: {x}", .{&hash});
     return error.BlockRequestTimeout;
 }
 
@@ -69,7 +70,8 @@ pub fn requestBlockByHeight(peer: *Peer, height: u32) !Block {
         }
         
         // Small delay to avoid busy waiting
-        std.time.sleep(100 * std.time.ns_per_ms);
+        const io = std.Io.Threaded.global_single_threaded.ioBasic();
+        io.sleep(std.Io.Duration.fromMilliseconds(100), std.Io.Clock.awake) catch {};
     }
     
     log.warn("Block {} request timed out", .{height});
@@ -95,7 +97,7 @@ pub fn requestLatestBlock(peer: *Peer) !?Block {
 /// Verify a specific block exists on a peer
 /// Used for fork resolution and chain validation
 pub fn verifyBlockExists(peer: *Peer, hash: Hash) !bool {
-    log.debug("Verifying block exists: {s}", .{std.fmt.fmtSliceHexLower(&hash)});
+    log.debug("Verifying block exists: {x}", .{&hash});
     
     // Try to request the block
     const block = requestBlock(peer, hash) catch |err| {
@@ -122,10 +124,10 @@ pub fn recoverFailedBlocks(
     allocator: std.mem.Allocator,
     peer: *Peer, 
     failed_heights: []const u32
-) !std.ArrayList(Block) {
+) !std.array_list.Managed(Block) {
     log.info("Recovering {} failed blocks", .{failed_heights.len});
     
-    var recovered_blocks = std.ArrayList(Block).init(allocator);
+    var recovered_blocks = std.array_list.Managed(Block).init(allocator);
     
     for (failed_heights) |height| {
         const block = requestBlockByHeight(peer, height) catch |err| {
@@ -150,10 +152,10 @@ pub fn requestBlockRange(
     peer: *Peer,
     start_height: u32,
     count: u32
-) !std.ArrayList(Block) {
+) !std.array_list.Managed(Block) {
     log.debug("Requesting {} blocks starting from height {}", .{count, start_height});
     
-    var blocks = std.ArrayList(Block).init(allocator);
+    var blocks = std.array_list.Managed(Block).init(allocator);
     
     for (0..count) |i| {
         const height = start_height + @as(u32, @intCast(i));

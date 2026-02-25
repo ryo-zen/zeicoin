@@ -4,6 +4,7 @@
 const std = @import("std");
 const types = @import("../types/types.zig");
 const db = @import("../storage/db.zig");
+const util = @import("../util/util.zig");
 const Peer = @import("../network/peer.zig").Peer;
 
 const log = std.log.scoped(.fork_detector);
@@ -28,7 +29,7 @@ pub fn findForkPoint(
         const mid = (low + high) / 2;
 
         // Get our block hash at height mid
-        var our_block = database.getBlock(mid) catch |err| {
+        var our_block = database.getBlock(std.Io.Threaded.global_single_threaded.ioBasic(), mid) catch |err| {
             log.warn("❌ [FORK POINT] Failed to get our block at height {}: {}", .{ mid, err });
             return error.DatabaseError;
         };
@@ -95,11 +96,11 @@ fn requestBlockHashAtHeight(peer: *Peer, height: u32) !types.BlockHash {
 
         // Wait for response (with timeout)
         const timeout_ms: u64 = 5000; // 5 seconds per attempt (reduced from 15s to fail faster)
-        const start_time = std.time.milliTimestamp();
+        const start_time = @as(u64, @intCast(util.getTime())) * 1000;
 
         while (true) {
             // Check for timeout
-            const elapsed = std.time.milliTimestamp() - start_time;
+            const elapsed = @as(u64, @intCast(util.getTime())) * 1000 - start_time;
             if (elapsed > timeout_ms) {
                 log.warn("⏱️ [FORK POINT] Timeout waiting for block hash at height {} (attempt {}/{})", .{ height, attempt + 1, max_retries });
                 break; // Break inner loop to retry
@@ -122,21 +123,23 @@ fn requestBlockHashAtHeight(peer: *Peer, height: u32) !types.BlockHash {
                     return error.BlockNotFound;
                 }
 
-                log.debug("✅ [FORK POINT] Received hash for height {}: {s}", .{
+                log.debug("✅ [FORK POINT] Received hash for height {}: {x}", .{
                     height,
-                    std.fmt.fmtSliceHexLower(&response.hash),
+                    response.hash,
                 });
 
                 return response.hash;
             }
 
             // Sleep briefly before checking again
-            std.time.sleep(10 * std.time.ns_per_ms); // Sleep 10ms between checks
+            const io = std.Io.Threaded.global_single_threaded.ioBasic();
+            io.sleep(std.Io.Duration.fromMilliseconds(10), std.Io.Clock.awake) catch {}; // Sleep 10ms between checks
         }
 
         // Add backoff before retry
         if (attempt < max_retries - 1) {
-             std.time.sleep(500 * std.time.ns_per_ms);
+            const io = std.Io.Threaded.global_single_threaded.ioBasic();
+            io.sleep(std.Io.Duration.fromMilliseconds(500), std.Io.Clock.awake) catch {};
         }
     }
 
@@ -197,7 +200,7 @@ fn calculateChainWork(
 
     var height = start_height;
     while (height <= end_height) : (height += 1) {
-        var block = try database.getBlock(height);
+        var block = try database.getBlock(std.Io.Threaded.global_single_threaded.ioBasic(), height);
         defer block.deinit(allocator);
 
         const block_work = block.header.getWork();
@@ -240,11 +243,11 @@ fn requestChainWork(peer: *Peer, start_height: u32, end_height: u32) !types.Chai
 
         // Wait for response
         const timeout_ms: u64 = 10000; // 10 seconds for work calculation
-        const start_time = std.time.milliTimestamp();
+        const start_time = @as(u64, @intCast(util.getTime())) * 1000;
 
         while (true) {
             // Check for timeout
-            const elapsed = std.time.milliTimestamp() - start_time;
+            const elapsed = @as(u64, @intCast(util.getTime())) * 1000 - start_time;
             if (elapsed > timeout_ms) {
                 log.warn("⏱️ [CHAIN WORK] Timeout waiting for chain work response (attempt {}/{})", .{ attempt + 1, max_retries });
                 break; // Retry
@@ -260,12 +263,14 @@ fn requestChainWork(peer: *Peer, start_height: u32, end_height: u32) !types.Chai
             }
 
             // Sleep briefly before checking again
-            std.time.sleep(10 * std.time.ns_per_ms);
+            const io = std.Io.Threaded.global_single_threaded.ioBasic();
+            io.sleep(std.Io.Duration.fromMilliseconds(10), std.Io.Clock.awake) catch {};
         }
 
         // Backoff
         if (attempt < max_retries - 1) {
-             std.time.sleep(500 * std.time.ns_per_ms);
+            const io = std.Io.Threaded.global_single_threaded.ioBasic();
+            io.sleep(std.Io.Duration.fromMilliseconds(500), std.Io.Clock.awake) catch {};
         }
     }
 

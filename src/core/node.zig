@@ -1,6 +1,6 @@
 const std = @import("std");
 const log = std.log.scoped(.node);
-const ArrayList = std.ArrayList;
+const ArrayList = std.array_list.Managed;
 
 const types = @import("types/types.zig");
 const util = @import("util/util.zig");
@@ -34,6 +34,7 @@ pub const ZeiCoin = struct {
     chain_state: @import("chain/state.zig").ChainState,
     network_coordinator: NetworkCoordinator,
     allocator: std.mem.Allocator,
+    io: std.Io,
     // header_chain: headerchain.HeaderChain, // ZSP-001: Disabled headers-first sync
     sync_manager: ?*sync_mod.SyncManager,
     message_dispatcher: message_dispatcher.MessageDispatcher,
@@ -47,8 +48,8 @@ pub const ZeiCoin = struct {
     mining_manager: ?*miner_mod.MiningManager,
     mining_keypair: ?@import("crypto/key.zig").KeyPair,
 
-    pub fn init(allocator: std.mem.Allocator) !*ZeiCoin {
-        const data_dir = switch (types.CURRENT_NETWORK) {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, data_dir_override: ?[]const u8) !*ZeiCoin {
+        const data_dir = if (data_dir_override) |dir| dir else switch (types.CURRENT_NETWORK) {
             .testnet => "zeicoin_data_testnet",
             .mainnet => "zeicoin_data_mainnet",
         };
@@ -56,7 +57,7 @@ pub const ZeiCoin = struct {
         const database = try allocator.create(db.Database);
         errdefer allocator.destroy(database);
 
-        database.* = try db.Database.init(allocator, data_dir);
+        database.* = try db.Database.init(allocator, io, data_dir);
         errdefer database.deinit();
 
         const instance_ptr = try allocator.create(ZeiCoin);
@@ -72,6 +73,7 @@ pub const ZeiCoin = struct {
             .chain_state = chain_state,
             .network_coordinator = undefined,
             .allocator = allocator,
+            .io = io,
             // .header_chain = header_chain, // ZSP-001: Disabled headers-first sync
             .sync_manager = null,
             .message_dispatcher = undefined,
@@ -88,7 +90,7 @@ pub const ZeiCoin = struct {
 
         // CRITICAL FIX: Rebuild block index from database on startup
         // This ensures getBlockHash() works for blocks loaded from disk
-        instance_ptr.chain_state.initializeBlockIndex() catch |err| {
+        instance_ptr.chain_state.initializeBlockIndex(io) catch |err| {
             log.err("❌ Failed to initialize block index: {}", .{err});
             return err;
         };
@@ -132,7 +134,7 @@ pub const ZeiCoin = struct {
         components_initialized = 7;
 
 
-        instance_ptr.mempool_manager = try MempoolManager.init(allocator, &instance_ptr.chain_state);
+        instance_ptr.mempool_manager = try MempoolManager.init(allocator, io, &instance_ptr.chain_state);
         components_initialized = 8;
 
         instance_ptr.mempool_manager.setMiningState(&instance_ptr.mining_state);
@@ -144,7 +146,7 @@ pub const ZeiCoin = struct {
 
         // Check if genesis block already exists in database
         const genesis_exists = blk: {
-            var genesis_block = instance_ptr.database.getBlock(0) catch |err| switch (err) {
+            var genesis_block = instance_ptr.database.getBlock(io, 0) catch |err| switch (err) {
                 db.DatabaseError.NotFound => break :blk false,
                 else => return err,
             };
@@ -217,10 +219,10 @@ pub const ZeiCoin = struct {
         defer genesis_block.deinit(self.allocator);
         for (genesis_block.transactions) |tx| {
             if (tx.isCoinbase()) {
-                try self.chain_state.processCoinbaseTransaction(tx, tx.recipient, 0, true);
+                try self.chain_state.processCoinbaseTransaction(self.io, tx, tx.recipient, 0, null, true);
             }
         }
-        try self.database.saveBlock(0, genesis_block);
+        try self.database.saveBlock(self.io, 0, genesis_block);
 
         // CRITICAL FIX: Index genesis block
         try self.chain_state.indexBlock(0, genesis_block.hash());
@@ -244,8 +246,7 @@ pub const ZeiCoin = struct {
     }
 
     pub fn getAccount(self: *ZeiCoin, address: Address) !Account {
-
-        return try self.chain_query.getAccount(address);
+        return try self.chain_query.getAccount(self.io, address);
     }
 
     pub fn addTransaction(self: *ZeiCoin, transaction: Transaction) !void {
@@ -257,11 +258,11 @@ pub const ZeiCoin = struct {
     }
 
     pub fn getBlockByHeight(self: *ZeiCoin, height: u32) !Block {
-        return try self.chain_query.getBlock(height);
+        return try self.chain_query.getBlock(self.io, height);
     }
     
     pub fn getBlockHashAtHeight(self: *ZeiCoin, height: u32) ![32]u8 {
-        var block = try self.chain_query.getBlock(height);
+        var block = try self.chain_query.getBlock(self.io, height);
         defer block.deinit(self.allocator);
         return block.hash();
     }
@@ -291,7 +292,7 @@ pub const ZeiCoin = struct {
         }
 
         // Check database for confirmed transactions
-        const tx = try self.database.getTransactionByHash(tx_hash);
+        const tx = try self.database.getTransactionByHash(self.io, tx_hash);
         // TODO: Get block height where transaction was included
         // For now, return confirmed with unknown height
         return .{
@@ -309,8 +310,8 @@ pub const ZeiCoin = struct {
         const difficulty_target = try difficulty_calc.calculateNextDifficulty();
         return difficulty_target.toU64();
     }
-    fn getMedianTimePast(self: *ZeiCoin, height: u32) !u64 {
-        return try self.chain_query.getMedianTimePast(height);
+    pub fn getMedianTimePast(self: *ZeiCoin, height: u32) !u64 {
+        return try self.chain_query.getMedianTimePast(self.io, height);
     }
 
     fn isValidForkBlock(self: *ZeiCoin, block: types.Block) !bool {
@@ -328,17 +329,17 @@ pub const ZeiCoin = struct {
     }
 
     pub fn addBlockToChain(self: *ZeiCoin, block: Block, height: u32) !void {
-        return try self.chain_processor.addBlockToChain(block, height);
+        return try self.chain_processor.addBlockToChain(self.io, block, height);
     }
 
     /// Add sync block directly to chain processor, bypassing block processor validation
     pub fn addSyncBlockToChain(self: *ZeiCoin, block: Block, height: u32) !void {
         log.info("🔄 [SYNC] Adding block {} directly to chain processor (bypassing block processor)", .{height});
-        return try self.chain_processor.addBlockToChain(block, height);
+        return try self.chain_processor.addBlockToChain(self.io, block, height);
     }
 
     fn applyBlock(self: *ZeiCoin, block: Block) !void {
-        return try self.chain_processor.applyBlock(block);
+        return try self.chain_processor.applyBlock(self.io, block);
     }
 
     pub fn startNetwork(self: *ZeiCoin, port: u16) !void {
@@ -363,13 +364,13 @@ pub const ZeiCoin = struct {
 
     /// Get total cumulative work for the main chain
     /// This implements proper Nakamoto Consensus by summing proof-of-work
-    pub fn getTotalWork(self: *ZeiCoin) !types.ChainWork {
+    pub fn getTotalWork(self: *ZeiCoin, io: std.Io) !types.ChainWork {
         const current_height = try self.database.getHeight();
         var cumulative_work: types.ChainWork = 0;
 
         // Sum the work contribution of each block in the chain
         for (0..current_height + 1) |height| {
-            var block = self.database.getBlock(@intCast(height)) catch {
+            var block = self.database.getBlock(io, @intCast(height)) catch {
                 log.info("⚠️  Failed to load block at height {} for work calculation", .{height});
                 continue;
             };
@@ -393,7 +394,7 @@ pub const ZeiCoin = struct {
         _ = self;
     }
 
-    fn rollbackToHeight(self: *ZeiCoin, target_height: u32) !void {
+    pub fn rollbackToHeight(self: *ZeiCoin, target_height: u32) !void {
         _ = self;
         log.info("🔄 Rollback to height {} delegated to chain processor", .{target_height});
     }
@@ -438,7 +439,7 @@ pub const ZeiCoin = struct {
     }
 
     pub fn getBlock(self: *ZeiCoin, height: u32) !types.Block {
-        return try self.chain_query.getBlock(height);
+        return try self.chain_query.getBlock(self.io, height);
     }
 
     fn switchSyncPeer(self: *ZeiCoin) !void {
@@ -474,13 +475,13 @@ pub const ZeiCoin = struct {
     }
 
     pub fn getHeadersRange(self: *ZeiCoin, start_height: u32, count: u32) ![]BlockHeader {
-        return try self.chain_query.getHeadersRange(start_height, count);
+        return try self.chain_query.getHeadersRange(self.io, start_height, count);
     }
 
     /// Get the next available nonce for an address, considering pending transactions in mempool
     pub fn getNextAvailableNonce(self: *ZeiCoin, address: types.Address) !u64 {
         // Get current account nonce
-        const account = try self.chain_query.getAccount(address);
+        const account = try self.chain_query.getAccount(self.io, address);
         var next_nonce = account.nonce;
 
         // Check mempool for pending transactions from this address
@@ -515,5 +516,18 @@ pub const ZeiCoin = struct {
 
     pub fn calculateNextDifficulty(self: *ZeiCoin) !types.DifficultyTarget {
         return try self.difficulty_calculator.calculateNextDifficulty();
+    }
+
+    pub fn zenMineBlock(self: *ZeiCoin, miner_keypair: @import("crypto/key.zig").KeyPair) !types.Block {
+        const ctx = miner_mod.MiningContext{
+            .allocator = self.allocator,
+            .io = self.io,
+            .database = self.database,
+            .mempool_manager = self.mempool_manager,
+            .mining_state = &self.mining_state,
+            .network = null,
+            .blockchain = self,
+        };
+        return miner_mod.zenMineBlock(ctx, miner_keypair, miner_keypair.getAddress());
     }
 };

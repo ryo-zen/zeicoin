@@ -3,6 +3,7 @@
 // Simple account model with nonce-based double-spend protection
 
 const std = @import("std");
+const builtin = @import("builtin");
 const util = @import("../util/util.zig");
 const bech32 = @import("../crypto/bech32.zig");
 
@@ -82,11 +83,19 @@ pub const BlockVersion = enum(u32) {
 // Current block version used by the protocol
 pub const CURRENT_BLOCK_VERSION: u32 = @intFromEnum(BlockVersion.V0);
 
-// Mining constants - Network-specific coinbase maturity
-pub const COINBASE_MATURITY: u32 = switch (CURRENT_NETWORK) {
-    .testnet => 10, // TestNet: 10 blocks for faster testing
-    .mainnet => 100, // MainNet: 100 blocks for security
-};
+// Mining constants - Coinbase maturity (blocks before mining reward can be spent)
+// Note: This is a function because TEST_MODE is runtime-initialized
+pub fn getCoinbaseMaturity() u32 {
+    if (TEST_MODE) return 2; // Docker testing - very fast reorgs
+
+    return switch (CURRENT_NETWORK) {
+        .testnet => 10, // TestNet: 10 blocks for faster testing
+        .mainnet => 100, // MainNet: 100 blocks for security
+    };
+}
+
+// Keep const for backward compatibility (calls function)
+pub const COINBASE_MATURITY: u32 = 100; // Default production value
 
 // Bootstrap node configuration structure
 pub const BootstrapConfig = struct {
@@ -95,11 +104,12 @@ pub const BootstrapConfig = struct {
 };
 
 // Load bootstrap nodes from JSON configuration
-pub fn loadBootstrapNodes(allocator: std.mem.Allocator) ![][]const u8 {
+pub fn loadBootstrapNodes(allocator: std.mem.Allocator, io: std.Io) ![][]const u8 {
     const config_path = "config/bootstrap_testnet.json";
 
     // Read the JSON file
-    const file = std.fs.cwd().openFile(config_path, .{}) catch |err| switch (err) {
+    const dir = std.Io.Dir.cwd();
+    const file = dir.openFile(io, config_path, .{}) catch |err| switch (err) {
         error.FileNotFound => {
             // Fallback to hardcoded nodes if config file not found
             const fallback_nodes = [_][]const u8{
@@ -114,12 +124,11 @@ pub fn loadBootstrapNodes(allocator: std.mem.Allocator) ![][]const u8 {
         },
         else => return err,
     };
-    defer file.close();
+    defer file.close(io);
 
-    const file_size = try file.getEndPos();
-    const contents = try allocator.alloc(u8, file_size);
-    defer allocator.free(contents);
-    _ = try file.readAll(contents);
+    var buf: [4096]u8 = undefined;
+    const bytes_read = try file.readStreaming(io, &[_][]u8{&buf});
+    const contents = buf[0..bytes_read];
 
     // Parse JSON
     const parsed = try std.json.parseFromSlice(BootstrapConfig, allocator, contents, .{});
@@ -339,8 +348,7 @@ pub const Transaction = struct {
         // Use larger buffer to handle transactions with extra_data up to limit
         // Buffer size matches TransactionLimits.MAX_TX_SIZE (100KB)
         var buffer: [TransactionLimits.MAX_TX_SIZE]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&buffer);
-        const writer = stream.writer();
+        var writer = std.Io.Writer.fixed(&buffer);
 
         // Simple serialization for hashing (order matters!)
         writer.writeInt(u16, tx_for_hash.version, .little) catch unreachable;
@@ -361,7 +369,7 @@ pub const Transaction = struct {
         writer.writeInt(u32, @intCast(self.extra_data.len), .little) catch unreachable;
         writer.writeAll(self.extra_data) catch unreachable;
 
-        const data = stream.getWritten();
+        const data = writer.buffered();
         return util.blake3Hash(data);
     }
 
@@ -374,14 +382,14 @@ pub const Transaction = struct {
     pub fn isValid(self: *const Transaction) bool {
         // Version validation - only version 0 is currently supported
         if (self.version != 0) {
-            log.warn("❌ Transaction invalid: unsupported version {}", .{self.version});
+            if (!builtin.is_test) log.warn("❌ Transaction invalid: unsupported version {}", .{self.version});
             return false;
         }
 
         // Size validation - prevent DoS with oversized transactions
         const tx_size = self.getSerializedSize();
         if (tx_size > TransactionLimits.MAX_TX_SIZE) {
-            log.warn("❌ Transaction invalid: size {} bytes exceeds maximum {} bytes", .{ tx_size, TransactionLimits.MAX_TX_SIZE });
+            if (!builtin.is_test) log.warn("❌ Transaction invalid: size {} bytes exceeds maximum {} bytes", .{ tx_size, TransactionLimits.MAX_TX_SIZE });
             return false;
         }
 
@@ -564,10 +572,18 @@ pub const DifficultyTarget = struct {
     /// Create initial difficulty target for network
     pub fn initial(network: NetworkType) DifficultyTarget {
         return switch (network) {
-            .testnet => DifficultyTarget{
-                .base_bytes = 1,
-                .threshold = 0xFFFFFFF0, // EXTREMELY easy difficulty - instant blocks for low-end hardware
-            },
+            .testnet => if (TEST_MODE)
+                // Docker/local testing mode - very easy difficulty for fast reorgs
+                DifficultyTarget{
+                    .base_bytes = 0, // No leading zeros required
+                    .threshold = 0x09FFFFFF, // ~3.7% chance per hash
+                }
+            else
+                // Production testnet - standard easy difficulty
+                DifficultyTarget{
+                    .base_bytes = 1, // 1 leading zero byte required
+                    .threshold = 0xFFFFFFF0, // EXTREMELY easy - instant blocks
+                },
             .mainnet => DifficultyTarget{
                 .base_bytes = 2,
                 .threshold = 0x00008000, // Middle of 2-byte range
@@ -745,18 +761,18 @@ pub const BlockHeader = struct {
     pub fn deserialize(reader: anytype) !BlockHeader {
         var header: BlockHeader = undefined;
 
-        header.version = try reader.readInt(u32, .little);
-        _ = try reader.readAll(&header.previous_hash);
-        _ = try reader.readAll(&header.merkle_root);
-        header.timestamp = try reader.readInt(u64, .little);
-        header.difficulty = try reader.readInt(u64, .little);
-        header.nonce = try reader.readInt(u32, .little);
+        header.version = try reader.takeInt(u32, .little);
+        _ = try reader.readSliceAll(&header.previous_hash);
+        _ = try reader.readSliceAll(&header.merkle_root);
+        header.timestamp = try reader.takeInt(u64, .little);
+        header.difficulty = try reader.takeInt(u64, .little);
+        header.nonce = try reader.takeInt(u32, .little);
 
         // New future-proof fields
-        _ = try reader.readAll(&header.witness_root);
-        _ = try reader.readAll(&header.state_root);
-        header.extra_nonce = try reader.readInt(u64, .little);
-        _ = try reader.readAll(&header.extra_data);
+        _ = try reader.readSliceAll(&header.witness_root);
+        _ = try reader.readSliceAll(&header.state_root);
+        header.extra_nonce = try reader.takeInt(u64, .little);
+        _ = try reader.readSliceAll(&header.extra_data);
 
         return header;
     }
@@ -770,13 +786,12 @@ pub const BlockHeader = struct {
     pub fn hash(self: *const BlockHeader) BlockHash {
         // Serialize the block header to bytes
         var buffer: [1024]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&buffer);
-        const writer = stream.writer();
+        var writer = std.Io.Writer.fixed(&buffer);
 
         // Simple serialization for hashing (order matters!)
-        self.serialize(writer) catch unreachable;
+        self.serialize(&writer) catch unreachable;
 
-        const data = stream.getWritten();
+        const data = writer.buffered();
         return util.blake3Hash(data);
     }
 
@@ -850,7 +865,7 @@ pub const Block = struct {
 
         // Regular blocks must have transactions
         if (self.transactions.len == 0) {
-            log.warn("❌ Block invalid: no transactions", .{});
+            if (!builtin.is_test) log.warn("❌ Block invalid: no transactions", .{});
             return false;
         }
 
@@ -1230,6 +1245,21 @@ pub const NetworkType = enum {
 /// Current network configuration
 pub const CURRENT_NETWORK: NetworkType = .testnet; // Change to .mainnet for production
 
+/// Test mode enables easier difficulty for Docker/local testing
+/// Set via ZEICOIN_TEST_MODE=true environment variable
+pub var TEST_MODE: bool = false;
+
+/// Initialize test mode from environment (call at startup)
+pub fn initTestMode() void {
+    if (util.getEnvVarOwned(std.heap.page_allocator, "ZEICOIN_TEST_MODE")) |mode_str| {
+        defer std.heap.page_allocator.free(mode_str);
+        TEST_MODE = std.mem.eql(u8, mode_str, "true") or std.mem.eql(u8, mode_str, "1");
+        if (TEST_MODE) {
+            log.warn("⚠️  TEST_MODE enabled - using easy difficulty for testing", .{});
+        }
+    } else |_| {}
+}
+
 /// Network-specific configurations
 pub const NetworkConfig = struct {
     randomx_mode: bool, // false = light (256MB), true = fast (2GB)
@@ -1290,10 +1320,6 @@ pub const ZenMining = struct {
     pub const RANDOMX_MODE: bool = NetworkConfig.current().randomx_mode;
     pub const DIFFICULTY_ADJUSTMENT_PERIOD: u64 = 20; // Adjust every 20 blocks (balanced security vs responsiveness)
     pub const MAX_ADJUSTMENT_FACTOR: f64 = 2.0; // Maximum 2x change per adjustment
-    pub const COINBASE_MATURITY: u32 = switch (CURRENT_NETWORK) {
-        .testnet => 10, // TestNet: 10 blocks for faster testing
-        .mainnet => 100, // MainNet: 100 blocks for security
-    };
 
     /// Halving interval - blocks between each reward halving
     /// TestNet: 100 blocks (~17 minutes at 10s blocks) for fast testing

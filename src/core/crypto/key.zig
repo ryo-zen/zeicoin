@@ -27,10 +27,10 @@ pub const KeyPair = struct {
     public_key: [32]u8, // Ed25519 uses 32-byte public keys
 
     /// Generate a new random key pair
-    pub fn generateNew() KeyError!KeyPair {
+    pub fn generateNew(io: std.Io) KeyError!KeyPair {
         // Generate Ed25519 keypair
         const Ed25519 = std.crypto.sign.Ed25519;
-        const keypair = Ed25519.KeyPair.generate();
+        const keypair = Ed25519.KeyPair.generate(io);
 
         return KeyPair{
             .private_key = keypair.secret_key.bytes,
@@ -42,7 +42,7 @@ pub const KeyPair = struct {
     pub fn fromPrivateKey(private_key: [64]u8) KeyPair {
         // Make mutable copy for secure clearing after use
         var mutable_key = private_key;
-        defer std.crypto.utils.secureZero(u8, &mutable_key); // Clear input copy from stack
+        defer std.crypto.secureZero(u8, &mutable_key); // Clear input copy from stack
 
         const Ed25519 = std.crypto.sign.Ed25519;
         const secret_key = Ed25519.SecretKey.fromBytes(mutable_key) catch {
@@ -98,7 +98,7 @@ pub const KeyPair = struct {
     /// Securely clear the private key from memory
     /// After calling this, signing operations will fail
     pub fn clearPrivateKey(self: *KeyPair) void {
-        std.crypto.utils.secureZero(u8, &self.private_key);
+        std.crypto.secureZero(u8, &self.private_key);
     }
 
     /// Cleanup keypair - clears private key
@@ -177,7 +177,7 @@ fn isPrivateKeyCleared(private_key: [64]u8) bool {
 // Tests
 test "key generation and address derivation" {
     // Generate new keypair
-    var keypair = try KeyPair.generateNew();
+    var keypair = try KeyPair.generateNew(std.Io.Threaded.global_single_threaded.ioBasic());
     defer keypair.deinit();
 
     // Should be able to sign
@@ -192,7 +192,7 @@ test "key generation and address derivation" {
 }
 
 test "signing and verification" {
-    var keypair = try KeyPair.generateNew();
+    var keypair = try KeyPair.generateNew(std.Io.Threaded.global_single_threaded.ioBasic());
     defer keypair.deinit();
 
     const message = "Hello ZeiCoin!";
@@ -205,7 +205,7 @@ test "signing and verification" {
 }
 
 test "transaction signing" {
-    var keypair = try KeyPair.generateNew();
+    var keypair = try KeyPair.generateNew(std.Io.Threaded.global_single_threaded.ioBasic());
     defer keypair.deinit();
 
     // Create a dummy transaction hash
@@ -219,7 +219,7 @@ test "transaction signing" {
 }
 
 test "private key clearing" {
-    var keypair = try KeyPair.generateNew();
+    var keypair = try KeyPair.generateNew(std.Io.Threaded.global_single_threaded.ioBasic());
 
     // Should be able to sign initially
     try testing.expect(keypair.canSign());
@@ -239,7 +239,7 @@ test "private key clearing" {
 }
 
 test "address consistency" {
-    var keypair = try KeyPair.generateNew();
+    var keypair = try KeyPair.generateNew(std.Io.Threaded.global_single_threaded.ioBasic());
     defer keypair.deinit();
 
     // Two ways to get address should give same result

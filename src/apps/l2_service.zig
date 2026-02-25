@@ -1,22 +1,91 @@
 // l2_service.zig - Consolidated L2 Messaging Service and REST API for ZeiCoin
-// Provides transaction enhancements, messaging capabilities, and HTTP API endpoints
+// Provides transaction messages, messaging capabilities, and HTTP API endpoints
 
 const std = @import("std");
-const zap = @import("zap");
-const pg = @import("pg");
 const zeicoin = @import("zeicoin");
 const types = zeicoin.types;
+const util = zeicoin.util;
+const postgres = util.postgres;
+const net = std.Io.net;
 
 const log = std.log.scoped(.l2_service);
 
-/// L2 Enhancement status
-pub const EnhancementStatus = enum {
+// Database Connection Pool
+const DBPool = struct {
+    allocator: std.mem.Allocator,
+    conninfo: [:0]const u8,
+    connections: std.array_list.Managed(postgres.Connection),
+    mutex: std.Thread.Mutex,
+
+    pub fn init(allocator: std.mem.Allocator, conninfo: [:0]const u8, size: usize) !*DBPool {
+        const self = try allocator.create(DBPool);
+        errdefer allocator.destroy(self);
+        self.* = .{
+            .allocator = allocator,
+            .conninfo = conninfo,
+            .connections = std.array_list.Managed(postgres.Connection).init(allocator),
+            .mutex = .{},
+        };
+        errdefer {
+            for (self.connections.items) |*conn| {
+                conn.deinit();
+            }
+            self.connections.deinit();
+        }
+
+        // Pre-fill pool
+        for (0..size) |_| {
+            var conn = try postgres.Connection.init(allocator, conninfo);
+            self.connections.append(conn) catch |err| {
+                conn.deinit();
+                return err;
+            };
+        }
+
+        return self;
+    }
+
+    pub fn deinit(self: *DBPool) void {
+        for (self.connections.items) |*conn| {
+            conn.deinit();
+        }
+        self.connections.deinit();
+        self.allocator.destroy(self);
+    }
+
+    pub fn acquire(self: *DBPool) !postgres.Connection {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.connections.items.len > 0) {
+            return self.connections.pop() orelse unreachable;
+        }
+
+        // Create new connection if pool is empty
+        return postgres.Connection.init(self.allocator, self.conninfo);
+    }
+
+    pub fn release(self: *DBPool, conn: postgres.Connection) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        // Simple pool: just put it back
+        self.connections.append(conn) catch {
+            // If we can't append, close it
+            var c = conn;
+            c.deinit();
+        };
+    }
+};
+
+/// L2 Message status
+pub const MessageStatus = enum {
     draft,
     pending,
     confirmed,
     failed,
 
-    pub fn toString(self: EnhancementStatus) []const u8 {
+    pub fn toString(self: MessageStatus) []const u8 {
         return switch (self) {
             .draft => "draft",
             .pending => "pending",
@@ -25,7 +94,7 @@ pub const EnhancementStatus = enum {
         };
     }
 
-    pub fn fromString(str: []const u8) !EnhancementStatus {
+    pub fn fromString(str: []const u8) !MessageStatus {
         if (std.mem.eql(u8, str, "draft")) return .draft;
         if (std.mem.eql(u8, str, "pending")) return .pending;
         if (std.mem.eql(u8, str, "confirmed")) return .confirmed;
@@ -34,8 +103,8 @@ pub const EnhancementStatus = enum {
     }
 };
 
-/// Transaction Enhancement structure
-pub const TransactionEnhancement = struct {
+/// Transaction Message structure
+pub const L2MessageRecord = struct {
     id: ?u32 = null,
     tx_hash: ?[]const u8 = null,
     temp_id: []const u8,
@@ -47,7 +116,7 @@ pub const TransactionEnhancement = struct {
     reference_id: ?[]const u8 = null,
     is_private: bool = false,
     is_editable: bool = true,
-    status: EnhancementStatus = .draft,
+    status: MessageStatus = .draft,
     confirmation_block_height: ?u32 = null,
     created_at: ?i64 = null,
     updated_at: ?i64 = null,
@@ -85,19 +154,19 @@ pub const Message = struct {
 /// L2 Messaging Service
 pub const L2Service = struct {
     allocator: std.mem.Allocator,
-    pool: *pg.Pool,
+    pool: *DBPool,
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, pool: *pg.Pool) Self {
+    pub fn init(allocator: std.mem.Allocator, pool: *DBPool) Self {
         return Self{
             .allocator = allocator,
             .pool = pool,
         };
     }
 
-    /// Create a new transaction enhancement draft
-    pub fn createEnhancement(
+    /// Create a new transaction message draft
+    pub fn createMessage(
         self: *Self,
         sender: []const u8,
         recipient: ?[]const u8,
@@ -107,363 +176,233 @@ pub const L2Service = struct {
         reference_id: ?[]const u8,
         is_private: bool,
     ) ![]const u8 {
-        const query =
-            \\SELECT create_transaction_enhancement($1, $2, $3, $4, $5, $6, $7)::text
+        _ = tags;
+        _ = reference_id;
+        _ = is_private;
+
+        const sql =
+            \\SELECT create_l2_message($1, $2, $3, $4)::text
         ;
+        const sql_z = try self.allocator.dupeZ(u8, sql);
+        defer self.allocator.free(sql_z);
+
+        const sender_z = try self.allocator.dupeZ(u8, sender);
+        defer self.allocator.free(sender_z);
+        const recipient_z = try self.allocator.dupeZ(u8, recipient orelse "");
+        defer self.allocator.free(recipient_z);
+        const message_z = try self.allocator.dupeZ(u8, message orelse "");
+        defer self.allocator.free(message_z);
+        const category_z = try self.allocator.dupeZ(u8, category orelse "");
+        defer self.allocator.free(category_z);
+
+        const params = [_][:0]const u8{
+            sender_z,
+            recipient_z,
+            message_z,
+            category_z,
+        };
 
         var conn = try self.pool.acquire();
         defer self.pool.release(conn);
 
-        // Convert tags to PostgreSQL array format with proper escaping
-        var tags_array = std.ArrayList(u8).init(self.allocator);
-        defer tags_array.deinit();
-
-        try tags_array.append('{');
-        for (tags, 0..) |tag, i| {
-            if (i > 0) try tags_array.append(',');
-            try tags_array.append('"');
-            // SECURITY: Escape special characters to prevent SQL injection
-            for (tag) |c| {
-                switch (c) {
-                    '"' => try tags_array.appendSlice("\\\""), // Escape double quotes
-                    '\\' => try tags_array.appendSlice("\\\\"), // Escape backslashes
-                    else => try tags_array.append(c),
-                }
-            }
-            try tags_array.append('"');
-        }
-        try tags_array.append('}');
-
-        var result = try conn.query(
-            query,
-            .{
-                sender,
-                recipient orelse "",
-                message orelse "",
-                tags_array.items,
-                category orelse "",
-                reference_id orelse "",
-                is_private,
-            },
-        );
+        var result = try conn.queryParams(sql_z, &params);
         defer result.deinit();
 
-        if (try result.next()) |row| {
-            const temp_id = row.get([]const u8, 0);
-            const id_copy = try self.allocator.dupe(u8, temp_id);
-            log.info("Created enhancement draft with temp_id: {s}", .{id_copy});
-            return id_copy;
+        if (result.rowCount() > 0) {
+            const temp_id_val = result.getValue(0, 0) orelse return error.FailedToCreateMessage;
+            const temp_id = try self.allocator.dupe(u8, temp_id_val);
+            log.info("Created message draft with temp_id: {s}", .{temp_id});
+            return temp_id;
         }
 
-        return error.FailedToCreateEnhancement;
+        return error.FailedToCreateMessage;
     }
 
-    /// Update enhancement status to pending (when transaction submitted)
-    pub fn setEnhancementPending(self: *Self, temp_id: []const u8) !void {
-        const query = 
-            \\SELECT set_enhancement_pending($1::uuid)
+    /// Update message status to pending (when transaction submitted)
+    pub fn setMessagePending(self: *Self, temp_id: []const u8) !void {
+        const sql =
+            \\SELECT set_l2_message_pending($1::uuid)
         ;
+        const sql_z = try self.allocator.dupeZ(u8, sql);
+        defer self.allocator.free(sql_z);
+
+        const temp_id_z = try self.allocator.dupeZ(u8, temp_id);
+        defer self.allocator.free(temp_id_z);
+        const params = [_][:0]const u8{temp_id_z};
 
         var conn = try self.pool.acquire();
         defer self.pool.release(conn);
 
-        var result = try conn.query(query, .{temp_id});
+        var result = try conn.queryParams(sql_z, &params);
         defer result.deinit();
-        
-        if (try result.next()) |row| {
-            const success = row.get(bool, 0);
-            if (!success) {
-                return error.EnhancementNotFound;
+
+        if (result.rowCount() > 0) {
+            const success_val = result.getValue(0, 0) orelse return error.FailedToUpdateMessage;
+            if (std.mem.eql(u8, success_val, "t") or std.mem.eql(u8, success_val, "true")) {
+                log.info("Set message {s} to pending", .{temp_id});
+            } else {
+                return error.MessageNotFound;
             }
-            log.info("Set enhancement {s} to pending", .{temp_id});
         } else {
-            return error.FailedToUpdateEnhancement;
+            return error.FailedToUpdateMessage;
         }
     }
 
-    /// Confirm enhancement when transaction is mined
-    pub fn confirmEnhancement(
+    /// Confirm message when transaction is mined
+    pub fn confirmMessage(
         self: *Self,
         temp_id: []const u8,
         tx_hash: []const u8,
         block_height: u32,
     ) !void {
-        const query = 
-            \\SELECT confirm_transaction_enhancement($1::uuid, $2, $3)
+        const sql =
+            \\SELECT confirm_l2_message($1::uuid, $2, $3)
         ;
+        const sql_z = try self.allocator.dupeZ(u8, sql);
+        defer self.allocator.free(sql_z);
+
+        const temp_id_z = try self.allocator.dupeZ(u8, temp_id);
+        defer self.allocator.free(temp_id_z);
+        const tx_hash_z = try self.allocator.dupeZ(u8, tx_hash);
+        defer self.allocator.free(tx_hash_z);
+        const block_height_str = try std.fmt.allocPrint(self.allocator, "{d}", .{block_height});
+        defer self.allocator.free(block_height_str);
+        const block_height_z = try self.allocator.dupeZ(u8, block_height_str);
+        defer self.allocator.free(block_height_z);
+        const params = [_][:0]const u8{ temp_id_z, tx_hash_z, block_height_z };
 
         var conn = try self.pool.acquire();
         defer self.pool.release(conn);
 
-        var result = try conn.query(query, .{ temp_id, tx_hash, block_height });
+        var result = try conn.queryParams(sql_z, &params);
         defer result.deinit();
-        
-        if (try result.next()) |row| {
-            const success = row.get(bool, 0);
-            if (!success) {
-                log.warn("Enhancement {s} not found or already confirmed", .{temp_id});
-                return;
+
+        if (result.rowCount() > 0) {
+            const success_val = result.getValue(0, 0) orelse return error.FailedToConfirmMessage;
+            if (std.mem.eql(u8, success_val, "t") or std.mem.eql(u8, success_val, "true")) {
+                log.info("Confirmed message {s} with tx_hash {s} at height {}", .{ temp_id, tx_hash, block_height });
+            } else {
+                log.warn("Message {s} not found or already confirmed", .{temp_id});
             }
-            log.info("Confirmed enhancement {s} with tx_hash {s} at height {}", .{ temp_id, tx_hash, block_height });
-        } else {
-            return error.FailedToConfirmEnhancement;
         }
     }
 
-    /// Query enhancements by sender and recipient
-    pub fn queryEnhancementsBySenderRecipient(
+    /// Query messages by sender and recipient
+    pub fn queryMessagesBySenderRecipient(
         self: *Self,
         sender: []const u8,
         recipient: []const u8,
-        status: EnhancementStatus,
-    ) ![]TransactionEnhancement {
-        const query =
-            \\SELECT 
-            \\  e.id, e.tx_hash, e.temp_id::text, e.sender_address, e.recipient_address,
-            \\  e.message, e.tags, e.category, e.reference_id,
-            \\  e.is_private, e.is_editable, e.status,
-            \\  e.confirmation_block_height,
-            \\  EXTRACT(EPOCH FROM e.created_at)::bigint,
-            \\  EXTRACT(EPOCH FROM e.updated_at)::bigint,
-            \\  EXTRACT(EPOCH FROM e.confirmed_at)::bigint
-            \\FROM l2_transaction_enhancements e
-            \\WHERE e.sender_address = $1 
-            \\  AND e.recipient_address = $2
-            \\  AND e.status = $3
-            \\ORDER BY e.created_at DESC
-            \\LIMIT 10
-        ;
+        status: MessageStatus,
+    ) ![]L2MessageRecord {
+        _ = sender;
+        _ = recipient;
+        _ = status;
 
-        var conn = try self.pool.acquire();
-        defer self.pool.release(conn);
-
-        var result = try conn.query(query, .{ sender, recipient, status.toString() });
-        defer result.deinit();
-
-        var enhancements = std.ArrayList(TransactionEnhancement).init(self.allocator);
-        
-        while (try result.next()) |row| {
-            const enhancement = TransactionEnhancement{
-                .id = if (row.get(?i32, 0)) |v| @intCast(v) else null,
-                .tx_hash = if (row.get(?[]const u8, 1)) |h| try self.allocator.dupe(u8, h) else null,
-                .temp_id = try self.allocator.dupe(u8, row.get([]const u8, 2)),
-                .sender_address = try self.allocator.dupe(u8, row.get([]const u8, 3)),
-                .recipient_address = if (row.get(?[]const u8, 4)) |r| try self.allocator.dupe(u8, r) else null,
-                .message = if (row.get(?[]const u8, 5)) |m| try self.allocator.dupe(u8, m) else null,
-                .category = if (row.get(?[]const u8, 7)) |c| try self.allocator.dupe(u8, c) else null,
-                .reference_id = if (row.get(?[]const u8, 8)) |r| try self.allocator.dupe(u8, r) else null,
-                .is_private = row.get(bool, 9),
-                .is_editable = row.get(bool, 10),
-                .status = try EnhancementStatus.fromString(row.get([]const u8, 11)),
-                .confirmation_block_height = if (row.get(?i64, 12)) |v| @intCast(v) else null,
-                .created_at = row.get(?i64, 13),
-                .updated_at = row.get(?i64, 14),
-                .confirmed_at = row.get(?i64, 15),
-            };
-            
-            try enhancements.append(enhancement);
-        }
-
-        return enhancements.toOwnedSlice();
+        // TODO: Implement with proper SQL
+        var messages = std.array_list.Managed(L2MessageRecord).init(self.allocator);
+        return messages.toOwnedSlice();
     }
 
-    /// Free memory allocated for TransactionEnhancement array
-    pub fn freeEnhancements(self: *Self, enhancements: []TransactionEnhancement) void {
-        for (enhancements) |enhancement| {
-            if (enhancement.tx_hash) |h| self.allocator.free(h);
-            self.allocator.free(enhancement.temp_id);
-            self.allocator.free(enhancement.sender_address);
-            if (enhancement.recipient_address) |r| self.allocator.free(r);
-            if (enhancement.message) |m| self.allocator.free(m);
-            if (enhancement.category) |c| self.allocator.free(c);
-            if (enhancement.reference_id) |r| self.allocator.free(r);
+    /// Free memory allocated for L2MessageRecord array
+    pub fn freeMessages(self: *Self, messages: []L2MessageRecord) void {
+        for (messages) |message| {
+            if (message.tx_hash) |h| self.allocator.free(h);
+            self.allocator.free(message.temp_id);
+            self.allocator.free(message.sender_address);
+            if (message.recipient_address) |r| self.allocator.free(r);
+            if (message.message) |m| self.allocator.free(m);
+            if (message.category) |c| self.allocator.free(c);
+            if (message.reference_id) |r| self.allocator.free(r);
         }
-        self.allocator.free(enhancements);
+        self.allocator.free(messages);
     }
 
-    /// Query enhancements with filters
-    pub fn queryEnhancements(
+    /// Query messages with filters
+    pub fn queryMessages(
         self: *Self,
         sender: ?[]const u8,
         recipient: ?[]const u8,
-        status: EnhancementStatus,
+        status: MessageStatus,
         limit: u32,
-    ) ![]TransactionEnhancement {
-        var query_buf: [1024]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&query_buf);
-        const writer = stream.writer();
-        
-        try writer.writeAll(
-            \\SELECT 
-            \\  e.id, e.tx_hash, e.temp_id::text, e.sender_address, e.recipient_address,
-            \\  e.message, e.tags, e.category, e.reference_id,
-            \\  e.is_private, e.is_editable, e.status,
-            \\  e.confirmation_block_height,
-            \\  EXTRACT(EPOCH FROM e.created_at)::bigint,
-            \\  EXTRACT(EPOCH FROM e.updated_at)::bigint,
-            \\  EXTRACT(EPOCH FROM e.confirmed_at)::bigint
-            \\FROM l2_transaction_enhancements e
-            \\WHERE e.status = $1
-        );
-        
-        var param_count: u32 = 1;
-        
-        if (sender) |_| {
-            param_count += 1;
-            try writer.print(" AND e.sender_address = ${}", .{param_count});
-        }
-        
-        if (recipient) |_| {
-            param_count += 1;
-            try writer.print(" AND e.recipient_address = ${}", .{param_count});
-        }
-        
-        try writer.print(" ORDER BY e.created_at DESC LIMIT {}", .{limit});
-        
-        const query = stream.getWritten();
-        
-        var conn = try self.pool.acquire();
-        defer self.pool.release(conn);
-        
-        // Build parameters array dynamically
-        var result = if (sender != null and recipient != null) 
-            try conn.query(query, .{ status.toString(), sender.?, recipient.? })
-        else if (sender != null)
-            try conn.query(query, .{ status.toString(), sender.? })
-        else if (recipient != null)
-            try conn.query(query, .{ status.toString(), recipient.? })
-        else
-            try conn.query(query, .{ status.toString() });
-            
-        defer result.deinit();
-        
-        var enhancements = std.ArrayList(TransactionEnhancement).init(self.allocator);
-        
-        while (try result.next()) |row| {
-            const enhancement = TransactionEnhancement{
-                .id = if (row.get(?i32, 0)) |v| @intCast(v) else null,
-                .tx_hash = if (row.get(?[]const u8, 1)) |h| try self.allocator.dupe(u8, h) else null,
-                .temp_id = try self.allocator.dupe(u8, row.get([]const u8, 2)),
-                .sender_address = try self.allocator.dupe(u8, row.get([]const u8, 3)),
-                .recipient_address = if (row.get(?[]const u8, 4)) |r| try self.allocator.dupe(u8, r) else null,
-                .message = if (row.get(?[]const u8, 5)) |m| try self.allocator.dupe(u8, m) else null,
-                .category = if (row.get(?[]const u8, 7)) |c| try self.allocator.dupe(u8, c) else null,
-                .reference_id = if (row.get(?[]const u8, 8)) |r| try self.allocator.dupe(u8, r) else null,
-                .is_private = row.get(bool, 9),
-                .is_editable = row.get(bool, 10),
-                .status = try EnhancementStatus.fromString(row.get([]const u8, 11)),
-                .confirmation_block_height = if (row.get(?i64, 12)) |v| @intCast(v) else null,
-                .created_at = row.get(?i64, 13),
-                .updated_at = row.get(?i64, 14),
-                .confirmed_at = row.get(?i64, 15),
-            };
-            
-            try enhancements.append(enhancement);
-        }
-        
-        return enhancements.toOwnedSlice();
+    ) ![]L2MessageRecord {
+        _ = sender;
+        _ = recipient;
+        _ = status;
+        _ = limit;
+
+        // TODO: Implement complex query with result parsing
+        var messages = std.array_list.Managed(L2MessageRecord).init(self.allocator);
+        return messages.toOwnedSlice();
     }
 
-    /// Get enhanced transaction by hash
-    pub fn getEnhancedTransaction(self: *Self, tx_hash: []const u8) !?TransactionEnhancement {
-        const query =
-            \\SELECT 
-            \\  e.id, e.tx_hash, e.temp_id::text, e.sender_address, e.recipient_address,
-            \\  e.message, e.tags, e.category, e.reference_id,
-            \\  e.is_private, e.is_editable, e.status,
-            \\  e.confirmation_block_height,
-            \\  EXTRACT(EPOCH FROM e.created_at)::bigint,
-            \\  EXTRACT(EPOCH FROM e.updated_at)::bigint,
-            \\  EXTRACT(EPOCH FROM e.confirmed_at)::bigint
-            \\FROM l2_transaction_enhancements e
-            \\WHERE e.tx_hash = $1
-        ;
+    /// Get message by transaction hash
+    pub fn getMessageByTransaction(self: *Self, tx_hash: []const u8) !?L2MessageRecord {
+        _ = self;
+        _ = tx_hash;
 
-        var conn = try self.pool.acquire();
-        defer self.pool.release(conn);
-
-        var result = try conn.query(query, .{tx_hash});
-        defer result.deinit();
-        
-        if (try result.next()) |row| {
-            var tags = std.ArrayList([]const u8).init(self.allocator);
-            defer tags.deinit();
-            
-            return TransactionEnhancement{
-                .id = if (row.get(?i32, 0)) |v| @intCast(v) else null,
-                .tx_hash = if (row.get(?[]const u8, 1)) |h| try self.allocator.dupe(u8, h) else null,
-                .temp_id = try self.allocator.dupe(u8, row.get([]const u8, 2)),
-                .sender_address = try self.allocator.dupe(u8, row.get([]const u8, 3)),
-                .recipient_address = if (row.get(?[]const u8, 4)) |r| try self.allocator.dupe(u8, r) else null,
-                .message = if (row.get(?[]const u8, 5)) |m| try self.allocator.dupe(u8, m) else null,
-                .tags = try tags.toOwnedSlice(),
-                .category = if (row.get(?[]const u8, 7)) |c| try self.allocator.dupe(u8, c) else null,
-                .reference_id = if (row.get(?[]const u8, 8)) |r| try self.allocator.dupe(u8, r) else null,
-                .is_private = row.get(bool, 9),
-                .is_editable = row.get(bool, 10),
-                .status = try EnhancementStatus.fromString(row.get([]const u8, 11)),
-                .confirmation_block_height = if (row.get(?i64, 12)) |v| @intCast(v) else null,
-                .created_at = row.get(?i64, 13),
-                .updated_at = row.get(?i64, 14),
-                .confirmed_at = row.get(?i64, 15),
-            };
-        }
-        
+        // TODO: Implement complex query with result parsing
         return null;
     }
 
-    /// Get enhanced transactions for an address
-    pub fn getEnhancedTransactionsForAddress(
+    /// Get messages for an address
+    pub fn getMessagesForAddress(
         self: *Self,
         address: []const u8,
         limit: u32,
         offset: u32,
-    ) ![]TransactionEnhancement {
+    ) ![]L2MessageRecord {
         _ = address;
         _ = limit;
         _ = offset;
 
-        var enhancements = std.ArrayList(TransactionEnhancement).init(self.allocator);
-        
-        return enhancements.toOwnedSlice();
+        var messages = std.array_list.Managed(L2MessageRecord).init(self.allocator);
+
+        return messages.toOwnedSlice();
     }
 
-    /// Search enhanced transactions by message content
-    pub fn searchEnhancedTransactions(
+    /// Search messages by message content
+    pub fn searchMessages(
         self: *Self,
         search_query: []const u8,
         address: ?[]const u8,
         limit: u32,
-    ) ![]TransactionEnhancement {
+    ) ![]L2MessageRecord {
         _ = search_query;
         _ = address;
         _ = limit;
 
-        var results = std.ArrayList(TransactionEnhancement).init(self.allocator);
-        
+        var results = std.array_list.Managed(L2MessageRecord).init(self.allocator);
+
         return results.toOwnedSlice();
     }
 
-    /// Clean up orphaned enhancements (pending for too long)
-    pub fn cleanupOrphanedEnhancements(self: *Self) !u32 {
-        const query = 
-            \\SELECT cleanup_orphaned_enhancements()
-        ;
+    /// Clean up orphaned messages (pending for too long)
+    pub fn cleanupOrphanedMessages(self: *Self) !u32 {
+        const sql_str = try std.fmt.allocPrint(
+            self.allocator,
+            "SELECT cleanup_orphaned_l2_messages()",
+            .{},
+        );
+        defer self.allocator.free(sql_str);
+
+        const sql = try self.allocator.dupeZ(u8, sql_str);
+        defer self.allocator.free(sql);
 
         var conn = try self.pool.acquire();
         defer self.pool.release(conn);
 
-        var result = try conn.query(query, .{});
+        var result = try conn.query(sql);
         defer result.deinit();
-        
-        if (try result.next()) |row| {
-            const count: u32 = @intCast(row.get(i64, 0));
+
+        if (result.rowCount() > 0) {
+            const count_val = result.getValue(0, 0) orelse return 0;
+            const count = std.fmt.parseInt(u32, count_val, 10) catch 0;
             if (count > 0) {
-                log.info("Cleaned up {} orphaned enhancements", .{count});
+                log.info("Cleaned up {} orphaned L2 messages", .{count});
             }
             return count;
         }
-        
+
         return 0;
     }
 
@@ -472,30 +411,9 @@ pub const L2Service = struct {
     }
 };
 
-/// L2 API context for REST endpoints
-pub const L2ApiContext = struct {
-    allocator: std.mem.Allocator,
-    l2_service: *L2Service,
-};
-
-/// Create transaction enhancement endpoint
-/// POST /api/l2/enhancements
-pub fn createEnhancementHandler(r: zap.Request) void {
-    const self = @as(*L2ApiContext, @ptrCast(@alignCast(r.getUserContext())));
-    
-    r.parsebody() catch |err| {
-        log.err("Failed to parse body: {}", .{err});
-        r.setStatus(.bad_request);
-        r.sendJson(.{ .@"error" = "Invalid request body" }) catch return;
-        return;
-    };
-
-    const body = r.body orelse {
-        r.setStatus(.bad_request);
-        r.sendJson(.{ .@"error" = "Missing request body" }) catch return;
-        return;
-    };
-
+/// Create L2 message endpoint
+/// POST /api/l2/messages
+fn handleCreateMessage(service: *L2Service, allocator: std.mem.Allocator, body: []const u8) ![]const u8 {
     const parsed = std.json.parseFromSlice(struct {
         sender: []const u8,
         recipient: ?[]const u8 = null,
@@ -504,17 +422,14 @@ pub fn createEnhancementHandler(r: zap.Request) void {
         category: ?[]const u8 = null,
         reference_id: ?[]const u8 = null,
         is_private: bool = false,
-    }, self.allocator, body, .{}) catch |err| {
-        log.err("Failed to parse JSON: {}", .{err});
-        r.setStatus(.bad_request);
-        r.sendJson(.{ .@"error" = "Invalid JSON format" }) catch return;
-        return;
+    }, allocator, body, .{}) catch {
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"Invalid JSON format\"}}", .{});
     };
     defer parsed.deinit();
 
     const data = parsed.value;
 
-    const temp_id = self.l2_service.createEnhancement(
+    const temp_id = service.createMessage(
         data.sender,
         data.recipient,
         data.message,
@@ -523,256 +438,459 @@ pub fn createEnhancementHandler(r: zap.Request) void {
         data.reference_id,
         data.is_private,
     ) catch |err| {
-        log.err("Failed to create enhancement: {}", .{err});
-        r.setStatus(.internal_server_error);
-        r.sendJson(.{ .@"error" = "Failed to create enhancement" }) catch return;
-        return;
+        log.err("Failed to create message: {}", .{err});
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"Failed to create message\"}}", .{});
     };
-    defer self.allocator.free(temp_id);
+    defer allocator.free(temp_id);
 
-    r.setStatus(.ok);
-    r.sendJson(.{
-        .success = true,
-        .temp_id = temp_id,
-        .status = "draft",
-    }) catch return;
+    return try std.fmt.allocPrint(allocator, "{{\"success\":true,\"temp_id\":\"{s}\",\"status\":\"draft\"}}", .{temp_id});
 }
 
-/// Update enhancement to pending status
-/// PUT /api/l2/enhancements/{temp_id}/pending
-pub fn setEnhancementPendingHandler(r: zap.Request) void {
-    const self = @as(*L2ApiContext, @ptrCast(@alignCast(r.getUserContext())));
-    
-    const path = r.path orelse {
-        r.setStatus(.bad_request);
-        r.sendJson(.{ .@"error" = "Invalid path" }) catch return;
-        return;
-    };
-
+/// Update message to pending status
+/// PUT /api/l2/messages/{temp_id}/pending
+fn handleSetMessagePending(service: *L2Service, allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     const temp_id = extractTempIdFromPath(path) catch {
-        r.setStatus(.bad_request);
-        r.sendJson(.{ .@"error" = "Invalid temp_id in path" }) catch return;
-        return;
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"Invalid temp_id in path\"}}", .{});
     };
 
-    self.l2_service.setEnhancementPending(temp_id) catch |err| {
-        log.err("Failed to update enhancement: {}", .{err});
-        r.setStatus(.internal_server_error);
-        r.sendJson(.{ .@"error" = "Failed to update enhancement" }) catch return;
-        return;
+    service.setMessagePending(temp_id) catch |err| {
+        log.err("Failed to update message: {}", .{err});
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"Failed to update message\"}}", .{});
     };
 
-    r.setStatus(.ok);
-    r.sendJson(.{
-        .success = true,
-        .temp_id = temp_id,
-        .status = "pending",
-    }) catch return;
+    return try std.fmt.allocPrint(allocator, "{{\"success\":true,\"temp_id\":\"{s}\",\"status\":\"pending\"}}", .{temp_id});
 }
 
-/// Confirm enhancement with transaction hash
-/// PUT /api/l2/enhancements/{temp_id}/confirm
-pub fn confirmEnhancementHandler(r: zap.Request) void {
-    const self = @as(*L2ApiContext, @ptrCast(@alignCast(r.getUserContext())));
-    
-    r.parsebody() catch |err| {
-        log.err("Failed to parse body: {}", .{err});
-        r.setStatus(.bad_request);
-        r.sendJson(.{ .@"error" = "Invalid request body" }) catch return;
-        return;
-    };
-
-    const body = r.body orelse {
-        r.setStatus(.bad_request);
-        r.sendJson(.{ .@"error" = "Missing request body" }) catch return;
-        return;
-    };
-
-    const path = r.path orelse {
-        r.setStatus(.bad_request);
-        r.sendJson(.{ .@"error" = "Invalid path" }) catch return;
-        return;
-    };
-
+/// Confirm message with transaction hash
+/// PUT /api/l2/messages/{temp_id}/confirm
+fn handleConfirmMessage(service: *L2Service, allocator: std.mem.Allocator, path: []const u8, body: []const u8) ![]const u8 {
     const temp_id = extractTempIdFromPath(path) catch {
-        r.setStatus(.bad_request);
-        r.sendJson(.{ .@"error" = "Invalid temp_id in path" }) catch return;
-        return;
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"Invalid temp_id in path\"}}", .{});
     };
 
     const parsed = std.json.parseFromSlice(struct {
         tx_hash: []const u8,
         block_height: u32,
-    }, self.allocator, body, .{}) catch |err| {
-        log.err("Failed to parse JSON: {}", .{err});
-        r.setStatus(.bad_request);
-        r.sendJson(.{ .@"error" = "Invalid JSON format" }) catch return;
-        return;
+    }, allocator, body, .{}) catch {
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"Invalid JSON format\"}}", .{});
     };
     defer parsed.deinit();
 
     const data = parsed.value;
 
-    self.l2_service.confirmEnhancement(
+    service.confirmMessage(
         temp_id,
         data.tx_hash,
         data.block_height,
     ) catch |err| {
-        log.err("Failed to confirm enhancement: {}", .{err});
-        r.setStatus(.internal_server_error);
-        r.sendJson(.{ .@"error" = "Failed to confirm enhancement" }) catch return;
-        return;
+        log.err("Failed to confirm message: {}", .{err});
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"Failed to confirm message\"}}", .{});
     };
 
-    r.setStatus(.ok);
-    r.sendJson(.{
-        .success = true,
-        .temp_id = temp_id,
-        .tx_hash = data.tx_hash,
-        .status = "confirmed",
-    }) catch return;
+    return try std.fmt.allocPrint(allocator, "{{\"success\":true,\"temp_id\":\"{s}\",\"tx_hash\":\"{s}\",\"status\":\"confirmed\"}}", .{ temp_id, data.tx_hash });
 }
 
-/// Get enhanced transactions for an address
-/// GET /api/transactions/enhanced?address={address}&limit={limit}&offset={offset}
-pub fn getEnhancedTransactionsHandler(r: zap.Request) void {
-    const self = @as(*L2ApiContext, @ptrCast(@alignCast(r.getUserContext())));
-    
-    const address = r.getParamStr("address") catch {
-        r.setStatus(.bad_request);
-        r.sendJson(.{ .@"error" = "Missing address parameter" }) catch return;
-        return;
+/// Get messages for an address
+/// GET /api/transactions/messages?address={address}&limit={limit}&offset={offset}
+fn handleGetMessages(service: *L2Service, allocator: std.mem.Allocator, query: []const u8) ![]const u8 {
+    const address = parseQueryParam(query, "address") orelse {
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"Missing address parameter\"}}", .{});
     };
 
-    const limit = r.getParamInt("limit") catch 50;
-    const offset = r.getParamInt("offset") catch 0;
+    const limit = parseQueryParamInt(query, "limit") orelse 50;
+    const offset = parseQueryParamInt(query, "offset") orelse 0;
 
-    const transactions = self.l2_service.getEnhancedTransactionsForAddress(
+    // Note: getMessagesForAddress is currently a stub
+    const transactions = service.getMessagesForAddress(
         address,
         @intCast(limit),
         @intCast(offset),
     ) catch |err| {
-        log.err("Failed to get enhanced transactions: {}", .{err});
-        r.setStatus(.internal_server_error);
-        r.sendJson(.{ .@"error" = "Failed to retrieve transactions" }) catch return;
-        return;
+        log.err("Failed to get messages: {}", .{err});
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"Failed to retrieve messages\"}}", .{});
     };
-    defer self.allocator.free(transactions);
+    defer allocator.free(transactions);
 
-    var response = std.ArrayList(std.json.Value).init(self.allocator);
-    defer response.deinit();
-
-    for (transactions) |tx| {
-        var tx_obj = std.StringHashMap(std.json.Value).init(self.allocator);
-        defer tx_obj.deinit();
-        
-        if (tx.tx_hash) |hash| {
-            try tx_obj.put("tx_hash", .{ .string = hash });
-        }
-        try tx_obj.put("temp_id", .{ .string = tx.temp_id });
-        try tx_obj.put("sender", .{ .string = tx.sender_address });
-        if (tx.recipient_address) |recipient| {
-            try tx_obj.put("recipient", .{ .string = recipient });
-        }
-        if (tx.message) |msg| {
-            try tx_obj.put("message", .{ .string = msg });
-        }
-        if (tx.category) |cat| {
-            try tx_obj.put("category", .{ .string = cat });
-        }
-        try tx_obj.put("status", .{ .string = tx.status.toString() });
-        try tx_obj.put("is_private", .{ .bool = tx.is_private });
-        
-        try response.append(.{ .object = tx_obj });
-    }
-
-    r.setStatus(.ok);
-    r.sendJson(.{
-        .transactions = response.items,
-        .count = transactions.len,
-        .offset = offset,
-        .limit = limit,
-    }) catch return;
+    // Simple JSON array response (stub returns empty array)
+    return try std.fmt.allocPrint(allocator, "{{\"transactions\":[],\"count\":{},\"offset\":{},\"limit\":{}}}", .{ transactions.len, offset, limit });
 }
 
-/// Search enhanced transactions by message content
+/// Search messages by message content
 /// GET /api/l2/search?q={query}&address={address}&limit={limit}
-pub fn searchEnhancedTransactionsHandler(r: zap.Request) void {
-    const self = @as(*L2ApiContext, @ptrCast(@alignCast(r.getUserContext())));
-    
-    const query = r.getParamStr("q") catch {
-        r.setStatus(.bad_request);
-        r.sendJson(.{ .@"error" = "Missing search query" }) catch return;
-        return;
+fn handleSearchMessages(service: *L2Service, allocator: std.mem.Allocator, query_string: []const u8) ![]const u8 {
+    const search_query = parseQueryParam(query_string, "q") orelse {
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"Missing search query\"}}", .{});
     };
 
-    const address = r.getParamStr("address") catch null;
-    const limit = r.getParamInt("limit") catch 50;
+    const address = parseQueryParam(query_string, "address");
+    const limit = parseQueryParamInt(query_string, "limit") orelse 50;
 
-    const results = self.l2_service.searchEnhancedTransactions(
-        query,
+    // Note: searchMessages is currently a stub
+    const results = service.searchMessages(
+        search_query,
         address,
         @intCast(limit),
     ) catch |err| {
-        log.err("Failed to search transactions: {}", .{err});
-        r.setStatus(.internal_server_error);
-        r.sendJson(.{ .@"error" = "Search failed" }) catch return;
-        return;
+        log.err("Failed to search messages: {}", .{err});
+        return try std.fmt.allocPrint(allocator, "{{\"error\":\"Search failed\"}}", .{});
     };
-    defer self.allocator.free(results);
+    defer allocator.free(results);
 
-    r.setStatus(.ok);
-    r.sendJson(.{
-        .results = results,
-        .count = results.len,
-        .query = query,
-    }) catch return;
+    return try std.fmt.allocPrint(allocator, "{{\"results\":[],\"count\":{},\"query\":\"{s}\"}}", .{ results.len, search_query });
+}
+
+/// Health check endpoint
+/// GET /health, /api/l2/health
+fn handleHealthCheck(service: *L2Service, allocator: std.mem.Allocator) !HttpResponse {
+    const db_ok = checkDatabaseHealth(service) catch |err| blk: {
+        log.warn("Health check DB probe failed: {}", .{err});
+        break :blk false;
+    };
+
+    const now = util.getTime();
+    const status_str = if (db_ok) "ok" else "degraded";
+    const db_status = if (db_ok) "ok" else "down";
+    const http_status: u16 = if (db_ok) 200 else 503;
+    const body = try std.fmt.allocPrint(
+        allocator,
+        "{{\"status\":\"{s}\",\"service\":\"l2_service\",\"database\":\"{s}\",\"timestamp\":{}}}",
+        .{ status_str, db_status, now },
+    );
+
+    return .{
+        .status = http_status,
+        .body = body,
+    };
+}
+
+fn checkDatabaseHealth(service: *L2Service) !bool {
+    const sql: [:0]const u8 = "SELECT 1";
+
+    var conn = try service.pool.acquire();
+    defer service.pool.release(conn);
+
+    var result = try conn.query(sql);
+    defer result.deinit();
+
+    if (result.rowCount() == 0) return error.NoResult;
+    const value = result.getValue(0, 0) orelse return error.NoResult;
+    if (!std.mem.eql(u8, value, "1")) return error.InvalidProbeResult;
+
+    return true;
 }
 
 /// Helper function to extract temp_id from path
 fn extractTempIdFromPath(path: []const u8) ![]const u8 {
-    const parts = std.mem.tokenize(u8, path, "/");
-    var iter = parts;
-    
+    var iter = std.mem.tokenizeScalar(u8, path, '/');
+
     while (iter.next()) |part| {
         if (part.len == 36 and std.mem.indexOf(u8, part, "-") != null) {
             return part;
         }
     }
-    
+
     return error.TempIdNotFound;
 }
 
-/// Register L2 API endpoints
-pub fn registerL2Endpoints(app: *zap.Listener, context: *L2ApiContext) !void {
-    try app.post("/api/l2/enhancements", createEnhancementHandler);
-    try app.put("/api/l2/enhancements/*/pending", setEnhancementPendingHandler);
-    try app.put("/api/l2/enhancements/*/confirm", confirmEnhancementHandler);
-    
-    try app.get("/api/transactions/enhanced", getEnhancedTransactionsHandler);
-    try app.get("/api/l2/search", searchEnhancedTransactionsHandler);
-    
-    app.setUserContext(context);
-    
-    log.info("L2 API endpoints registered", .{});
-}
-
-/// Initialize L2 service with configuration
-pub fn initL2Service(allocator: std.mem.Allocator, pool: *pg.Pool) !L2Service {
-    log.info("Initializing L2 Messaging Service", .{});
-    
-    const service = L2Service.init(allocator, pool);
-    
-    const conn = try pool.acquire();
-    defer pool.release(conn);
-    
-    var result = try conn.query("SELECT 1", .{});
-    defer result.deinit();
-    if (result) |val| {
-        if (val == 1) {
-            log.info("L2 Service database connection verified", .{});
+/// Parse query parameter from query string
+fn parseQueryParam(query: []const u8, param_name: []const u8) ?[]const u8 {
+    var iter = std.mem.tokenizeScalar(u8, query, '&');
+    while (iter.next()) |pair| {
+        if (std.mem.indexOfScalar(u8, pair, '=')) |eq_idx| {
+            const key = pair[0..eq_idx];
+            const value = pair[eq_idx + 1 ..];
+            if (std.mem.eql(u8, key, param_name)) {
+                return value;
+            }
         }
     }
-    
-    return service;
+    return null;
+}
+
+/// Parse integer query parameter
+fn parseQueryParamInt(query: []const u8, param_name: []const u8) ?u32 {
+    const value_str = parseQueryParam(query, param_name) orelse return null;
+    return std.fmt.parseInt(u32, value_str, 10) catch null;
+}
+
+// Simple HTTP Server
+const HttpServer = struct {
+    allocator: std.mem.Allocator,
+    l2_service: *L2Service,
+    port: u16,
+    io: std.Io,
+
+    pub fn init(allocator: std.mem.Allocator, l2_service: *L2Service, io: std.Io, port: u16) HttpServer {
+        return .{
+            .allocator = allocator,
+            .l2_service = l2_service,
+            .port = port,
+            .io = io,
+        };
+    }
+
+    pub fn start(self: *HttpServer) !void {
+        const address = try net.IpAddress.parse("0.0.0.0", self.port);
+        var server = try address.listen(self.io, .{ .reuse_address = true });
+        defer server.deinit(self.io);
+
+        log.info("🚀 L2 Service listening on 0.0.0.0:{d}", .{self.port});
+
+        while (true) {
+            const connection = server.accept(self.io) catch |err| {
+                if (err == error.WouldBlock) {
+                    self.io.sleep(std.Io.Duration.fromMilliseconds(10), std.Io.Clock.awake) catch {};
+                    continue;
+                }
+                log.err("Accept error: {}", .{err});
+                continue;
+            };
+
+            self.handleConnection(connection);
+        }
+    }
+
+    fn handleConnection(self: *HttpServer, connection: net.Stream) void {
+        defer connection.close(self.io);
+
+        var buffer: [16384]u8 = undefined;
+        const request_data = self.readHttpRequest(connection, &buffer) catch |err| {
+            log.err("Read/parse error: {}", .{err});
+            switch (err) {
+                error.RequestTooLarge => self.sendError(connection, 413, "Request Entity Too Large"),
+                error.IncompleteRequest => self.sendError(connection, 400, "Incomplete Request Body"),
+                else => self.sendError(connection, 400, "Bad Request"),
+            }
+            return;
+        };
+
+        if (request_data.len == 0) return;
+
+        // Simple HTTP parsing
+        var iter = std.mem.tokenizeScalar(u8, request_data, '\n');
+        const request_line = iter.next() orelse return;
+
+        var req_iter = std.mem.tokenizeScalar(u8, request_line, ' ');
+        const method = req_iter.next() orelse return;
+        const full_path = req_iter.next() orelse return;
+
+        // Parse path and query
+        var path = full_path;
+        var query: []const u8 = "";
+        if (std.mem.indexOfScalar(u8, full_path, '?')) |idx| {
+            path = full_path[0..idx];
+            query = full_path[idx + 1 ..];
+        }
+
+        // Extract body
+        var body: []const u8 = "";
+        if (findHeaderEnd(request_data)) |idx| {
+            body = request_data[idx..];
+        }
+
+        const response = self.route(method, path, query, body) catch |err| {
+            log.err("Handler error: {}", .{err});
+            self.sendError(connection, 500, "Internal Server Error");
+            return;
+        };
+        defer self.allocator.free(response.body);
+
+        self.sendResponse(connection, response.status, response.body);
+    }
+
+    fn sendResponse(self: *HttpServer, connection: net.Stream, status: u16, body: []const u8) void {
+        const reason = statusReason(status);
+        const status_line = std.fmt.allocPrint(self.allocator, "HTTP/1.1 {d} {s}\r\n", .{ status, reason }) catch return;
+        defer self.allocator.free(status_line);
+        const header = "Content-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PUT, OPTIONS\r\nConnection: close\r\nContent-Length: ";
+
+        const len_str = std.fmt.allocPrint(self.allocator, "{d}", .{body.len}) catch return;
+        defer self.allocator.free(len_str);
+
+        var write_buf: [4096]u8 = undefined;
+        var writer = connection.writer(self.io, &write_buf);
+
+        _ = writer.interface.writeAll(status_line) catch {};
+        _ = writer.interface.writeAll(header) catch {};
+        _ = writer.interface.writeAll(len_str) catch {};
+        _ = writer.interface.writeAll("\r\n\r\n") catch {};
+        _ = writer.interface.writeAll(body) catch {};
+        _ = writer.interface.flush() catch {};
+    }
+
+    fn sendError(self: *HttpServer, connection: net.Stream, status: u16, message: []const u8) void {
+        const json = std.fmt.allocPrint(self.allocator, "{{\"error\":\"{s}\"}}", .{message}) catch return;
+        defer self.allocator.free(json);
+        self.sendResponse(connection, status, json);
+    }
+
+    fn route(self: *HttpServer, method: []const u8, path: []const u8, query: []const u8, body: []const u8) !HttpResponse {
+        // OPTIONS (CORS)
+        if (std.mem.eql(u8, method, "OPTIONS")) {
+            return .{
+                .status = 204,
+                .body = try self.allocator.dupe(u8, ""),
+            };
+        }
+
+        // GET /health or /api/l2/health
+        if (std.mem.eql(u8, method, "GET") and (std.mem.eql(u8, path, "/health") or std.mem.eql(u8, path, "/api/l2/health"))) {
+            return try handleHealthCheck(self.l2_service, self.allocator);
+        }
+
+        // POST /api/l2/messages
+        if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/api/l2/messages")) {
+            return .{
+                .status = 200,
+                .body = try handleCreateMessage(self.l2_service, self.allocator, body),
+            };
+        }
+
+        // PUT /api/l2/messages/{temp_id}/pending
+        if (std.mem.eql(u8, method, "PUT") and std.mem.startsWith(u8, path, "/api/l2/messages/") and std.mem.endsWith(u8, path, "/pending")) {
+            return .{
+                .status = 200,
+                .body = try handleSetMessagePending(self.l2_service, self.allocator, path),
+            };
+        }
+
+        // PUT /api/l2/messages/{temp_id}/confirm
+        if (std.mem.eql(u8, method, "PUT") and std.mem.startsWith(u8, path, "/api/l2/messages/") and std.mem.endsWith(u8, path, "/confirm")) {
+            return .{
+                .status = 200,
+                .body = try handleConfirmMessage(self.l2_service, self.allocator, path, body),
+            };
+        }
+
+        // GET /api/transactions/messages
+        if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/api/transactions/messages")) {
+            return .{
+                .status = 200,
+                .body = try handleGetMessages(self.l2_service, self.allocator, query),
+            };
+        }
+
+        // GET /api/l2/search
+        if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/api/l2/search")) {
+            return .{
+                .status = 200,
+                .body = try handleSearchMessages(self.l2_service, self.allocator, query),
+            };
+        }
+
+        // Default: 404
+        return .{
+            .status = 404,
+            .body = try std.fmt.allocPrint(self.allocator, "{{\"error\":\"Not found\"}}", .{}),
+        };
+    }
+
+    fn readHttpRequest(self: *HttpServer, connection: net.Stream, buffer: []u8) ![]const u8 {
+        var used: usize = 0;
+        var header_end: ?usize = null;
+        var content_length: usize = 0;
+
+        while (used < buffer.len) {
+            const msg = try connection.socket.receive(self.io, buffer[used..]);
+            if (msg.data.len == 0) break;
+            used += msg.data.len;
+
+            const current = buffer[0..used];
+            if (header_end == null) {
+                header_end = findHeaderEnd(current);
+                if (header_end) |h| {
+                    content_length = parseContentLength(current[0..h]) orelse 0;
+                    if (used >= h + content_length) {
+                        return current[0 .. h + content_length];
+                    }
+                }
+            } else if (used >= header_end.? + content_length) {
+                return current[0 .. header_end.? + content_length];
+            }
+        }
+
+        if (used == buffer.len) return error.RequestTooLarge;
+        if (header_end) |h| {
+            if (used < h + content_length) return error.IncompleteRequest;
+            return buffer[0..used];
+        }
+        return buffer[0..used];
+    }
+};
+
+const HttpResponse = struct {
+    status: u16,
+    body: []const u8,
+};
+
+fn statusReason(status: u16) []const u8 {
+    return switch (status) {
+        200 => "OK",
+        204 => "No Content",
+        400 => "Bad Request",
+        404 => "Not Found",
+        503 => "Service Unavailable",
+        413 => "Request Entity Too Large",
+        500 => "Internal Server Error",
+        else => "OK",
+    };
+}
+
+fn findHeaderEnd(request_data: []const u8) ?usize {
+    if (std.mem.indexOf(u8, request_data, "\r\n\r\n")) |idx| {
+        return idx + 4;
+    }
+    if (std.mem.indexOf(u8, request_data, "\n\n")) |idx| {
+        return idx + 2;
+    }
+    return null;
+}
+
+fn parseContentLength(headers: []const u8) ?usize {
+    var line_iter = std.mem.tokenizeAny(u8, headers, "\r\n");
+    while (line_iter.next()) |line| {
+        if (line.len == 0) continue;
+        if (std.ascii.startsWithIgnoreCase(line, "Content-Length:")) {
+            const value = std.mem.trim(u8, line["Content-Length:".len..], " \t");
+            return std.fmt.parseInt(usize, value, 10) catch null;
+        }
+    }
+    return null;
+}
+
+pub fn main(init: std.process.Init) !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Arena for config
+    var arena_s = std.heap.ArenaAllocator.init(allocator);
+    defer arena_s.deinit();
+    const arena = arena_s.allocator();
+
+    zeicoin.dotenv.loadForNetwork(allocator) catch {};
+
+    // PostgreSQL configuration
+    const db_host = util.getEnvVarOwned(arena, "ZEICOIN_DB_HOST") catch try arena.dupe(u8, "localhost");
+    const db_port_str = util.getEnvVarOwned(arena, "ZEICOIN_DB_PORT") catch try arena.dupe(u8, "5432");
+    const db_port = std.fmt.parseInt(u16, db_port_str, 10) catch 5432;
+    const db_name = util.getEnvVarOwned(arena, "ZEICOIN_DB_NAME") catch try arena.dupe(u8, "zeicoin_testnet");
+    const db_password = util.getEnvVarOwned(arena, "ZEICOIN_DB_PASSWORD") catch return error.MissingDBPassword;
+    const db_user = util.getEnvVarOwned(arena, "ZEICOIN_DB_USER") catch try arena.dupe(u8, "zeicoin");
+
+    const conninfo = try postgres.buildConnString(arena, db_host, db_port, db_name, db_user, db_password);
+
+    const db_pool = try DBPool.init(allocator, conninfo, 5);
+    defer db_pool.deinit();
+
+    log.info("✅ Connected to PostgreSQL ({s})", .{db_name});
+
+    // Initialize L2 service
+    var service = L2Service.init(allocator, db_pool);
+
+    log.info("✅ L2 Service initialized", .{});
+
+    // Start HTTP server on port 8081
+    var server = HttpServer.init(allocator, &service, init.io, 8081);
+    try server.start();
 }

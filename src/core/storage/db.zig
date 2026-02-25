@@ -41,7 +41,12 @@ pub const Database = struct {
     const TOTAL_SUPPLY_KEY = "meta:total_supply";
     const CIRCULATING_SUPPLY_KEY = "meta:circulating_supply";
 
-    pub fn init(allocator: std.mem.Allocator, base_path: []const u8) !Database {
+    pub const TransactionWithHeight = struct {
+        transaction: types.Transaction,
+        block_height: u32,
+    };
+
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, base_path: []const u8) !Database {
         var self = Database{
             .db = null,
             .options = null,
@@ -69,10 +74,10 @@ pub const Database = struct {
         c.rocksdb_writeoptions_set_sync(self.write_options, 0);
 
         var err: ?[*:0]u8 = null;
-        const db_path = try std.fmt.allocPrintZ(allocator, "{s}/rocksdb", .{base_path});
+        const db_path = try std.fmt.allocPrintSentinel(allocator, "{s}/rocksdb", .{base_path}, 0);
         defer allocator.free(db_path);
 
-        std.fs.cwd().makePath(base_path) catch |e| switch (e) {
+        std.Io.Dir.cwd().createDirPath(io, base_path) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
@@ -90,7 +95,7 @@ pub const Database = struct {
     }
 
     /// Initialize as secondary instance for concurrent read-only access
-    pub fn initSecondary(allocator: std.mem.Allocator, base_path: []const u8, secondary_path: []const u8) !Database {
+    pub fn initSecondary(allocator: std.mem.Allocator, io: std.Io, base_path: []const u8, secondary_path: []const u8) !Database {
         var self = Database{
             .db = null,
             .options = null,
@@ -115,14 +120,14 @@ pub const Database = struct {
         // No write_options needed for secondary instance
 
         var err: ?[*:0]u8 = null;
-        const primary_db_path = try std.fmt.allocPrintZ(allocator, "{s}/rocksdb", .{base_path});
+        const primary_db_path = try std.fmt.allocPrintSentinel(allocator, "{s}/rocksdb", .{base_path}, 0);
         defer allocator.free(primary_db_path);
 
-        const secondary_db_path = try std.fmt.allocPrintZ(allocator, "{s}", .{secondary_path});
+        const secondary_db_path = try std.fmt.allocPrintSentinel(allocator, "{s}", .{secondary_path}, 0);
         defer allocator.free(secondary_db_path);
 
         // Create secondary path if it doesn't exist
-        std.fs.cwd().makePath(secondary_path) catch |e| switch (e) {
+        std.Io.Dir.cwd().createDirPath(io, secondary_path) catch |e| switch (e) {
             error.PathAlreadyExists => {},
             else => return e,
         };
@@ -197,7 +202,7 @@ pub const Database = struct {
     fn makeAccountKey(self: *Database, address: Address) ![]u8 {
         var hex_buffer: [42]u8 = undefined;
         const addr_bytes = address.toBytes();
-        _ = std.fmt.bufPrint(&hex_buffer, "{}", .{std.fmt.fmtSliceHexLower(&addr_bytes)}) catch unreachable;
+        _ = std.fmt.bufPrint(&hex_buffer, "{x}", .{&addr_bytes}) catch unreachable;
         return std.fmt.allocPrint(self.allocator, "{s}{s}", .{ ACCOUNT_PREFIX, hex_buffer });
     }
 
@@ -216,15 +221,15 @@ pub const Database = struct {
         return std.fmt.allocPrint(self.allocator, "{s}{s}", .{ WALLET_PREFIX, wallet_name });
     }
 
-    pub fn saveBlock(self: *Database, height: u32, block: Block) !void {
+    pub fn saveBlock(self: *Database, io: std.Io, height: u32, block: Block) !void {
+        _ = io;
         const key = try self.makeBlockKey(height);
         defer self.allocator.free(key);
 
-        var buffer = std.ArrayList(u8).init(self.allocator);
-        defer buffer.deinit();
-
-        const writer = buffer.writer();
-        serialize.serialize(writer, block) catch return DatabaseError.SerializationFailed;
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        serialize.serialize(&aw.writer, block) catch return DatabaseError.SerializationFailed;
+        const data = aw.written();
 
         var err: ?[*:0]u8 = null;
         c.rocksdb_put(
@@ -232,8 +237,8 @@ pub const Database = struct {
             self.write_options,
             key.ptr,
             key.len,
-            buffer.items.ptr,
-            buffer.items.len,
+            data.ptr,
+            data.len,
             @ptrCast(&err),
         );
 
@@ -246,7 +251,8 @@ pub const Database = struct {
         try self.updateHeight(height);
     }
 
-    pub fn getBlock(self: *Database, height: u32) !Block {
+    pub fn getBlock(self: *Database, io: std.Io, height: u32) !Block {
+        _ = io;
         const key = try self.makeBlockKey(height);
         defer self.allocator.free(key);
 
@@ -273,21 +279,19 @@ pub const Database = struct {
         defer c.rocksdb_free(val_ptr);
 
         const data = val_ptr[0..val_len];
-        var stream = std.io.fixedBufferStream(data);
-        const reader = stream.reader();
+        var reader = std.Io.Reader.fixed(data);
 
-        return serialize.deserialize(reader, Block, self.allocator) catch DatabaseError.SerializationFailed;
+        return serialize.deserialize(&reader, Block, self.allocator) catch DatabaseError.SerializationFailed;
     }
 
     pub fn saveAccount(self: *Database, address: Address, account: Account) !void {
         const key = try self.makeAccountKey(address);
         defer self.allocator.free(key);
 
-        var buffer = std.ArrayList(u8).init(self.allocator);
-        defer buffer.deinit();
-
-        const writer = buffer.writer();
-        serialize.serialize(writer, account) catch return DatabaseError.SerializationFailed;
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        serialize.serialize(&aw.writer, account) catch return DatabaseError.SerializationFailed;
+        const data = aw.written();
 
         var err: ?[*:0]u8 = null;
         c.rocksdb_put(
@@ -295,8 +299,8 @@ pub const Database = struct {
             self.write_options,
             key.ptr,
             key.len,
-            buffer.items.ptr,
-            buffer.items.len,
+            data.ptr,
+            data.len,
             @ptrCast(&err),
         );
 
@@ -336,10 +340,9 @@ pub const Database = struct {
         defer c.rocksdb_free(val_ptr);
 
         const data = val_ptr[0..val_len];
-        var stream = std.io.fixedBufferStream(data);
-        const reader = stream.reader();
+        var reader = std.Io.Reader.fixed(data);
 
-        return serialize.deserialize(reader, Account, self.allocator) catch DatabaseError.SerializationFailed;
+        return serialize.deserialize(&reader, Account, self.allocator) catch DatabaseError.SerializationFailed;
     }
 
     pub fn getHeight(self: *Database) !u32 {
@@ -588,7 +591,7 @@ pub const Database = struct {
         defer c.rocksdb_iter_destroy(it);
 
         // Collect all account keys first, then sort them for deterministic order
-        var account_keys = std.ArrayList([]const u8).init(self.allocator);
+        var account_keys = std.array_list.Managed([]const u8).init(self.allocator);
         defer {
             for (account_keys.items) |key| {
                 self.allocator.free(key);
@@ -647,10 +650,9 @@ pub const Database = struct {
             defer c.rocksdb_free(val_ptr);
 
             const data = val_ptr[0..val_len];
-            var stream = std.io.fixedBufferStream(data);
-            const reader = stream.reader();
+            var reader = std.Io.Reader.fixed(data);
             
-            const account = serialize.deserialize(reader, Account, self.allocator) catch {
+            const account = serialize.deserialize(&reader, Account, self.allocator) catch {
                 continue; // Skip on deserialization error
             };
 
@@ -669,7 +671,7 @@ pub const Database = struct {
         defer c.rocksdb_iter_destroy(it);
 
         // Collect all account keys to delete
-        var keys_to_delete = std.ArrayList([]u8).init(self.allocator);
+        var keys_to_delete = std.array_list.Managed([]u8).init(self.allocator);
         defer {
             for (keys_to_delete.items) |key| {
                 self.allocator.free(key);
@@ -779,15 +781,16 @@ pub const Database = struct {
         return self.getWalletPath("default");
     }
 
-    pub fn walletExists(self: *Database, wallet_name: []const u8) bool {
+    pub fn walletExists(self: *Database, io: std.Io, wallet_name: []const u8) bool {
         const wallet_path = self.getWalletPath(wallet_name) catch return false;
         defer self.allocator.free(wallet_path);
 
-        std.fs.cwd().access(wallet_path, .{}) catch return false;
+        std.Io.Dir.cwd().access(io, wallet_path, .{}) catch return false;
         return true;
     }
 
-    pub fn getBlockByHash(self: *Database, hash: [32]u8) !Block {
+    pub fn getBlockByHash(self: *Database, io: std.Io, hash: [32]u8) !Block {
+        _ = io;
         const it = c.rocksdb_create_iterator(self.db, self.read_options);
         defer c.rocksdb_iter_destroy(it);
 
@@ -807,9 +810,8 @@ pub const Database = struct {
             const val_ptr = c.rocksdb_iter_value(it, &val_len);
             const data = val_ptr[0..val_len];
 
-            var stream = std.io.fixedBufferStream(data);
-            const reader = stream.reader();
-            var block = serialize.deserialize(reader, Block, self.allocator) catch {
+            var reader = std.Io.Reader.fixed(data);
+            var block = serialize.deserialize(&reader, Block, self.allocator) catch {
                 c.rocksdb_iter_next(it);
                 continue;
             };
@@ -826,7 +828,13 @@ pub const Database = struct {
         return DatabaseError.NotFound;
     }
 
-    pub fn getTransactionByHash(self: *Database, hash: [32]u8) !types.Transaction {
+    pub fn getTransactionByHash(self: *Database, io: std.Io, hash: [32]u8) !types.Transaction {
+        const tx_with_height = try self.getTransactionWithHeightByHash(io, hash);
+        return tx_with_height.transaction;
+    }
+
+    pub fn getTransactionWithHeightByHash(self: *Database, io: std.Io, hash: [32]u8) !TransactionWithHeight {
+        _ = io;
         const it = c.rocksdb_create_iterator(self.db, self.read_options);
         defer c.rocksdb_iter_destroy(it);
 
@@ -846,9 +854,8 @@ pub const Database = struct {
             const val_ptr = c.rocksdb_iter_value(it, &val_len);
             const data = val_ptr[0..val_len];
 
-            var stream = std.io.fixedBufferStream(data);
-            const reader = stream.reader();
-            var block = serialize.deserialize(reader, Block, self.allocator) catch {
+            var reader = std.Io.Reader.fixed(data);
+            var block = serialize.deserialize(&reader, Block, self.allocator) catch {
                 c.rocksdb_iter_next(it);
                 continue;
             };
@@ -856,12 +863,14 @@ pub const Database = struct {
 
             for (block.transactions) |tx| {
                 if (std.mem.eql(u8, &tx.hash(), &hash)) {
-                    var buffer = std.ArrayList(u8).init(self.allocator);
-                    defer buffer.deinit();
-                    
-                    try serialize.serialize(buffer.writer(), tx);
-                    var tx_stream = std.io.fixedBufferStream(buffer.items);
-                    return try serialize.deserialize(tx_stream.reader(), types.Transaction, self.allocator);
+                    var aw: std.Io.Writer.Allocating = .init(self.allocator);
+                    defer aw.deinit();
+                    try serialize.serialize(&aw.writer, tx);
+                    var tx_reader = std.Io.Reader.fixed(aw.written());
+                    return .{
+                        .transaction = try serialize.deserialize(&tx_reader, types.Transaction, self.allocator),
+                        .block_height = block.height,
+                    };
                 }
             }
 
@@ -871,14 +880,14 @@ pub const Database = struct {
         return DatabaseError.NotFound;
     }
 
-    pub fn hasBlock(self: *Database, hash: [32]u8) bool {
-        var block = self.getBlockByHash(hash) catch return false;
+    pub fn hasBlock(self: *Database, io: std.Io, hash: [32]u8) bool {
+        var block = self.getBlockByHash(io, hash) catch return false;
         block.deinit(self.allocator);
         return true;
     }
 
-    pub fn hasTransaction(self: *Database, hash: [32]u8) bool {
-        var tx = self.getTransactionByHash(hash) catch return false;
+    pub fn hasTransaction(self: *Database, io: std.Io, hash: [32]u8) bool {
+        var tx = self.getTransactionByHash(io, hash) catch return false;
         tx.deinit(self.allocator);
         return true;
     }
@@ -950,18 +959,17 @@ pub const Database = struct {
             const key = try self.db.makeBlockKey(height);
             defer self.db.allocator.free(key);
 
-            var buffer = std.ArrayList(u8).init(self.db.allocator);
-            defer buffer.deinit();
-
-            const writer = buffer.writer();
-            serialize.serialize(writer, block) catch return DatabaseError.SerializationFailed;
+            var aw: std.Io.Writer.Allocating = .init(self.db.allocator);
+            defer aw.deinit();
+            serialize.serialize(&aw.writer, block) catch return DatabaseError.SerializationFailed;
+            const data = aw.written();
 
             c.rocksdb_writebatch_put(
                 self.batch,
                 key.ptr,
                 key.len,
-                buffer.items.ptr,
-                buffer.items.len,
+                data.ptr,
+                data.len,
             );
         }
 
@@ -969,18 +977,17 @@ pub const Database = struct {
             const key = try self.db.makeAccountKey(address);
             defer self.db.allocator.free(key);
 
-            var buffer = std.ArrayList(u8).init(self.db.allocator);
-            defer buffer.deinit();
-
-            const writer = buffer.writer();
-            serialize.serialize(writer, account) catch return DatabaseError.SerializationFailed;
+            var aw: std.Io.Writer.Allocating = .init(self.db.allocator);
+            defer aw.deinit();
+            serialize.serialize(&aw.writer, account) catch return DatabaseError.SerializationFailed;
+            const data = aw.written();
 
             c.rocksdb_writebatch_put(
                 self.batch,
                 key.ptr,
                 key.len,
-                buffer.items.ptr,
-                buffer.items.len,
+                data.ptr,
+                data.len,
             );
         }
 
@@ -998,6 +1005,34 @@ pub const Database = struct {
                 c.rocksdb_free(@constCast(@ptrCast(err)));
                 return DatabaseError.SaveFailed;
             }
+        }
+
+        pub fn updateTotalSupply(self: *WriteBatch, new_supply: u64) !void {
+            const key = "meta:total_supply";
+            var buffer: [8]u8 = undefined;
+            std.mem.writeInt(u64, &buffer, new_supply, .little);
+
+            c.rocksdb_writebatch_put(
+                self.batch,
+                key.ptr,
+                key.len,
+                &buffer,
+                buffer.len,
+            );
+        }
+
+        pub fn updateCirculatingSupply(self: *WriteBatch, new_supply: u64) !void {
+            const key = "meta:circulating_supply";
+            var buffer: [8]u8 = undefined;
+            std.mem.writeInt(u64, &buffer, new_supply, .little);
+
+            c.rocksdb_writebatch_put(
+                self.batch,
+                key.ptr,
+                key.len,
+                &buffer,
+                buffer.len,
+            );
         }
 
         pub fn deinit(self: *WriteBatch) void {

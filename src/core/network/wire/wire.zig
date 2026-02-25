@@ -4,101 +4,124 @@
 const std = @import("std");
 const protocol = @import("../protocol/protocol.zig");
 const message_envelope = @import("../protocol/message_envelope.zig");
+const util = @import("../../util/util.zig");
 
 /// Wire protocol reader for parsing incoming messages
+/// Uses std.Io.Reader buffer management pattern for efficient message framing
 pub const WireReader = struct {
     allocator: std.mem.Allocator,
-    buffer: std.ArrayList(u8),
-    read_pos: usize,
+    buffer: std.array_list.Managed(u8),
+    seek: usize, // Number of bytes consumed (Reader pattern)
 
     const Self = @This();
 
     /// Maximum buffer size to prevent memory exhaustion attacks (16MB)
     const MAX_BUFFER_SIZE: usize = 16 * 1024 * 1024;
-    
+
+    /// Compact threshold - compact when consumed bytes exceed this
+    const COMPACT_THRESHOLD: usize = 8 * 1024; // 8KB
+
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
             .allocator = allocator,
-            .buffer = std.ArrayList(u8).init(allocator),
-            .read_pos = 0,
+            .buffer = std.array_list.Managed(u8).init(allocator),
+            .seek = 0,
         };
     }
-    
+
     pub fn deinit(self: *Self) void {
         self.buffer.deinit();
     }
-    
+
+    /// Returns the currently buffered (unconsumed) data
+    fn buffered(self: *const Self) []const u8 {
+        return self.buffer.items[self.seek..];
+    }
+
+    /// Returns the number of buffered bytes available for reading
+    fn bufferedLen(self: *const Self) usize {
+        return self.buffer.items.len - self.seek;
+    }
+
+    /// Advances the seek position by n bytes (consumes data)
+    fn toss(self: *Self, n: usize) void {
+        self.seek += n;
+    }
+
     /// Add data from network to buffer
     pub fn addData(self: *Self, data: []const u8) !void {
         // SECURITY: Prevent memory exhaustion via unbounded buffer growth
-        if (self.buffer.items.len + data.len > MAX_BUFFER_SIZE) {
+        const unbuffered_size = self.buffer.items.len - self.seek;
+        if (unbuffered_size + data.len > MAX_BUFFER_SIZE) {
             return error.BufferOverflow;
         }
+
+        // Compact if we've consumed enough data to make it worthwhile
+        if (self.seek > COMPACT_THRESHOLD) {
+            self.compact();
+        }
+
         try self.buffer.appendSlice(data);
     }
     
     /// Try to read a complete message
     pub fn readMessage(self: *Self) !?message_envelope.MessageEnvelope {
-        const available = self.buffer.items.len - self.read_pos;
-        
+        const available = self.bufferedLen();
+
         // Need at least header size
         if (available < protocol.MessageHeader.SIZE) {
             return null;
         }
-        
-        // Try to parse header
-        const header_bytes = self.buffer.items[self.read_pos..][0..protocol.MessageHeader.SIZE];
-        var stream = std.io.fixedBufferStream(header_bytes);
-        
-        const header = protocol.MessageHeader.deserialize(stream.reader()) catch {
+
+        // Try to parse header using Reader abstraction
+        const header_bytes = self.buffered()[0..protocol.MessageHeader.SIZE];
+        var reader = std.Io.Reader.fixed(header_bytes);
+
+        const header = protocol.MessageHeader.deserialize(&reader) catch {
             // Invalid header, skip byte and try again
-            self.read_pos += 1;
-            self.compact();
+            self.toss(1);
             return error.InvalidHeader;
         };
-        
+
         // Check if we have complete message
         const total_size = protocol.MessageHeader.SIZE + header.payload_length;
         if (available < total_size) {
             return null; // Need more data
         }
-        
+
         // Extract payload
-        const payload_start = self.read_pos + protocol.MessageHeader.SIZE;
-        const payload_end = payload_start + header.payload_length;
-        const payload = self.buffer.items[payload_start..payload_end];
-        
+        const payload = self.buffered()[protocol.MessageHeader.SIZE..total_size];
+
         // Verify checksum
         if (!header.verifyChecksum(payload)) {
             // Bad checksum, skip this message
-            self.read_pos = payload_end;
-            self.compact();
+            self.toss(total_size);
             return error.InvalidChecksum;
         }
-        
+
         // Create message envelope
         const envelope = try message_envelope.MessageEnvelope.init(
             self.allocator,
             header.message_type,
             payload,
         );
-        
-        // Advance read position
-        self.read_pos = payload_end;
-        self.compact();
-        
+
+        // Consume the message (advance seek position)
+        self.toss(total_size);
+
         return envelope;
     }
     
-    /// Compact buffer by removing read data
+    /// Compact buffer by removing consumed data (Reader pattern)
+    /// Only called when necessary (via addData threshold), not after every read
     fn compact(self: *Self) void {
-        if (self.read_pos > 0) {
-            const remaining = self.buffer.items.len - self.read_pos;
-            std.mem.copyForwards(u8, self.buffer.items[0..remaining], self.buffer.items[self.read_pos..]);
+        if (self.seek > 0) {
+            const remaining = self.buffer.items.len - self.seek;
+            std.mem.copyForwards(u8, self.buffer.items[0..remaining], self.buffer.items[self.seek..]);
             self.buffer.items.len = remaining;
-            self.read_pos = 0;
+            self.seek = 0;
         }
-        
+
         // Shrink if buffer is too large and mostly empty
         if (self.buffer.capacity > 1024 * 1024 and self.buffer.items.len < self.buffer.capacity / 4) {
             self.buffer.shrinkAndFree(self.buffer.items.len);
@@ -109,14 +132,14 @@ pub const WireReader = struct {
 /// Wire protocol writer for sending messages
 pub const WireWriter = struct {
     allocator: std.mem.Allocator,
-    send_buffer: std.ArrayList(u8),
+    send_buffer: std.array_list.Managed(u8),
     
     const Self = @This();
     
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
             .allocator = allocator,
-            .send_buffer = std.ArrayList(u8).init(allocator),
+            .send_buffer = std.array_list.Managed(u8).init(allocator),
         };
     }
     
@@ -135,7 +158,10 @@ pub const WireWriter = struct {
         // Encode message payload
         const payload_start = self.send_buffer.items.len;
         if (@TypeOf(msg) != void) {
-            try msg.encode(self.send_buffer.writer());
+            var aw: std.Io.Writer.Allocating = .init(self.allocator);
+            defer aw.deinit();
+            try msg.encode(&aw.writer);
+            try self.send_buffer.appendSlice(aw.written());
         }
         // For void messages (like blocks), payload remains empty
         
@@ -146,8 +172,8 @@ pub const WireWriter = struct {
         var header = protocol.MessageHeader.init(msg_type, payload_len);
         header.setChecksum(payload);
         
-        var header_stream = std.io.fixedBufferStream(self.send_buffer.items[0..protocol.MessageHeader.SIZE]);
-        try header.serialize(header_stream.writer());
+        var writer = std.Io.Writer.fixed(self.send_buffer.items[0..protocol.MessageHeader.SIZE]);
+        try header.serialize(&writer);
     }
     
     /// Get the complete message data for sending
@@ -221,7 +247,7 @@ pub const ConnectionStats = struct {
             .messages_received = 0,
             .bytes_sent = 0,
             .bytes_received = 0,
-            .connected_since = std.time.timestamp(),
+            .connected_since = util.getTime(),
         };
     }
 };

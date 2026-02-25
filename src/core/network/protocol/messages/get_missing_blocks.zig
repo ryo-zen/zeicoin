@@ -10,14 +10,14 @@ const serialize = @import("../../../storage/serialize.zig");
 /// Optimized for small, targeted requests (vs batch sync)
 pub const GetMissingBlocksMessage = struct {
     /// Array of block hashes to request (max 10 per request)
-    block_hashes: std.ArrayList([32]u8),
+    block_hashes: std.array_list.Managed([32]u8),
 
     /// Maximum blocks to request in single message
     pub const MAX_MISSING_BLOCKS: usize = 10;
 
     pub fn init(allocator: Allocator) GetMissingBlocksMessage {
         return .{
-            .block_hashes = std.ArrayList([32]u8).init(allocator),
+            .block_hashes = std.array_list.Managed([32]u8).init(allocator),
         };
     }
 
@@ -34,7 +34,7 @@ pub const GetMissingBlocksMessage = struct {
     }
 
     /// Encode message for network transmission
-    pub fn encode(self: GetMissingBlocksMessage, writer: anytype) !void {
+    pub fn encode(self: *const GetMissingBlocksMessage, writer: anytype) !void {
         const count = self.block_hashes.items.len;
 
         // Validate count
@@ -57,7 +57,7 @@ pub const GetMissingBlocksMessage = struct {
         errdefer msg.deinit(allocator);
 
         // Read count
-        const count = try reader.readByte();
+        const count = try reader.takeByte();
 
         if (count > MAX_MISSING_BLOCKS) {
             return error.TooManyHashes;
@@ -67,7 +67,7 @@ pub const GetMissingBlocksMessage = struct {
         var i: usize = 0;
         while (i < count) : (i += 1) {
             var hash: [32]u8 = undefined;
-            _ = try reader.readAll(&hash);
+            try reader.readSliceAll(&hash);
             try msg.block_hashes.append(hash);
         }
 
@@ -83,11 +83,11 @@ pub const GetMissingBlocksMessage = struct {
 /// Response containing requested blocks
 pub const MissingBlocksResponseMessage = struct {
     /// The requested blocks (in any order, receiver will sort)
-    blocks: std.ArrayList(Block),
+    blocks: std.array_list.Managed(Block),
 
     pub fn init(allocator: Allocator) MissingBlocksResponseMessage {
         return .{
-            .blocks = std.ArrayList(Block).init(allocator),
+            .blocks = std.array_list.Managed(Block).init(allocator),
         };
     }
 
@@ -103,7 +103,7 @@ pub const MissingBlocksResponseMessage = struct {
     }
 
     /// Encode message (reuse existing block encoding)
-    pub fn encode(self: MissingBlocksResponseMessage, writer: anytype) !void {
+    pub fn encode(self: *const MissingBlocksResponseMessage, writer: anytype) !void {
         const count = self.blocks.items.len;
 
         if (count > GetMissingBlocksMessage.MAX_MISSING_BLOCKS) {
@@ -111,11 +111,12 @@ pub const MissingBlocksResponseMessage = struct {
         }
 
         // Write count
-        try writer.writeByte(@intCast(count));
+        var w = writer;
+        try w.writeByte(@intCast(count));
 
         // Write each block (using existing block serialization)
         for (self.blocks.items) |block| {
-            try serialize.serialize(writer, block);
+            try serialize.serialize(w, block);
         }
     }
 
@@ -125,7 +126,7 @@ pub const MissingBlocksResponseMessage = struct {
         errdefer msg.deinit(allocator);
 
         // Read count
-        const count = try reader.readByte();
+        const count = try reader.takeByte();
 
         if (count > GetMissingBlocksMessage.MAX_MISSING_BLOCKS) {
             return error.TooManyBlocks;

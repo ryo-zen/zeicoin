@@ -64,13 +64,13 @@ pub const ChainOperations = struct {
     }
 
     /// Calculate total work for the current chain
-    pub fn calculateTotalWork(self: *Self) !u64 {
+    pub fn calculateTotalWork(self: *Self, io: std.Io) !u64 {
         const current_height = try self.getHeight();
         var total_work: u64 = 0;
 
         // Sum work from all blocks in the chain
         for (0..current_height + 1) |height| {
-            var block = self.chain_state.database.getBlock(@intCast(height)) catch {
+            var block = self.chain_state.database.getBlock(io, @intCast(height)) catch {
                 // Skip missing blocks
                 continue;
             };
@@ -83,25 +83,25 @@ pub const ChainOperations = struct {
     }
 
     /// Get block at specific height
-    pub fn getBlockByHeight(self: *Self, height: u32) !Block {
-        return self.chain_state.database.getBlock(height);
+    pub fn getBlockByHeight(self: *Self, io: std.Io, height: u32) !Block {
+        return self.chain_state.database.getBlock(io, height);
     }
 
     /// Calculate median time past for timestamp validation
-    pub fn getMedianTimePast(self: *Self, height: u32) !u64 {
+    pub fn getMedianTimePast(self: *Self, io: std.Io, height: u32) !u64 {
         // Need at least MTP_BLOCK_COUNT blocks for meaningful median
         if (height < types.TimestampValidation.MTP_BLOCK_COUNT) {
             // For early blocks, use genesis timestamp as baseline
             return types.Genesis.timestamp();
         }
 
-        var timestamps = std.ArrayList(u64).init(self.allocator);
+        var timestamps = std.array_list.Managed(u64).init(self.allocator);
         defer timestamps.deinit();
 
         // Collect timestamps from last MTP_BLOCK_COUNT blocks
         const start_height = height - types.TimestampValidation.MTP_BLOCK_COUNT + 1;
         for (start_height..height + 1) |h| {
-            var block = try self.chain_state.database.getBlock(@intCast(h));
+            var block = try self.chain_state.database.getBlock(io, @intCast(h));
             defer block.deinit(self.allocator);
             try timestamps.append(block.header.timestamp);
         }
@@ -115,7 +115,7 @@ pub const ChainOperations = struct {
     }
 
     /// Calculate next difficulty target
-    pub fn calculateNextDifficulty(self: *Self) !types.DifficultyTarget {
+    pub fn calculateNextDifficulty(self: *Self, io: std.Io) !types.DifficultyTarget {
         const current_height = try self.getHeight();
 
         // For first adjustment period blocks, use initial difficulty
@@ -127,7 +127,7 @@ pub const ChainOperations = struct {
         if (current_height % types.ZenMining.DIFFICULTY_ADJUSTMENT_PERIOD != 0) {
             // Not an adjustment block, use previous difficulty
             const prev_block_height: u32 = @intCast(current_height - 1);
-            var prev_block = try self.chain_state.database.getBlock(prev_block_height);
+            var prev_block = try self.chain_state.database.getBlock(io, prev_block_height);
             defer prev_block.deinit(self.allocator);
             return prev_block.header.getDifficultyTarget();
         }
@@ -143,7 +143,7 @@ pub const ChainOperations = struct {
         // Get timestamp from adjustment period blocks ago
         {
             const old_block_height: u32 = @intCast(current_height - lookback_blocks);
-            var old_block = try self.chain_state.database.getBlock(old_block_height);
+            var old_block = try self.chain_state.database.getBlock(io, old_block_height);
             defer old_block.deinit(self.allocator);
             oldest_timestamp = old_block.header.timestamp;
         }
@@ -151,13 +151,13 @@ pub const ChainOperations = struct {
         // Get timestamp from most recent block
         {
             const new_block_height: u32 = @intCast(current_height - 1);
-            var new_block = try self.chain_state.database.getBlock(new_block_height);
+            var new_block = try self.chain_state.database.getBlock(io, new_block_height);
             defer new_block.deinit(self.allocator);
             newest_timestamp = new_block.header.timestamp;
         }
 
         // Get current difficulty from previous block
-        var prev_block = try self.chain_state.database.getBlock(current_height - 1);
+        var prev_block = try self.chain_state.database.getBlock(io, current_height - 1);
         defer prev_block.deinit(self.allocator);
         const current_difficulty = prev_block.header.getDifficultyTarget();
 
@@ -181,10 +181,10 @@ pub const ChainOperations = struct {
     }
 
     /// Estimate cumulative work for the chain up to given height
-    pub fn estimateCumulativeWork(self: *Self, height: u32) !types.ChainWork {
+    pub fn estimateCumulativeWork(self: *Self, io: std.Io, height: u32) !types.ChainWork {
         var total_work: types.ChainWork = 0;
         for (0..height + 1) |h| {
-            var block = self.chain_state.database.getBlock(@intCast(h)) catch continue;
+            var block = self.chain_state.database.getBlock(io, @intCast(h)) catch continue;
             defer block.deinit(self.allocator);
             total_work += block.header.getWork();
         }
@@ -192,24 +192,25 @@ pub const ChainOperations = struct {
     }
 
     /// Add a validated block to the chain
-    pub fn addBlockToChain(self: *Self, block: Block, height: u32) !void {
+    pub fn addBlockToChain(self: *Self, io: std.Io, block: Block, height: u32) !void {
         // Process all transactions in the block
-        try self.chain_state.processBlockTransactions(block.transactions, height, false);
+        try self.chain_state.processBlockTransactions(io, block.transactions, height, false);
 
         // Save block to database
-        try self.chain_state.database.saveBlock(height, block);
+        try self.chain_state.database.saveBlock(io, height, block);
 
         // Mature coinbase rewards if enough blocks have passed
-        if (height >= types.COINBASE_MATURITY) {
-            const maturity_height = height - types.COINBASE_MATURITY;
-            try self.chain_state.matureCoinbaseRewards(maturity_height);
+        const coinbase_maturity = types.getCoinbaseMaturity();
+        if (height >= coinbase_maturity) {
+            const maturity_height = height - coinbase_maturity;
+            try self.chain_state.matureCoinbaseRewards(io, maturity_height);
         }
 
         log.info("✅ Block #{} added to chain ({} txs)", .{ height, block.txCount() });
     }
 
     /// Accept a block during reorganization
-    pub fn acceptBlock(self: *Self, block: Block) !void {
+    pub fn acceptBlock(self: *Self, io: std.Io, block: Block) !void {
         const current_height = try self.getHeight();
 
         // Special case: if we're at height 0 and incoming block is not genesis
@@ -224,32 +225,32 @@ pub const ChainOperations = struct {
         }
 
         // Process transactions
-        try self.chain_state.processBlockTransactions(block.transactions, target_height, false);
+        try self.chain_state.processBlockTransactions(io, block.transactions, target_height, false);
 
         // Save to database
-        try self.chain_state.database.saveBlock(target_height, block);
+        try self.chain_state.database.saveBlock(io, target_height, block);
 
         log.info("✅ Block accepted at height {}", .{target_height});
     }
 
     /// Apply a block (simpler version without validation)
-    pub fn applyBlock(self: *Self, block: Block) !void {
+    pub fn applyBlock(self: *Self, io: std.Io, block: Block) !void {
         const block_height = try self.getHeight();
 
         // Process all transactions in the block
-        try self.chain_state.processBlockTransactions(block.transactions, block_height, false);
+        try self.chain_state.processBlockTransactions(io, block.transactions, block_height, false);
 
         // Save block to database
-        try self.chain_state.database.saveBlock(block_height, block);
+        try self.chain_state.database.saveBlock(io, block_height, block);
     }
 
     /// Check if a block is a valid fork block
-    pub fn isValidForkBlock(self: *Self, block: Block) !bool {
+    pub fn isValidForkBlock(self: *Self, io: std.Io, block: Block) !bool {
         const current_height = try self.getHeight();
 
         // Check if block's previous_hash matches any block in our chain
         for (0..current_height) |height| {
-            var existing_block = self.chain_state.database.getBlock(@intCast(height)) catch continue;
+            var existing_block = self.chain_state.database.getBlock(io, @intCast(height)) catch continue;
             defer existing_block.deinit(self.allocator);
 
             const existing_hash = existing_block.hash();
@@ -263,14 +264,14 @@ pub const ChainOperations = struct {
     }
 
     /// Store a fork block and check for reorganization
-    pub fn storeForkBlock(self: *Self, block: Block, fork_height: u32) !void {
+    pub fn storeForkBlock(self: *Self, io: std.Io, block: Block, fork_height: u32) !void {
         log.info("🔀 Storing fork block at height {}", .{fork_height});
 
         // Calculate cumulative work of the fork
         const fork_work = block.header.getWork();
 
         // Get current chain work at the same height
-        const current_block = self.chain_state.database.getBlock(fork_height) catch |err| {
+        const current_block = self.chain_state.database.getBlock(io, fork_height) catch |err| {
             log.info("❌ Cannot compare fork - missing block at height {}: {}", .{ fork_height, err });
             return;
         };

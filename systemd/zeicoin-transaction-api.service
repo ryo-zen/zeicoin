@@ -7,7 +7,7 @@ Wants=postgresql.service
 Type=simple
 User=root
 WorkingDirectory=/root/zeicoin
-EnvironmentFile=-/root/zeicoin/.env
+EnvironmentFile=-/root/zeicoin/.env.testnet
 EnvironmentFile=-/root/zeicoin/.env.local
 Environment="ZEICOIN_SERVER=127.0.0.1"
 

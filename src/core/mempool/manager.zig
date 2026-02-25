@@ -43,6 +43,9 @@ pub const MempoolManager = struct {
     network_handler: NetworkHandler,
     cleaner: MempoolCleaner,
     
+    // I/O subsystem
+    io: std.Io,
+    
     // Mining integration
     mining_state: ?*types.MiningState,
     
@@ -53,7 +56,7 @@ pub const MempoolManager = struct {
 
     /// Initialize MempoolManager with chain state and allocator
     /// Returns a heap-allocated MempoolManager to ensure stable addresses
-    pub fn init(allocator: std.mem.Allocator, chain_state: *ChainState) !*Self {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, chain_state: *ChainState) !*Self {
         
         // Allocate on heap to ensure stable addresses
         const self = try allocator.create(Self);
@@ -62,10 +65,11 @@ pub const MempoolManager = struct {
         // Initialize components in dependency order
         self.* = Self{
             .storage = MempoolStorage.init(allocator),
-            .validator = TransactionValidator.init(allocator, chain_state),
+            .validator = TransactionValidator.init(allocator, io, chain_state),
             .limits = MempoolLimits.init(),
             .network_handler = undefined,
             .cleaner = undefined,
+            .io = io,
             .mining_state = null,
             .allocator = allocator,
         };
@@ -114,8 +118,8 @@ pub const MempoolManager = struct {
         const recipient_bech32 = transaction.recipient.toBech32(self.allocator, types.CURRENT_NETWORK) catch "invalid";
         defer if (!std.mem.eql(u8, recipient_bech32, "invalid")) self.allocator.free(recipient_bech32);
         
-        log.info("🔄 [TX LIFECYCLE] Received transaction {s} from {s} → {s}: {d:.8} ZEI (fee: {d:.8}, nonce: {})", .{
-            std.fmt.fmtSliceHexLower(tx_hash[0..8]), sender_bech32, recipient_bech32, amount_zei, fee_zei, transaction.nonce
+        log.info("🔄 [TX LIFECYCLE] Received transaction {x} from {s} → {s}: {d:.8} ZEI (fee: {d:.8}, nonce: {})", .{
+            tx_hash[0..8], sender_bech32, recipient_bech32, amount_zei, fee_zei, transaction.nonce
         });
         
         const result = try self.network_handler.processLocalTransaction(transaction);
@@ -125,13 +129,13 @@ pub const MempoolManager = struct {
             switch (result.reason) {
                 .accepted => {}, // This shouldn't happen when !result.accepted, but required for completeness
                 .duplicate_in_mempool => {
-                    log.info("❌ [TX LIFECYCLE] Transaction {s} REJECTED: duplicate in mempool", .{std.fmt.fmtSliceHexLower(reject_tx_hash[0..8])});
+                    log.info("❌ [TX LIFECYCLE] Transaction {x} REJECTED: duplicate in mempool", .{reject_tx_hash[0..8]});
                     return error.DuplicateTransaction;
                 },
                 .validation_failed => {
                     // Check if we have a specific validation error
                     if (result.validation_error) |validation_error| {
-                        log.info("❌ [TX LIFECYCLE] Transaction {s} REJECTED: validation failed ({})", .{std.fmt.fmtSliceHexLower(reject_tx_hash[0..8]), validation_error});
+                        log.info("❌ [TX LIFECYCLE] Transaction {x} REJECTED: validation failed ({})", .{reject_tx_hash[0..8], validation_error});
                         switch (validation_error) {
                             error.InsufficientBalance => return error.InsufficientBalance,
                             error.FeeTooLow => return error.FeeTooLow,
@@ -140,11 +144,11 @@ pub const MempoolManager = struct {
                             else => return error.InvalidTransaction,
                         }
                     }
-                    log.info("❌ [TX LIFECYCLE] Transaction {s} REJECTED: validation failed (unknown)", .{std.fmt.fmtSliceHexLower(reject_tx_hash[0..8])});
+                    log.info("❌ [TX LIFECYCLE] Transaction {x} REJECTED: validation failed (unknown)", .{reject_tx_hash[0..8]});
                     return error.InvalidTransaction;
                 },
                 .mempool_limits_exceeded => {
-                    log.info("❌ [TX LIFECYCLE] Transaction {s} REJECTED: mempool full", .{std.fmt.fmtSliceHexLower(reject_tx_hash[0..8])});
+                    log.info("❌ [TX LIFECYCLE] Transaction {x} REJECTED: mempool full", .{reject_tx_hash[0..8]});
                     return error.MempoolFull;
                 },
             }
@@ -152,7 +156,7 @@ pub const MempoolManager = struct {
         
         const accept_tx_hash = transaction.hash();
         const mempool_size = self.getTransactionCount();
-        log.info("✅ [TX LIFECYCLE] Transaction {s} ACCEPTED and added to mempool (size: {})", .{std.fmt.fmtSliceHexLower(accept_tx_hash[0..8]), mempool_size});
+        log.info("✅ [TX LIFECYCLE] Transaction {x} ACCEPTED and added to mempool (size: {})", .{accept_tx_hash[0..8], mempool_size});
         
         // Signal mining thread if available
         if (self.mining_state) |mining_state| {

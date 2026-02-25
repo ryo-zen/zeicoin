@@ -1,9 +1,10 @@
 const std = @import("std");
-const net = std.net;
+const net = std.Io.net;
 const rpc_types = @import("types.zig");
 const format = @import("format.zig");
 const zen = @import("../node.zig");
 const db = @import("../storage/db.zig");
+const util = @import("../util/util.zig");
 
 const log = std.log.scoped(.rpc_server);
 
@@ -36,10 +37,10 @@ pub const RPCServer = struct {
         const secondary_path = try std.fmt.allocPrint(allocator, "{s}_indexer_secondary", .{blockchain_path});
         errdefer allocator.free(secondary_path);
 
-        const address = try net.Address.parseIp4("0.0.0.0", port);
-        const server = try address.listen(.{
+        const address = try net.IpAddress.parse("0.0.0.0", port);
+        const io = blockchain.io;
+        const server = try address.listen(io, .{
             .reuse_address = true,
-            .reuse_port = true,
         });
 
         self.* = RPCServer{
@@ -63,7 +64,8 @@ pub const RPCServer = struct {
             secondary.deinit();
         }
         self.allocator.free(self.secondary_path);
-        self.server.deinit();
+        const io = self.blockchain.io;
+        self.server.deinit(io);
         self.allocator.destroy(self);
     }
 
@@ -75,9 +77,11 @@ pub const RPCServer = struct {
             return &self.secondary_db.?;
         }
 
+        const io = self.blockchain.io;
         // Try to initialize secondary instance
         self.secondary_db = db.Database.initSecondary(
             self.allocator,
+            io,
             self.blockchain_path,
             self.secondary_path,
         ) catch |err| {
@@ -106,7 +110,7 @@ pub const RPCServer = struct {
             const current = self.active_connections.load(.acquire);
             if (current >= MAX_CONNECTIONS) {
                 log.warn("⚠️ RPC connection limit reached ({}/{}), rejecting", .{ current, MAX_CONNECTIONS });
-                connection.stream.close();
+                                connection.close(self.blockchain.io);
                 continue;
             }
 
@@ -117,7 +121,7 @@ pub const RPCServer = struct {
             const thread = std.Thread.spawn(.{}, handleConnection, .{ self, connection }) catch |err| {
                 log.err("Failed to spawn thread: {}", .{err});
                 _ = self.active_connections.fetchSub(1, .acq_rel);
-                connection.stream.close();
+                                connection.close(self.blockchain.io);
                 continue;
             };
             thread.detach();
@@ -130,18 +134,19 @@ pub const RPCServer = struct {
         self.running.store(false, .release);
     }
 
-    fn acceptWithTimeout(self: *RPCServer) !net.Server.Connection {
-        const timeout_ns = 1 * std.time.ns_per_s;
-        const start_time = std.time.nanoTimestamp();
+    fn acceptWithTimeout(self: *RPCServer) !net.Stream {
+        const io = self.blockchain.io;
+        const timeout_s: i64 = 1;
+        const start_time = util.getTime();
 
         while (true) {
-            if (std.time.nanoTimestamp() - start_time > timeout_ns) {
+            if (util.getTime() - start_time > timeout_s) {
                 return error.Timeout;
             }
 
-            const connection = self.server.accept() catch |err| {
+            const connection = self.server.accept(io) catch |err| {
                 if (err == error.WouldBlock) {
-                    std.time.sleep(10 * std.time.ns_per_ms);
+                    io.sleep(std.Io.Duration.fromMilliseconds(10), std.Io.Clock.awake) catch {};
                     continue;
                 }
                 return err;
@@ -151,17 +156,23 @@ pub const RPCServer = struct {
         }
     }
 
-    fn handleConnection(self: *RPCServer, connection: net.Server.Connection) void {
+    fn handleConnection(self: *RPCServer, connection: net.Stream) void {
         defer {
-            connection.stream.close();
+                            connection.close(self.blockchain.io);
             _ = self.active_connections.fetchSub(1, .acq_rel);
         }
 
         var buffer: [8192]u8 = undefined;
-        const bytes_read = connection.stream.read(&buffer) catch |err| {
-            log.err("Read error: {}", .{err});
+        const io = self.blockchain.io;
+        const msg = connection.socket.receive(io, &buffer) catch |err| {
+            if (err == error.ConnectionResetByPeer) {
+                log.debug("RPC client disconnected during read: {}", .{err});
+            } else {
+                log.err("Read error: {}", .{err});
+            }
             return;
         };
+        const bytes_read = msg.data.len;
 
         if (bytes_read == 0) return;
 
@@ -182,7 +193,12 @@ pub const RPCServer = struct {
             // Send HTTP response
             const http_response = self.wrapHttpResponse(error_response) catch return;
             defer self.allocator.free(http_response);
-            _ = connection.stream.writeAll(http_response) catch {};
+            {
+                var write_buf: [4096]u8 = undefined;
+                var writer = connection.writer(io, &write_buf);
+                writer.interface.writeAll(http_response) catch {};
+                writer.interface.flush() catch {};
+            }
             return;
         };
         defer self.allocator.free(response);
@@ -197,9 +213,17 @@ pub const RPCServer = struct {
         };
         defer self.allocator.free(http_response);
 
-        _ = connection.stream.writeAll(http_response) catch |err| {
-            log.err("Write error: {}", .{err});
-        };
+        {
+            var write_buf: [4096]u8 = undefined;
+            var writer = connection.writer(io, &write_buf);
+            writer.interface.writeAll(http_response) catch |err| {
+                log.err("Write error: {}", .{err});
+                return;
+            };
+            writer.interface.flush() catch |err| {
+                log.err("Flush error: {}", .{err});
+            };
+        }
     }
 
     fn extractJsonBody(self: *RPCServer, data: []const u8) ?[]const u8 {
@@ -298,7 +322,7 @@ pub const RPCServer = struct {
         }
 
         // Process each request
-        var responses = std.ArrayList([]const u8).init(self.allocator);
+        var responses = std.array_list.Managed([]const u8).init(self.allocator);
         defer {
             for (responses.items) |resp| {
                 self.allocator.free(resp);
@@ -332,7 +356,7 @@ pub const RPCServer = struct {
             return try self.allocator.alloc(u8, 0);
         }
 
-        var buf = std.ArrayList(u8).init(self.allocator);
+        var buf = std.array_list.Managed(u8).init(self.allocator);
         defer buf.deinit();
 
         try buf.append('[');
@@ -419,6 +443,22 @@ pub const RPCServer = struct {
         return try format.formatSuccess(self.allocator, result, req.id);
     }
 
+    // ========== Helper Functions ==========
+
+    /// Safely validate and convert JSON integer to u64
+    /// Returns error if value is negative or out of range
+    fn validateU64FromJson(value: i64) !u64 {
+        if (value < 0) return error.NegativeValue;
+        return @intCast(value);
+    }
+
+    /// Safely convert usize to u32
+    /// Returns error if value exceeds u32 max
+    fn validateU32FromUsize(value: usize) !u32 {
+        if (value > std.math.maxInt(u32)) return error.ValueTooLarge;
+        return @intCast(value);
+    }
+
     // ========== Method Handlers ==========
 
     fn handlePing(self: *RPCServer) ![]const u8 {
@@ -435,7 +475,8 @@ pub const RPCServer = struct {
 
     fn handleGetMempoolSize(self: *RPCServer) ![]const u8 {
         const size = self.blockchain.mempool_manager.getTransactionCount();
-        const response = rpc_types.GetMempoolSizeResponse{ .size = @intCast(size) };
+        const size_u32 = try validateU32FromUsize(size);
+        const response = rpc_types.GetMempoolSizeResponse{ .size = size_u32 };
         return try format.formatResult(self.allocator, rpc_types.GetMempoolSizeResponse, response);
     }
 
@@ -444,8 +485,14 @@ pub const RPCServer = struct {
         const database = try self.ensureSecondaryDb();
         const height = try database.getHeight();
         const mempool_size = self.blockchain.mempool_manager.getTransactionCount();
+        const mempool_size_u32 = try validateU32FromUsize(mempool_size);
         const is_mining = self.blockchain.mining_manager != null;
-        const peer_count: u32 = 0; // TODO: Get from network manager
+        const peer_count = blk: {
+            if (self.blockchain.network_coordinator.getNetworkManager()) |network_manager| {
+                break :blk try validateU32FromUsize(network_manager.getConnectedPeerCount());
+            }
+            break :blk 0;
+        };
 
         const network_str = if (types.CURRENT_NETWORK == .testnet) "testnet" else "mainnet";
 
@@ -453,7 +500,7 @@ pub const RPCServer = struct {
             .version = "0.1.0",
             .network = network_str,
             .height = height,
-            .mempool_size = @intCast(mempool_size),
+            .mempool_size = mempool_size_u32,
             .is_mining = is_mining,
             .peer_count = peer_count,
         };
@@ -549,7 +596,8 @@ pub const RPCServer = struct {
 
         // Get transaction from secondary database
         const database = try self.ensureSecondaryDb();
-        const tx = database.getTransactionByHash(tx_hash) catch {
+        const io = self.blockchain.io;
+        const tx_with_height = database.getTransactionWithHeightByHash(io, tx_hash) catch {
             // Check mempool if not found in database
             const mempool_tx = self.blockchain.mempool_manager.getTransaction(tx_hash) orelse {
                 return try format.formatError(
@@ -579,6 +627,8 @@ pub const RPCServer = struct {
             };
             return try format.formatResult(self.allocator, rpc_types.GetTransactionResponse, response);
         };
+        var tx = tx_with_height.transaction;
+        defer tx.deinit(self.allocator);
 
         const types = @import("../types/types.zig");
 
@@ -598,7 +648,7 @@ pub const RPCServer = struct {
             .timestamp = tx.timestamp,
             .expiry_height = tx.expiry_height,
             .status = "confirmed",
-            .block_height = null, // TODO: Get block height from transaction metadata
+            .block_height = tx_with_height.block_height,
         };
         return try format.formatResult(self.allocator, rpc_types.GetTransactionResponse, response);
     }
@@ -646,12 +696,47 @@ pub const RPCServer = struct {
             );
         };
 
-        // Extract numeric fields
-        const amount = @as(u64, @intCast(params_obj.get("amount").?.integer));
-        const fee = @as(u64, @intCast(params_obj.get("fee").?.integer));
-        const nonce = @as(u64, @intCast(params_obj.get("nonce").?.integer));
-        const timestamp = @as(u64, @intCast(params_obj.get("timestamp").?.integer));
-        const expiry_height = @as(u64, @intCast(params_obj.get("expiry_height").?.integer));
+        // Extract and validate numeric fields
+        const amount = validateU64FromJson(params_obj.get("amount").?.integer) catch {
+            return try format.formatError(
+                self.allocator,
+                rpc_types.ErrorCode.invalid_params,
+                "Invalid amount: must be non-negative integer",
+                null,
+            );
+        };
+        const fee = validateU64FromJson(params_obj.get("fee").?.integer) catch {
+            return try format.formatError(
+                self.allocator,
+                rpc_types.ErrorCode.invalid_params,
+                "Invalid fee: must be non-negative integer",
+                null,
+            );
+        };
+        const nonce = validateU64FromJson(params_obj.get("nonce").?.integer) catch {
+            return try format.formatError(
+                self.allocator,
+                rpc_types.ErrorCode.invalid_params,
+                "Invalid nonce: must be non-negative integer",
+                null,
+            );
+        };
+        const timestamp = validateU64FromJson(params_obj.get("timestamp").?.integer) catch {
+            return try format.formatError(
+                self.allocator,
+                rpc_types.ErrorCode.invalid_params,
+                "Invalid timestamp: must be non-negative integer",
+                null,
+            );
+        };
+        const expiry_height = validateU64FromJson(params_obj.get("expiry_height").?.integer) catch {
+            return try format.formatError(
+                self.allocator,
+                rpc_types.ErrorCode.invalid_params,
+                "Invalid expiry_height: must be non-negative integer",
+                null,
+            );
+        };
 
         // Parse signature (hex string to bytes)
         const signature_hex = params_obj.get("signature").?.string;
@@ -710,8 +795,8 @@ pub const RPCServer = struct {
         const tx_hash = transaction.hash();
         const tx_hash_hex = try std.fmt.allocPrint(
             self.allocator,
-            "{s}",
-            .{std.fmt.fmtSliceHexLower(&tx_hash)},
+            "{x}",
+            .{tx_hash},
         );
         defer self.allocator.free(tx_hash_hex);
 
@@ -724,4 +809,76 @@ pub const RPCServer = struct {
 };
 
 // ========== Tests ==========
+
+test "validateU64FromJson - valid positive values" {
+    const allocator = std.testing.allocator;
+    _ = allocator;
+
+    // Valid positive values
+    try std.testing.expectEqual(@as(u64, 0), try RPCServer.validateU64FromJson(0));
+    try std.testing.expectEqual(@as(u64, 100), try RPCServer.validateU64FromJson(100));
+    try std.testing.expectEqual(@as(u64, 1000000), try RPCServer.validateU64FromJson(1000000));
+
+    // Max i64 value should work
+    const max_i64: i64 = std.math.maxInt(i64);
+    try std.testing.expectEqual(@as(u64, @intCast(max_i64)), try RPCServer.validateU64FromJson(max_i64));
+}
+
+test "validateU64FromJson - rejects negative values" {
+    const allocator = std.testing.allocator;
+    _ = allocator;
+
+    // SECURITY: Negative values must be rejected
+    try std.testing.expectError(error.NegativeValue, RPCServer.validateU64FromJson(-1));
+    try std.testing.expectError(error.NegativeValue, RPCServer.validateU64FromJson(-100));
+    try std.testing.expectError(error.NegativeValue, RPCServer.validateU64FromJson(-1000000));
+
+    // Min i64 (most negative) must be rejected
+    const min_i64: i64 = std.math.minInt(i64);
+    try std.testing.expectError(error.NegativeValue, RPCServer.validateU64FromJson(min_i64));
+}
+
+test "validateU32FromUsize - valid values" {
+    const allocator = std.testing.allocator;
+    _ = allocator;
+
+    // Valid small values
+    try std.testing.expectEqual(@as(u32, 0), try RPCServer.validateU32FromUsize(0));
+    try std.testing.expectEqual(@as(u32, 100), try RPCServer.validateU32FromUsize(100));
+    try std.testing.expectEqual(@as(u32, 1000), try RPCServer.validateU32FromUsize(1000));
+
+    // Max u32 value should work
+    const max_u32: usize = std.math.maxInt(u32);
+    try std.testing.expectEqual(@as(u32, @intCast(max_u32)), try RPCServer.validateU32FromUsize(max_u32));
+}
+
+test "validateU32FromUsize - rejects overflow on 64-bit" {
+    const allocator = std.testing.allocator;
+    _ = allocator;
+
+    // Only test on 64-bit systems where usize > u32
+    if (@sizeOf(usize) > @sizeOf(u32)) {
+        // Value exceeding u32 max must be rejected
+        const too_large: usize = @as(usize, std.math.maxInt(u32)) + 1;
+        try std.testing.expectError(error.ValueTooLarge, RPCServer.validateU32FromUsize(too_large));
+
+        // Much larger value
+        const very_large: usize = 0xFFFFFFFFFFFF;
+        try std.testing.expectError(error.ValueTooLarge, RPCServer.validateU32FromUsize(very_large));
+    }
+}
+
+test "RPC integer overflow attack prevention" {
+    const allocator = std.testing.allocator;
+    _ = allocator;
+
+    // SECURITY TEST: Simulate malicious JSON-RPC request with negative amount
+    // This would have wrapped to huge u64 value before the fix
+    const malicious_amount: i64 = -1000;
+    const result = RPCServer.validateU64FromJson(malicious_amount);
+
+    // Must be rejected, not silently converted to 18446744073709550616
+    try std.testing.expectError(error.NegativeValue, result);
+}
+
 // Integration tests in build.zig

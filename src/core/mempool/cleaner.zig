@@ -64,8 +64,8 @@ pub const MempoolCleaner = struct {
         for (block.transactions, 0..) |tx, i| {
             block_tx_hashes[i] = tx.hash();
             const amount_zei = @as(f64, @floatFromInt(tx.amount)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-            log.info("🔄 [TX LIFECYCLE] Transaction {s} included in block (mempool → blockchain): {d:.8} ZEI", .{
-                std.fmt.fmtSliceHexLower(tx.hash()[0..8]), amount_zei
+            log.info("🔄 [TX LIFECYCLE] Transaction {x} included in block (mempool → blockchain): {d:.8} ZEI", .{
+                tx.hash()[0..8], amount_zei
             });
         }
         
@@ -131,7 +131,7 @@ pub const MempoolCleaner = struct {
         const transactions = try self.storage.getAllTransactions();
         defer self.storage.freeTransactionArray(transactions);
         
-        var expired_hashes = std.ArrayList(Hash).init(self.allocator);
+        var expired_hashes = std.array_list.Managed(Hash).init(self.allocator);
         defer expired_hashes.deinit();
         
         for (transactions) |tx| {

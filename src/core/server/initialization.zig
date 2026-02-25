@@ -12,6 +12,7 @@ const key = @import("../crypto/key.zig");
 const command_line = @import("command_line.zig");
 const types = @import("../types/types.zig");
 const bech32 = @import("../crypto/bech32.zig");
+const util = @import("../util/util.zig");
 
 /// Thread function to accept incoming connections
 fn acceptConnectionsThread(network_manager: *network.NetworkManager) void {
@@ -21,7 +22,7 @@ fn acceptConnectionsThread(network_manager: *network.NetworkManager) void {
 }
 
 /// Load bootstrap nodes from JSON config, with command line fallback
-fn loadBootstrapNodes(allocator: std.mem.Allocator, cmd_line_nodes: []const command_line.BootstrapNode) ![]const command_line.BootstrapNode {
+fn loadBootstrapNodes(allocator: std.mem.Allocator, io: std.Io, cmd_line_nodes: []const command_line.BootstrapNode) ![]const command_line.BootstrapNode {
     // If command line nodes are provided, use them (they override JSON)
     if (cmd_line_nodes.len > 0) {
         std.log.info("Using {} command line bootstrap nodes", .{cmd_line_nodes.len});
@@ -37,7 +38,7 @@ fn loadBootstrapNodes(allocator: std.mem.Allocator, cmd_line_nodes: []const comm
     }
     
     // Try to load from JSON config
-    const json_nodes = types.loadBootstrapNodes(allocator) catch |err| {
+    const json_nodes = types.loadBootstrapNodes(allocator, io) catch |err| {
         std.log.warn("Failed to load bootstrap nodes from JSON: {}", .{err});
         // Return empty slice if both JSON and command line fail
         return try allocator.alloc(command_line.BootstrapNode, 0);
@@ -78,7 +79,7 @@ fn freeBootstrapNodes(allocator: std.mem.Allocator, nodes: []const command_line.
 /// Load consensus configuration from environment variables
 fn loadConsensusConfig() void {
     // Load consensus mode
-    if (std.process.getEnvVarOwned(std.heap.page_allocator, "ZEICOIN_CONSENSUS_MODE")) |mode_str| {
+    if (util.getEnvVarOwned(std.heap.page_allocator, "ZEICOIN_CONSENSUS_MODE")) |mode_str| {
         defer std.heap.page_allocator.free(mode_str);
         
         if (std.mem.eql(u8, mode_str, "disabled")) {
@@ -93,7 +94,7 @@ fn loadConsensusConfig() void {
     } else |_| {}
     
     // Load consensus threshold
-    if (std.process.getEnvVarOwned(std.heap.page_allocator, "ZEICOIN_CONSENSUS_THRESHOLD")) |threshold_str| {
+    if (util.getEnvVarOwned(std.heap.page_allocator, "ZEICOIN_CONSENSUS_THRESHOLD")) |threshold_str| {
         defer std.heap.page_allocator.free(threshold_str);
         
         if (std.fmt.parseFloat(f32, threshold_str)) |threshold| {
@@ -108,7 +109,7 @@ fn loadConsensusConfig() void {
     } else |_| {}
     
     // Load minimum peer responses
-    if (std.process.getEnvVarOwned(std.heap.page_allocator, "ZEICOIN_CONSENSUS_MIN_PEERS")) |min_str| {
+    if (util.getEnvVarOwned(std.heap.page_allocator, "ZEICOIN_CONSENSUS_MIN_PEERS")) |min_str| {
         defer std.heap.page_allocator.free(min_str);
         
         if (std.fmt.parseInt(u32, min_str, 10)) |min_peers| {
@@ -119,7 +120,7 @@ fn loadConsensusConfig() void {
     } else |_| {}
     
     // Load check during normal operation flag
-    if (std.process.getEnvVarOwned(std.heap.page_allocator, "ZEICOIN_CONSENSUS_CHECK_NORMAL")) |check_str| {
+    if (util.getEnvVarOwned(std.heap.page_allocator, "ZEICOIN_CONSENSUS_CHECK_NORMAL")) |check_str| {
         defer std.heap.page_allocator.free(check_str);
         
         types.CONSENSUS.check_during_normal_operation = std.mem.eql(u8, check_str, "true");
@@ -168,14 +169,22 @@ pub const NodeComponents = struct {
     }
 };
 
-pub fn initializeNode(allocator: std.mem.Allocator, config: command_line.Config) !NodeComponents {
+pub fn initializeNode(allocator: std.mem.Allocator, io: std.Io, config: command_line.Config) !NodeComponents {
     std.log.info("Initializing ZeiCoin node", .{});
     
     // Load consensus configuration from environment
     loadConsensusConfig();
+
+    // Check for ZEICOIN_DATA_DIR override
+    var data_dir_override: ?[]u8 = null;
+    if (util.getEnvVarOwned(allocator, "ZEICOIN_DATA_DIR")) |dir| {
+        data_dir_override = dir;
+        std.log.info("📂 Using data directory override: {s}", .{dir});
+    } else |_| {}
+    defer if (data_dir_override) |dir| allocator.free(dir);
     
     // Initialize blockchain
-    const blockchain = try zen.ZeiCoin.init(allocator);
+    const blockchain = try zen.ZeiCoin.init(allocator, io, data_dir_override);
     errdefer {
         blockchain.deinit();
         allocator.destroy(blockchain);
@@ -190,7 +199,7 @@ pub fn initializeNode(allocator: std.mem.Allocator, config: command_line.Config)
     
     // Initialize network
     var network_manager = try allocator.create(network.NetworkManager);
-    network_manager.* = network.NetworkManager.init(allocator, handler_result.handler);
+    network_manager.* = network.NetworkManager.init(allocator, io, handler_result.handler);
     // Note: network_manager ownership is transferred to blockchain.network_coordinator
     // No errdefer needed - NodeComponents.deinit() handles cleanup
     
@@ -207,8 +216,8 @@ pub fn initializeNode(allocator: std.mem.Allocator, config: command_line.Config)
     blockchain.sync_manager = sync_manager;
     
     // Start network listening
-    try network_manager.listen(config.port);
-    std.log.info("Network listening on port {}", .{config.port});
+    try network_manager.listen(config.bind_address, config.port);
+    std.log.info("Network listening on {s}:{}", .{ config.bind_address, config.port });
     
     // Start accepting connections in a separate thread
     const accept_thread = try std.Thread.spawn(.{}, acceptConnectionsThread, .{network_manager});
@@ -217,7 +226,7 @@ pub fn initializeNode(allocator: std.mem.Allocator, config: command_line.Config)
     
     
     // Load bootstrap nodes - JSON first, then command line fallback
-    const bootstrap_nodes = try loadBootstrapNodes(allocator, config.bootstrap_nodes);
+    const bootstrap_nodes = try loadBootstrapNodes(allocator, io, config.bootstrap_nodes);
     defer freeBootstrapNodes(allocator, bootstrap_nodes);
     
     // Set bootstrap nodes for auto-reconnect (NetworkManager will copy them)
@@ -227,7 +236,7 @@ pub fn initializeNode(allocator: std.mem.Allocator, config: command_line.Config)
     std.log.info("Connecting to {} bootstrap nodes", .{bootstrap_nodes.len});
     for (bootstrap_nodes) |node| {
         std.log.info("Attempting to connect to bootstrap node {s}:{}", .{ node.ip, node.port });
-        const address = std.net.Address.parseIp(node.ip, node.port) catch |err| {
+        const address = std.Io.net.IpAddress.parse(node.ip, node.port) catch |err| {
             std.log.warn("Failed to parse bootstrap node {s}:{} - {}", .{ node.ip, node.port, err });
             continue;
         };
@@ -240,7 +249,7 @@ pub fn initializeNode(allocator: std.mem.Allocator, config: command_line.Config)
     // Initialize mining if enabled - but delay actual mining start until after sync
     if (config.enable_mining) {
         // miner_wallet is guaranteed to be non-null when enable_mining is true
-        if (initializeMiningSystem(blockchain, config.miner_wallet.?)) {
+        if (initializeMiningSystem(blockchain, io, config.miner_wallet.?, data_dir_override)) {
             std.log.info("⛏️  Mining system initialized - will start mining after initial sync", .{});
         } else |err| {
             // Handle mining initialization errors gracefully without exposing internals
@@ -292,19 +301,19 @@ fn createMessageHandler(allocator: std.mem.Allocator, blockchain: *zen.ZeiCoin) 
     };
 }
 
-fn initializeMiningSystem(blockchain: *zen.ZeiCoin, miner_wallet_name: []const u8) !void {
+fn initializeMiningSystem(blockchain: *zen.ZeiCoin, io: std.Io, miner_wallet_name: []const u8, data_dir_override: ?[]const u8) !void {
     const allocator = blockchain.allocator;
     
     // Load specified mining wallet
     const wallet_name = miner_wallet_name;
     var mining_address: types.Address = undefined;
-    var wallet_instance: ?wallet.Wallet = null;
     
     // Load specified wallet
     var wallet_obj = wallet.Wallet.init(allocator);
+    defer wallet_obj.deinit();
     
     // Build proper wallet path (wallet_name is already safely owned by Config)
-    const data_dir = types.CURRENT_NETWORK.getDataDir();
+    const data_dir = if (data_dir_override) |dir| dir else types.CURRENT_NETWORK.getDataDir();
     const wallet_path = try std.fmt.allocPrint(allocator, "{s}/wallets/{s}.wallet", .{ data_dir, wallet_name });
     defer allocator.free(wallet_path);
     
@@ -312,7 +321,6 @@ fn initializeMiningSystem(blockchain: *zen.ZeiCoin, miner_wallet_name: []const u
     
     // Get password for mining wallet
     const password = password_util.getPasswordForWallet(allocator, wallet_name, false) catch |pwd_err| {
-        wallet_obj.deinit(); // Clean up wallet on password error
         std.log.err("❌ Failed to get password for mining wallet '{s}'", .{wallet_name});
         std.log.err("❌ Error: {}", .{pwd_err});
         std.log.err("", .{});
@@ -325,8 +333,7 @@ fn initializeMiningSystem(blockchain: *zen.ZeiCoin, miner_wallet_name: []const u
     defer allocator.free(password);
     defer password_util.clearPassword(password);
     
-    wallet_obj.loadFromFile(wallet_path, password) catch |err| {
-        wallet_obj.deinit(); // Clean up wallet on load error
+    wallet_obj.loadFromFile(io, wallet_path, password) catch |err| {
         std.log.err("❌ Failed to load mining wallet '{s}' from path: {s}", .{wallet_name, wallet_path});
         std.log.err("❌ Error: {}", .{err});
         std.log.err("", .{});
@@ -337,11 +344,8 @@ fn initializeMiningSystem(blockchain: *zen.ZeiCoin, miner_wallet_name: []const u
         std.log.err("🔄 Or start the server without mining and create the wallet later", .{});
         return err;
     };
-    
-    wallet_instance = wallet_obj;
-    
-    const addr = wallet_instance.?.getAddress(0) catch {
-        wallet_obj.deinit(); // Clean up wallet on address error
+
+    const addr = wallet_obj.getAddress(0) catch {
         std.log.err("❌ Wallet '{s}' has no address!", .{wallet_name});
         return error.WalletHasNoAddress;
     };
@@ -351,39 +355,31 @@ fn initializeMiningSystem(blockchain: *zen.ZeiCoin, miner_wallet_name: []const u
     const addr_str = bech32.encodeAddress(allocator, addr, types.CURRENT_NETWORK) catch "<invalid>";
     defer if (!std.mem.eql(u8, addr_str, "<invalid>")) allocator.free(addr_str);
     std.log.info("⛏️  Mining address: {s}", .{addr_str});
+
+    // Get keypair from wallet for mining
+    const keypair = wallet_obj.getKeyPair(0) catch {
+        std.log.err("❌ Failed to get keypair from wallet for mining", .{});
+        return error.WalletKeyPairError;
+    };
     
-    if (wallet_instance) |*w| {
-        defer w.deinit();
-    }
-    
-    // Start mining
-    if (wallet_instance) |*w| {
-        // Get keypair from wallet for mining
-        const keypair = w.getKeyPair(0) catch {
-            std.log.err("❌ Failed to get keypair from wallet for mining", .{});
-            return error.WalletKeyPairError;
+    // Initialize mining manager if needed
+    if (blockchain.mining_manager == null) {
+        const mining_context = miner_mod.MiningContext{
+            .allocator = allocator,
+            .io = blockchain.io,
+            .database = blockchain.database,
+            .mempool_manager = blockchain.mempool_manager,
+            .mining_state = &blockchain.mining_state,
+            .network = blockchain.network_coordinator.getNetworkManager(),
+            .blockchain = blockchain,
         };
-        
-        // Initialize mining manager if needed
-        if (blockchain.mining_manager == null) {
-            const mining_context = miner_mod.MiningContext{
-                .allocator = allocator,
-                .database = blockchain.database,
-                .mempool_manager = blockchain.mempool_manager,
-                .mining_state = &blockchain.mining_state,
-                .network = blockchain.network_coordinator.getNetworkManager(),
-                .blockchain = blockchain,
-            };
-            blockchain.mining_manager = try allocator.create(miner_mod.MiningManager);
-            blockchain.mining_manager.?.* = miner_mod.MiningManager.init(mining_context, mining_address);
-        }
-        
-        // Store keypair for deferred mining start
-        blockchain.mining_keypair = keypair;
-        std.log.info("⛏️  Mining keypair stored for deferred start", .{});
-    } else {
-        return error.WalletNotFound;
+        blockchain.mining_manager = try allocator.create(miner_mod.MiningManager);
+        blockchain.mining_manager.?.* = miner_mod.MiningManager.init(mining_context, mining_address);
     }
+    
+    // Store keypair for deferred mining start
+    blockchain.mining_keypair = keypair;
+    std.log.info("⛏️  Mining keypair stored for deferred start", .{});
     
     const address_str = bech32.encodeAddress(allocator, mining_address, types.CURRENT_NETWORK) catch "<invalid>";
     defer if (!std.mem.eql(u8, address_str, "<invalid>")) allocator.free(address_str);

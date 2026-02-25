@@ -100,37 +100,27 @@ pub const NetworkHandler = struct {
                 .should_broadcast = false,
             };
         }
-        
-        // 2. Check if already processed (replay protection handled by validator)
-        if (self.validator.isReplayTransaction(transaction)) {
-            self.rejected_count += 1;
-            return NetworkTransactionResult{
-                .accepted = false,
-                .reason = .already_processed,
-                .should_broadcast = false,
-            };
-        }
-        
-        // 3. Validate transaction using network-specific validation
+
+        // 2. Validate transaction using network-specific validation
         if (!try self.validator.validateNetworkTransaction(transaction)) {
             self.rejected_count += 1;
             log.info("⚠️ Rejected network transaction: validation failed", .{});
-            
+
             // Check auto-sync trigger in case account state is out of sync
             try self.checkAutoSyncTrigger(transaction);
-            
+
             return NetworkTransactionResult{
                 .accepted = false,
                 .reason = .validation_failed,
                 .should_broadcast = false,
             };
         }
-        
-        // 4. Check mempool limits
+
+        // 3. Check mempool limits
         const current_count = self.storage.getTransactionCount();
         const current_size = self.storage.getTotalSize();
         const limit_result = try self.limits.canAcceptTransaction(transaction, current_count, current_size);
-        
+
         if (!limit_result.can_accept) {
             self.rejected_count += 1;
             self.limits.printLimitCheckResult(limit_result);
@@ -140,12 +130,9 @@ pub const NetworkHandler = struct {
                 .should_broadcast = false,
             };
         }
-        
-        // 5. Add to mempool storage
+
+        // 4. Add to mempool storage
         try self.storage.addTransactionToPool(transaction);
-        
-        // 6. Mark as processed for replay protection
-        try self.validator.markAsProcessed(transaction);
         
         log.info("✅ Network transaction flows into zen mempool", .{});
         
@@ -232,7 +219,7 @@ pub const NetworkHandler = struct {
         const current_count = self.storage.getTransactionCount();
         const current_size = self.storage.getTotalSize();
         const limit_result = try self.limits.canAcceptTransaction(transaction, current_count, current_size);
-        
+
         if (!limit_result.can_accept) {
             self.limits.printLimitCheckResult(limit_result);
             return LocalTransactionResult{
@@ -242,12 +229,9 @@ pub const NetworkHandler = struct {
                 .validation_error = null,
             };
         }
-        
+
         // 4. Add to mempool storage
         try self.storage.addTransactionToPool(transaction);
-        
-        // 5. Mark as processed for replay protection
-        try self.validator.markAsProcessed(transaction);
         
         log.info("✅ Local transaction added to mempool", .{});
         

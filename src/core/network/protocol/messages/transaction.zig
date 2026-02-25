@@ -7,7 +7,7 @@ const serialize = @import("../../../storage/serialize.zig");
 pub const TransactionMessage = struct {
     transaction: types.Transaction,
     
-    pub fn encode(self: TransactionMessage, writer: anytype) !void {
+    pub fn encode(self: *const TransactionMessage, writer: anytype) !void {
         try serialize.serialize(writer, self.transaction);
     }
     

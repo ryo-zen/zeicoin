@@ -4,9 +4,12 @@
 const std = @import("std");
 const log = std.log.scoped(.server);
 const network = @import("../network/peer.zig");
+const util = @import("../util/util.zig");
 
 pub const Config = struct {
     port: u16 = network.DEFAULT_PORT,
+    api_port: u16 = 10802,
+    rpc_port: u16 = 10803,
     bootstrap_nodes: []const BootstrapNode = &[_]BootstrapNode{},
     enable_mining: bool = false,
     miner_wallet: ?[]const u8 = null,
@@ -39,12 +42,9 @@ pub const BootstrapNode = struct {
     port: u16,
 };
 
-pub fn parseArgs(allocator: std.mem.Allocator) !Config {
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-    
+pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Config {
     var config = Config{ .allocator = allocator };
-    var bootstrap_list = std.ArrayList(BootstrapNode).init(allocator);
+    var bootstrap_list = std.array_list.Managed(BootstrapNode).init(allocator);
     defer bootstrap_list.deinit();
     
     var i: usize = 1;
@@ -81,18 +81,58 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Config {
     }
     
     // Handle environment variable for bind address
-    if (std.process.getEnvVarOwned(allocator, "ZEICOIN_BIND_IP")) |bind_ip| {
+    if (util.getEnvVarOwned(allocator, "ZEICOIN_BIND_IP")) |bind_ip| {
         config.bind_address = bind_ip; // Transfer ownership to config
         config.bind_address_allocated = true;
     } else |_| {}
     
     // Handle environment variable for bootstrap nodes
     if (bootstrap_list.items.len == 0) {
-        if (std.process.getEnvVarOwned(allocator, "ZEICOIN_BOOTSTRAP")) |env_bootstrap| {
+        if (util.getEnvVarOwned(allocator, "ZEICOIN_BOOTSTRAP")) |env_bootstrap| {
             defer allocator.free(env_bootstrap);
             try parseBootstrapNodes(&bootstrap_list, env_bootstrap);
         } else |_| {}
     }
+
+    // Handle environment variables for ports
+    const p2p_port_env = util.getEnvVarOwned(allocator, "ZEICOIN_P2P_PORT") catch 
+                         util.getEnvVarOwned(allocator, "ZEICOIN_PORT") catch 
+                         null;
+    if (p2p_port_env) |p2p_port_str| {
+        defer allocator.free(p2p_port_str);
+        config.port = std.fmt.parseInt(u16, p2p_port_str, 10) catch config.port;
+    }
+
+    const api_port_env = util.getEnvVarOwned(allocator, "ZEICOIN_CLIENT_PORT") catch 
+                         util.getEnvVarOwned(allocator, "ZEICOIN_API_PORT") catch 
+                         null;
+    if (api_port_env) |api_port_str| {
+        defer allocator.free(api_port_str);
+        config.api_port = std.fmt.parseInt(u16, api_port_str, 10) catch config.api_port;
+    }
+
+    if (util.getEnvVarOwned(allocator, "ZEICOIN_RPC_PORT")) |rpc_port_str| {
+        defer allocator.free(rpc_port_str);
+        config.rpc_port = std.fmt.parseInt(u16, rpc_port_str, 10) catch config.rpc_port;
+    } else |_| {}
+    
+    // Handle mining environment variables
+    if (util.getEnvVarOwned(allocator, "ZEICOIN_MINE_ENABLED")) |mine_enabled_str| {
+        defer allocator.free(mine_enabled_str);
+        config.enable_mining = std.mem.eql(u8, mine_enabled_str, "true");
+    } else |_| {}
+    
+    if (config.miner_wallet == null) {
+        if (util.getEnvVarOwned(allocator, "ZEICOIN_MINER_WALLET")) |miner_wallet| {
+            config.miner_wallet = miner_wallet; // Transfer ownership
+        } else |_| {}
+    }
+
+    // Handle client API environment variable
+    if (util.getEnvVarOwned(allocator, "ZEICOIN_CLIENT_API_ENABLED")) |api_enabled_str| {
+        defer allocator.free(api_enabled_str);
+        config.client_api_disabled = std.mem.eql(u8, api_enabled_str, "false");
+    } else |_| {}
     
     // No default bootstrap nodes - nodes without bootstrap config act as bootstrap nodes themselves
     
@@ -100,7 +140,7 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Config {
     return config;
 }
 
-fn parseBootstrapNodes(list: *std.ArrayList(BootstrapNode), input: []const u8) !void {
+fn parseBootstrapNodes(list: *std.array_list.Managed(BootstrapNode), input: []const u8) !void {
     var iter = std.mem.tokenizeScalar(u8, input, ',');
     while (iter.next()) |node| {
         var parts = std.mem.tokenizeScalar(u8, node, ':');

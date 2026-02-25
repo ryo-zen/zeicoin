@@ -155,7 +155,7 @@ pub const EnhancedSyncManager = struct {
                 }
                 
                 // Add validated block to chain
-                try self.sync_manager.blockchain.chain_processor.addBlockToChain(block, next_height);
+                try self.sync_manager.blockchain.chain_processor.addBlockToChain(self.sync_manager.blockchain.io, block, next_height);
                 log.info("Block {} successfully added to chain", .{next_height});
             } else {
                 log.warn("Block {} validation failed, skipping", .{next_height});

@@ -7,6 +7,7 @@ const print = std.debug.print;
 
 const zeicoin = @import("zeicoin");
 const types = zeicoin.types;
+const util = zeicoin.util;
 
 const connection = @import("../client/connection.zig");
 
@@ -16,7 +17,7 @@ const CLIError = error{
 };
 
 /// Handle status command
-pub fn handleStatus(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+pub fn handleStatus(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void {
     // Check for --watch or -w flag
     var watch_mode = false;
     for (args) |arg| {
@@ -27,14 +28,14 @@ pub fn handleStatus(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     }
 
     if (watch_mode) {
-        try handleWatchStatus(allocator);
+        try handleWatchStatus(allocator, io);
         return;
     }
 
     print("📊 ZeiCoin Network Status:\n", .{});
 
     // Show server information (try to get it, fallback to localhost)
-    if (connection.getServerIP(allocator)) |server_ip| {
+    if (util.getEnvVarOwned(allocator, "ZEICOIN_SERVER")) |server_ip| {
         defer allocator.free(server_ip);
         print("🌐 Server: {s}:10802\n", .{server_ip});
     } else |_| {
@@ -42,7 +43,7 @@ pub fn handleStatus(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     }
 
     var buffer: [1024]u8 = undefined;
-    const response = connection.sendRequest(allocator, "BLOCKCHAIN_STATUS_ENHANCED", &buffer) catch |err| {
+    const response = connection.sendRequest(allocator, io, "BLOCKCHAIN_STATUS_ENHANCED", &buffer) catch |err| {
         switch (err) {
             connection.ConnectionError.NetworkError, connection.ConnectionError.ConnectionFailed, connection.ConnectionError.ConnectionTimeout => {
                 // Error messages already printed by connection module
@@ -77,7 +78,7 @@ pub fn handleStatus(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 }
 
 /// Handle watch status with enhanced blockchain animation
-fn handleWatchStatus(allocator: std.mem.Allocator) !void {
+fn handleWatchStatus(allocator: std.mem.Allocator, io: std.Io) !void {
     print("🔍 Monitoring ZeiCoin network status... (Press Ctrl+C to stop)\n", .{});
 
     // Blockchain animation frames
@@ -111,7 +112,7 @@ fn handleWatchStatus(allocator: std.mem.Allocator) !void {
     while (true) {
         // Get status from server
         var buffer: [1024]u8 = undefined;
-        const response = connection.sendRequest(allocator, "BLOCKCHAIN_STATUS_ENHANCED", &buffer) catch |err| {
+        const response = connection.sendRequest(allocator, io, "BLOCKCHAIN_STATUS_ENHANCED", &buffer) catch |err| {
             switch (err) {
                 connection.ConnectionError.NetworkError, connection.ConnectionError.ConnectionFailed, connection.ConnectionError.ConnectionTimeout => {
                     return;
@@ -151,10 +152,10 @@ fn handleWatchStatus(allocator: std.mem.Allocator) !void {
 
             if (first_iteration) {
                 // First iteration: print normally
-                print("{s} Block: {s: >3} | Peers: {s: >2} | Mempool: {s: >3} | Hash: {s: >5} H/s", .{ frame, height orelse "?", peers orelse "?", pending orelse "?", hashrate orelse "0.0" });
+                print("{s} Now Mining Block: {s: >3} | Peers: {s: >2} | Mempool: {s: >3} | Hash: {s: >5} H/s", .{ frame, height orelse "?", peers orelse "?", pending orelse "?", hashrate orelse "0.0" });
             } else {
                 // Update: carriage return, clear entire line, then print (prevents white streak)
-                print("\r\x1b[2K{s} Block: {s: >3} | Peers: {s: >2} | Mempool: {s: >3} | Hash: {s: >5} H/s", .{ frame, height orelse "?", peers orelse "?", pending orelse "?", hashrate orelse "0.0" });
+                print("\r\x1b[2K{s} Now Mining Block: {s: >3} | Peers: {s: >2} | Mempool: {s: >3} | Hash: {s: >5} H/s", .{ frame, height orelse "?", peers orelse "?", pending orelse "?", hashrate orelse "0.0" });
             }
             frame_counter += 1;
         } else {
@@ -169,16 +170,16 @@ fn handleWatchStatus(allocator: std.mem.Allocator) !void {
         first_iteration = false;
 
         // Wait 100ms for smooth animation (10 FPS)
-        std.time.sleep(100 * std.time.ns_per_ms);
+        io.sleep(std.Io.Duration.fromMilliseconds(100), std.Io.Clock.awake) catch {};
     }
 }
 
 /// Handle sync command
-pub fn handleSync(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+pub fn handleSync(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void {
     _ = args; // Unused parameter
 
     var buffer: [1024]u8 = undefined;
-    const response = connection.sendRequest(allocator, "TRIGGER_SYNC", &buffer) catch |err| {
+    const response = connection.sendRequest(allocator, io, "TRIGGER_SYNC", &buffer) catch |err| {
         switch (err) {
             connection.ConnectionError.NetworkError, connection.ConnectionError.ConnectionFailed, connection.ConnectionError.ConnectionTimeout => {
                 // Error messages already printed by connection module
@@ -192,7 +193,7 @@ pub fn handleSync(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 }
 
 /// Handle block inspection command
-pub fn handleBlock(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+pub fn handleBlock(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void {
     if (args.len < 1) {
         print("❌ Block height required\n", .{});
         print("Usage: zeicoin block <height>\n", .{});
@@ -212,7 +213,7 @@ pub fn handleBlock(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     defer allocator.free(block_request);
 
     var buffer: [4096]u8 = undefined;
-    const response = connection.sendRequest(allocator, block_request, &buffer) catch |err| {
+    const response = connection.sendRequest(allocator, io, block_request, &buffer) catch |err| {
         switch (err) {
             connection.ConnectionError.NetworkError, connection.ConnectionError.ConnectionFailed, connection.ConnectionError.ConnectionTimeout => {
                 // Error messages already printed by connection module

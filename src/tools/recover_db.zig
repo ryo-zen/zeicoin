@@ -8,10 +8,14 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    var threaded = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer threaded.deinit();
+    const io = threaded.io();
+
     const data_dir = "zeicoin_data_testnet";
     std.debug.print("Opening database at {s}...\n", .{data_dir});
 
-    var database = try db.Database.init(allocator, data_dir);
+    var database = try db.Database.init(allocator, io, data_dir);
     defer database.deinit();
 
     const current_height = try database.getHeight();

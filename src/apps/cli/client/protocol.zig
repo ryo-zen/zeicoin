@@ -15,7 +15,7 @@ pub const BalanceInfo = struct {
 };
 
 /// Get balance for an address
-pub fn getBalance(allocator: std.mem.Allocator, address: types.Address) !BalanceInfo {
+pub fn getBalance(allocator: std.mem.Allocator, io: std.Io, address: types.Address) !BalanceInfo {
     // Send balance request with bech32 address
     const bech32_addr = try address.toBech32(allocator, types.CURRENT_NETWORK);
     defer allocator.free(bech32_addr);
@@ -24,7 +24,7 @@ pub fn getBalance(allocator: std.mem.Allocator, address: types.Address) !Balance
     defer allocator.free(balance_request);
 
     var buffer: [1024]u8 = undefined;
-    const response = try connection.sendRequest(allocator, balance_request, &buffer);
+    const response = try connection.sendRequest(allocator, io, balance_request, &buffer);
 
     // Parse BALANCE:mature,immature response
     if (std.mem.startsWith(u8, response, "BALANCE:")) {
@@ -45,7 +45,7 @@ pub fn getBalance(allocator: std.mem.Allocator, address: types.Address) !Balance
 }
 
 /// Get current nonce for an address
-pub fn getNonce(allocator: std.mem.Allocator, address: types.Address) !u64 {
+pub fn getNonce(allocator: std.mem.Allocator, io: std.Io, address: types.Address) !u64 {
     // Send nonce request with bech32 address
     const bech32_addr = try address.toBech32(allocator, types.CURRENT_NETWORK);
     defer allocator.free(bech32_addr);
@@ -54,7 +54,7 @@ pub fn getNonce(allocator: std.mem.Allocator, address: types.Address) !u64 {
     defer allocator.free(nonce_request);
 
     var buffer: [1024]u8 = undefined;
-    const response = try connection.sendRequest(allocator, nonce_request, &buffer);
+    const response = try connection.sendRequest(allocator, io, nonce_request, &buffer);
 
     // Parse NONCE:value response
     if (std.mem.startsWith(u8, response, "NONCE:")) {
@@ -66,9 +66,9 @@ pub fn getNonce(allocator: std.mem.Allocator, address: types.Address) !u64 {
 }
 
 /// Get current blockchain height
-pub fn getHeight(allocator: std.mem.Allocator) !u64 {
+pub fn getHeight(allocator: std.mem.Allocator, io: std.Io) !u64 {
     var buffer: [1024]u8 = undefined;
-    const response = try connection.sendRequest(allocator, "GET_HEIGHT", &buffer);
+    const response = try connection.sendRequest(allocator, io, "GET_HEIGHT", &buffer);
 
     // Parse HEIGHT:value response
     if (std.mem.startsWith(u8, response, "HEIGHT:")) {
@@ -91,7 +91,7 @@ pub const TransactionInfo = struct {
 };
 
 /// Get transaction history for an address
-pub fn getHistory(allocator: std.mem.Allocator, address: types.Address) ![]TransactionInfo {
+pub fn getHistory(allocator: std.mem.Allocator, io: std.Io, address: types.Address) ![]TransactionInfo {
     // Send history request with bech32 address
     const bech32_addr = try address.toBech32(allocator, types.CURRENT_NETWORK);
     defer allocator.free(bech32_addr);
@@ -100,7 +100,7 @@ pub fn getHistory(allocator: std.mem.Allocator, address: types.Address) ![]Trans
     defer allocator.free(history_request);
 
     var buffer: [65536]u8 = undefined;
-    const response = try connection.sendRequest(allocator, history_request, &buffer);
+    const response = try connection.sendRequest(allocator, io, history_request, &buffer);
 
     if (std.mem.startsWith(u8, response, "ERROR:")) {
         log.info("❌ {s}", .{response[7..]});
@@ -130,7 +130,7 @@ pub fn getHistory(allocator: std.mem.Allocator, address: types.Address) ![]Trans
     }
 
     // Parse transaction lines
-    var transactions = std.ArrayList(TransactionInfo).init(allocator);
+    var transactions = std.array_list.Managed(TransactionInfo).init(allocator);
     var lines = std.mem.splitScalar(u8, response[8 + first_newline + 1..], '\n');
     
     while (lines.next()) |line| {
@@ -177,7 +177,7 @@ pub fn getHistory(allocator: std.mem.Allocator, address: types.Address) ![]Trans
 }
 
 /// Send a transaction to the network
-pub fn sendTransaction(allocator: std.mem.Allocator, transaction: *const types.Transaction) !void {
+pub fn sendTransaction(allocator: std.mem.Allocator, io: std.Io, transaction: *const types.Transaction) !void {
     // Convert addresses to bech32 for sending
     const sender_bech32 = try transaction.sender.toBech32(allocator, types.CURRENT_NETWORK);
     defer allocator.free(sender_bech32);
@@ -186,7 +186,7 @@ pub fn sendTransaction(allocator: std.mem.Allocator, transaction: *const types.T
     defer allocator.free(recipient_bech32);
 
     // Format transaction message
-    const tx_message = try std.fmt.allocPrint(allocator, "CLIENT_TRANSACTION:{s}:{s}:{}:{}:{}:{}:{}:{s}:{s}", .{
+    const tx_message = try std.fmt.allocPrint(allocator, "CLIENT_TRANSACTION:{s}:{s}:{}:{}:{}:{}:{}:{x}:{x}", .{
         sender_bech32,
         recipient_bech32,
         transaction.amount,
@@ -194,13 +194,13 @@ pub fn sendTransaction(allocator: std.mem.Allocator, transaction: *const types.T
         transaction.nonce,
         transaction.timestamp,
         transaction.expiry_height,
-        std.fmt.fmtSliceHexLower(&transaction.signature),
-        std.fmt.fmtSliceHexLower(&transaction.sender_public_key),
+        transaction.signature,
+        transaction.sender_public_key,
     });
     defer allocator.free(tx_message);
 
     var buffer: [1024]u8 = undefined;
-    const response = try connection.sendRequest(allocator, tx_message, &buffer);
+    const response = try connection.sendRequest(allocator, io, tx_message, &buffer);
 
     if (!std.mem.startsWith(u8, response, "OK:")) {
         // Provide helpful error messages based on server response
@@ -222,7 +222,7 @@ pub fn sendTransaction(allocator: std.mem.Allocator, transaction: *const types.T
 }
 
 /// Send batch of transactions
-pub fn sendBatchTransactions(allocator: std.mem.Allocator, transactions: []const types.Transaction) ![]bool {
+pub fn sendBatchTransactions(allocator: std.mem.Allocator, io: std.Io, transactions: []const types.Transaction) ![]bool {
     const serialize_module = @import("zeicoin").serialize;
     
     // Calculate total size needed for batch message
@@ -246,8 +246,8 @@ pub fn sendBatchTransactions(allocator: std.mem.Allocator, transactions: []const
         offset += 4;
         
         // Serialize transaction
-        var stream = std.io.fixedBufferStream(batch_data[offset..]);
-        try serialize_module.serialize(stream.writer(), tx);
+        var writer = std.Io.Writer.fixed(batch_data[offset .. offset + tx_size]);
+        try serialize_module.serialize(&writer, tx);
         offset += tx_size;
     }
     
@@ -261,7 +261,7 @@ pub fn sendBatchTransactions(allocator: std.mem.Allocator, transactions: []const
     
     // Send batch request (need larger buffer for response)
     var buffer: [65536]u8 = undefined; // 64KB buffer for batch response
-    const response = try connection.sendRequest(allocator, batch_message, &buffer);
+    const response = try connection.sendRequest(allocator, io, batch_message, &buffer);
     
     // Parse batch response
     if (!std.mem.startsWith(u8, response, "BATCH_RESULT:")) {

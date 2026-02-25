@@ -1,11 +1,31 @@
 // Utilities for Zeicoin
 
 const std = @import("std");
+const c = @cImport({
+    @cInclude("stdlib.h");
+});
 
 const log = std.log.scoped(.util);
 
 // Global debug flag
 pub var debug_mode: bool = false;
+
+pub const GetEnvError = error{
+    EnvironmentVariableMissing,
+    OutOfMemory,
+};
+
+/// Get environment variable (owned slice) - replacement for std.process.getEnvVarOwned
+pub fn getEnvVarOwned(allocator: std.mem.Allocator, key: []const u8) GetEnvError![]u8 {
+    // We need a null-terminated string for C
+    const key_c = try allocator.dupeZ(u8, key);
+    defer allocator.free(key_c);
+
+    const val_c = c.getenv(key_c);
+    if (val_c == null) return error.EnvironmentVariableMissing;
+
+    return allocator.dupe(u8, std.mem.span(val_c)) catch error.OutOfMemory;
+}
 
 /// Simple logging utilities for blockchain
 pub fn logSuccess(comptime fmt: []const u8, args: anytype) void {
@@ -22,7 +42,9 @@ pub fn logProcess(comptime fmt: []const u8, args: anytype) void {
 
 /// Get current Unix timestamp
 pub fn getTime() i64 {
-    return std.time.timestamp();
+    const io = std.Io.Threaded.global_single_threaded.ioBasic();
+    const ts = std.Io.Clock.real.now(io) catch return 0;
+    return ts.toSeconds();
 }
 
 /// Format Unix timestamp to human-readable string
@@ -165,3 +187,6 @@ pub fn formatZEI(allocator: std.mem.Allocator, amount_zei: u64) ![]u8 {
         return std.fmt.allocPrint(allocator, "{}.{d:0>5} ZEI", .{ zei_coins, @as(u64, @intFromFloat(decimal * types.PROGRESS.DECIMAL_PRECISION_MULTIPLIER)) });
     }
 }
+
+/// PostgreSQL interface (minimal libpq wrapper)
+pub const postgres = @import("postgres.zig");

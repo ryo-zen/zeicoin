@@ -2,14 +2,15 @@
 // Handles peer connections, discovery, and lifecycle
 
 const std = @import("std");
-const net = std.net;
+const net = std.Io.net;
 const protocol = @import("protocol/protocol.zig");
 const wire = @import("wire/wire.zig");
 const message_types = @import("protocol/messages/message_types.zig");
 const message_envelope = @import("protocol/message_envelope.zig");
 const types = @import("../types/types.zig");
+const util = @import("../util/util.zig");
 
-const ArrayList = std.ArrayList;
+const ArrayList = std.array_list.Managed;
 const Mutex = std.Thread.Mutex;
 
 /// Peer connection state
@@ -40,8 +41,9 @@ pub const PeerState = enum {
 /// Individual peer connection
 pub const Peer = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     id: u64,
-    address: net.Address,
+    address: net.IpAddress,
     state: PeerState,
     connection: wire.WireConnection,
 
@@ -88,7 +90,10 @@ pub const Peer = struct {
     received_blocks_by_height: std.AutoHashMap(u32, types.Block),   // height -> block
     
     response_mutex: std.Thread.Mutex,  // Protects response queues and block caches
-    
+
+    // Stream reference for external close (PeerManager timeout wakeup)
+    stream: ?net.Stream,
+
     // Reference counting for thread-safe peer lifecycle
     ref_count: std.atomic.Value(u32),
 
@@ -101,9 +106,10 @@ pub const Peer = struct {
         timestamp: i64,
     };
 
-    pub fn init(allocator: std.mem.Allocator, id: u64, address: net.Address) Self {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, id: u64, address: net.IpAddress) Self {
         return .{
             .allocator = allocator,
+            .io = io,
             .id = id,
             .address = address,
             .state = .connecting,
@@ -113,8 +119,8 @@ pub const Peer = struct {
             .height = 0,
             .user_agent = &[_]u8{},
             .best_block_hash = [_]u8{0} ** 32,
-            .last_ping = std.time.timestamp(),
-            .last_recv = std.time.timestamp(),
+            .last_ping = util.getTime(),
+            .last_recv = util.getTime(),
             .ping_nonce = null,
             .syncing = false,
             .headers_requested = false,
@@ -132,6 +138,7 @@ pub const Peer = struct {
             .received_blocks = std.AutoHashMap([32]u8, types.Block).init(allocator),
             .received_blocks_by_height = std.AutoHashMap(u32, types.Block).init(allocator),
             .response_mutex = std.Thread.Mutex{},
+            .stream = null,
             .ref_count = std.atomic.Value(u32).init(1),
         };
     }
@@ -140,8 +147,8 @@ pub const Peer = struct {
         // Signal shutdown to connection threads
         self.is_shutting_down.store(true, .release);
 
-        // Give threads a moment to notice the shutdown flag
-        std.time.sleep(10 * std.time.ns_per_ms);
+        const io = self.io;
+        io.sleep(std.Io.Duration.fromMilliseconds(10), std.Io.Clock.awake) catch {};
 
         if (self.user_agent.len > 0) {
             self.allocator.free(self.user_agent);
@@ -194,7 +201,7 @@ pub const Peer = struct {
             return error.PeerShuttingDown;
         }
         
-        self.last_recv = std.time.timestamp();
+        self.last_recv = util.getTime();
         try self.connection.receiveData(data);
     }
 
@@ -207,20 +214,20 @@ pub const Peer = struct {
         
         const result = try self.connection.readMessage();
         if (result) |_| {
-            self.last_recv = std.time.timestamp();
+            self.last_recv = util.getTime();
         }
         return result;
     }
 
     /// Check if peer needs ping
     pub fn needsPing(self: Self) bool {
-        const now = std.time.timestamp();
+        const now = util.getTime();
         return (now - self.last_ping) > protocol.PING_INTERVAL_SECONDS;
     }
 
     /// Check if peer timed out
     pub fn isTimedOut(self: Self) bool {
-        const now = std.time.timestamp();
+        const now = util.getTime();
         const timeout_result = (now - self.last_recv) > protocol.CONNECTION_TIMEOUT_SECONDS;
         return timeout_result;
     }
@@ -233,7 +240,7 @@ pub const Peer = struct {
         try self.block_hash_responses.put(height, BlockHashResponse{
             .hash = hash,
             .exists = exists,
-            .timestamp = std.time.timestamp(),
+            .timestamp = util.getTime(),
         });
     }
 
@@ -388,9 +395,9 @@ pub const Peer = struct {
         std.log.info("📤 [SEND GET_BLOCKS] Peer {d} sending GetBlocks message", .{self.id});
         std.log.info("📤 [SEND GET_BLOCKS] Number of hashes: {d}", .{hashes.len});
         if (hashes.len > 0) {
-            std.log.info("📤 [SEND GET_BLOCKS] First hash: {s}...{s}", .{
-                std.fmt.fmtSliceHexLower(hashes[0][0..4]),
-                std.fmt.fmtSliceHexLower(hashes[0][4..8]),
+            std.log.info("📤 [SEND GET_BLOCKS] First hash: {x}...{x}", .{
+                hashes[0][0..4],
+                hashes[0][4..8],
             });
         }
 
@@ -400,7 +407,7 @@ pub const Peer = struct {
 
         std.log.info("📤 [SEND GET_BLOCKS] Calling sendMessage with .get_blocks type", .{});
         const bytes_sent = try self.sendMessage(.get_blocks, msg);
-        std.log.info("📤 [SEND GET_BLOCKS] ✅ Message sent successfully ({d} bytes)", .{bytes_sent});
+        std.log.info("📤 [SEND GET_BLOCKS] ✅ Message sent successfully ({d} bytes)", .{bytes_sent.len});
         std.log.info("📤 [SEND GET_BLOCKS] ============================================", .{});
     }
 
@@ -421,7 +428,7 @@ pub const Peer = struct {
         // Add each hash to request (up to MAX_MISSING_BLOCKS)
         for (block_hashes) |hash| {
             try msg.addHash(hash);
-            log.debug("   Requesting: {s}", .{std.fmt.fmtSliceHexLower(&hash)});
+            log.debug("   Requesting: {x}", .{&hash});
         }
 
         // Send message
@@ -434,7 +441,7 @@ pub const Peer = struct {
     pub fn sendGetHeaders(self: *Self, start_height: u32, count: u32) !void {
         _ = count; // For future use
 
-        var locator = std.ArrayList([32]u8).init(self.allocator);
+        var locator = std.array_list.Managed([32]u8).init(self.allocator);
         defer locator.deinit();
 
         // Build a simple block locator
@@ -516,13 +523,13 @@ pub const Peer = struct {
         self.consecutive_successful_requests = 0;
 
         // Track failure timestamp and set cooldown
-        self.last_failed_at = std.time.timestamp();
+        self.last_failed_at = util.getTime();
         self.retry_allowed_after = self.last_failed_at + 30; // 30-second cooldown
     }
 
     /// Check if peer can retry connection (cooldown expired)
     pub fn canRetryConnection(self: *const Self) bool {
-        const now = std.time.timestamp();
+        const now = util.getTime();
         return now >= self.retry_allowed_after;
     }
 
@@ -552,11 +559,11 @@ pub const Peer = struct {
     }
 
     /// Format peer for logging - safe version to prevent crashes
-    pub fn format(self: Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: *const Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = fmt;
         _ = options;
         
-        // Safe address formatting to avoid std.net.Address crashes
+        // Safe address formatting to avoid std.net.IpAddress crashes
         switch (self.address.any.family) {
             std.posix.AF.INET => {
                 const addr = self.address.in.sa.addr;
@@ -584,24 +591,26 @@ pub const Peer = struct {
 /// Peer manager handles all peer connections
 pub const PeerManager = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     peers: ArrayList(*Peer),
     mutex: Mutex,
     next_peer_id: u64,
     max_peers: usize,
 
     // Discovery
-    known_addresses: ArrayList(net.Address),
+    known_addresses: ArrayList(net.IpAddress),
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, max_peers: usize) Self {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, max_peers: usize) Self {
         return .{
             .allocator = allocator,
+            .io = io,
             .peers = ArrayList(*Peer).init(allocator),
             .mutex = .{},
             .next_peer_id = 1,
             .max_peers = max_peers,
-            .known_addresses = ArrayList(net.Address).init(allocator),
+            .known_addresses = ArrayList(net.IpAddress).init(allocator),
         };
     }
 
@@ -610,9 +619,12 @@ pub const PeerManager = struct {
         defer self.mutex.unlock();
 
         for (self.peers.items) |peer| {
-            // Signal shutdown to prevent hanging threads (Fixes memory leak)
-            peer.is_shutting_down.store(true, .release);
-            peer.release();
+            // stop() already waited up to 5s for connection threads to finish.
+            // Force full cleanup regardless of remaining reference count so all
+            // peer resources (received_blocks, wire buffers, etc.) are freed.
+            const alloc = peer.allocator;
+            peer.deinit();
+            alloc.destroy(peer);
         }
         self.peers.deinit();
         self.known_addresses.deinit();
@@ -624,27 +636,48 @@ pub const PeerManager = struct {
         defer self.mutex.unlock();
 
         // Mark all peers as disconnected and signal shutdown
+        // Close streams to wake any blocked readers in PeerConnection.run()
         for (self.peers.items) |peer| {
             peer.state = .disconnected;
             peer.is_shutting_down.store(true, .release);
+            if (peer.stream) |s| {
+                // shutdown() interrupts any blocked netRead in the connection thread.
+                // close() alone does not reliably unblock a recv() on Linux.
+                s.shutdown(self.io, .recv) catch {};
+                s.close(self.io);
+                peer.stream = null;
+            }
         }
     }
 
+    fn extractMappedIpv4(ip6_bytes: [16]u8) ?[4]u8 {
+        // IPv4-mapped IPv6: ::ffff:a.b.c.d
+        if (!std.mem.eql(u8, ip6_bytes[0..10], &[_]u8{0} ** 10)) return null;
+        if (ip6_bytes[10] != 0xff or ip6_bytes[11] != 0xff) return null;
+        return .{ ip6_bytes[12], ip6_bytes[13], ip6_bytes[14], ip6_bytes[15] };
+    }
+
+    fn sameIpIgnoringPort(a: net.IpAddress, b: net.IpAddress) bool {
+        return switch (a) {
+            .ip4 => |a4| switch (b) {
+                .ip4 => |b4| std.mem.eql(u8, &a4.bytes, &b4.bytes),
+                .ip6 => |b6| if (extractMappedIpv4(b6.bytes)) |mapped| std.mem.eql(u8, &a4.bytes, &mapped) else false,
+            },
+            .ip6 => |a6| switch (b) {
+                .ip6 => |b6| std.mem.eql(u8, &a6.bytes, &b6.bytes),
+                .ip4 => |b4| if (extractMappedIpv4(a6.bytes)) |mapped| std.mem.eql(u8, &mapped, &b4.bytes) else false,
+            },
+        };
+    }
+
     /// Add a new peer connection
-    pub fn addPeer(self: *Self, address: net.Address) !*Peer {
+    pub fn addPeer(self: *Self, address: net.IpAddress) !*Peer {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        // SECURITY: Check if IP already has a connection (ignore port to prevent dual connections)
+        // SECURITY: Check if IP already has a connection (compare IP only, ignore port)
         for (self.peers.items) |peer| {
-            // Compare IP addresses by converting to string representation
-            const peer_ip = peer.address.getPort();
-            const new_ip = address.getPort();
-            _ = peer_ip;
-            _ = new_ip;
-
-            // For now, use simpler exact address matching until proper IP comparison is implemented
-            if (peer.address.eql(address)) {
+            if (sameIpIgnoringPort(peer.address, address)) {
                 return error.AlreadyConnected;
             }
         }
@@ -658,7 +691,7 @@ pub const PeerManager = struct {
         const peer = try self.allocator.create(Peer);
         errdefer self.allocator.destroy(peer);
         const assigned_id = self.next_peer_id;
-        peer.* = Peer.init(self.allocator, assigned_id, address);
+        peer.* = Peer.init(self.allocator, self.io, assigned_id, address);
         self.next_peer_id += 1;
 
         try self.peers.append(peer);
@@ -748,7 +781,7 @@ pub const PeerManager = struct {
     }
 
     /// Add known address for discovery
-    pub fn addKnownAddress(self: *Self, address: net.Address) !void {
+    pub fn addKnownAddress(self: *Self, address: net.IpAddress) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -763,7 +796,7 @@ pub const PeerManager = struct {
     }
 
     /// Get random known address for connection
-    pub fn getRandomAddress(self: *Self) ?net.Address {
+    pub fn getRandomAddress(self: *Self) ?net.IpAddress {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -771,7 +804,11 @@ pub const PeerManager = struct {
             return null;
         }
 
-        const index = std.crypto.random.uintLessThan(usize, self.known_addresses.items.len);
+        const io = self.io;
+        var rand_bytes: [@sizeOf(usize)]u8 = undefined;
+        std.Io.random(io, &rand_bytes);
+        const rand_val = std.mem.readInt(usize, &rand_bytes, .little);
+        const index = rand_val % self.known_addresses.items.len;
         return self.known_addresses.items[index];
     }
 
@@ -784,6 +821,12 @@ pub const PeerManager = struct {
         while (i < self.peers.items.len) {
             const peer = self.peers.items[i];
             if (peer.isTimedOut()) {
+                // Close the stream to wake the blocked reader in PeerConnection.run()
+                if (peer.stream) |s| {
+                    s.close(self.io);
+                    peer.stream = null;  // Prevent double-close in PeerConnection.deinit()
+                }
+                peer.is_shutting_down.store(true, .release);
                 peer.release();
                 _ = self.peers.orderedRemove(i);
                 // Don't increment i since we removed an item
@@ -830,7 +873,8 @@ pub const PeerManager = struct {
         var syncing: usize = 0;
 
         for (self.peers.items) |peer| {
-            if (peer.state == .connected) connected += 1;
+            // Count connecting/handshaking as connected for maintenance purposes
+            if (peer.state == .connected or peer.state == .connecting or peer.state == .handshaking) connected += 1;
             if (peer.syncing) syncing += 1;
         }
 

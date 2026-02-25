@@ -3,71 +3,66 @@ const types = @import("types.zig");
 
 /// Format a successful JSON-RPC 2.0 response
 pub fn formatSuccess(allocator: std.mem.Allocator, result: []const u8, id: ?std.json.Value) ![]const u8 {
-    var buf = std.ArrayList(u8).init(allocator);
-    defer buf.deinit();
-
-    const writer = buf.writer();
-    try writer.writeAll("{\"jsonrpc\":\"2.0\",\"result\":");
-    try writer.writeAll(result);
-    try writer.writeAll(",\"id\":");
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    try aw.writer.writeAll("{\"jsonrpc\":\"2.0\",\"result\":");
+    try aw.writer.writeAll(result);
+    try aw.writer.writeAll(",\"id\":");
 
     // Handle optional id
     if (id) |id_value| {
         switch (id_value) {
-            .integer => |i| try writer.print("{d}", .{i}),
-            .string => |s| try writer.print("\"{s}\"", .{s}),
-            .null => try writer.writeAll("null"),
-            else => try writer.writeAll("null"),
+            .integer => |i| try aw.writer.print("{d}", .{i}),
+            .string => |s| try aw.writer.print("\"{s}\"", .{s}),
+            .null => try aw.writer.writeAll("null"),
+            else => try aw.writer.writeAll("null"),
         }
     } else {
-        try writer.writeAll("null");
+        try aw.writer.writeAll("null");
     }
 
-    try writer.writeAll("}");
-    return buf.toOwnedSlice();
+    try aw.writer.writeAll("}");
+    return try aw.toOwnedSlice();
 }
 
 /// Format a JSON-RPC 2.0 error response
 pub fn formatError(allocator: std.mem.Allocator, code: types.ErrorCode, data: ?[]const u8, id: ?std.json.Value) ![]const u8 {
-    var buf = std.ArrayList(u8).init(allocator);
-    defer buf.deinit();
-
-    const writer = buf.writer();
-    try writer.writeAll("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":");
-    try writer.print("{d}", .{@intFromEnum(code)});
-    try writer.writeAll(",\"message\":\"");
-    try writer.writeAll(code.message());
-    try writer.writeAll("\"");
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    try aw.writer.writeAll("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":");
+    try aw.writer.print("{d}", .{@intFromEnum(code)});
+    try aw.writer.writeAll(",\"message\":\"");
+    try aw.writer.writeAll(code.message());
+    try aw.writer.writeAll("\"");
 
     if (data) |d| {
-        try writer.writeAll(",\"data\":");
-        try writer.writeAll(d);
+        try aw.writer.writeAll(",\"data\":");
+        try std.json.Stringify.value(d, .{}, &aw.writer);
     }
 
-    try writer.writeAll("},\"id\":");
+    try aw.writer.writeAll("},\"id\":");
 
     if (id) |i| {
         switch (i) {
-            .integer => |int| try writer.print("{d}", .{int}),
-            .string => |s| try writer.print("\"{s}\"", .{s}),
-            .null => try writer.writeAll("null"),
-            else => try writer.writeAll("null"),
+            .integer => |int| try aw.writer.print("{d}", .{int}),
+            .string => |s| try aw.writer.print("\"{s}\"", .{s}),
+            .null => try aw.writer.writeAll("null"),
+            else => try aw.writer.writeAll("null"),
         }
     } else {
-        try writer.writeAll("null");
+        try aw.writer.writeAll("null");
     }
 
-    try writer.writeAll("}");
-    return buf.toOwnedSlice();
+    try aw.writer.writeAll("}");
+    return try aw.toOwnedSlice();
 }
 
 /// Format result object as JSON
 pub fn formatResult(allocator: std.mem.Allocator, comptime T: type, value: T) ![]const u8 {
-    var buf = std.ArrayList(u8).init(allocator);
-    defer buf.deinit();
-
-    try std.json.stringify(value, .{}, buf.writer());
-    return buf.toOwnedSlice();
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    try std.json.Stringify.value(value, .{}, &aw.writer);
+    return try aw.toOwnedSlice();
 }
 
 // ========== Tests ==========
@@ -113,11 +108,11 @@ test "format error response with data" {
     const allocator = std.testing.allocator;
 
     const id = std.json.Value{ .integer = 1 };
-    const data = "{\"size\":10000}";
+    const data = "InvalidTransaction";
     const response = try formatError(allocator, types.ErrorCode.mempool_full, data, id);
     defer allocator.free(response);
 
-    try std.testing.expect(std.mem.indexOf(u8, response, "\"data\":{\"size\":10000}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"data\":\"InvalidTransaction\"") != null);
 }
 
 test "format result object" {

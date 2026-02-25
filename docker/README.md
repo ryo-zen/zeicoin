@@ -336,7 +336,8 @@ const min_batch_size = 0; // Allow empty blocks for testing (normally 1)
 
 // src/core/miner/core.zig
 log.info("⛏️ ZenMineBlock: Starting to mine new block (Slowing down for TEST - 2s delay)", .{});
-std.time.sleep(2 * std.time.ns_per_s); // Artificial delay
+const io = std.Io.Threaded.global_single_threaded.ioBasic();
+io.sleep(std.Io.Duration.fromSeconds(2), std.Io.Clock.awake) catch {}; // Artificial delay
 ```
 
 ## Troubleshooting

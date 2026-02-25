@@ -8,6 +8,7 @@ const key = @import("../crypto/key.zig");
 /// Mining context that holds references to blockchain state
 pub const MiningContext = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     database: *@import("../storage/db.zig").Database,
     mempool_manager: *@import("../mempool/manager.zig").MempoolManager,
     mining_state: *types.MiningState,

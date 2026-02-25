@@ -12,14 +12,14 @@ pub const HashList = struct {
     hashes: []const Hash,
     
     pub fn encode(self: HashList, writer: anytype) !void {
-        try writer.writeInt(u32, @intCast(self.hashes.len), .little);
+        try std.Io.Writer.writeInt(writer, u32, @intCast(self.hashes.len), .little);
         for (self.hashes) |hash| {
             try writer.writeAll(&hash);
         }
     }
     
     pub fn decode(allocator: std.mem.Allocator, reader: anytype, max_count: usize) !HashList {
-        const count = try reader.readInt(u32, .little);
+        const count = try reader.takeInt(u32, .little);
         if (count > max_count) {
             return error.TooManyHashes;
         }
@@ -28,7 +28,7 @@ pub const HashList = struct {
         errdefer allocator.free(hashes);
         
         for (hashes) |*hash| {
-            try reader.readNoEof(hash);
+            try reader.readSliceAll(hash);
         }
         
         return .{ .hashes = hashes };

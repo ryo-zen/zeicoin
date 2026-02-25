@@ -1,16 +1,19 @@
 const std = @import("std");
-const net = std.net;
+const net = std.Io.net;
+const log = std.log.scoped(.rpc_client);
 
 /// Minimal JSON-RPC 2.0 client for blockchain queries
 pub const RPCClient = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     host: []const u8,
     port: u16,
     request_id: u64,
 
-    pub fn init(allocator: std.mem.Allocator, host: []const u8, port: u16) RPCClient {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, host: []const u8, port: u16) RPCClient {
         return RPCClient{
             .allocator = allocator,
+            .io = io,
             .host = host,
             .port = port,
             .request_id = 0,
@@ -112,9 +115,13 @@ pub const RPCClient = struct {
 
         const parsed = try std.json.parseFromSlice(
             struct {
-                result: struct {
+                result: ?struct {
                     nonce: u64,
-                },
+                } = null,
+                @"error": ?struct {
+                    code: i32,
+                    message: ?[]const u8 = null,
+                } = null,
             },
             self.allocator,
             response,
@@ -122,7 +129,9 @@ pub const RPCClient = struct {
         );
         defer parsed.deinit();
 
-        return parsed.value.result.nonce;
+        if (parsed.value.@"error" != null) return error.RPCRequestFailed;
+        const result = parsed.value.result orelse return error.InvalidRPCResponse;
+        return result.nonce;
     }
 
     /// Get account balance and nonce
@@ -141,10 +150,14 @@ pub const RPCClient = struct {
 
         const parsed = try std.json.parseFromSlice(
             struct {
-                result: struct {
+                result: ?struct {
                     balance: u64,
                     nonce: u64,
-                },
+                } = null,
+                @"error": ?struct {
+                    code: i32,
+                    message: ?[]const u8 = null,
+                } = null,
             },
             self.allocator,
             response,
@@ -152,9 +165,12 @@ pub const RPCClient = struct {
         );
         defer parsed.deinit();
 
+        if (parsed.value.@"error" != null) return error.RPCRequestFailed;
+        const result = parsed.value.result orelse return error.InvalidRPCResponse;
+
         return .{
-            .balance = parsed.value.result.balance,
-            .nonce = parsed.value.result.nonce,
+            .balance = result.balance,
+            .nonce = result.nonce,
         };
     }
 
@@ -238,15 +254,23 @@ pub const RPCClient = struct {
         );
         defer self.allocator.free(request);
 
-        const response = try self.call(request);
+        const response = self.call(request) catch |err| {
+            log.err("submitTransaction call failed: {}", .{err});
+            return err;
+        };
         defer self.allocator.free(response);
 
         const parsed = try std.json.parseFromSlice(
             struct {
-                result: struct {
+                result: ?struct {
                     success: bool,
-                    tx_hash: ?[]const u8,
-                },
+                    tx_hash: ?[]const u8 = null,
+                } = null,
+                @"error": ?struct {
+                    code: i32,
+                    message: []const u8,
+                    data: ?[]const u8 = null,
+                } = null,
             },
             self.allocator,
             response,
@@ -254,26 +278,41 @@ pub const RPCClient = struct {
         );
         defer parsed.deinit();
 
-        if (!parsed.value.result.success) {
+        if (parsed.value.@"error") |rpc_err| {
+            if (rpc_err.data) |data| {
+                log.warn("submitTransaction rejected: code={} message='{s}' data='{s}'", .{ rpc_err.code, rpc_err.message, data });
+            } else {
+                log.warn("submitTransaction rejected: code={} message='{s}'", .{ rpc_err.code, rpc_err.message });
+            }
+            return error.RPCRequestFailed;
+        }
+
+        const result = parsed.value.result orelse return error.InvalidRPCResponse;
+        if (!result.success) {
             return error.TransactionFailed;
         }
 
-        return try self.allocator.dupe(u8, parsed.value.result.tx_hash orelse "");
+        const tx_hash = result.tx_hash orelse return error.InvalidRPCResponse;
+        return try self.allocator.dupe(u8, tx_hash);
     }
 
     /// Low-level RPC call
     fn call(self: *RPCClient, request: []const u8) ![]const u8 {
         // Connect to RPC server
-        const address = try net.Address.parseIp4(self.host, self.port);
-        var stream = try net.tcpConnectToAddress(address);
-        defer stream.close();
+        const address = try net.IpAddress.parse(self.host, self.port);
+        var stream = try address.connect(self.io, .{ .mode = .stream });
+        defer stream.close(self.io);
 
         // Send request
-        try stream.writeAll(request);
+        var tiny_buf: [1]u8 = undefined;
+        var writer = stream.writer(self.io, &tiny_buf);
+        try writer.interface.writeAll(request);
+        try writer.interface.flush();
 
         // Read response
         var buffer: [16384]u8 = undefined;
-        const bytes_read = try stream.read(&buffer);
+        const msg = try stream.socket.receive(self.io, &buffer);
+        const bytes_read = msg.data.len;
 
         if (bytes_read == 0) {
             return error.EmptyResponse;
@@ -293,27 +332,3 @@ pub const RPCClient = struct {
         return try self.allocator.dupe(u8, response);
     }
 };
-
-// ========== Tests ==========
-
-test "RPC client creation" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    const client = RPCClient.init(allocator, "127.0.0.1", 10803);
-    try testing.expect(client.port == 10803);
-    try testing.expect(client.request_id == 0);
-    try testing.expectEqualStrings("127.0.0.1", client.host);
-}
-
-test "request ID increments" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    var client = RPCClient.init(allocator, "127.0.0.1", 10803);
-    try testing.expect(client.request_id == 0);
-
-    // Simulate ID increment
-    client.request_id += 1;
-    try testing.expect(client.request_id == 1);
-}

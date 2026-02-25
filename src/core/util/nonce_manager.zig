@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const types = @import("../types/types.zig");
+const util = @import("util.zig");
 
 pub const NonceManagerError = error{
     AllocationFailed,
@@ -35,12 +36,12 @@ pub const NonceManager = struct {
             self.base_nonce = server_nonce;
             self.next_nonce = server_nonce + 1;
             self.pending_count = 0;
-            self.last_sync = std.time.timestamp();
+            self.last_sync = util.getTime();
         }
         
         /// Check if sync with server is needed (optimized for high throughput)
         fn needsSync(self: *const @This()) bool {
-            const current_time = std.time.timestamp();
+            const current_time = util.getTime();
             const sync_age = current_time - self.last_sync;
             
             // Optimized for high-throughput: less frequent syncs
@@ -91,67 +92,78 @@ pub const NonceManager = struct {
         self.nonce_states.deinit();
     }
     
-    /// Get next nonce for address, with automatic server sync when needed
-    /// getNonceCallback should fetch current nonce from server
+    /// Get or sync nonce for an address
     pub fn getNextNonce(
         self: *Self, 
-        address: types.Address,
-        getNonceCallback: *const fn (address: types.Address) anyerror!u64
+        address: types.Address, 
+        io: std.Io,
+        getNonceCallback: *const fn (address: types.Address, io: std.Io) anyerror!u64
     ) !u64 {
         self.mutex.lock();
         defer self.mutex.unlock();
-        
-        const address_key = address.hash;
-        
-        // Get or create nonce state for this address
-        const gop = try self.nonce_states.getOrPut(address_key);
-        if (!gop.found_existing) {
-            // First time seeing this address - sync with server
-            const server_nonce = try getNonceCallback(address);
-            gop.value_ptr.* = AddressNonceState{
+
+        const state = self.nonce_states.getPtr(address.hash) orelse {
+            // New address, initialize from server
+            const server_nonce = try getNonceCallback(address, io);
+            var new_state = AddressNonceState{
                 .base_nonce = server_nonce,
-                .next_nonce = server_nonce,  // Start at server nonce (not +1)
+                .next_nonce = server_nonce, // Start with server nonce
                 .pending_count = 0,
-                .last_sync = std.time.timestamp(),
+                .last_sync = util.getTime(),
             };
-        } else if (gop.value_ptr.needsSync()) {
-            // Periodic sync - but DON'T block on it for high throughput
-            // Just skip sync if we have pending nonces available
-            if (gop.value_ptr.pending_count < 100) {
-                // Only sync if not in burst mode
-                const server_nonce = getNonceCallback(address) catch {
-                    // If sync fails, continue with local nonces
-                    return gop.value_ptr.allocateNonce();
-                };
-                
-                // Only update if server nonce is higher (transactions confirmed)
-                if (server_nonce > gop.value_ptr.base_nonce) {
-                    const confirmed_transactions = server_nonce - gop.value_ptr.base_nonce;
-                    gop.value_ptr.base_nonce = server_nonce;
-                    
-                    // Adjust pending count based on confirmations
-                    if (confirmed_transactions <= gop.value_ptr.pending_count) {
-                        gop.value_ptr.pending_count -= @intCast(confirmed_transactions);
-                    } else {
-                        // More confirmations than expected - reset
-                        gop.value_ptr.pending_count = 0;
-                    }
-                    
-                    // Ensure next_nonce is at least server_nonce
-                    if (gop.value_ptr.next_nonce < server_nonce) {
-                        gop.value_ptr.next_nonce = server_nonce;
-                    }
-                    
-                    gop.value_ptr.last_sync = std.time.timestamp();
-                }
+            const nonce = new_state.allocateNonce();
+            try self.nonce_states.put(address.hash, new_state);
+            return nonce;
+        };
+
+        // Check if we need to sync with server
+        if (state.needsSync()) {
+            const server_nonce = getNonceCallback(address, io) catch state.base_nonce;
+            if (server_nonce > state.base_nonce) {
+                // Server has higher nonce, reset our state
+                state.reset(server_nonce);
             }
         }
-        
-        // Allocate next nonce
-        return gop.value_ptr.allocateNonce();
+
+        return state.allocateNonce();
     }
-    
-    /// Mark a transaction as failed (reduces pending count)
+
+    /// Force immediate sync with server
+    pub fn forceSync(
+        self: *Self, 
+        address: types.Address, 
+        io: std.Io,
+        getNonceCallback: *const fn (address: types.Address, io: std.Io) anyerror!u64
+    ) !void {
+        const server_nonce = try getNonceCallback(address, io);
+        
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        
+        if (self.nonce_states.getPtr(address.hash)) |state| {
+            state.reset(server_nonce);
+        } else {
+            try self.nonce_states.put(address.hash, AddressNonceState{
+                .base_nonce = server_nonce,
+                .next_nonce = server_nonce,
+                .pending_count = 0,
+                .last_sync = util.getTime(),
+            });
+        }
+    }
+
+    /// Emergency nonce recovery - resets to server nonce directly
+    pub fn emergencyNonceRecovery(
+        self: *Self, 
+        address: types.Address, 
+        io: std.Io,
+        getNonceCallback: *const fn (address: types.Address, io: std.Io) anyerror!u64
+    ) !u64 {
+        try self.forceSync(address, io, getNonceCallback);
+        return self.getNextNonce(address, io, getNonceCallback);
+    }
+
+    /// Mark a transaction as failed (decrements pending count)
     pub fn markTransactionFailed(self: *Self, address: types.Address) void {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -167,17 +179,18 @@ pub const NonceManager = struct {
     pub fn getNextNonceWithRetry(
         self: *Self, 
         address: types.Address,
-        getNonceCallback: *const fn (address: types.Address) anyerror!u64,
+        io: std.Io,
+        getNonceCallback: *const fn (address: types.Address, io: std.Io) anyerror!u64,
         max_retries: u32
     ) !u64 {
         var attempts: u32 = 0;
         
         while (attempts <= max_retries) : (attempts += 1) {
             // First attempt or retry: get nonce normally
-            const nonce = self.getNextNonce(address, getNonceCallback) catch |err| {
+            const nonce = self.getNextNonce(address, io, getNonceCallback) catch |err| {
                 if (attempts < max_retries) {
                     // Force immediate sync and try again
-                    self.forceSync(address, getNonceCallback) catch {};
+                    self.forceSync(address, io, getNonceCallback) catch {};
                     continue;
                 } else {
                     return err;
@@ -187,60 +200,7 @@ pub const NonceManager = struct {
             return nonce;
         }
         
-        return error.MaxRetriesExceeded;
-    }
-    
-    /// Emergency nonce recovery - force sync and get conservative nonce
-    pub fn emergencyNonceRecovery(
-        self: *Self, 
-        address: types.Address,
-        getNonceCallback: *const fn (address: types.Address) anyerror!u64
-    ) !u64 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        
-        // Force fresh sync from server
-        const server_nonce = try getNonceCallback(address);
-        
-        // Reset state completely
-        if (self.nonce_states.getPtr(address.hash)) |state| {
-            state.base_nonce = server_nonce;
-            state.next_nonce = server_nonce + 1; // Conservative: only allocate 1 ahead
-            state.pending_count = 1; // Mark as having 1 pending
-            state.last_sync = std.time.timestamp();
-        } else {
-            try self.nonce_states.put(address.hash, AddressNonceState{
-                .base_nonce = server_nonce,
-                .next_nonce = server_nonce + 1,
-                .pending_count = 1,
-                .last_sync = std.time.timestamp(),
-            });
-        }
-        
-        return server_nonce + 1;
-    }
-    
-    /// Force resync with server for an address (useful after transaction failures)
-    pub fn forceSync(
-        self: *Self, 
-        address: types.Address,
-        getNonceCallback: *const fn (address: types.Address) anyerror!u64
-    ) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        
-        const server_nonce = try getNonceCallback(address);
-        
-        if (self.nonce_states.getPtr(address.hash)) |state| {
-            state.reset(server_nonce);
-        } else {
-            try self.nonce_states.put(address.hash, AddressNonceState{
-                .base_nonce = server_nonce,
-                .next_nonce = server_nonce + 1,
-                .pending_count = 0,
-                .last_sync = std.time.timestamp(),
-            });
-        }
+        return error.NonceRecoveryFailed;
     }
     
     /// Get status information for debugging

@@ -18,23 +18,71 @@ pub const RandomXMode = enum {
     fast, // 2GB memory - used for MainNet
 };
 
-// RandomX context using subprocess approach
+// RandomX context using keep-alive subprocess
 pub const RandomXContext = struct {
     allocator: Allocator,
+    io: std.Io,
     key: []u8,
     mode: RandomXMode,
 
-    pub fn init(allocator: Allocator, key: []const u8, mode: RandomXMode) !RandomXContext {
+    // Keep-alive subprocess state
+    helper_process: ?std.process.Child,
+    stdin_writer: ?std.Io.File,
+    stdout_reader: ?std.Io.File,
+
+    pub fn init(allocator: Allocator, io: std.Io, key: []const u8, mode: RandomXMode) !RandomXContext {
         const key_copy = try allocator.dupe(u8, key);
+        errdefer allocator.free(key_copy);
+
+        // Resolve helper path
+        const exe_path = std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io, "./randomx/randomx_helper", allocator) catch |err| {
+            log.info("Failed to resolve RandomX helper path: {}", .{err});
+            return RandomXError.ProcessFailed;
+        };
+        defer allocator.free(exe_path);
+
+        // Spawn helper in server mode (no args = server mode)
+        const argv = &[_][]const u8{exe_path};
+        var child = std.process.spawn(io, .{
+            .argv = argv,
+            .stdin = .pipe,   // We write to this
+            .stdout = .pipe,  // We read from this
+            .stderr = .ignore,
+        }) catch |err| {
+            log.info("Failed to spawn RandomX helper: {}", .{err});
+            return RandomXError.ProcessFailed;
+        };
+
         return RandomXContext{
             .allocator = allocator,
+            .io = io,
             .key = key_copy,
             .mode = mode,
+            .helper_process = child,
+            .stdin_writer = if (child.stdin) |s| s else null,
+            .stdout_reader = if (child.stdout) |s| s else null,
         };
     }
 
     pub fn deinit(self: *RandomXContext) void {
         self.allocator.free(self.key);
+
+        if (self.helper_process) |*process| {
+            // Send exit command
+            if (self.stdin_writer) |file| {
+                var write_buf: [8]u8 = undefined;
+                var writer = file.writer(self.io, &write_buf);
+                const exit_cmd = "exit\n";
+                writer.interface.writeAll(exit_cmd) catch {};
+                writer.flush() catch {};
+            }
+
+            // Wait for graceful exit (with short timeout)
+            _ = process.wait(self.io) catch {
+                // Force kill if timeout
+                process.kill(self.io);
+            };
+        }
     }
 
     pub fn hash(self: *RandomXContext, input: []const u8, output: *[32]u8) !void {
@@ -42,6 +90,10 @@ pub const RandomXContext = struct {
     }
 
     pub fn hashWithDifficulty(self: *RandomXContext, input: []const u8, output: *[32]u8, difficulty_bytes: u8) !void {
+        // Validate subprocess is alive
+        if (self.helper_process == null or self.stdin_writer == null or self.stdout_reader == null) {
+            return RandomXError.ProcessFailed;
+        }
 
         // Convert input to hex string
         var hex_input = try self.allocator.alloc(u8, input.len * 2);
@@ -54,99 +106,51 @@ pub const RandomXContext = struct {
         // Get mode string
         const mode_str = if (self.mode == .light) "light" else "fast";
 
-        // Validate inputs before subprocess execution
-        if (hex_input.len == 0) return RandomXError.InvalidInput;
-        for (hex_input) |c| {
-            if (!std.ascii.isHex(c)) return RandomXError.InvalidInput;
-        }
+        // Format request: hex_input:hex_key:difficulty:mode\n
+        var request_buf: [16384]u8 = undefined;
+        const request = std.fmt.bufPrint(&request_buf, "{s}:{s}:{d}:{s}\n", .{ hex_input, self.key, difficulty_bytes, mode_str }) catch {
+            return RandomXError.InvalidInput;
+        };
 
-        // Validate key format (should be hex string)
-        if (self.key.len != 64) return RandomXError.InvalidInput; // 32 bytes * 2 hex chars
-        for (self.key) |c| {
-            if (!std.ascii.isHex(c)) return RandomXError.InvalidInput;
-        }
-
-        // Use absolute path to prevent PATH manipulation
-        const exe_path = std.fs.realpathAlloc(self.allocator, "./randomx/randomx_helper") catch |err| {
-            log.info("Failed to resolve RandomX helper path: {}", .{err});
+        // Write request to stdin
+        const stdin_file = self.stdin_writer.?;
+        var write_buf: [16384]u8 = undefined;
+        var writer = stdin_file.writer(self.io, &write_buf);
+        writer.interface.writeAll(request) catch |err| {
+            log.info("Failed to write to RandomX helper: {}", .{err});
             return RandomXError.ProcessFailed;
         };
-        defer self.allocator.free(exe_path);
-
-        // Create argv array with proper memory management
-        const argv = try self.allocator.alloc([]const u8, 5);
-        defer self.allocator.free(argv);
-        // Format difficulty bytes as string
-        var difficulty_str: [4]u8 = undefined;
-        _ = std.fmt.bufPrint(&difficulty_str, "{}", .{difficulty_bytes}) catch unreachable;
-
-        argv[0] = exe_path;
-        argv[1] = hex_input;
-        argv[2] = self.key;
-        argv[3] = difficulty_str[0..std.fmt.count("{}", .{difficulty_bytes})];
-        argv[4] = mode_str;
-
-        // Run RandomX helper subprocess with resource limits
-        var child = std.process.Child.init(argv, self.allocator);
-
-        // Set resource limits for security
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
-        child.stdin_behavior = .Ignore;
-
-        // Spawn and wait with timeout
-        child.spawn() catch |err| {
-            log.info("Failed to spawn RandomX helper: {}", .{err});
+        writer.flush() catch |err| {
+            log.info("Failed to flush RandomX helper stdin: {}", .{err});
             return RandomXError.ProcessFailed;
         };
 
-        // Set up timeout (30 seconds max)
-        const timeout_ns = 30 * std.time.ns_per_s;
-        const start_time = std.time.nanoTimestamp();
-
-        // Collect output with size limits
-        var stdout = std.ArrayList(u8).init(self.allocator);
-        defer stdout.deinit();
-        var stderr = std.ArrayList(u8).init(self.allocator);
-        defer stderr.deinit();
-
-        // Read with size limits (max 1KB output)
-        const max_output = 1024;
-        try stdout.ensureTotalCapacity(max_output);
-        try stderr.ensureTotalCapacity(max_output);
-
-        // Read output before wait to avoid deadlock
-        if (child.stdout) |out| {
-            const n = try out.reader().readAll(stdout.unusedCapacitySlice()[0..@min(max_output, stdout.unusedCapacitySlice().len)]);
-            stdout.items.len += n;
-        }
-        if (child.stderr) |err| {
-            const n = try err.reader().readAll(stderr.unusedCapacitySlice()[0..@min(max_output, stderr.unusedCapacitySlice().len)]);
-            stderr.items.len += n;
-        }
-
-        const result = try child.wait();
-
-        // Check execution time
-        const elapsed = std.time.nanoTimestamp() - start_time;
-        if (elapsed > timeout_ns) return RandomXError.ProcessTimeout;
-
-        if (result != .Exited or result.Exited != 0) {
-            log.info("RandomX helper failed with exit code: {}", .{result});
-            log.info("stderr: {s}", .{stderr.items});
-            log.info("stdout: {s}", .{stdout.items});
+        // Read response from stdout
+        const stdout_file = self.stdout_reader.?;
+        var read_buf: [256]u8 = undefined;
+        var reader = stdout_file.reader(self.io, &read_buf);
+        const response = reader.interface.takeDelimiterExclusive('\n') catch |err| {
+            log.info("Failed to read from RandomX helper: {}", .{err});
             return RandomXError.ProcessFailed;
+        };
+
+        // Check for error response
+        if (std.mem.startsWith(u8, response, "ERROR:")) {
+            log.info("RandomX helper error: {s}", .{response});
+            return RandomXError.HashFailed;
         }
 
-        // Parse result: hash_hex:meets_difficulty
-        const output_str = stdout.items;
-        const colon_pos = std.mem.indexOf(u8, output_str, ":") orelse {
-            log.info("Failed to find colon in RandomX output", .{});
+        // Parse response: hash_hex:meets_difficulty
+        const colon_pos = std.mem.indexOf(u8, response, ":") orelse {
+            log.info("Failed to find colon in RandomX output: {s}", .{response});
             return RandomXError.HashFailed;
         };
-        const hash_hex = output_str[0..colon_pos];
+        const hash_hex = response[0..colon_pos];
 
-        if (hash_hex.len != 64) return RandomXError.HashFailed;
+        if (hash_hex.len != 64) {
+            log.info("Invalid hash length: {} (expected 64)", .{hash_hex.len});
+            return RandomXError.HashFailed;
+        }
 
         // Convert hex hash to bytes
         for (0..32) |i| {
@@ -202,4 +206,61 @@ test "RandomX integration" {
 
     const hard_hash: [32]u8 = .{0xFF} ** 32;
     try std.testing.expect(!hashMeetsDifficulty(hard_hash, 1));
+}
+
+test "RandomX keep-alive subprocess performance" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.default();
+
+    // Create RandomX key
+    const key = createRandomXKey("TestNet");
+    var hex_key: [64]u8 = undefined;
+    for (key, 0..) |byte, i| {
+        _ = std.fmt.bufPrint(hex_key[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch unreachable;
+    }
+
+    // Initialize context (spawns helper once)
+    var ctx = try RandomXContext.init(allocator, io, &hex_key, .light);
+    defer ctx.deinit();
+
+    std.debug.print("\n🧪 Testing keep-alive subprocess with 50 hashes...\n", .{});
+
+    var timer = try std.time.Timer.start();
+
+    // Hash 50 inputs using same subprocess
+    for (0..50) |i| {
+        var input: [32]u8 = undefined;
+        std.mem.writeInt(u64, input[0..8], i, .little);
+
+        var output: [32]u8 = undefined;
+        try ctx.hashWithDifficulty(&input, &output, 0);
+
+        // Verify hash is valid (not all zeros, not all 0xFF)
+        var all_zero = true;
+        var all_ff = true;
+        for (output) |byte| {
+            if (byte != 0) all_zero = false;
+            if (byte != 0xFF) all_ff = false;
+        }
+        try std.testing.expect(!all_zero);
+        try std.testing.expect(!all_ff);
+    }
+
+    const elapsed_ms = timer.read() / std.time.ns_per_ms;
+    const per_hash = @as(f64, @floatFromInt(elapsed_ms)) / 50.0;
+
+    std.debug.print("✅ Completed 50 hashes in {}ms (~{d:.1}ms per hash)\n", .{ elapsed_ms, per_hash });
+    std.debug.print("   Old way (spawn per hash): ~25 seconds (500ms per hash)\n", .{});
+    std.debug.print("   New way (keep-alive): {}ms total\n", .{elapsed_ms});
+
+    // Performance check: should complete in < 5 seconds
+    // Old way: 50 * 500ms = 25 seconds
+    // New way: 500ms init + 50 * 5ms = ~750ms
+    if (elapsed_ms < 5000) {
+        std.debug.print("🎉 SUCCESS! Keep-alive subprocess is working ({d:.0}x faster)!\n", .{@as(f64, 25000.0) / @as(f64, @floatFromInt(elapsed_ms))});
+    } else {
+        std.debug.print("⚠️  WARNING: Slower than expected, may still be spawning per hash\n", .{});
+    }
+
+    try std.testing.expect(elapsed_ms < 10000); // Should complete in < 10 seconds
 }

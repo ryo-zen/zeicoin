@@ -4,10 +4,11 @@
 const std = @import("std");
 const log = std.log.scoped(.cli);
 const print = std.debug.print;
-const net = std.net;
+const net = std.Io.net;
 
 const zeicoin = @import("zeicoin");
 const types = zeicoin.types;
+const util = zeicoin.util;
 
 pub const ConnectionError = error{
     NetworkError,
@@ -20,239 +21,122 @@ pub const ClientConnection = struct {
     stream: net.Stream,
     server_ip: []const u8,
     allocator: std.mem.Allocator,
+    io: std.Io,
 
     pub fn deinit(self: *ClientConnection) void {
-        self.stream.close();
+        self.stream.close(self.io);
         self.allocator.free(self.server_ip);
     }
 
     pub fn writeRequest(self: *ClientConnection, request: []const u8) !void {
-        try self.stream.writeAll(request);
+        // Use a tiny buffer to ensure immediate transmission of the request.
+        var tiny_buf: [1]u8 = undefined;
+        var writer = self.stream.writer(self.io, &tiny_buf);
+        try writer.interface.writeAll(request);
     }
 
     pub fn readResponse(self: *ClientConnection, buffer: []u8) ![]const u8 {
-        const bytes_read = readWithTimeout(self.stream, buffer) catch {
-            log.info("❌ Server response timeout (5s)", .{});
+        const msg = self.stream.socket.receive(self.io, buffer) catch |err| {
+            log.info("❌ Server response error: {}", .{err});
             return ConnectionError.ConnectionTimeout;
         };
-        return buffer[0..bytes_read];
+        return msg.data;
     }
 };
 
 // Auto-detect server IP by checking common interfaces
-fn autoDetectServerIP(allocator: std.mem.Allocator) ?[]const u8 {
-    // Try to get local IP from hostname command
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
+fn autoDetectServerIP(allocator: std.mem.Allocator, io: std.Io) ?[]const u8 {
+    var child = std.process.spawn(io, .{
         .argv = &[_][]const u8{ "hostname", "-I" },
+        .stdout = .pipe,
+        .stderr = .pipe,
     }) catch return null;
+    
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_reader = child.stdout.?.reader(io, &stdout_buf);
+    const stdout = stdout_reader.interface.readAlloc(allocator, 4096) catch return null;
+    defer allocator.free(stdout);
+    
+    var stderr_buf: [4096]u8 = undefined;
+    var stderr_reader = child.stderr.?.reader(io, &stderr_buf);
+    _ = stderr_reader.interface.readAlloc(allocator, 4096) catch {};
+    
+    _ = child.wait(io) catch return null;
 
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-
-    if (result.term.Exited == 0 and result.stdout.len > 0) {
-        // Parse first IP from output
-        var it = std.mem.splitScalar(u8, result.stdout, ' ');
-        if (it.next()) |first_ip| {
-            const trimmed = std.mem.trim(u8, first_ip, " \t\n");
-            if (trimmed.len > 0) {
-                return allocator.dupe(u8, trimmed) catch null;
-            }
-        }
+    var it = std.mem.splitScalar(u8, stdout, ' ');
+    if (it.next()) |first_ip| {
+        const trimmed = std.mem.trim(u8, first_ip, " \t\n");
+        if (trimmed.len > 0) return allocator.dupe(u8, trimmed) catch null;
     }
 
     return null;
 }
 
-fn testServerConnection(ip: []const u8) bool {
-    const address = net.Address.parseIp4(ip, 10802) catch return false;
+fn testServerConnection(io: std.Io, ip: []const u8) bool {
+    const address = net.IpAddress.parse(ip, 10802) catch return false;
+    var stream = address.connect(io, .{ .mode = .stream }) catch return false;
+    defer stream.close(io);
     
-    var stream = connectWithTimeout(address) catch return false;
-    defer stream.close();
-    
-    // Server is healthy if it responds with any data
-    const test_msg = "STATUS";
-    stream.writeAll(test_msg) catch return false;
+    const test_msg = "BLOCKCHAIN_STATUS";
+    var tiny_buf: [1]u8 = undefined;
+    var writer = stream.writer(io, &tiny_buf);
+    writer.interface.writeAll(test_msg) catch return false;
     
     var buffer: [1024]u8 = undefined;
-    const bytes_read = readWithTimeout(stream, &buffer) catch return false;
-    
-    return bytes_read > 0;
+    const msg = stream.socket.receive(io, &buffer) catch return false;
+    return msg.data.len > 0;
 }
 
-pub fn getServerIP(allocator: std.mem.Allocator) ![]const u8 {
-    // 1. Try environment variable first
-    if (std.process.getEnvVarOwned(allocator, "ZEICOIN_SERVER")) |server_ip| {
-        return server_ip;
-    } else |_| {}
-
-    // 2. Try auto-detection with connection test
-    if (autoDetectServerIP(allocator)) |detected_ip| {
+pub fn getServerIP(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
+    if (util.getEnvVarOwned(allocator, "ZEICOIN_SERVER")) |server_ip| return server_ip else |_| {}
+    if (autoDetectServerIP(allocator, io)) |detected_ip| {
         defer allocator.free(detected_ip);
-
-        // Test if detected IP actually has a ZeiCoin server
-        if (testServerConnection(detected_ip)) {
-            return allocator.dupe(u8, detected_ip);
-        }
+        if (testServerConnection(io, detected_ip)) return allocator.dupe(u8, detected_ip);
     }
 
-    // 3. Try bootstrap servers from JSON config
-    const bootstrap_nodes = types.loadBootstrapNodes(allocator) catch |err| {
+    const bootstrap_nodes = types.loadBootstrapNodes(allocator, io) catch |err| {
         log.info("⚠️  Failed to load bootstrap nodes: {}", .{err});
         return ConnectionError.NetworkError;
     };
     defer types.freeBootstrapNodes(allocator, bootstrap_nodes);
 
-    log.info("🔍 Testing bootstrap nodes for health...", .{});
     for (bootstrap_nodes) |bootstrap_addr| {
-        // Parse IP from "ip:port" format
         var it = std.mem.splitScalar(u8, bootstrap_addr, ':');
         if (it.next()) |ip_str| {
-            log.info("  Testing {s}... ", .{ip_str});
-            if (testServerConnection(ip_str)) {
-                log.info("✅ Healthy!", .{});
-                log.info("🌐 Using healthy bootstrap node: {s}", .{ip_str});
-                return allocator.dupe(u8, ip_str);
-            } else {
-                log.info("❌ Unhealthy or offline", .{});
-            }
+            if (testServerConnection(io, ip_str)) return allocator.dupe(u8, ip_str);
         }
     }
 
-    log.info("⚠️  No healthy bootstrap nodes found", .{});
-
-    // 4. Final fallback to localhost
-    print("💡 Using localhost fallback (set ZEICOIN_SERVER to override)\n", .{});
+    print("💡 Using localhost fallback\n", .{});
     return allocator.dupe(u8, "127.0.0.1");
 }
 
-fn connectWithTimeout(address: net.Address) !net.Stream {
-    const ConnectResult = struct {
-        result: ?net.Stream = null,
-        error_occurred: bool = false,
-        completed: bool = false,
-    };
-
-    var connect_result = ConnectResult{};
-
-    // Spawn thread for connection attempt
-    const connect_thread = std.Thread.spawn(.{}, struct {
-        fn connectWorker(addr: net.Address, result: *ConnectResult) void {
-            result.result = net.tcpConnectToAddress(addr) catch {
-                result.error_occurred = true;
-                result.completed = true;
-                return;
-            };
-            result.completed = true;
-        }
-    }.connectWorker, .{ address, &connect_result }) catch {
-        return ConnectionError.ConnectionFailed;
-    };
-
-    // Wait for completion or timeout (5 seconds)
-    const timeout_ns = 5 * std.time.ns_per_s;
-    const start_time = std.time.nanoTimestamp();
-
-    while (!connect_result.completed) {
-        const elapsed = std.time.nanoTimestamp() - start_time;
-        if (elapsed > timeout_ns) {
-            // Timeout - the thread will continue but we abandon it
-            return ConnectionError.ConnectionTimeout;
-        }
-        std.time.sleep(10 * std.time.ns_per_ms); // Check every 10ms
-    }
-
-    connect_thread.join();
-
-    if (connect_result.error_occurred) {
-        return ConnectionError.ConnectionFailed;
-    }
-
-    return connect_result.result orelse ConnectionError.ConnectionFailed;
-}
-
-fn readWithTimeout(stream: net.Stream, buffer: []u8) !usize {
-    const ReadResult = struct {
-        bytes_read: usize = 0,
-        error_occurred: bool = false,
-        completed: bool = false,
-    };
-
-    var read_result = ReadResult{};
-
-    // Spawn thread for read attempt
-    const read_thread = std.Thread.spawn(.{}, struct {
-        fn readWorker(s: net.Stream, buf: []u8, result: *ReadResult) void {
-            result.bytes_read = s.read(buf) catch {
-                result.error_occurred = true;
-                result.completed = true;
-                return;
-            };
-            result.completed = true;
-        }
-    }.readWorker, .{ stream, buffer, &read_result }) catch {
-        return error.ReadTimeout;
-    };
-
-    // Wait for completion or timeout (5 seconds)
-    const timeout_ns = 5 * std.time.ns_per_s;
-    const start_time = std.time.nanoTimestamp();
-
-    while (!read_result.completed) {
-        const elapsed = std.time.nanoTimestamp() - start_time;
-        if (elapsed > timeout_ns) {
-            // Timeout - the thread will continue but we abandon it
-            return error.ReadTimeout;
-        }
-        std.time.sleep(10 * std.time.ns_per_ms); // Check every 10ms
-    }
-
-    read_thread.join();
-
-    if (read_result.error_occurred) {
-        return error.ReadTimeout;
-    }
-
-    return read_result.bytes_read;
-}
-
-/// Connect to ZeiCoin server with automatic server discovery
-pub fn connect(allocator: std.mem.Allocator) !ClientConnection {
-    const server_ip = try getServerIP(allocator);
+pub fn connect(allocator: std.mem.Allocator, io: std.Io) !ClientConnection {
+    const server_ip = try getServerIP(allocator, io);
     errdefer allocator.free(server_ip);
 
-    const server_address = net.Address.parseIp4(server_ip, 10802) catch {
+    const server_address = net.IpAddress.parse(server_ip, 10802) catch {
         log.info("❌ Invalid server address: {s}", .{server_ip});
         return ConnectionError.InvalidServerAddress;
     };
 
-    const stream = connectWithTimeout(server_address) catch |err| {
-        switch (err) {
-            ConnectionError.ConnectionTimeout => {
-                print("❌ Connection timeout to ZeiCoin server at {s}:10802 (5s)\n", .{server_ip});
-                return ConnectionError.ConnectionTimeout;
-            },
-            ConnectionError.ConnectionFailed => {
-                print("❌ Cannot connect to ZeiCoin server at {s}:10802\n", .{server_ip});
-                print("💡 Make sure the server is running\n", .{});
-                return ConnectionError.ConnectionFailed;
-            },
-            else => return err,
-        }
+    const stream = server_address.connect(io, .{ .mode = .stream }) catch |err| {
+        log.info("❌ Cannot connect to ZeiCoin server at {s}:10802: {}", .{server_ip, err});
+        print("💡 Make sure the server is running\n", .{});
+        return ConnectionError.ConnectionFailed;
     };
 
     return ClientConnection{
         .stream = stream,
         .server_ip = server_ip,
         .allocator = allocator,
+        .io = io,
     };
 }
 
-/// Send a request and get response in one call
-pub fn sendRequest(allocator: std.mem.Allocator, request: []const u8, response_buffer: []u8) ![]const u8 {
-    var connection = try connect(allocator);
-    defer connection.deinit();
-    
-    try connection.writeRequest(request);
-    return try connection.readResponse(response_buffer);
+pub fn sendRequest(allocator: std.mem.Allocator, io: std.Io, request: []const u8, response_buffer: []u8) ![]const u8 {
+    var connection_inst = try connect(allocator, io);
+    defer connection_inst.deinit();
+    try connection_inst.writeRequest(request);
+    return try connection_inst.readResponse(response_buffer);
 }

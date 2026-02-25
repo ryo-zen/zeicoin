@@ -3,16 +3,13 @@ const build_helpers = @import("build_helpers.zig");
 const package_name = "zeicoin";
 const package_path = "src/lib.zig";
 
+// NOTE: External Zig dependencies removed - using libpq C library for PostgreSQL.
+// Core blockchain (zen_server, CLI) has ZERO external dependencies.
+// System libraries: RocksDB (blockchain storage), libpq (optional PostgreSQL analytics)
+//
 // List of external dependencies that this package requires.
 const external_dependencies = [_]build_helpers.Dependency{
-    .{
-        .name = "pg",
-        .module_name = "pg",
-    },
-    .{
-        .name = "zap",
-        .module_name = "zap",
-    },
+    // All external dependencies removed - using C libraries instead
 };
 
 pub fn build(b: *std.Build) !void {
@@ -30,41 +27,45 @@ pub fn build(b: *std.Build) !void {
     // **************************************************************
     // *            HANDLE DEPENDENCY MODULES                       *
     // **************************************************************
-    const deps = build_helpers.generateModuleDependencies(
-        b,
-        &external_dependencies,
-        .{
-            .optimize = optimize,
-            .target = target,
-        },
-    ) catch unreachable;
+    // No external Zig module dependencies - using C libraries (libpq, rocksdb)
+    // const deps = build_helpers.generateModuleDependencies(
+    //     b,
+    //     &external_dependencies,
+    //     .{
+    //         .optimize = optimize,
+    //         .target = target,
+    //     },
+    // ) catch unreachable;
 
     // **************************************************************
     // *               ZEICOIN AS A MODULE                          *
     // **************************************************************
-    // expose zeicoin as a module
-    _ = b.addModule(package_name, .{
+    // Create the root module for zeicoin library
+    const zeicoin_module = b.createModule(.{
         .root_source_file = b.path(package_path),
-        .imports = deps,
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
     });
+
+    // Link RocksDB to the module (system dependency for core blockchain)
+    zeicoin_module.linkSystemLibrary("rocksdb", .{});
+
+    // Link libpq to the module (PostgreSQL for optional analytics/indexer)
+    zeicoin_module.linkSystemLibrary("pq", .{});
+
+    // Expose zeicoin as a public module
+    try b.modules.put(b.dupe(package_name), zeicoin_module);
 
     // **************************************************************
     // *              ZEICOIN AS A LIBRARY                          *
     // **************************************************************
-    const lib = b.addStaticLibrary(.{
+    const lib = b.addLibrary(.{
         .name = "zeicoin",
-        .root_source_file = b.path("src/lib.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = zeicoin_module,
+        .linkage = .static,
     });
-    // Add dependency modules to the library.
-    for (deps) |mod| lib.root_module.addImport(
-        mod.name,
-        mod.module,
-    );
-    lib.linkLibC();
-    // Link RocksDB
-    lib.linkSystemLibrary("rocksdb");
+
     // This declares intent for the library to be installed into the standard
     // location when the user invokes the "install" step (the default step when
     // running `zig build`).
@@ -74,21 +75,20 @@ pub fn build(b: *std.Build) !void {
     // *              ZEN_SERVER AS AN EXECUTABLE                   *
     // **************************************************************
     {
-        const exe = b.addExecutable(.{
-            .name = "zen_server",
+        const server_module = b.createModule(.{
             .root_source_file = b.path("src/apps/main.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         });
-        // Add dependency modules to the executable.
-        for (deps) |mod| exe.root_module.addImport(
-            mod.name,
-            mod.module,
-        );
-        exe.root_module.addImport("zeicoin", lib.root_module);
-        exe.linkLibC();
-        // Link RocksDB
-        exe.linkSystemLibrary("rocksdb");
+
+        // Import zeicoin library
+        server_module.addImport("zeicoin", zeicoin_module);
+
+        const exe = b.addExecutable(.{
+            .name = "zen_server",
+            .root_module = server_module,
+        });
 
         b.installArtifact(exe);
 
@@ -107,21 +107,20 @@ pub fn build(b: *std.Build) !void {
     // *              ZEICOIN CLI AS AN EXECUTABLE                  *
     // **************************************************************
     {
-        const exe = b.addExecutable(.{
-            .name = "zeicoin",
+        const cli_module = b.createModule(.{
             .root_source_file = b.path("src/apps/cli.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         });
-        // Add dependency modules to the executable.
-        for (deps) |mod| exe.root_module.addImport(
-            mod.name,
-            mod.module,
-        );
-        exe.root_module.addImport("zeicoin", lib.root_module);
-        exe.linkLibC();
-        // Link RocksDB
-        exe.linkSystemLibrary("rocksdb");
+
+        // Import zeicoin library
+        cli_module.addImport("zeicoin", zeicoin_module);
+
+        const exe = b.addExecutable(.{
+            .name = "zeicoin",
+            .root_module = cli_module,
+        });
 
         b.installArtifact(exe);
 
@@ -137,24 +136,65 @@ pub fn build(b: *std.Build) !void {
     }
 
     // **************************************************************
+    // *              ANALYTICS EXECUTABLES                         *
+    // *              (Require pg dependency - now compatible)      *
+    // **************************************************************
+
+    // NOTE: pg.zig has been updated for Zig 0.16.0 compatibility (ryo-zen fork).
+    // The following executables are now enabled:
+    //
+    // - zeicoin_indexer (requires pg) - ENABLED
+    // - transaction_api (requires pg + zap) - DISABLED (zap not yet compatible)
+    // - error_monitor (requires pg) - DISABLED (not needed)
+    //
+    // Core blockchain functionality (zen_server + CLI) works without these.
+
+    // **************************************************************
     // *              ZEICOIN INDEXER AS AN EXECUTABLE              *
     // **************************************************************
+    // Indexer uses libpq wrapper (migrated from pg.zig for Zig 0.16)
     {
-        const exe = b.addExecutable(.{
-            .name = "zeicoin_indexer",
+        const indexer_module = b.createModule(.{
             .root_source_file = b.path("src/apps/indexer.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         });
-        // Add dependency modules to the executable.
-        for (deps) |mod| exe.root_module.addImport(
-            mod.name,
-            mod.module,
-        );
-        exe.root_module.addImport("zeicoin", lib.root_module);
-        exe.linkLibC();
-        // Link RocksDB
-        exe.linkSystemLibrary("rocksdb");
+        indexer_module.addImport("zeicoin", zeicoin_module);
+        indexer_module.linkSystemLibrary("rocksdb", .{});
+        indexer_module.linkSystemLibrary("pq", .{});
+        const exe = b.addExecutable(.{
+            .name = "zeicoin_indexer",
+            .root_module = indexer_module,
+        });
+        b.installArtifact(exe);
+        const run_cmd = b.addRunArtifact(exe);
+        run_cmd.step.dependOn(b.getInstallStep());
+        if (b.args) |args| {
+            run_cmd.addArgs(args);
+        }
+        const run_step = b.step("run-indexer", "Run the zeicoin indexer");
+        run_step.dependOn(&run_cmd.step);
+    }
+
+    // **************************************************************
+    // *           TRANSACTION API AS AN EXECUTABLE                 *
+    // **************************************************************
+    {
+        const api_module = b.createModule(.{
+            .root_source_file = b.path("src/apps/transaction_api.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+
+        api_module.addImport("zeicoin", zeicoin_module);
+        api_module.linkSystemLibrary("pq", .{});
+
+        const exe = b.addExecutable(.{
+            .name = "transaction_api",
+            .root_module = api_module,
+        });
 
         b.installArtifact(exe);
 
@@ -165,33 +205,39 @@ pub fn build(b: *std.Build) !void {
             run_cmd.addArgs(args);
         }
 
-        const run_step = b.step("run-indexer", "Run the zeicoin indexer");
+        const run_step = b.step("run-transaction-api", "Run the transaction API server (port 8080)");
         run_step.dependOn(&run_cmd.step);
     }
 
     // **************************************************************
-    // *           TRANSACTION API AS AN EXECUTABLE                 *
+    // *           L2 SERVICE AS AN EXECUTABLE                      *
     // **************************************************************
     {
-        const exe = b.addExecutable(.{
-            .name = "transaction_api",
-            .root_source_file = b.path("src/apps/transaction_api.zig"),
+        const l2_module = b.createModule(.{
+            .root_source_file = b.path("src/apps/l2_service.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         });
-        // Add dependency modules
-        for (deps) |mod| exe.root_module.addImport(
-            mod.name,
-            mod.module,
-        );
-        exe.root_module.addImport("zeicoin", lib.root_module);
-        exe.linkLibC();
+
+        l2_module.addImport("zeicoin", zeicoin_module);
+        l2_module.linkSystemLibrary("pq", .{});
+
+        const exe = b.addExecutable(.{
+            .name = "l2_service",
+            .root_module = l2_module,
+        });
 
         b.installArtifact(exe);
 
         const run_cmd = b.addRunArtifact(exe);
         run_cmd.step.dependOn(b.getInstallStep());
-        const run_step = b.step("run-transaction-api", "Run the transaction API server (port 8080)");
+
+        if (b.args) |args| {
+            run_cmd.addArgs(args);
+        }
+
+        const run_step = b.step("run-l2", "Run the L2 messaging service (port 8081)");
         run_step.dependOn(&run_cmd.step);
     }
 
@@ -199,22 +245,20 @@ pub fn build(b: *std.Build) !void {
     // *              RECOVERY TOOL                                 *
     // **************************************************************
     {
-        const exe = b.addExecutable(.{
-            .name = "recover_db",
+        const recovery_module = b.createModule(.{
             .root_source_file = b.path("src/tools/recover_db.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         });
-        // Add dependency modules
-        for (deps) |mod| exe.root_module.addImport(
-            mod.name,
-            mod.module,
-        );
-        // Add internal modules
-        exe.root_module.addImport("zeicoin", lib.root_module);
-        
-        exe.linkLibC();
-        exe.linkSystemLibrary("rocksdb");
+
+        // Import zeicoin library
+        recovery_module.addImport("zeicoin", zeicoin_module);
+
+        const exe = b.addExecutable(.{
+            .name = "recover_db",
+            .root_module = recovery_module,
+        });
 
         b.installArtifact(exe);
 
@@ -228,22 +272,20 @@ pub fn build(b: *std.Build) !void {
     // *              ERROR MONITOR                                 *
     // **************************************************************
     {
-        const exe = b.addExecutable(.{
-            .name = "error_monitor",
+        const monitor_module = b.createModule(.{
             .root_source_file = b.path("src/apps/error_monitor.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         });
-        // Add dependency modules
-        for (deps) |mod| exe.root_module.addImport(
-            mod.name,
-            mod.module,
-        );
-        // Add internal modules
-        exe.root_module.addImport("zeicoin", lib.root_module);
 
-        exe.linkLibC();
-        exe.linkSystemLibrary("rocksdb");
+        monitor_module.addImport("zeicoin", zeicoin_module);
+        monitor_module.linkSystemLibrary("pq", .{});
+
+        const exe = b.addExecutable(.{
+            .name = "zeicoin_error_monitor",
+            .root_module = monitor_module,
+        });
 
         b.installArtifact(exe);
 
@@ -258,23 +300,28 @@ pub fn build(b: *std.Build) !void {
     // **************************************************************
     // Tip taken from: `https://kristoff.it/blog/improving-your-zls-experience/`
     {
-        const exe_check = b.addExecutable(.{
-            .name = "zen_server",
+        const check_module = b.createModule(.{
             .root_source_file = b.path("src/apps/main.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         });
-        // Add dependency modules to the executable.
-        for (deps) |mod| exe_check.root_module.addImport(
-            mod.name,
-            mod.module,
-        );
-        exe_check.root_module.addImport("zeicoin", lib.root_module);
-        exe_check.linkLibC();
 
-        const check_test = b.addTest(.{
+        check_module.addImport("zeicoin", zeicoin_module);
+
+        const exe_check = b.addExecutable(.{
+            .name = "zen_server",
+            .root_module = check_module,
+        });
+
+        const check_test_module = b.createModule(.{
             .root_source_file = b.path("src/lib.zig"),
             .target = target,
+            .link_libc = true,
+        });
+
+        const check_test = b.addTest(.{
+            .root_module = check_test_module,
         });
 
         // This step is used to check if zeicoin compiles, it helps to provide a faster feedback loop when developing.
@@ -287,24 +334,46 @@ pub fn build(b: *std.Build) !void {
     // *              UNIT TESTS                                    *
     // **************************************************************
 
-    // Test the library which includes all modules
-    const lib_unit_tests = b.addTest(.{
+    // Create test module
+    const test_module = b.createModule(.{
         .root_source_file = b.path("src/lib.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
 
-    // Add dependency modules to the test.
-    for (deps) |mod| lib_unit_tests.root_module.addImport(
-        mod.name,
-        mod.module,
-    );
-    lib_unit_tests.linkLibC();
+    // Test the library which includes all modules
+    const lib_unit_tests = b.addTest(.{
+        .root_module = test_module,
+    });
 
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
 
     const test_step = b.step("test", "Run all unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
+
+    // Integration tests
+    {
+        const tests_module = b.createModule(.{
+            .root_source_file = b.path("src/tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        tests_module.addImport("zeicoin", zeicoin_module);
+
+        const integration_tests = b.addTest(.{
+            .root_module = tests_module,
+        });
+        integration_tests.root_module.linkSystemLibrary("rocksdb", .{});
+
+        const run_integration_tests = b.addRunArtifact(integration_tests);
+        const integration_test_step = b.step("test-integration", "Run all integration tests");
+        integration_test_step.dependOn(&run_integration_tests.step);
+        
+        // Also add to main test step
+        test_step.dependOn(&run_integration_tests.step);
+    }
 
     // **************************************************************
     // *              DOCUMENTATION                                 *
@@ -327,24 +396,22 @@ pub fn build(b: *std.Build) !void {
     }
 
     // **************************************************************
-    // *              ADDITIONAL TESTS                              *
-    // **************************************************************
-
-    // Add tests here if neeed to test new test
-
-    // **************************************************************
     // *              FUZZ TESTS                                    *
     // **************************************************************
 
     // Bech32 fuzz tests
     {
-        const bech32_fuzz_tests = b.addTest(.{
-            .name = "bech32_fuzz_tests",
+        const fuzz_module = b.createModule(.{
             .root_source_file = b.path("fuzz/bech32_simple_fuzz.zig"),
             .target = target,
             .optimize = optimize,
         });
-        bech32_fuzz_tests.root_module.addImport("zeicoin", lib.root_module);
+        fuzz_module.addImport("zeicoin", zeicoin_module);
+
+        const bech32_fuzz_tests = b.addTest(.{
+            .name = "bech32_fuzz_tests",
+            .root_module = fuzz_module,
+        });
 
         const run_bech32_fuzz = b.addRunArtifact(bech32_fuzz_tests);
         const bech32_fuzz_step = b.step("fuzz-bech32", "Run Bech32 fuzz tests");
@@ -353,13 +420,17 @@ pub fn build(b: *std.Build) !void {
 
     // Network message fuzz tests
     {
-        const network_fuzz_tests = b.addTest(.{
-            .name = "network_message_fuzz_tests",
+        const fuzz_module = b.createModule(.{
             .root_source_file = b.path("fuzz/network_message_fuzz.zig"),
             .target = target,
             .optimize = optimize,
         });
-        network_fuzz_tests.root_module.addImport("zeicoin", lib.root_module);
+        fuzz_module.addImport("zeicoin", zeicoin_module);
+
+        const network_fuzz_tests = b.addTest(.{
+            .name = "network_message_fuzz_tests",
+            .root_module = fuzz_module,
+        });
 
         const run_network_fuzz = b.addRunArtifact(network_fuzz_tests);
         const network_fuzz_step = b.step("fuzz-network", "Run network protocol fuzz tests");
@@ -368,13 +439,17 @@ pub fn build(b: *std.Build) !void {
 
     // Transaction validator fuzz tests (randomized, 10k+ iterations)
     {
-        const validator_fuzz_tests = b.addTest(.{
-            .name = "validator_fuzz_tests",
+        const fuzz_module = b.createModule(.{
             .root_source_file = b.path("fuzz/validator_fuzz.zig"),
             .target = target,
             .optimize = optimize,
         });
-        validator_fuzz_tests.root_module.addImport("zeicoin", lib.root_module);
+        fuzz_module.addImport("zeicoin", zeicoin_module);
+
+        const validator_fuzz_tests = b.addTest(.{
+            .name = "validator_fuzz_tests",
+            .root_module = fuzz_module,
+        });
 
         const run_validator_fuzz = b.addRunArtifact(validator_fuzz_tests);
         const validator_fuzz_step = b.step("fuzz-validator", "Run transaction validator fuzz tests (10k iterations)");
@@ -386,16 +461,13 @@ pub fn build(b: *std.Build) !void {
     // **************************************************************
     const clean_step = b.step("clean", "Clean build artifacts and cache");
 
-    // Define directories to clean
-    const dirs_to_clean = [_][]const u8{
+    // Use system command to clean directories
+    const clean_cmd = b.addSystemCommand(&[_][]const u8{
+        "rm",
+        "-rf",
         "zig-cache",
         "zig-out",
         ".zig-cache",
-    };
-
-    // Add remove directory commands for each directory
-    for (dirs_to_clean) |dir| {
-        const remove_dir = b.addRemoveDirTree(b.path(dir));
-        clean_step.dependOn(&remove_dir.step);
-    }
+    });
+    clean_step.dependOn(&clean_cmd.step);
 }

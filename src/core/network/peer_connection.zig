@@ -2,12 +2,13 @@
 // Manages the lifecycle of a single peer connection
 
 const std = @import("std");
-const net = std.net;
+const net = std.Io.net;
 const protocol = @import("protocol/protocol.zig");
 const message_types = @import("protocol/messages/message_types.zig");
 const message_envelope = @import("protocol/message_envelope.zig");
 const peer_manager = @import("peer_manager.zig");
 const types = @import("../types/types.zig");
+const util = @import("../util/util.zig");
 
 const Peer = peer_manager.Peer;
 
@@ -18,6 +19,7 @@ pub const PeerConnection = struct {
     stream: net.Stream,
     message_handler: MessageHandler,
     running: bool,
+    current_io: ?std.Io,
 
     const Self = @This();
 
@@ -37,16 +39,28 @@ pub const PeerConnection = struct {
             .stream = stream,
             .message_handler = handler,
             .running = false,
+            .current_io = null,
         };
     }
 
     /// Clean up peer connection resources
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *Self, io: std.Io) void {
         self.running = false;
+        self.current_io = null;
         // Clear the callback BEFORE closing the stream
         self.peer.setTcpSendCallback(null, null);
-        self.stream.close();
-        
+        // Only close if PeerManager hasn't already closed it (timeout wakeup)
+        if (self.peer.stream != null) {
+            self.stream.close(io);
+        }
+
+        // Free user_agent allocated by this connection's allocator.
+        // Must be done here (not in Peer.deinit) to match the allocator used in handleHandshake.
+        if (self.peer.user_agent.len > 0) {
+            self.allocator.free(self.peer.user_agent);
+            self.peer.user_agent = &[_]u8{};
+        }
+
         // Release peer reference
         self.peer.release();
     }
@@ -63,55 +77,53 @@ pub const PeerConnection = struct {
 
     /// Run the peer connection (blocking)
     /// Handles the full connection lifecycle including handshake, message processing, and cleanup
-    pub fn run(self: *Self) !void {
+    pub fn run(self: *Self, io: std.Io) !void {
         self.running = true;
-        defer self.running = false;
+        self.current_io = io;
+        defer {
+            self.running = false;
+            self.current_io = null;
+        }
 
-        std.log.info("Peer {} connected", .{self.peer});
+        std.log.info("Peer {} connected ({})", .{ self.peer.id, self.peer.address });
 
         // Set up TCP send callback for this peer
         self.peer.setTcpSendCallback(tcpSendCallback, self);
 
         // Send handshake
-        try self.sendHandshake();
+        try self.sendHandshake(io);
         self.peer.state = .handshaking;
 
-        // Connection loop
-        var buffer = try self.allocator.alloc(u8, 4096);
-        defer self.allocator.free(buffer);
+        // Blocking read loop — zero CPU while idle.
+        // PeerManager.cleanupTimedOut() closes the stream to wake a blocked reader on timeout.
+        var buffer: [4096]u8 = undefined;
 
         while (self.running) {
-            // Main connection loop - running flag provides safer shutdown signaling
-
-            // Check if peer is shutting down (from PeerManager)
             if (self.peer.is_shutting_down.load(.acquire)) {
                 break;
             }
 
-            // Read data with timeout
-            const bytes_read = self.stream.read(buffer) catch |err| switch (err) {
-                error.WouldBlock => {
-                    // Check for timeout
-                    if (self.peer.isTimedOut()) {
-                        std.log.warn("Peer {} timed out", .{self.peer});
-                        break;
-                    }
-
-                    // Check if ping needed
-                    if (self.peer.needsPing()) {
-                        try self.sendPing();
-                    }
-
-                    std.time.sleep(10 * std.time.ns_per_ms);
-                    continue;
-                },
-                else => return err,
+            // Blocking read — suspends thread until data arrives or stream is closed
+            var dest = [1][]u8{&buffer};
+            const bytes_read = io.vtable.netRead(io.userdata, self.stream.socket.handle, &dest) catch |err| {
+                if (self.running and !self.peer.is_shutting_down.load(.acquire)) {
+                    std.log.err("Read error from peer {}: {}", .{ self.peer.id, err });
+                }
+                break;
             };
 
             if (bytes_read == 0) {
-                // Safe peer disconnection logging - cache ID first to avoid use-after-free
+                // Peer closed connection gracefully
                 const peer_id = self.peer.id;
-                std.log.info("Peer {} disconnected (connection closed)", .{peer_id});
+                const is_localhost = switch (self.peer.address) {
+                    .ip4 => |ip4| ip4.bytes[0] == 127 and ip4.bytes[1] == 0 and ip4.bytes[2] == 0 and ip4.bytes[3] == 1,
+                    .ip6 => |ip6| std.mem.eql(u8, &ip6.bytes, &[_]u8{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1}),
+                };
+                if (!is_localhost) {
+                    std.log.info("Peer {} disconnected (connection closed)", .{peer_id});
+                } else {
+                    std.log.debug("Healthcheck probe disconnected (peer {})", .{peer_id});
+                }
                 break;
             }
 
@@ -151,7 +163,7 @@ pub const PeerConnection = struct {
                     std.log.debug("Peer {d} processing message type: {}", .{ msg_peer_id, env.header.message_type });
                 }
 
-                try self.handleMessage(env);
+                try self.handleMessage(io, env);
 
                 if (env.header.message_type == .get_blocks) {
                     std.log.info("📥 [RECEIVE] ✅ GET_BLOCKS message processing completed", .{});
@@ -159,26 +171,32 @@ pub const PeerConnection = struct {
                     std.log.debug("Peer {d} completed processing message", .{msg_peer_id});
                 }
             }
+
+            // Opportunistic ping after processing — keeps ping logic in the same
+            // thread as pong handling to avoid races on ping_nonce / last_ping.
+            if (self.peer.needsPing()) {
+                self.sendPing() catch {};
+            }
         }
 
         self.peer.state = .disconnected;
     }
 
     /// Send handshake message
-    fn sendHandshake(self: *Self) !void {
+    fn sendHandshake(self: *Self, io: std.Io) !void {
         const user_agent = "ZeiCoin/1.0.0";
         var handshake = try message_types.HandshakeMessage.init(self.allocator, user_agent);
         defer handshake.deinit(self.allocator);
 
         handshake.listen_port = protocol.DEFAULT_PORT;
-        handshake.start_height = try self.message_handler.getHeight();
-        handshake.best_block_hash = try self.message_handler.getBestBlockHash();
-        handshake.genesis_hash = try self.message_handler.getGenesisHash();
-        handshake.current_difficulty = try self.message_handler.getCurrentDifficulty();
+        handshake.start_height = try self.message_handler.getHeight(io);
+        handshake.best_block_hash = try self.message_handler.getBestBlockHash(io);
+        handshake.genesis_hash = try self.message_handler.getGenesisHash(io);
+        handshake.current_difficulty = try self.message_handler.getCurrentDifficulty(io);
 
         const peer_id = self.peer.id; // Cache the ID
-        std.log.info("Sending handshake to peer {} with height {} and best block hash {s}", .{ peer_id, handshake.start_height, std.fmt.fmtSliceHexLower(&handshake.best_block_hash) });
-        std.log.info("   ⛓️  Genesis hash: {s}", .{std.fmt.fmtSliceHexLower(&handshake.genesis_hash)});
+        std.log.info("Sending handshake to peer {} with height {} and best block hash {x}", .{ peer_id, handshake.start_height, handshake.best_block_hash });
+        std.log.info("   ⛓️  Genesis hash: {x}", .{&handshake.genesis_hash});
         std.log.info("   📊 Current difficulty: {} (0x{X})", .{ handshake.current_difficulty, @as(u32, @intCast(handshake.current_difficulty & 0xFFFFFFFF)) });
         _ = try self.peer.sendMessage(.handshake, handshake);
         std.log.info("Handshake sent to peer {}", .{peer_id});
@@ -188,54 +206,54 @@ pub const PeerConnection = struct {
     fn sendPing(self: *Self) !void {
         const ping = message_types.PingMessage.init();
         self.peer.ping_nonce = ping.nonce;
-        self.peer.last_ping = std.time.timestamp();
+        self.peer.last_ping = util.getTime();
 
         _ = try self.peer.sendMessage(.ping, ping);
     }
 
     /// Handle incoming message
     /// Decodes and dispatches messages to appropriate handlers
-    fn handleMessage(self: *Self, envelope: message_envelope.MessageEnvelope) !void {
+    fn handleMessage(self: *Self, io: std.Io, envelope: message_envelope.MessageEnvelope) !void {
         const msg_type = envelope.header.message_type;
 
-        std.log.debug("Received {} from {}", .{ msg_type, self.peer });
+        std.log.debug("Received {} from peer {}", .{ msg_type, self.peer.id });
 
         // Decode message
-        var stream = std.io.fixedBufferStream(envelope.payload);
-        var msg = try message_types.Message.decode(msg_type, self.allocator, stream.reader());
+        var reader = std.Io.Reader.fixed(envelope.payload);
+        var msg = try message_types.Message.decode(msg_type, self.allocator, &reader);
         defer msg.deinit(self.allocator);
 
         switch (msg) {
-            .handshake => |handshake| try self.handleHandshake(handshake),
-            .handshake_ack => |ack_msg| try self.handleHandshakeAck(ack_msg),
+            .handshake => |handshake| try self.handleHandshake(io, handshake),
+            .handshake_ack => |ack_msg| try self.handleHandshakeAck(io, ack_msg),
             .ping => |ping| try self.handlePing(ping),
             .pong => |pong| try self.handlePong(pong),
-            .block => |block| try self.handleBlock(block),
-            .transaction => |transaction| try self.handleTransaction(transaction),
-            .get_blocks => |get_blocks| try self.handleGetBlocks(get_blocks),
+            .block => |block| try self.handleBlock(io, block),
+            .transaction => |transaction| try self.handleTransaction(io, transaction),
+            .get_blocks => |get_blocks| try self.handleGetBlocks(io, get_blocks),
             .blocks => |blocks| try self.handleBlocks(blocks),
-            .get_peers => |get_peers| try self.handleGetPeers(get_peers),
-            .peers => |peers| try self.handlePeers(peers),
-            .get_block_hash => |get_block_hash| try self.handleGetBlockHash(get_block_hash),
-            .block_hash => |block_hash| try self.handleBlockHash(block_hash),
-            .get_mempool => |get_mempool| try self.handleGetMempool(get_mempool),
-            .mempool_inv => |mempool_inv| try self.handleMempoolInv(mempool_inv),
-            .get_missing_blocks => |get_missing_blocks| try self.handleGetMissingBlocks(get_missing_blocks),
-            .missing_blocks_response => |missing_blocks_response| try self.handleMissingBlocksResponse(missing_blocks_response),
-            .get_chain_work => |get_chain_work| try self.handleGetChainWork(get_chain_work),
-            .chain_work_response => |chain_work_response| try self.handleChainWorkResponse(chain_work_response),
+            .get_peers => |get_peers| try self.handleGetPeers(io, get_peers),
+            .peers => |peers| try self.handlePeers(io, peers),
+            .get_block_hash => |get_block_hash| try self.handleGetBlockHash(io, get_block_hash),
+            .block_hash => |block_hash| try self.handleBlockHash(io, block_hash),
+            .get_mempool => |get_mempool| try self.handleGetMempool(io, get_mempool),
+            .mempool_inv => |mempool_inv| try self.handleMempoolInv(io, mempool_inv),
+            .get_missing_blocks => |get_missing_blocks| try self.handleGetMissingBlocks(io, get_missing_blocks),
+            .missing_blocks_response => |missing_blocks_response| try self.handleMissingBlocksResponse(io, missing_blocks_response),
+            .get_chain_work => |get_chain_work| try self.handleGetChainWork(io, get_chain_work),
+            .chain_work_response => |chain_work_response| try self.handleChainWorkResponse(io, chain_work_response),
         }
     }
 
-    fn handleHandshake(self: *Self, handshake: message_types.HandshakeMessage) !void {
-        const our_height = try self.message_handler.getHeight();
-        const our_best_hash = try self.message_handler.getBestBlockHash();
-        const our_genesis_hash = try self.message_handler.getGenesisHash();
+    fn handleHandshake(self: *Self, io: std.Io, handshake: message_types.HandshakeMessage) !void {
+        const our_height = try self.message_handler.getHeight(io);
+        const our_best_hash = try self.message_handler.getBestBlockHash(io);
+        const our_genesis_hash = try self.message_handler.getGenesisHash(io);
         const peer_id = self.peer.id; // Cache the ID
         std.log.info("🤝 [HANDSHAKE] Received from peer {} - their height: {}, our height: {}", .{ peer_id, handshake.start_height, our_height });
-        std.log.info("📊 [HANDSHAKE] Block hashes - theirs: {s}, ours: {s}", .{
-            std.fmt.fmtSliceHexLower(&handshake.best_block_hash),
-            std.fmt.fmtSliceHexLower(&our_best_hash),
+        std.log.info("📊 [HANDSHAKE] Block hashes - theirs: {x}, ours: {x}", .{
+            handshake.best_block_hash,
+            our_best_hash,
         });
 
         // Check genesis compatibility first - reject incompatible chains immediately
@@ -247,41 +265,9 @@ pub const PeerConnection = struct {
         };
 
         // ENHANCED: Comprehensive compatibility checking including difficulty consensus
-        const our_difficulty = try self.message_handler.getCurrentDifficulty();
+        const our_difficulty = try self.message_handler.getCurrentDifficulty(io);
         handshake.checkPeerCompatibility(our_height, our_difficulty) catch |err| {
             switch (err) {
-                error.DifficultyConsensusMismatch => {
-                    // FORK RESOLUTION: Check if this is an equal-height fork scenario
-                    if (handshake.start_height == our_height and
-                        !std.mem.eql(u8, &handshake.best_block_hash, &our_best_hash))
-                    {
-                        std.log.warn("⚠️ [FORK DETECTED] Equal-height fork with peer {} at height {}", .{ peer_id, our_height });
-                        std.log.warn("   🔀 Our block hash: {s}", .{std.fmt.fmtSliceHexLower(&our_best_hash)});
-                        std.log.warn("   🔀 Peer block hash: {s}", .{std.fmt.fmtSliceHexLower(&handshake.best_block_hash)});
-
-                        // ETHEREUM-STYLE TIE-BREAKER: Compare hashes lexicographically
-                        const hash_comparison = compareHashesLexicographic(&handshake.best_block_hash, &our_best_hash);
-                        if (hash_comparison > 0) {
-                            std.log.warn("   🏆 [TIE-BREAKER] Peer's chain wins (higher hash)", .{});
-                            std.log.warn("   🔄 [TIE-BREAKER] We should reorganize to peer's chain", .{});
-                        } else if (hash_comparison < 0) {
-                            std.log.warn("   🏆 [TIE-BREAKER] Our chain wins (higher hash)", .{});
-                            std.log.warn("   💡 [TIE-BREAKER] Peer should reorganize to our chain", .{});
-                        } else {
-                            std.log.warn("   ⚠️ [TIE-BREAKER] Identical hashes (should never happen!)", .{});
-                        }
-
-                        std.log.info("   💡 FORK RESOLUTION: Allowing connection - tie-breaker determined winner", .{});
-
-                        // Allow connection - fork will be resolved via tie-breaker
-                        // Don't disconnect! Connection needed for reorganization
-                    } else {
-                        std.log.warn("❌ [CONSENSUS ERROR] Disconnecting peer {} due to difficulty mismatch", .{peer_id});
-                        std.log.warn("   💡 This indicates the peer is using different consensus rules", .{});
-                        std.log.warn("   💡 Both nodes may need to reset to a common genesis state", .{});
-                        return err;
-                    }
-                },
                 error.IncompatibleProtocolVersion => {
                     std.log.warn("❌ [PROTOCOL ERROR] Peer {} has incompatible protocol version {}", .{ peer_id, handshake.version });
                     std.log.warn("   💡 Peer needs to upgrade to protocol version {}", .{@import("protocol/protocol.zig").PROTOCOL_VERSION});
@@ -330,28 +316,28 @@ pub const PeerConnection = struct {
         _ = try self.peer.sendMessage(.handshake_ack, ack_msg);
 
         self.peer.state = .connected;
-        std.log.info("✅ [HANDSHAKE] Complete with {}: peer_height={}, our_height={}, agent={s}", .{ self.peer, handshake.start_height, our_height, handshake.user_agent });
+        std.log.info("✅ [HANDSHAKE] Complete with Peer {}: peer_height={}, our_height={}, agent={s}", .{ self.peer.id, handshake.start_height, our_height, handshake.user_agent });
 
         // Check for chain divergence
         if (handshake.start_height == our_height and !std.mem.eql(u8, &handshake.best_block_hash, &our_best_hash)) {
-            std.log.warn("⚠️ [CHAIN DIVERGENCE] Detected at height {} - peer hash: {s}, our hash: {s}", .{
+            std.log.warn("⚠️ [CHAIN DIVERGENCE] Detected at height {} - peer hash: {x}, our hash: {x}", .{
                 our_height,
-                std.fmt.fmtSliceHexLower(&handshake.best_block_hash),
-                std.fmt.fmtSliceHexLower(&our_best_hash),
+                handshake.best_block_hash,
+                our_best_hash,
             });
         }
 
         // Call handler - THIS is where sync should be triggered
         std.log.info("🔄 [HANDSHAKE] Calling onPeerConnected to check sync requirements", .{});
         std.log.info("🔄 [HANDSHAKE] Peer height before onPeerConnected: {d}", .{self.peer.height});
-        std.log.info("🔄 [HANDSHAKE] Peer hash before onPeerConnected: {s}", .{std.fmt.fmtSliceHexLower(&self.peer.best_block_hash)});
-        try self.message_handler.onPeerConnected(self.peer);
+        std.log.info("🔄 [HANDSHAKE] Peer hash before onPeerConnected: {x}", .{&self.peer.best_block_hash});
+        try self.message_handler.onPeerConnected(io, self.peer);
         std.log.info("🔄 [HANDSHAKE] onPeerConnected completed", .{});
     }
 
-    fn handleHandshakeAck(self: *Self, ack_msg: message_types.HandshakeAckMessage) !void {
+    fn handleHandshakeAck(self: *Self, io: std.Io, ack_msg: message_types.HandshakeAckMessage) !void {
         if (self.peer.state == .handshaking) {
-            const our_height = try self.message_handler.getHeight();
+            const our_height = try self.message_handler.getHeight(io);
 
             // CRITICAL FIX: Update peer height with the height from handshake_ack
             const peer_id = self.peer.id; // Cache the ID
@@ -364,7 +350,7 @@ pub const PeerConnection = struct {
 
             // CRITICAL: The initiating side (sync node) needs to check sync here too!
             std.log.info("🔄 [HANDSHAKE ACK] Connection established, checking if we need to sync", .{});
-            try self.message_handler.onPeerConnected(self.peer);
+            try self.message_handler.onPeerConnected(io, self.peer);
         }
     }
 
@@ -376,72 +362,71 @@ pub const PeerConnection = struct {
     fn handlePong(self: *Self, pong: message_types.PongMessage) !void {
         if (self.peer.ping_nonce) |nonce| {
             if (pong.nonce == nonce) {
-                const latency = std.time.timestamp() - self.peer.last_ping;
-                std.log.debug("Peer {} latency: {}ms", .{ self.peer, latency * 1000 });
+                const latency = util.getTime() - self.peer.last_ping;
+                std.log.debug("Peer {} latency: {}ms", .{ self.peer.id, latency * 1000 });
                 self.peer.ping_nonce = null;
             }
         }
     }
 
-    fn handleBlock(self: *Self, block: message_types.BlockMessage) !void {
-        try self.message_handler.onBlock(self.peer, block);
+    fn handleBlock(self: *Self, io: std.Io, block: message_types.BlockMessage) !void {
+        try self.message_handler.onBlock(io, self.peer, block);
     }
 
-    fn handleTransaction(self: *Self, transaction: message_types.TransactionMessage) !void {
-        try self.message_handler.onTransaction(self.peer, transaction);
+    fn handleTransaction(self: *Self, io: std.Io, transaction: message_types.TransactionMessage) !void {
+        try self.message_handler.onTransaction(io, self.peer, transaction);
     }
 
-    fn handleGetBlocks(self: *Self, get_blocks: message_types.GetBlocksMessage) !void {
+    fn handleGetBlocks(self: *Self, io: std.Io, get_blocks: message_types.GetBlocksMessage) !void {
         std.log.info("🔀 [DISPATCH GET_BLOCKS] Peer {d} dispatching to onGetBlocks handler", .{self.peer.id});
         std.log.info("🔀 [DISPATCH GET_BLOCKS] Message has {d} hashes", .{get_blocks.hashes.len});
-        try self.message_handler.onGetBlocks(self.peer, get_blocks);
+        try self.message_handler.onGetBlocks(io, self.peer, get_blocks);
         std.log.info("🔀 [DISPATCH GET_BLOCKS] ✅ Handler completed successfully", .{});
     }
 
     fn handleBlocks(self: *Self, blocks: void) !void {
         _ = blocks; // blocks message type has no payload (void)
-        std.log.debug("Received blocks message from {}", .{self.peer});
+                        std.log.debug("Received blocks message from peer {}", .{self.peer.id});    }
+
+    fn handleGetPeers(self: *Self, io: std.Io, get_peers: message_types.GetPeersMessage) !void {
+        try self.message_handler.onGetPeers(io, self.peer, get_peers);
     }
 
-    fn handleGetPeers(self: *Self, get_peers: message_types.GetPeersMessage) !void {
-        try self.message_handler.onGetPeers(self.peer, get_peers);
+    fn handlePeers(self: *Self, io: std.Io, peers: message_types.PeersMessage) !void {
+        try self.message_handler.onPeers(io, self.peer, peers);
     }
 
-    fn handlePeers(self: *Self, peers: message_types.PeersMessage) !void {
-        try self.message_handler.onPeers(self.peer, peers);
+    fn handleGetBlockHash(self: *Self, io: std.Io, msg: message_types.GetBlockHashMessage) !void {
+        try self.message_handler.onGetBlockHash(io, self.peer, msg);
     }
 
-    fn handleGetBlockHash(self: *Self, msg: message_types.GetBlockHashMessage) !void {
-        try self.message_handler.onGetBlockHash(self.peer, msg);
+    fn handleBlockHash(self: *Self, io: std.Io, msg: message_types.BlockHashMessage) !void {
+        try self.message_handler.onBlockHash(io, self.peer, msg);
     }
 
-    fn handleBlockHash(self: *Self, msg: message_types.BlockHashMessage) !void {
-        try self.message_handler.onBlockHash(self.peer, msg);
-    }
-
-    fn handleGetMempool(self: *Self, msg: message_types.GetMempoolMessage) !void {
+    fn handleGetMempool(self: *Self, io: std.Io, msg: message_types.GetMempoolMessage) !void {
         _ = msg; // No payload to use
-        try self.message_handler.onGetMempool(self.peer);
+        try self.message_handler.onGetMempool(io, self.peer);
     }
 
-    fn handleMempoolInv(self: *Self, msg: message_types.MempoolInvMessage) !void {
-        try self.message_handler.onMempoolInv(self.peer, msg);
+    fn handleMempoolInv(self: *Self, io: std.Io, msg: message_types.MempoolInvMessage) !void {
+        try self.message_handler.onMempoolInv(io, self.peer, msg);
     }
 
-    fn handleGetMissingBlocks(self: *Self, msg: message_types.GetMissingBlocksMessage) !void {
-        try self.message_handler.onGetMissingBlocks(self.peer, msg);
+    fn handleGetMissingBlocks(self: *Self, io: std.Io, msg: message_types.GetMissingBlocksMessage) !void {
+        try self.message_handler.onGetMissingBlocks(io, self.peer, msg);
     }
 
-    fn handleMissingBlocksResponse(self: *Self, msg: message_types.MissingBlocksResponseMessage) !void {
-        try self.message_handler.onMissingBlocksResponse(self.peer, msg);
+    fn handleMissingBlocksResponse(self: *Self, io: std.Io, msg: message_types.MissingBlocksResponseMessage) !void {
+        try self.message_handler.onMissingBlocksResponse(io, self.peer, msg);
     }
 
-    fn handleGetChainWork(self: *Self, msg: message_types.GetChainWorkMessage) !void {
-        try self.message_handler.onGetChainWork(self.peer, msg);
+    fn handleGetChainWork(self: *Self, io: std.Io, msg: message_types.GetChainWorkMessage) !void {
+        try self.message_handler.onGetChainWork(io, self.peer, msg);
     }
 
-    fn handleChainWorkResponse(self: *Self, msg: message_types.ChainWorkResponseMessage) !void {
-        try self.message_handler.onChainWorkResponse(self.peer, msg);
+    fn handleChainWorkResponse(self: *Self, io: std.Io, msg: message_types.ChainWorkResponseMessage) !void {
+        try self.message_handler.onChainWorkResponse(io, self.peer, msg);
     }
 };
 
@@ -449,58 +434,58 @@ pub const PeerConnection = struct {
 /// Defines callbacks for handling various network messages
 pub const MessageHandler = struct {
     /// Get current blockchain height
-    getHeight: *const fn () anyerror!u32,
+    getHeight: *const fn (io: std.Io) anyerror!u32,
 
     /// Get best block hash
-    getBestBlockHash: *const fn () anyerror![32]u8,
+    getBestBlockHash: *const fn (io: std.Io) anyerror![32]u8,
 
     /// Get genesis block hash
-    getGenesisHash: *const fn () anyerror![32]u8,
+    getGenesisHash: *const fn (io: std.Io) anyerror![32]u8,
 
     /// Get current difficulty target
-    getCurrentDifficulty: *const fn () anyerror!u64,
+    getCurrentDifficulty: *const fn (io: std.Io) anyerror!u64,
 
     /// Called when peer connects
-    onPeerConnected: *const fn (peer: *Peer) anyerror!void,
+    onPeerConnected: *const fn (io: std.Io, peer: *Peer) anyerror!void,
 
     /// Handle block data
-    onBlock: *const fn (peer: *Peer, msg: message_types.BlockMessage) anyerror!void,
+    onBlock: *const fn (io: std.Io, peer: *Peer, msg: message_types.BlockMessage) anyerror!void,
 
     /// Handle transaction data
-    onTransaction: *const fn (peer: *Peer, msg: message_types.TransactionMessage) anyerror!void,
+    onTransaction: *const fn (io: std.Io, peer: *Peer, msg: message_types.TransactionMessage) anyerror!void,
 
     /// Handle get blocks request
-    onGetBlocks: *const fn (peer: *Peer, msg: message_types.GetBlocksMessage) anyerror!void,
+    onGetBlocks: *const fn (io: std.Io, peer: *Peer, msg: message_types.GetBlocksMessage) anyerror!void,
 
     /// Handle get peers request
-    onGetPeers: *const fn (peer: *Peer, msg: message_types.GetPeersMessage) anyerror!void,
+    onGetPeers: *const fn (io: std.Io, peer: *Peer, msg: message_types.GetPeersMessage) anyerror!void,
 
     /// Handle peers message
-    onPeers: *const fn (peer: *Peer, msg: message_types.PeersMessage) anyerror!void,
+    onPeers: *const fn (io: std.Io, peer: *Peer, msg: message_types.PeersMessage) anyerror!void,
 
     /// Handle get block hash request (consensus verification)
-    onGetBlockHash: *const fn (peer: *Peer, msg: message_types.GetBlockHashMessage) anyerror!void,
+    onGetBlockHash: *const fn (io: std.Io, peer: *Peer, msg: message_types.GetBlockHashMessage) anyerror!void,
 
     /// Handle block hash response (consensus verification)
-    onBlockHash: *const fn (peer: *Peer, msg: message_types.BlockHashMessage) anyerror!void,
+    onBlockHash: *const fn (io: std.Io, peer: *Peer, msg: message_types.BlockHashMessage) anyerror!void,
 
     /// Handle get mempool request
-    onGetMempool: *const fn (peer: *Peer) anyerror!void,
+    onGetMempool: *const fn (io: std.Io, peer: *Peer) anyerror!void,
 
     /// Handle mempool inventory message
-    onMempoolInv: *const fn (peer: *Peer, msg: message_types.MempoolInvMessage) anyerror!void,
+    onMempoolInv: *const fn (io: std.Io, peer: *Peer, msg: message_types.MempoolInvMessage) anyerror!void,
 
     /// Handle get missing blocks request (Fix 3: Orphan block resolution)
-    onGetMissingBlocks: *const fn (peer: *Peer, msg: message_types.GetMissingBlocksMessage) anyerror!void,
+    onGetMissingBlocks: *const fn (io: std.Io, peer: *Peer, msg: message_types.GetMissingBlocksMessage) anyerror!void,
 
     /// Handle missing blocks response (Fix 3: Orphan block resolution)
-    onMissingBlocksResponse: *const fn (peer: *Peer, msg: message_types.MissingBlocksResponseMessage) anyerror!void,
+    onMissingBlocksResponse: *const fn (io: std.Io, peer: *Peer, msg: message_types.MissingBlocksResponseMessage) anyerror!void,
 
     /// Handle get chain work request (for reorganization decisions)
-    onGetChainWork: *const fn (peer: *Peer, msg: message_types.GetChainWorkMessage) anyerror!void,
+    onGetChainWork: *const fn (io: std.Io, peer: *Peer, msg: message_types.GetChainWorkMessage) anyerror!void,
 
     /// Handle chain work response (for reorganization decisions)
-    onChainWorkResponse: *const fn (peer: *Peer, msg: message_types.ChainWorkResponseMessage) anyerror!void,
+    onChainWorkResponse: *const fn (io: std.Io, peer: *Peer, msg: message_types.ChainWorkResponseMessage) anyerror!void,
 
     /// Handle peer disconnect (optional)
     onPeerDisconnected: ?*const fn (peer: *Peer, err: anyerror) anyerror!void = null,
@@ -511,11 +496,12 @@ pub const MessageHandler = struct {
 fn tcpSendCallback(ctx: ?*anyopaque, data: []const u8) anyerror!void {
     const self = @as(*PeerConnection, @ptrCast(@alignCast(ctx.?)));
     // Check if connection is still running (safer than accessing peer memory)
-    if (!self.running) {
+    if (!self.running or self.current_io == null) {
         return error.PeerShuttingDown;
     }
     const peer_id = self.peer.id; // Cache the ID
     std.log.debug("Peer {} writing {} bytes to TCP stream", .{ peer_id, data.len });
-    try self.stream.writeAll(data);
-    std.log.debug("Peer {} TCP write completed", .{peer_id});
+    const io = self.current_io.?;
+    var writer = self.stream.writer(io, &[_]u8{});
+    try writer.interface.writeAll(data);
 }

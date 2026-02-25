@@ -237,8 +237,8 @@ pub const BlockProcessor = struct {
         const parent_hash = parent_block.hash();
         if (!std.mem.eql(u8, &owned_block.header.previous_hash, &parent_hash)) {
             log.warn("Block {} doesn't connect to parent", .{block_height});
-            log.warn("   Expected: {s}", .{std.fmt.fmtSliceHexLower(&parent_hash)});
-            log.warn("   Got:      {s}", .{std.fmt.fmtSliceHexLower(&owned_block.header.previous_hash)});
+            log.warn("   Expected: {x}", .{&parent_hash});
+            log.warn("   Got:      {x}", .{&owned_block.header.previous_hash});
             return false;
         }
 
@@ -359,6 +359,7 @@ pub const BlockProcessor = struct {
             // Find the best peer to sync with
             if (self.blockchain.network_coordinator.getNetworkManager()) |network| {
                 if (network.peer_manager.getBestPeerForSync()) |best_peer| {
+                    defer best_peer.release();
                     // Use libp2p-powered batch sync for improved performance
                     try sync_manager.startSync(best_peer, best_peer.height, false);
                     log.info("libp2p batch auto-sync triggered due to orphan block with peer height {}", .{best_peer.height});

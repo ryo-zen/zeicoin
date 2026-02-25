@@ -14,7 +14,7 @@ const BECH32_GEN = [_]u32{ 0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1
 fn convertBits(allocator: std.mem.Allocator, data: []const u8, from_bits: u8, to_bits: u8, pad: bool) ![]u8 {
     var acc: u32 = 0;
     var bits: u5 = 0;
-    var result = std.ArrayList(u8).init(allocator);
+    var result = std.array_list.Managed(u8).init(allocator);
     defer result.deinit();
 
     const maxv = (@as(u32, 1) << @as(u5, @intCast(to_bits))) - 1;
@@ -56,7 +56,7 @@ fn bech32Polymod(values: []const u8) u32 {
 
 // Create checksum for Bech32
 fn bech32CreateChecksum(allocator: std.mem.Allocator, hrp: []const u8, data: []const u8) ![6]u8 {
-    var values = std.ArrayList(u8).init(allocator);
+    var values = std.array_list.Managed(u8).init(allocator);
     defer values.deinit();
 
     // Expand human-readable part
@@ -92,7 +92,7 @@ pub fn encodeBech32(allocator: std.mem.Allocator, hrp: []const u8, data: []const
     const checksum = try bech32CreateChecksum(allocator, hrp, data5bit);
 
     // Build the final string
-    var result = std.ArrayList(u8).init(allocator);
+    var result = std.array_list.Managed(u8).init(allocator);
     errdefer result.deinit();
 
     try result.appendSlice(hrp);
@@ -118,7 +118,7 @@ pub fn encodeBech32Check(allocator: std.mem.Allocator, hrp: []const u8, data: []
 // Create a Bech32 address from a BLAKE3 hash (modern, fast address generation)
 pub fn hash160ToAddress(allocator: std.mem.Allocator, hash160: []const u8, hrp: []const u8) ![]u8 {
     // Add version byte (similar to ADDRESSVERSION in original)
-    var data = std.ArrayList(u8).init(allocator);
+    var data = std.array_list.Managed(u8).init(allocator);
     defer data.deinit();
 
     try data.append(0); // Version byte, e.g., 0 for P2WPKH
@@ -165,7 +165,7 @@ pub fn decodeBech32(allocator: std.mem.Allocator, bech: []const u8) !struct { hr
     const dataPart = bech[sepIndex + 1 ..];
 
     // Convert characters to 5-bit values
-    var data5bit = std.ArrayList(u8).init(allocator);
+    var data5bit = std.array_list.Managed(u8).init(allocator);
     defer data5bit.deinit();
 
     for (dataPart) |c| {
@@ -223,7 +223,7 @@ pub fn decodeAddress(allocator: std.mem.Allocator, bech32_str: []const u8) !type
     }
     
     // Convert from bech32 charset to 5-bit values
-    var data5bit = std.ArrayList(u8).init(allocator);
+    var data5bit = std.array_list.Managed(u8).init(allocator);
     defer data5bit.deinit();
     for (data_part) |c| {
         const idx = std.mem.indexOfScalar(u8, BECH32_CHARSET, c) orelse return error.InvalidCharacter;

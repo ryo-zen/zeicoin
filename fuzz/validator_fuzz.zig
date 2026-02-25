@@ -5,6 +5,7 @@
 const std = @import("std");
 const testing = std.testing;
 const zeicoin = @import("zeicoin");
+const util = zeicoin.util;
 
 const types = zeicoin.types;
 const key = zeicoin.key;
@@ -66,10 +67,10 @@ const FuzzStats = struct {
 
 // Helper: Create a valid baseline transaction
 fn createValidTransaction() !Transaction {
-    var keypair = try key.KeyPair.generateNew();
+    var keypair = try key.KeyPair.generateNew(std.Io.Threaded.global_single_threaded.ioBasic());
     defer keypair.deinit();
 
-    var recipient_keypair = try key.KeyPair.generateNew();
+    var recipient_keypair = try key.KeyPair.generateNew(std.Io.Threaded.global_single_threaded.ioBasic());
     defer recipient_keypair.deinit();
 
     var tx = Transaction{
@@ -80,7 +81,7 @@ fn createValidTransaction() !Transaction {
         .amount = 100 * types.ZEI_COIN,
         .fee = types.ZenFees.MIN_FEE,
         .nonce = 0,
-        .timestamp = @intCast(std.time.timestamp()),
+        .timestamp = @intCast(util.getTime()),
         .expiry_height = 1000,
         .sender_public_key = keypair.public_key,
         .signature = undefined,

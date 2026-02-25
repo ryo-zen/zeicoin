@@ -40,6 +40,8 @@ pub const ChainWorkResponseMessage = @import("get_chain_work.zig").ChainWorkResp
 
 /// Union of all message types - clean batch sync protocol
 pub const Message = union(protocol.MessageType) {
+    const Self = @This();
+
     handshake: HandshakeMessage,
     handshake_ack: HandshakeAckMessage, // Now includes height payload
     ping: PingMessage,
@@ -75,7 +77,7 @@ pub const Message = union(protocol.MessageType) {
     chain_work_response: ChainWorkResponseMessage,
 
     /// Encode any message type
-    pub fn encode(self: Message, writer: anytype) !void {
+    pub fn encode(self: *const Self, writer: anytype) !void {
         switch (self) {
             .handshake_ack => |msg| try msg.serialize(writer),
             .blocks => {}, // Handled separately

@@ -120,7 +120,7 @@ pub const ServiceFlags = struct {
         if (services == MINING_NODE) return try allocator.dupe(u8, "MINING_NODE");
         if (services == PRUNED_NODE) return try allocator.dupe(u8, "PRUNED_NODE");
 
-        var parts = std.ArrayList([]const u8).init(allocator);
+        var parts = std.array_list.Managed([]const u8).init(allocator);
         defer parts.deinit();
 
         if ((services & NETWORK) != 0) try parts.append("NETWORK");
@@ -163,21 +163,21 @@ pub const MessageHeader = packed struct {
     }
 
     pub fn serialize(self: MessageHeader, writer: anytype) !void {
-        try writer.writeInt(u32, self.magic, .little);
+        try std.Io.Writer.writeInt(writer, u32, self.magic, .little);
         try writer.writeByte(@intFromEnum(self.message_type));
-        try writer.writeInt(u32, self.payload_length, .little);
-        try writer.writeInt(u32, self.checksum, .little);
+        try std.Io.Writer.writeInt(writer, u32, self.payload_length, .little);
+        try std.Io.Writer.writeInt(writer, u32, self.checksum, .little);
     }
 
     pub fn deserialize(reader: anytype) !MessageHeader {
-        const magic = try reader.readInt(u32, .little);
+        const magic = try reader.takeInt(u32, .little);
         if (magic != MAGIC) return error.InvalidMagic;
 
-        const msg_type = try reader.readEnum(MessageType, .little);
-        const payload_length = try reader.readInt(u32, .little);
+        const msg_type = try reader.takeEnum(MessageType, .little);
+        const payload_length = try reader.takeInt(u32, .little);
         if (payload_length > MAX_MESSAGE_SIZE) return error.MessageTooLarge;
 
-        const checksum = try reader.readInt(u32, .little);
+        const checksum = try reader.takeInt(u32, .little);
 
         return MessageHeader{
             .magic = magic,
@@ -217,12 +217,12 @@ test "MessageHeader serialization" {
     header.setChecksum(&[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 });
 
     var buffer: [MessageHeader.SIZE]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buffer);
+    var writer = std.Io.Writer.fixed(&buffer);
 
-    try header.serialize(stream.writer());
+    try header.serialize(&writer);
 
-    stream.reset();
-    const decoded = try MessageHeader.deserialize(stream.reader());
+    var reader = std.Io.Reader.fixed(writer.buffered());
+    const decoded = try MessageHeader.deserialize(&reader);
 
     try std.testing.expectEqual(header.magic, decoded.magic);
     try std.testing.expectEqual(header.message_type, decoded.message_type);

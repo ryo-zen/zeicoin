@@ -32,7 +32,7 @@ var tx_sequence: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
 /// Get unique timestamp for transactions to prevent hash collisions
 fn getUniqueTimestamp() u64 {
     // Use millisecond precision for transaction timestamps
-    const base_time = @as(u64, @intCast(std.time.milliTimestamp()));
+    const base_time = @as(u64, @intCast(@as(u64, @intCast(util.getTime())) * 1000));
 
     // Add atomic sequence number to ensure uniqueness even within same millisecond
     const seq = tx_sequence.fetchAdd(1, .monotonic);
@@ -70,13 +70,13 @@ pub fn cleanupGlobalNonceManager() void {
 }
 
 /// Callback function for nonce manager to fetch nonce from server
-fn fetchNonceFromServer(address: types.Address) !u64 {
+fn fetchNonceFromServer(address: types.Address, io: std.Io) !u64 {
     // Use page allocator for internal protocol operations
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     
-    return protocol.getNonce(allocator, address) catch |err| {
+    return protocol.getNonce(allocator, io, address) catch |err| {
         switch (err) {
             protocol.connection.ConnectionError.NetworkError,
             protocol.connection.ConnectionError.ConnectionFailed,
@@ -89,7 +89,7 @@ fn fetchNonceFromServer(address: types.Address) !u64 {
     };
 }
 
-fn loadHDWalletForOperation(allocator: std.mem.Allocator, wallet_name: []const u8) !*wallet.Wallet {
+fn loadHDWalletForOperation(allocator: std.mem.Allocator, io: std.Io, wallet_name: []const u8) !*wallet.Wallet {
     // Get wallet path directly without opening database
     const data_dir = switch (types.CURRENT_NETWORK) {
         .testnet => "zeicoin_data_testnet",
@@ -101,7 +101,8 @@ fn loadHDWalletForOperation(allocator: std.mem.Allocator, wallet_name: []const u
     defer allocator.free(wallet_path);
     
     // Check if wallet file exists
-    std.fs.cwd().access(wallet_path, .{}) catch {
+    const dir = std.Io.Dir.cwd();
+    dir.access(io, wallet_path, .{}) catch {
         print("❌ Wallet '{s}' not found\n", .{wallet_name});
         print("💡 Use 'zeicoin wallet create {s}' to create it\n", .{wallet_name});
         return CLIError.WalletNotFound;
@@ -127,7 +128,7 @@ fn loadHDWalletForOperation(allocator: std.mem.Allocator, wallet_name: []const u
     const wallet_path_for_load = try allocator.dupe(u8, wallet_path);
     defer allocator.free(wallet_path_for_load);
     
-    zen_wallet.loadFromFile(wallet_path_for_load, password) catch |err| {
+    zen_wallet.loadFromFile(io, wallet_path_for_load, password) catch |err| {
         switch (err) {
             wallet.WalletError.InvalidPassword => {
                 print("❌ Failed to load wallet '{s}': Invalid password\n", .{wallet_name});
@@ -145,11 +146,11 @@ fn loadHDWalletForOperation(allocator: std.mem.Allocator, wallet_name: []const u
 }
 
 /// Handle balance command
-pub fn handleBalance(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+pub fn handleBalance(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void {
     const wallet_name = if (args.len > 0) args[0] else "default";
 
     // Load HD wallet
-    const zen_wallet = loadHDWalletForOperation(allocator, wallet_name) catch |err| {
+    const zen_wallet = loadHDWalletForOperation(allocator, io, wallet_name) catch |err| {
         switch (err) {
             CLIError.WalletNotFound => {
                 // Error message already printed in loadHDWalletForOperation
@@ -166,7 +167,7 @@ pub fn handleBalance(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const address = try zen_wallet.getAddress(0);
 
     // Get balance from server using protocol helper
-    const balance_info = protocol.getBalance(allocator, address) catch |err| {
+    const balance_info = protocol.getBalance(allocator, io, address) catch |err| {
         switch (err) {
             protocol.connection.ConnectionError.NetworkError,
             protocol.connection.ConnectionError.ConnectionFailed,
@@ -190,7 +191,7 @@ pub fn handleBalance(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 }
 
 /// Handle send command
-pub fn handleSend(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+pub fn handleSend(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void {
     if (args.len < 2) {
         print("❌ Usage: zeicoin send <amount> <recipient> [wallet_name]\n", .{});
         print("💡 Recipient can be a bech32 address or wallet name\n", .{});
@@ -226,7 +227,7 @@ pub fn handleSend(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         }
 
         // If not a bech32 format, try to resolve as wallet name
-        const recipient_wallet = loadHDWalletForOperation(allocator, recipient_hex) catch {
+        const recipient_wallet = loadHDWalletForOperation(allocator, io, recipient_hex) catch {
             print("❌ Invalid recipient: '{s}'\n", .{recipient_hex});
             print("💡 Recipient must be a valid bech32 address or wallet name\n", .{});
             print("💡 Example: zeicoin send 10 tzei1qr2q... alice\n", .{});
@@ -248,7 +249,7 @@ pub fn handleSend(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     };
 
     // Load sender wallet
-    const zen_wallet = loadHDWalletForOperation(allocator, wallet_name) catch |err| {
+    const zen_wallet = loadHDWalletForOperation(allocator, io, wallet_name) catch |err| {
         switch (err) {
             CLIError.WalletNotFound => {
                 // Error message already printed
@@ -268,7 +269,7 @@ pub fn handleSend(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 
     // Get next nonce using nonce manager with ultra-reliable retry logic
     const nonce_manager = try getGlobalNonceManager(allocator);
-    const current_nonce = nonce_manager.getNextNonceWithRetry(sender_address, fetchNonceFromServer, 3) catch |err| {
+    const current_nonce = nonce_manager.getNextNonceWithRetry(sender_address, io, fetchNonceFromServer, 3) catch |err| {
         switch (err) {
             protocol.connection.ConnectionError.NetworkError,
             protocol.connection.ConnectionError.ConnectionFailed,
@@ -283,7 +284,7 @@ pub fn handleSend(allocator: std.mem.Allocator, args: [][:0]u8) !void {
         }
     };
 
-    const current_height = protocol.getHeight(allocator) catch {
+    const current_height = protocol.getHeight(allocator, io) catch {
         print("❌ Failed to get height from server\n", .{});
         return CLIError.NetworkError;
     };
@@ -317,7 +318,7 @@ pub fn handleSend(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const max_retries = 2;
     
     while (retry_count <= max_retries) : (retry_count += 1) {
-        const send_result = protocol.sendTransaction(allocator, &transaction);
+        const send_result = protocol.sendTransaction(allocator, io, &transaction);
         
         if (send_result) |_| {
             // Transaction succeeded!
@@ -330,7 +331,7 @@ pub fn handleSend(allocator: std.mem.Allocator, args: [][:0]u8) !void {
                     print("⚠️  Nonce error detected, attempting emergency recovery...\n", .{});
                     
                     // Use emergency nonce recovery to get a fresh, conservative nonce
-                    const recovery_nonce = nonce_manager.emergencyNonceRecovery(sender_address, fetchNonceFromServer) catch {
+                    const recovery_nonce = nonce_manager.emergencyNonceRecovery(sender_address, io, fetchNonceFromServer) catch {
                         print("❌ Emergency nonce recovery failed\n", .{});
                         return CLIError.NetworkError;
                     };
@@ -360,7 +361,7 @@ pub fn handleSend(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     // Success message
     const tx_hash_final = transaction.hash();
     print("✅ Transaction sent successfully!\n", .{});
-    print("🆔 Transaction hash: {}\n", .{std.fmt.fmtSliceHexLower(&tx_hash_final)});
+    print("🆔 Transaction hash: {x}\n", .{&tx_hash_final});
     
     const amount_display = util.formatZEI(allocator, amount) catch "? ZEI";
     defer if (!std.mem.eql(u8, amount_display, "? ZEI")) allocator.free(amount_display);
@@ -369,11 +370,11 @@ pub fn handleSend(allocator: std.mem.Allocator, args: [][:0]u8) !void {
 }
 
 /// Handle history command
-pub fn handleHistory(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+pub fn handleHistory(allocator: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void {
     const wallet_name = if (args.len > 0) args[0] else "default";
     
     // Load HD wallet
-    const zen_wallet = loadHDWalletForOperation(allocator, wallet_name) catch |err| {
+    const zen_wallet = loadHDWalletForOperation(allocator, io, wallet_name) catch |err| {
         switch (err) {
             CLIError.WalletNotFound => {
                 // Error message already printed in loadHDWalletForOperation
@@ -390,7 +391,7 @@ pub fn handleHistory(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     const address = try zen_wallet.getAddress(0);
 
     // Get transaction history using protocol helper
-    const transactions = protocol.getHistory(allocator, address) catch |err| {
+    const transactions = protocol.getHistory(allocator, io, address) catch |err| {
         switch (err) {
             protocol.connection.ConnectionError.NetworkError,
             protocol.connection.ConnectionError.ConnectionFailed,
