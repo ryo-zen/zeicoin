@@ -588,23 +588,38 @@ pub const BatchSyncProtocol = struct {
 
         self.sync_peer = peer;
         self.target_height = target_height;
-        self.start_height = start_height - 1;  // Set to one before start to maintain consistency
         self.metrics = SyncMetrics.init();
         log.info("✅ [BATCH SYNC CUSTOM] STEP 3 COMPLETED: Session initialized", .{});
 
-        // Configure batch tracker to start from custom height
+        // Configure batch tracker anchored to the actual blockchain height.
+        // Using start_height - 1 is wrong when the chain is already ahead of start_height:
+        // it causes already-applied blocks to be re-queued and re-applied, failing
+        // validation with a previous_hash mismatch.
         log.info("🔍 [BATCH SYNC CUSTOM] STEP 4: Configuring batch tracker for custom range...", .{});
-        self.batch_tracker.next_batch_start = start_height;
-        self.batch_tracker.completed_height = start_height - 1;
+        const actual_height = try self.context.getHeight();
+        const effective_completed = @max(start_height -| 1, actual_height);
+        self.start_height = effective_completed;
+        self.batch_tracker.completed_height = effective_completed;
+        self.batch_tracker.next_batch_start = effective_completed + 1;
+        log.info("   └─ Actual blockchain height: {}", .{actual_height});
         log.info("   └─ Batch tracker next start: {}", .{self.batch_tracker.next_batch_start});
         log.info("   └─ Batch tracker completed: {}", .{self.batch_tracker.completed_height});
         log.info("✅ [BATCH SYNC CUSTOM] STEP 4 COMPLETED: Tracker configured", .{});
 
-        const blocks_needed = target_height - start_height + 1;
+        // Early exit if already at or past the target — nothing to download.
+        if (effective_completed >= target_height) {
+            log.info("✅ [BATCH SYNC CUSTOM] Already at target height {} - sync complete", .{target_height});
+            self.sync_state = .complete;
+            return;
+        }
+
+        const effective_start = effective_completed + 1;
+        const blocks_needed = target_height - effective_completed;
         const estimated_batches = (blocks_needed + BATCH_CONFIG.BATCH_SIZE - 1) / BATCH_CONFIG.BATCH_SIZE;
         log.info("📊 [BATCH SYNC CUSTOM] Sync plan:", .{});
         log.info("   └─ Blocks to fetch: {}", .{blocks_needed});
         log.info("   └─ Estimated batches: {} (@ {} blocks each)", .{ estimated_batches, BATCH_CONFIG.BATCH_SIZE });
+        log.info("   └─ Effective range: {} to {}", .{ effective_start, target_height });
         log.info("   └─ Expected speedup: up to {}x vs sequential", .{BATCH_CONFIG.BATCH_SIZE});
 
         // Start the batch download pipeline
@@ -613,7 +628,7 @@ pub const BatchSyncProtocol = struct {
         log.info("✅ [BATCH SYNC CUSTOM] STEP 5 COMPLETED: Pipeline started", .{});
 
         log.info("🎉 [BATCH SYNC CUSTOM] CUSTOM HEIGHT SYNC SESSION ACTIVE!", .{});
-        log.info("⏳ [BATCH SYNC CUSTOM] Fetching blocks {} to {}", .{start_height, target_height});
+        log.info("⏳ [BATCH SYNC CUSTOM] Fetching blocks {} to {}", .{ effective_start, target_height });
     }
 
     /// Fill the batch request pipeline with concurrent requests
@@ -877,10 +892,11 @@ pub const BatchSyncProtocol = struct {
 
         if (blocks_processed > 0) {
             log.info("📊 [BATCH SYNC] Processed {} sequential blocks (completed: {})", .{ blocks_processed, self.batch_tracker.completed_height });
-
-            // Check if sync is now complete
-            try self.checkSyncCompletion();
         }
+
+        // Always check completion — handles the case where completed_height was
+        // initialized to the actual chain height and no new blocks needed processing.
+        try self.checkSyncCompletion();
     }
 
     /// Check if synchronization is complete and finalize if so
@@ -890,11 +906,17 @@ pub const BatchSyncProtocol = struct {
 
         log.info("🔍 [BATCH SYNC] Checking completion: {}/{} blocks", .{ completed, target });
 
-        // Check if all blocks have been processed
+        // Check if all blocks have been processed.
+        // Stale blocks (already-applied heights from in-flight batches that arrived
+        // after syncFromHeight reset completed_height) are drained before completing.
         if (completed >= target and
-            self.batch_tracker.active_batches.count() == 0 and
-            self.pending_queue.size() == 0)
+            self.batch_tracker.active_batches.count() == 0)
         {
+            if (self.pending_queue.size() > 0) {
+                log.info("🧹 [BATCH SYNC] Draining {} stale blocks from pending queue", .{self.pending_queue.size()});
+                self.pending_queue.deinit();
+                self.pending_queue = PendingQueue.init(self.allocator);
+            }
             log.info("🎉 [BATCH SYNC] Synchronization completed successfully!", .{});
 
             // Generate final performance report
