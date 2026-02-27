@@ -26,8 +26,8 @@ GRANT ALL PRIVILEGES ON DATABASE $DB_NAME TO zeicoin;
 EOF
 
 echo "Loading schema..."
-# Load schema
-PGPASSWORD=****** psql -h localhost -U zeicoin -d $DB_NAME < ../sql/schema.sql
+# Load canonical indexer schema
+PGPASSWORD=****** psql -h localhost -U zeicoin -d $DB_NAME < ../sql/indexer_schema.sql
 
 echo "PostgreSQL setup complete!"
 echo "Database: $DB_NAME"

@@ -68,6 +68,10 @@ echo "Binaries OK"
 cd "$ZEICOIN_HOME"
 sudo ./scripts/setup_analytics.sh
 
+# Canonical schema for src/apps/indexer.zig
+PGPASSWORD="$ZEICOIN_DB_PASSWORD" psql -h localhost -U zeicoin -d zeicoin_testnet \
+  -f sql/indexer_schema.sql
+
 # Verify
 PGPASSWORD="$ZEICOIN_DB_PASSWORD" psql -h localhost -U zeicoin -d zeicoin_testnet -c "SELECT 1" > /dev/null \
   || { echo "ERROR: cannot connect to zeicoin_testnet"; exit 1; }

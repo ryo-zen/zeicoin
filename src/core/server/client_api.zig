@@ -589,7 +589,7 @@ pub const ClientApiServer = struct {
                     \\To enable fast history queries:
                     \\1. Install PostgreSQL: sudo apt install postgresql libpq-dev
                     \\2. Create database: createdb zeicoin_testnet
-                    \\3. Run schema: psql zeicoin_testnet < sql/timescaledb_schema.sql
+                    \\3. Run schema: psql zeicoin_testnet < sql/indexer_schema.sql
                     \\4. Set password: export ZEICOIN_DB_PASSWORD=yourpassword
                     \\5. Run indexer: ./zig-out/bin/zeicoin_indexer (when available)
                     \\

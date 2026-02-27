@@ -214,6 +214,10 @@ The testnet faucet distributes small amounts of ZEI to new addresses with rate l
 ZeiCoin features an optional concurrent indexer that runs simultaneously with the mining node without database conflicts:
 
 ```bash
+# One-time DB setup for the indexer schema (no sample rows)
+createdb zeicoin_testnet
+psql zeicoin_testnet < sql/indexer_schema.sql
+
 # Start mining node
 ZEICOIN_SERVER=127.0.0.1 ./zig-out/bin/zen_server --mine miner &
 
