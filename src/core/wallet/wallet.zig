@@ -52,13 +52,12 @@ pub const WalletFile = struct {
             return WalletError.InvalidMnemonic;
         };
         
-        var wallet = WalletFile{
-            .encrypted_data = [_]u8{0} ** 512,
-            .data_len = @intCast(mnemonic.len),
-            .salt = undefined,
-            .nonce = undefined,
-            .auth_tag = undefined,
-        };
+        // Zero-initialize the full struct so any compiler-inserted padding
+        // bytes are initialized before writing the struct to disk.
+        var wallet = std.mem.zeroes(WalletFile);
+        wallet.magic = MAGIC;
+        wallet.version = VERSION;
+        wallet.data_len = @intCast(mnemonic.len);
         
         // Generate random salt and nonce
         const io = std.Io.Threaded.global_single_threaded.ioBasic();
@@ -460,4 +459,3 @@ fn getGenesisAccountMnemonic(allocator: std.mem.Allocator, io: std.Io, name: []c
     
     return error.UnknownGenesisAccount;
 }
-
