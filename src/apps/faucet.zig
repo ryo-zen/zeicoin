@@ -10,7 +10,7 @@ const RPCClient = @import("rpc_client.zig").RPCClient;
 const log = std.log.scoped(.faucet);
 
 const ZEI_COIN = types.ZEI_COIN;
-const FAUCET_MAX_SCORE: u32 = 200; // score cap -> 2.00 ZEI max
+const FAUCET_MAX_SCORE: u32 = 200; // score cap -> 0.20 ZEI max
 const FAUCET_RATE_LIMIT_MS: u64 = 24 * 60 * 60 * 1000; // 24 hours
 
 pub const FaucetService = struct {
@@ -135,10 +135,10 @@ pub const FaucetService = struct {
             return try allocator.dupe(u8, "{\"success\":false,\"error\":\"score_too_low\"}");
         }
 
-        const amount: u64 = @as(u64, score_capped) * (ZEI_COIN / 100);
+        const amount: u64 = @as(u64, score_capped) * (ZEI_COIN / 1000);
         const fee = types.ZenFees.STANDARD_FEE;
-        const display_whole = score_capped / 100;
-        const display_frac = score_capped % 100;
+        const display_whole = score_capped / @as(u32, 1000);
+        const display_frac = (score_capped % @as(u32, 1000)) / @as(u32, 10);
         const amount_display = try std.fmt.allocPrint(allocator, "{d}.{d:0>2}", .{ display_whole, display_frac });
         defer allocator.free(amount_display);
 

@@ -12,7 +12,7 @@ SERVICES=(
     "zeicoin-error-monitor.service"
 )
 
-ZEICOIN_HOME="${ZEICOIN_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+ZEICOIN_HOME="${ZEICOIN_HOME:-/root/zeicoin}"
 ZEICOIN_CLI="$ZEICOIN_HOME/zig-out/bin/zeicoin"
 
 is_port_listening() {
@@ -45,6 +45,8 @@ case "$1" in
         ;;
 
     restart)
+        echo "🔄 Rebuilding ZeiCoin..."
+        cd "$ZEICOIN_HOME" && zig build -Doptimize=ReleaseFast || { echo "❌ Build failed, aborting restart"; exit 1; }
         echo "🔄 Restarting ZeiCoin services..."
         sudo systemctl daemon-reload
         for service in "${SERVICES[@]}"; do
