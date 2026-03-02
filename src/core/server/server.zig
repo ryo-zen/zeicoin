@@ -102,7 +102,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Start RPC server
     const data_dir = types.CURRENT_NETWORK.getDataDir();
-    var rpc_server = try RPCServer.init(allocator, components.blockchain, data_dir, config.rpc_port);
+    var rpc_server = try RPCServer.init(allocator, components.blockchain, data_dir, config.bind_address, config.rpc_port);
     defer rpc_server.deinit();
 
     const rpc_thread = try std.Thread.spawn(.{}, RPCServer.start, .{rpc_server});

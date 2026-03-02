@@ -75,23 +75,25 @@ const DBPool = struct {
 // Simple HTTP Server
 const HttpServer = struct {
     allocator: std.mem.Allocator,
+    bind_address: []const u8,
     port: u16,
     io: std.Io,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, port: u16) HttpServer {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, bind_address: []const u8, port: u16) HttpServer {
         return .{
             .allocator = allocator,
+            .bind_address = bind_address,
             .port = port,
             .io = io,
         };
     }
 
     pub fn start(self: *HttpServer) !void {
-        const address = try net.IpAddress.parse("0.0.0.0", self.port);
+        const address = try net.IpAddress.parse(self.bind_address, self.port);
         var server = try address.listen(self.io, .{ .reuse_address = true });
         defer server.deinit(self.io);
 
-        log.info("🚀 Transaction API listening on 0.0.0.0:{d}", .{self.port});
+        log.info("🚀 Transaction API listening on {s}:{d}", .{ self.bind_address, self.port });
 
         while (true) {
             const connection = server.accept(self.io) catch |err| {
@@ -144,6 +146,13 @@ const HttpServer = struct {
             body = request_data[idx+2..];
         }
 
+        // SECURITY: Reject oversized bodies before parsing
+        const MAX_BODY_SIZE = 64 * 1024; // 64KB
+        if (body.len > MAX_BODY_SIZE) {
+            self.sendError(connection, 413, "payload too large");
+            return;
+        }
+
         const response = self.route(method, path, query, body) catch |err| {
             log.err("Handler error: {}", .{err});
             self.sendError(connection, 500, "Internal Server Error");
@@ -156,7 +165,7 @@ const HttpServer = struct {
 
     fn sendResponse(self: *HttpServer, connection: net.Stream, status: u16, body: []const u8) void {
         _ = status; // Assumed 200 OK for now
-        const header = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nConnection: close\r\nContent-Length: ";
+        const header = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: https://zei.network\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nConnection: close\r\nContent-Length: ";
         
         const len_str = std.fmt.allocPrint(self.allocator, "{d}", .{body.len}) catch return;
         defer self.allocator.free(len_str);
@@ -176,7 +185,7 @@ const HttpServer = struct {
         const json = std.fmt.allocPrint(self.allocator, "{{\"error\":\"{s}\"}}", .{message}) catch return;
         defer self.allocator.free(json);
 
-        const header = "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\nContent-Length: ";
+        const header = "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: https://zei.network\r\nConnection: close\r\nContent-Length: ";
         const len_str = std.fmt.allocPrint(self.allocator, "{d}", .{json.len}) catch return;
         defer self.allocator.free(len_str);
 
@@ -652,7 +661,8 @@ pub fn main(init: std.process.Init) !void {
     defer faucet_service.deinit();
     faucet_service.loadFromEnv();
 
-    // Start HTTP server
-    var server = HttpServer.init(allocator, init.io, 8080);
+    // Start HTTP server — bind to ZEICOIN_BIND_IP (default: 127.0.0.1 for safety)
+    const bind_address = util.getEnvVarOwned(arena, "ZEICOIN_BIND_IP") catch try arena.dupe(u8, "127.0.0.1");
+    var server = HttpServer.init(allocator, init.io, bind_address, 8080);
     try server.start();
 }

@@ -17,6 +17,7 @@ pub const RPCServer = struct {
     blockchain_path: []const u8,
     secondary_path: []const u8,
     server: net.Server,
+    bind_address: []const u8,
     port: u16,
     running: std.atomic.Value(bool),
     active_connections: std.atomic.Value(u32),
@@ -28,6 +29,7 @@ pub const RPCServer = struct {
         allocator: std.mem.Allocator,
         blockchain: *zen.ZeiCoin,
         blockchain_path: []const u8,
+        bind_address: []const u8,
         port: u16,
     ) !*RPCServer {
         const self = try allocator.create(RPCServer);
@@ -37,7 +39,7 @@ pub const RPCServer = struct {
         const secondary_path = try std.fmt.allocPrint(allocator, "{s}_indexer_secondary", .{blockchain_path});
         errdefer allocator.free(secondary_path);
 
-        const address = try net.IpAddress.parse("0.0.0.0", port);
+        const address = try net.IpAddress.parse(bind_address, port);
         const io = blockchain.io;
         const server = try address.listen(io, .{
             .reuse_address = true,
@@ -50,6 +52,7 @@ pub const RPCServer = struct {
             .blockchain_path = blockchain_path,
             .secondary_path = secondary_path,
             .server = server,
+            .bind_address = bind_address,
             .port = port,
             .running = std.atomic.Value(bool).init(false),
             .active_connections = std.atomic.Value(u32).init(0),
@@ -96,7 +99,7 @@ pub const RPCServer = struct {
 
     pub fn start(self: *RPCServer) !void {
         self.running.store(true, .release);
-        log.info("🔌 RPC Server listening on 0.0.0.0:{d}", .{self.port});
+        log.info("🔌 RPC Server listening on {s}:{d}", .{ self.bind_address, self.port });
 
         while (self.running.load(.acquire)) {
             // Accept connection with timeout
