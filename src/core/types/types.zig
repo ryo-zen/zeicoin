@@ -113,8 +113,7 @@ pub fn loadBootstrapNodes(allocator: std.mem.Allocator, io: std.Io) ![][]const u
         error.FileNotFound => {
             // Fallback to hardcoded nodes if config file not found
             const fallback_nodes = [_][]const u8{
-                "209.38.31.77:10801",
-                "134.199.170.129:10801",
+                "209.38.84.23:10801",
             };
             var result = try allocator.alloc([]const u8, fallback_nodes.len);
             for (fallback_nodes, 0..) |node, i| {

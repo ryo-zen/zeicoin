@@ -25,7 +25,7 @@ zeicoin-network (Docker bridge - ISOLATED from live network)
     └── Data: Docker volume 'node2-data'
 ```
 
-**Important**: This Docker setup is completely isolated from the live ZeiCoin testnet. The nodes will NOT connect to the public bootstrap nodes (209.38.31.77, 134.199.170.129). This creates a private testing network for safe experimentation.
+**Important**: This Docker setup is completely isolated from the live ZeiCoin testnet. The nodes will NOT connect to the public bootstrap nodes. This creates a private testing network for safe experimentation.
 
 ## Prerequisites
 

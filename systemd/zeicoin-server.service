@@ -10,7 +10,7 @@ WorkingDirectory=/root/zeicoin
 EnvironmentFile=-/root/zeicoin/.env.testnet
 EnvironmentFile=-/root/zeicoin/.env.local
 Environment="ZEICOIN_SERVER=127.0.0.1"
-Environment="ZEICOIN_BOOTSTRAP=209.38.31.77:10801,134.199.170.129:10801"
+Environment="ZEICOIN_BOOTSTRAP=209.38.84.23:10801"
 
 # Clean up stale RocksDB lock before starting (handles crash recovery)
 ExecStartPre=-/usr/bin/pkill -9 -x zen_server

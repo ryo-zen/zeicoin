@@ -80,7 +80,7 @@ ZEICOIN_SERVER=127.0.0.1 ./zig-out/bin/zeicoin wallet create miner
 ZEICOIN_SERVER=127.0.0.1 ./zig-out/bin/zen_server --mine miner
 
 # Connect to bootstrap nodes (automatic from .env)
-# Default bootstrap: 209.38.31.77:10801, 134.199.170.129:10801, 209.38.84.23:10801
+# Default bootstrap: 209.38.84.23:10801
 ```
 
 ### CLI Usage
@@ -156,7 +156,7 @@ zeicoin/
 
 #### Network Protocol
 - **Ports**: P2P (10801), Client API (10802), JSON-RPC (10803), REST API (8080)
-- **Bootstrap Nodes**: 209.38.31.77:10801, 134.199.170.129:10801, 209.38.84.23:10801, 209.38.84.23:10801
+- **Bootstrap Nodes**: 209.38.84.23:10801
 - **Address Format**: Bech32 with BLAKE3 hashing (tzei1... for TestNet, zei1... for MainNet)
 - **Message Types**: Handshake, Ping/Pong, Block, Transaction, GetBlocks, GetPeers, BlockHash
 - **Integrity**: CRC32 checksums on all messages
@@ -332,7 +332,7 @@ zig build clean
 - **Address Prefix**: `tzei1...`
 - **Mining Mode**: Light (256MB RAM)
 - **Difficulty**: 0xF0000000 (easy)
-- **Bootstrap Nodes**: 209.38.31.77:10801, 134.199.170.129:10801, 209.38.84.23:10801
+- **Bootstrap Nodes**: 209.38.84.23:10801
 - **Database**: `zeicoin_testnet`
 
 ### MainNet (Future)

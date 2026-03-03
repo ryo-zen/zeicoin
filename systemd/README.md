@@ -13,7 +13,7 @@ verification fails.
 ZEICOIN_HOME=/root/zeicoin
 ZEICOIN_DB_PASSWORD=your_secure_password   # change this
 ZEICOIN_BIND_IP=0.0.0.0                    # 0.0.0.0 for mining/bootstrap, 127.0.0.1 for local dev
-ZEICOIN_BOOTSTRAP=209.38.31.77:10801,134.199.170.129:10801,209.38.84.23:10801
+ZEICOIN_BOOTSTRAP=209.38.84.23:10801
 ZEICOIN_MINE_ENABLED=true                  # false for non-mining nodes
 ZEICOIN_MINER_WALLET=miner                 # ignored when MINE_ENABLED=false
 ```
@@ -410,7 +410,7 @@ ZEICOIN_DB_PASSWORD=your_secure_password_here
 # .env (Config)
 ZEICOIN_SERVER=127.0.0.1
 ZEICOIN_BIND_IP=0.0.0.0
-ZEICOIN_BOOTSTRAP=209.38.31.77:10801,134.199.170.129:10801
+ZEICOIN_BOOTSTRAP=209.38.84.23:10801
 ```
 
 ### Service Dependencies
