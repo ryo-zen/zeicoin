@@ -23,6 +23,7 @@ const DBPool = struct {
 
     pub fn init(allocator: std.mem.Allocator, conninfo: [:0]const u8, size: usize) !*DBPool {
         const self = try allocator.create(DBPool);
+        errdefer allocator.destroy(self);
         self.* = .{
             .allocator = allocator,
             .conninfo = conninfo,

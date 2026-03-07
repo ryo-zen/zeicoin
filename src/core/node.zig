@@ -292,13 +292,11 @@ pub const ZeiCoin = struct {
         }
 
         // Check database for confirmed transactions
-        const tx = try self.database.getTransactionByHash(self.io, tx_hash);
-        // TODO: Get block height where transaction was included
-        // For now, return confirmed with unknown height
+        const tx_with_height = try self.database.getTransactionWithHeightByHash(self.io, tx_hash);
         return .{
-            .transaction = tx,
+            .transaction = tx_with_height.transaction,
             .status = .confirmed,
-            .block_height = null, // Would need to scan blocks to find this
+            .block_height = tx_with_height.block_height,
         };
     }
 
