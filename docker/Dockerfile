@@ -13,17 +13,18 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     cmake \
     librocksdb-dev \
+    libpq-dev \
     libhwloc-dev \
     ca-certificates \
     netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Zig 0.16.0-dev
-RUN wget https://ziglang.org/builds/zig-x86_64-linux-0.16.0-dev.2261+d6b3dd25a.tar.xz && \
-    tar -xf zig-x86_64-linux-0.16.0-dev.2261+d6b3dd25a.tar.xz && \
-    mv zig-x86_64-linux-0.16.0-dev.2261+d6b3dd25a /usr/local/zig && \
+# Install Zig 0.16 dev
+RUN wget https://zig.squirl.dev/download/zig-x86_64-linux-0.16.0-dev.2694+74f361a5c.tar.xz && \
+    tar -xf zig-x86_64-linux-0.16.0-dev.2694+74f361a5c.tar.xz && \
+    mv zig-x86_64-linux-0.16.0-dev.2694+74f361a5c /usr/local/zig && \
     ln -s /usr/local/zig/zig /usr/local/bin/zig && \
-    rm zig-x86_64-linux-0.16.0-dev.2261+d6b3dd25a.tar.xz
+    rm zig-x86_64-linux-0.16.0-dev.2694+74f361a5c.tar.xz
 
 WORKDIR /zeicoin
 

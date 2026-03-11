@@ -375,9 +375,6 @@ zig build clean                    # Clean artifacts
 
 **Feature Freeze Active** - The codebase is feature-complete for testnet validation.
 
-> [!WARNING]
-> **Chain Reorganization (Reorg) - Work in Progress**: The chain reorganization feature is partially working and is under active development.
-
 **Focus Areas**:
 
 - Multi-node mining and sync testing
