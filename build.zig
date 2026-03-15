@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) !void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
-    const use_evented = b.option(bool, "evented", "Use io_uring/Evented backend for libp2p testnode (experimental, Linux only)") orelse false;
+    // const use_evented = b.option(bool, "evented", "Use io_uring/Evented backend for libp2p testnode (experimental, Linux only)") orelse false;
 
     // **************************************************************
     // *            HANDLE DEPENDENCY MODULES                       *
@@ -58,12 +58,12 @@ pub fn build(b: *std.Build) !void {
     // Expose zeicoin as a public module
     try b.modules.put(b.dupe(package_name), zeicoin_module);
 
-    const libp2p_module_def = b.createModule(.{
-        .root_source_file = b.path("libp2p/api.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
+    // const libp2p_module_def = b.createModule(.{
+    //     .root_source_file = b.path("libp2p/api.zig"),
+    //     .target = target,
+    //     .optimize = optimize,
+    //     .link_libc = true,
+    // });
 
     // **************************************************************
     // *              ZEICOIN AS A LIBRARY                          *
@@ -146,63 +146,65 @@ pub fn build(b: *std.Build) !void {
     // **************************************************************
     // *              LIBP2P TESTNODE (ISOLATED)                    *
     // **************************************************************
-    {
-        const libp2p_testnode_module = b.createModule(.{
-            .root_source_file = b.path("libp2p/libp2p_testnode.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        });
-        libp2p_testnode_module.addImport("libp2p", libp2p_module_def);
-        const testnode_opts = b.addOptions();
-        testnode_opts.addOption(bool, "use_evented", use_evented);
-        libp2p_testnode_module.addOptions("build_options", testnode_opts);
-
-        const exe = b.addExecutable(.{
-            .name = "libp2p_testnode",
-            .root_module = libp2p_testnode_module,
-        });
-
-        b.installArtifact(exe);
-
-        const run_cmd = b.addRunArtifact(exe);
-        run_cmd.step.dependOn(b.getInstallStep());
-        if (b.args) |args| {
-            run_cmd.addArgs(args);
-        }
-
-        const run_step = b.step("run-libp2p-testnode", "Run isolated libp2p test node");
-        run_step.dependOn(&run_cmd.step);
-    }
+    // TODO: re-enable when libp2p source files are present
+    // {
+    //     const libp2p_testnode_module = b.createModule(.{
+    //         .root_source_file = b.path("libp2p/libp2p_testnode.zig"),
+    //         .target = target,
+    //         .optimize = optimize,
+    //         .link_libc = true,
+    //     });
+    //     libp2p_testnode_module.addImport("libp2p", libp2p_module_def);
+    //     const testnode_opts = b.addOptions();
+    //     testnode_opts.addOption(bool, "use_evented", use_evented);
+    //     libp2p_testnode_module.addOptions("build_options", testnode_opts);
+    //
+    //     const exe = b.addExecutable(.{
+    //         .name = "libp2p_testnode",
+    //         .root_module = libp2p_testnode_module,
+    //     });
+    //
+    //     b.installArtifact(exe);
+    //
+    //     const run_cmd = b.addRunArtifact(exe);
+    //     run_cmd.step.dependOn(b.getInstallStep());
+    //     if (b.args) |args| {
+    //         run_cmd.addArgs(args);
+    //     }
+    //
+    //     const run_step = b.step("run-libp2p-testnode", "Run isolated libp2p test node");
+    //     run_step.dependOn(&run_cmd.step);
+    // }
 
     // **************************************************************
     // *              LIBP2P BENCHMARK                              *
     // **************************************************************
-    {
-        const libp2p_bench_module = b.createModule(.{
-            .root_source_file = b.path("libp2p/libp2p_bench.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        });
-        libp2p_bench_module.addImport("libp2p", libp2p_module_def);
-
-        const exe = b.addExecutable(.{
-            .name = "libp2p_bench",
-            .root_module = libp2p_bench_module,
-        });
-
-        b.installArtifact(exe);
-
-        const run_cmd = b.addRunArtifact(exe);
-        run_cmd.step.dependOn(b.getInstallStep());
-        if (b.args) |args| {
-            run_cmd.addArgs(args);
-        }
-
-        const run_step = b.step("run-libp2p-bench", "Run local libp2p throughput benchmark");
-        run_step.dependOn(&run_cmd.step);
-    }
+    // TODO: re-enable when libp2p source files are present
+    // {
+    //     const libp2p_bench_module = b.createModule(.{
+    //         .root_source_file = b.path("libp2p/libp2p_bench.zig"),
+    //         .target = target,
+    //         .optimize = optimize,
+    //         .link_libc = true,
+    //     });
+    //     libp2p_bench_module.addImport("libp2p", libp2p_module_def);
+    //
+    //     const exe = b.addExecutable(.{
+    //         .name = "libp2p_bench",
+    //         .root_module = libp2p_bench_module,
+    //     });
+    //
+    //     b.installArtifact(exe);
+    //
+    //     const run_cmd = b.addRunArtifact(exe);
+    //     run_cmd.step.dependOn(b.getInstallStep());
+    //     if (b.args) |args| {
+    //         run_cmd.addArgs(args);
+    //     }
+    //
+    //     const run_step = b.step("run-libp2p-bench", "Run local libp2p throughput benchmark");
+    //     run_step.dependOn(&run_cmd.step);
+    // }
 
     // **************************************************************
     // *              ANALYTICS EXECUTABLES                         *
