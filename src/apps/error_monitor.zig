@@ -54,17 +54,22 @@ pub fn main(init: std.process.Init) !void {
     const user = util.getEnvVarOwned(arena, "ZEICOIN_DB_USER") catch try arena.dupe(u8, "zeicoin");
     const pass = try util.getEnvVarOwned(arena, "ZEICOIN_DB_PASSWORD");
     const node = util.getEnvVarOwned(arena, "ZEICOIN_MONITOR_NODE_ADDRESS") catch try arena.dupe(u8, "127.0.0.1");
-    const svc = util.getEnvVarOwned(arena, "ZEICOIN_MONITOR_SERVICE") catch try arena.dupe(u8, "zeicoin-server.service");
 
     // Initialize PostgreSQL connection
     const conninfo = try postgres.buildConnString(arena, host, port, db_name, user, pass);
     var conn = try postgres.Connection.init(allocator, conninfo);
     defer conn.deinit();
 
-    std.log.info("🔍 Monitoring {s} -> {s}", .{svc, db_name});
+    std.log.info("🔍 Monitoring all zeicoin services -> {s}", .{db_name});
 
-    // Spawn journalctl to follow logs in JSON format
-    const argv = &[_][]const u8{ "journalctl", "-u", svc, "-f", "--output=json", "--since=now" };
+    // Spawn journalctl to follow logs in JSON format — cover all zeicoin services
+    const argv = &[_][]const u8{
+        "journalctl",
+        "-u", "zeicoin-mining.service",
+        "-u", "zeicoin-transaction-api.service",
+        "-u", "zeicoin-indexer.service",
+        "-f", "--output=json", "--since=now",
+    };
     var child = try std.process.spawn(init.io, .{
         .argv = argv,
         .stdout = .pipe,
@@ -96,8 +101,8 @@ pub fn main(init: std.process.Init) !void {
         const msg = if (obj.get("MESSAGE")) |m| m.string else continue;
         const prio = if (obj.get("PRIORITY")) |p| std.fmt.parseInt(u8, p.string, 10) catch 6 else 6;
         
-        // Filter for errors and warnings
-        if (prio > 4 and std.mem.indexOf(u8, msg, "error") == null) continue;
+        // Filter for errors only (syslog priority 0-3: EMERG, ALERT, CRIT, ERR)
+        if (prio > 3) continue;
 
         // Extract timestamp and metadata
         const ts_us = if (obj.get("__REALTIME_TIMESTAMP")) |t| t.string else continue;

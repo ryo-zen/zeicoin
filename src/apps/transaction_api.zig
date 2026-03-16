@@ -106,16 +106,22 @@ const HttpServer = struct {
                 continue;
             };
 
-            self.handleConnection(connection);
+            const thread = std.Thread.spawn(.{}, handleConnection, .{ self, connection }) catch |err| {
+                log.err("Failed to spawn connection thread: {}", .{err});
+                connection.close(self.io);
+                continue;
+            };
+            thread.detach();
         }
     }
 
     fn handleConnection(self: *HttpServer, connection: net.Stream) void {
         defer connection.close(self.io);
 
+        const recv_timeout = std.Io.Timeout{ .duration = .{ .raw = std.Io.Duration.fromSeconds(30), .clock = .awake } };
         var buffer: [16384]u8 = undefined;
-        const msg = connection.socket.receive(self.io, &buffer) catch |err| {
-            log.err("Read error: {}", .{err});
+        const msg = connection.socket.receiveTimeout(self.io, &buffer, recv_timeout) catch |err| {
+            if (err != error.Timeout) log.err("Read error: {}", .{err});
             return;
         };
         
@@ -166,7 +172,7 @@ const HttpServer = struct {
 
     fn sendResponse(self: *HttpServer, connection: net.Stream, status: u16, body: []const u8) void {
         _ = status; // Assumed 200 OK for now
-        const header = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: https://zei.network\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nConnection: close\r\nContent-Length: ";
+        const header = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: ";
         
         const len_str = std.fmt.allocPrint(self.allocator, "{d}", .{body.len}) catch return;
         defer self.allocator.free(len_str);
@@ -186,7 +192,7 @@ const HttpServer = struct {
         const json = std.fmt.allocPrint(self.allocator, "{{\"error\":\"{s}\"}}", .{message}) catch return;
         defer self.allocator.free(json);
 
-        const header = "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: https://zei.network\r\nConnection: close\r\nContent-Length: ";
+        const header = "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: ";
         const len_str = std.fmt.allocPrint(self.allocator, "{d}", .{json.len}) catch return;
         defer self.allocator.free(len_str);
 
