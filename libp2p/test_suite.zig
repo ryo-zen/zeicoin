@@ -7,6 +7,7 @@ test {
     _ = @import("protocol/identify.zig");
     _ = @import("security/noise.zig");
     _ = @import("muxer/yamux.zig");
+    _ = @import("muxer/test_yamux.zig");
     _ = @import("transport/tcp.zig");
     _ = @import("protocol/multistream.zig");
 }
