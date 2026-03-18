@@ -1,0 +1,35 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    xz-utils \
+    ca-certificates \
+    build-essential \
+    netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/*
+
+# Local nightly tarball is prepared by scripts/test_libp2p_docker.sh
+COPY .docker-cache/zig-nightly.tar.xz /tmp/zig-nightly.tar.xz
+RUN set -eux; \
+    tar -xf /tmp/zig-nightly.tar.xz -C /tmp; \
+    zig_dir="$(find /tmp -maxdepth 1 -type d -name 'zig-x86_64-linux-*' | head -n1)"; \
+    test -n "$zig_dir"; \
+    mv "$zig_dir" /usr/local/zig; \
+    ln -s /usr/local/zig/zig /usr/local/bin/zig; \
+    rm -f /tmp/zig-nightly.tar.xz
+
+WORKDIR /zeicoin
+
+COPY libp2p ./libp2p
+COPY src/apps/libp2p_testnode.zig ./src/apps/libp2p_testnode.zig
+
+RUN mkdir -p zig-out/bin && \
+    zig build-exe -ODebug \
+    --dep libp2p \
+    -Mroot=src/apps/libp2p_testnode.zig \
+    -Mlibp2p=libp2p/api.zig \
+    -lc \
+    -femit-bin=zig-out/bin/libp2p_testnode
+
+CMD ["./zig-out/bin/libp2p_testnode", "/ip4/0.0.0.0/tcp/10811"]
