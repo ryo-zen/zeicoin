@@ -207,10 +207,10 @@ const TcpNoiseServerCtx = struct {
         var conn = try ctx.listener.accept(ctx.io);
         defer conn.deinit();
 
-        var handshake = try noise.performResponder(ctx.allocator, ctx.io, &conn, ctx.identity, null);
+        var handshake = try noise.performResponder(ctx.allocator, ctx.io, conn.connection(), ctx.identity, null);
         defer handshake.deinit();
 
-        var secure = noise.SecureTransport.init(ctx.allocator, &conn, handshake.tx_key, handshake.rx_key);
+        var secure = noise.SecureTransport.init(ctx.allocator, conn.connection(), handshake.tx_key, handshake.rx_key);
         defer secure.deinit();
         return switch (ctx.direction) {
             .upload => .{ .c2s_bytes = try readAllFromSecureConn(&secure, ctx.io) },
@@ -246,10 +246,10 @@ const TcpNoiseYamuxServerCtx = struct {
         var conn = try ctx.listener.accept(ctx.io);
         defer conn.deinit();
 
-        var handshake = try noise.performResponder(ctx.allocator, ctx.io, &conn, ctx.identity, null);
+        var handshake = try noise.performResponder(ctx.allocator, ctx.io, conn.connection(), ctx.identity, null);
         defer handshake.deinit();
 
-        var secure = noise.SecureTransport.init(ctx.allocator, &conn, handshake.tx_key, handshake.rx_key);
+        var secure = noise.SecureTransport.init(ctx.allocator, conn.connection(), handshake.tx_key, handshake.rx_key);
         defer secure.deinit();
 
         var session = yamux.Session.init(ctx.allocator, &secure, false);
@@ -276,7 +276,7 @@ const TcpNoiseYamuxServerCtx = struct {
             },
         };
         if (ctx.direction != .upload) {
-            secure.conn.close(ctx.io) catch {};
+            secure.conn.close() catch {};
         }
         return result;
     }
@@ -534,10 +534,10 @@ fn runTcpNoiseIteration(
     var conn = try dialLoopback(allocator, io, &transport, listener);
     defer conn.deinit();
 
-    var handshake = try noise.performInitiator(allocator, io, &conn, &client_identity, null);
+    var handshake = try noise.performInitiator(allocator, io, conn.connection(), &client_identity, null);
     defer handshake.deinit();
 
-    var secure = noise.SecureTransport.init(allocator, &conn, handshake.tx_key, handshake.rx_key);
+    var secure = noise.SecureTransport.init(allocator, conn.connection(), handshake.tx_key, handshake.rx_key);
     defer secure.deinit();
 
     var client_c2s: u64 = 0;
@@ -602,10 +602,10 @@ fn runTcpNoiseYamuxIteration(
     var conn = try dialLoopback(allocator, io, &transport, listener);
     defer conn.deinit();
 
-    var handshake = try noise.performInitiator(allocator, io, &conn, &client_identity, null);
+    var handshake = try noise.performInitiator(allocator, io, conn.connection(), &client_identity, null);
     defer handshake.deinit();
 
-    var secure = noise.SecureTransport.init(allocator, &conn, handshake.tx_key, handshake.rx_key);
+    var secure = noise.SecureTransport.init(allocator, conn.connection(), handshake.tx_key, handshake.rx_key);
     defer secure.deinit();
 
     var session = yamux.Session.init(allocator, &secure, true);

@@ -641,12 +641,12 @@ fn runInitiatorHandshake(
     defer allocator.free(noise_ack);
     if (!std.mem.eql(u8, noise_ack, noise.PROTOCOL_ID)) return error.ProtocolMismatch;
 
-    var noise_result = try noise.performInitiator(allocator, io, conn, identity, peerIdSlice(dialed_addr));
+    var noise_result = try noise.performInitiator(allocator, io, conn.connection(), identity, peerIdSlice(dialed_addr));
     defer noise_result.deinit();
     print("noise handshake complete with peer_id={s}\n", .{noise_result.remote_peer_id.toString()});
     try address_book.learnWithPeer(dialed_addr, noise_result.remote_peer_id.toString(), nowMs());
 
-    var secure = noise.SecureTransport.init(allocator, conn, noise_result.tx_key, noise_result.rx_key);
+    var secure = noise.SecureTransport.init(allocator, conn.connection(), noise_result.tx_key, noise_result.rx_key);
     defer secure.deinit();
     var secure_reader: SecureConnReader = .{ .conn = &secure, .io = io };
     var secure_writer: SecureConnWriter = .{ .conn = &secure, .io = io };
@@ -751,11 +751,11 @@ fn runResponderHandshake(
 
     if (std.mem.eql(u8, proposal, noise.PROTOCOL_ID)) {
         try ms.writeMessage(io, &writer, noise.PROTOCOL_ID);
-        var noise_result = try noise.performResponder(allocator, io, conn, identity, null);
+        var noise_result = try noise.performResponder(allocator, io, conn.connection(), identity, null);
         defer noise_result.deinit();
         print("noise handshake complete with peer_id={s}\n", .{noise_result.remote_peer_id.toString()});
 
-        var secure = noise.SecureTransport.init(allocator, conn, noise_result.tx_key, noise_result.rx_key);
+        var secure = noise.SecureTransport.init(allocator, conn.connection(), noise_result.tx_key, noise_result.rx_key);
         defer secure.deinit();
         var secure_reader: SecureConnReader = .{ .conn = &secure, .io = io };
         var secure_writer: SecureConnWriter = .{ .conn = &secure, .io = io };

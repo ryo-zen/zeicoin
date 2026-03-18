@@ -7,7 +7,7 @@ pub const PROTOCOL_ID = "/noise";
 pub const PROTOCOL_NAME = "Noise_XX_25519_ChaChaPoly_SHA256";
 pub const SIGNATURE_PREFIX = "noise-libp2p-static-key:";
 
-const TcpConnection = tcp.TcpConnection;
+const Connection = @import("../transport/connection.zig").Connection;
 const IdentityKey = peer.IdentityKey;
 const PeerId = peer.PeerId;
 const ChaCha20Poly1305 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
@@ -114,7 +114,7 @@ const CipherState = struct {
 
 pub const SecureTransport = struct {
     allocator: std.mem.Allocator,
-    conn: *TcpConnection,
+    conn: Connection,
     tx: CipherState,
     rx: CipherState,
     tx_plain: std.array_list.Managed(u8),
@@ -127,7 +127,7 @@ pub const SecureTransport = struct {
 
     pub fn init(
         allocator: std.mem.Allocator,
-        conn: *TcpConnection,
+        conn: Connection,
         tx_key: [32]u8,
         rx_key: [32]u8,
     ) Self {
@@ -154,18 +154,20 @@ pub const SecureTransport = struct {
     }
 
     pub fn writeAll(self: *Self, io: std.Io, data: []const u8) !void {
+        _ = io;
         var fragments = [_][]const u8{data};
-        try self.writeSlices(io, &fragments);
+        try self.writeSlices(&fragments);
     }
 
     pub fn writeVecAll(self: *Self, io: std.Io, fragments: anytype) !void {
+        _ = io;
         const Fragments = @TypeOf(fragments.*);
         switch (@typeInfo(Fragments)) {
             .array => {},
             else => @compileError("writeVecAll expects a pointer to an array of byte slices"),
         }
         var vecs = fragments.*;
-        try self.writeSlices(io, &vecs);
+        try self.writeSlices(&vecs);
     }
 
     pub fn writeByte(self: *Self, io: std.Io, b: u8) !void {
@@ -190,7 +192,7 @@ pub const SecureTransport = struct {
         return n;
     }
 
-    fn writeSlices(self: *Self, io: std.Io, fragments: []const []const u8) !void {
+    fn writeSlices(self: *Self, fragments: []const []const u8) !void {
         var fragment_index: usize = 0;
         var fragment_offset: usize = 0;
 
@@ -219,7 +221,7 @@ pub const SecureTransport = struct {
 
             try self.tx_cipher.resize(self.tx_plain.items.len + ChaCha20Poly1305.tag_length);
             const ciphertext = try self.tx.encryptInto(self.tx_plain.items, self.tx_cipher.items);
-            try writeNoiseFrame(self.conn, io, ciphertext);
+            try writeNoiseFrame(self.conn, ciphertext);
         }
     }
 };
@@ -318,7 +320,7 @@ const SymmetricState = struct {
 pub fn performInitiator(
     allocator: std.mem.Allocator,
     io: std.Io,
-    conn: *TcpConnection,
+    conn: Connection,
     local_identity: *const IdentityKey,
     expected_remote_peer_id: ?[]const u8,
 ) !HandshakeResult {
@@ -331,10 +333,10 @@ pub fn performInitiator(
 
     // XX msg1: -> e
     ss.mixHash(&ei.public_key);
-    try writeNoiseFrame(conn, io, &ei.public_key);
+    try writeNoiseFrame(conn, &ei.public_key);
 
     // XX msg2: <- e, ee, s, es, payload
-    const m2 = try readNoiseFrame(allocator, conn, io);
+    const m2 = try readNoiseFrame(allocator, conn);
     defer allocator.free(m2);
     if (m2.len < 32 + 48 + 16) return HandshakeError.InvalidMessage;
 
@@ -382,7 +384,7 @@ pub fn performInitiator(
     defer allocator.free(m3);
     @memcpy(m3[0..enc_si.len], enc_si);
     @memcpy(m3[enc_si.len..], payload3_ct);
-    try writeNoiseFrame(conn, io, m3);
+    try writeNoiseFrame(conn, m3);
 
     const keys = ss.split();
     var material_input: [64]u8 = undefined;
@@ -404,7 +406,7 @@ pub fn performInitiator(
 pub fn performInitiatorConcurrent(
     allocator: std.mem.Allocator,
     io: std.Io,
-    conn: *TcpConnection,
+    conn: Connection,
     local_identity: *const IdentityKey,
     expected_remote_peer_id: ?[]const u8,
 ) std.Io.ConcurrentError!InitiatorFuture {
@@ -420,14 +422,14 @@ pub fn performInitiatorConcurrent(
 pub fn performResponder(
     allocator: std.mem.Allocator,
     io: std.Io,
-    conn: *TcpConnection,
+    conn: Connection,
     local_identity: *const IdentityKey,
     expected_remote_peer_id: ?[]const u8,
 ) !HandshakeResult {
     var ss = SymmetricState.init();
 
     // XX msg1: <- e
-    const m1 = try readNoiseFrame(allocator, conn, io);
+    const m1 = try readNoiseFrame(allocator, conn);
     defer allocator.free(m1);
     if (m1.len != 32) return HandshakeError.InvalidMessage;
 
@@ -460,10 +462,10 @@ pub fn performResponder(
     @memcpy(m2[0..32], &er.public_key);
     @memcpy(m2[32 .. 32 + enc_sr.len], enc_sr);
     @memcpy(m2[32 + enc_sr.len ..], payload2_ct);
-    try writeNoiseFrame(conn, io, m2);
+    try writeNoiseFrame(conn, m2);
 
     // XX msg3: <- s, se, payload
-    const m3 = try readNoiseFrame(allocator, conn, io);
+    const m3 = try readNoiseFrame(allocator, conn);
     defer allocator.free(m3);
     if (m3.len < 48 + 16) return HandshakeError.InvalidMessage;
 
@@ -510,7 +512,7 @@ pub fn performResponder(
 pub fn performResponderConcurrent(
     allocator: std.mem.Allocator,
     io: std.Io,
-    conn: *TcpConnection,
+    conn: Connection,
     local_identity: *const IdentityKey,
     expected_remote_peer_id: ?[]const u8,
 ) std.Io.ConcurrentError!ResponderFuture {
@@ -526,7 +528,7 @@ pub fn performResponderConcurrent(
 fn performInitiatorTaskMain(
     allocator: std.mem.Allocator,
     io: std.Io,
-    conn: *TcpConnection,
+    conn: Connection,
     local_identity: *const IdentityKey,
     expected_remote_peer_id: ?[]const u8,
 ) anyerror!HandshakeResult {
@@ -536,7 +538,7 @@ fn performInitiatorTaskMain(
 fn performResponderTaskMain(
     allocator: std.mem.Allocator,
     io: std.Io,
-    conn: *TcpConnection,
+    conn: Connection,
     local_identity: *const IdentityKey,
     expected_remote_peer_id: ?[]const u8,
 ) anyerror!HandshakeResult {
@@ -693,36 +695,37 @@ fn verifyNoiseStaticSignature(
     sig.verify(&data, pubkey) catch return HandshakeError.InvalidIdentitySignature;
 }
 
-fn writeNoiseFrame(conn: *TcpConnection, io: std.Io, payload: []const u8) !void {
+fn writeNoiseFrame(conn: Connection, payload: []const u8) !void {
     if (payload.len > std.math.maxInt(u16)) return HandshakeError.InvalidFrameLength;
     var len_prefix: [2]u8 = undefined;
     std.mem.writeInt(u16, &len_prefix, @intCast(payload.len), .big);
     var fragments = [_][]const u8{ &len_prefix, payload };
-    try conn.writeVecAll(io, &fragments);
+    try conn.writeVecAll(&fragments);
 }
 
-fn readNoiseFrame(allocator: std.mem.Allocator, conn: *TcpConnection, io: std.Io) ![]u8 {
+fn readNoiseFrame(allocator: std.mem.Allocator, conn: Connection) ![]u8 {
     var len_prefix: [2]u8 = undefined;
-    try readNoEof(conn, io, &len_prefix);
+    try readNoEof(conn, &len_prefix);
     const frame_len = std.mem.readInt(u16, &len_prefix, .big);
     const out = try allocator.alloc(u8, frame_len);
     errdefer allocator.free(out);
-    try readNoEof(conn, io, out);
+    try readNoEof(conn, out);
     return out;
 }
 
-fn readNoiseFrameInto(buffer: *std.array_list.Managed(u8), conn: *TcpConnection, io: std.Io) !void {
+fn readNoiseFrameInto(buffer: *std.array_list.Managed(u8), conn: Connection, io: std.Io) !void {
+    _ = io;
     var len_prefix: [2]u8 = undefined;
-    try readNoEof(conn, io, &len_prefix);
+    try readNoEof(conn, &len_prefix);
     const frame_len = std.mem.readInt(u16, &len_prefix, .big);
     try buffer.resize(frame_len);
-    try readNoEof(conn, io, buffer.items);
+    try readNoEof(conn, buffer.items);
 }
 
-fn readNoEof(conn: *TcpConnection, io: std.Io, dest: []u8) !void {
+fn readNoEof(conn: Connection, dest: []u8) !void {
     var off: usize = 0;
     while (off < dest.len) {
-        const n = try conn.readSome(io, dest[off..]);
+        const n = try conn.readSome(dest[off..]);
         if (n == 0) return error.EndOfStream;
         off += n;
     }
@@ -842,7 +845,7 @@ test "noise concurrent handshake helpers" {
     var responder_future = performResponderConcurrent(
         allocator,
         io,
-        &responder_conn,
+        responder_conn.connection(),
         &responder_identity,
         initiator_identity.peer_id.toString(),
     ) catch |err| switch (err) {
@@ -853,7 +856,7 @@ test "noise concurrent handshake helpers" {
     var initiator_future = performInitiatorConcurrent(
         allocator,
         io,
-        &initiator_conn,
+        initiator_conn.connection(),
         &initiator_identity,
         responder_identity.peer_id.toString(),
     ) catch |err| switch (err) {

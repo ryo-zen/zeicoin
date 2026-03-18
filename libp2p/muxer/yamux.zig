@@ -172,7 +172,7 @@ pub const Session = struct {
 
     pub fn deinit(self: *Self) void {
         self.beginClosing(.closing);
-        self.transport.conn.close(self.transport.conn.io) catch {};
+        self.transport.conn.close() catch {};
 
         if (self.demux_future) |*future| {
             _ = future.cancel(self.transport.conn.io) catch {};
@@ -327,14 +327,14 @@ pub const Session = struct {
             if (timed_out) {
                 self.sendGoAway(.protocol_error) catch {};
                 self.beginClosing(.closed);
-                self.transport.conn.close(self.transport.conn.io) catch {};
+                self.transport.conn.close() catch {};
                 return YamuxError.GoAway;
             }
 
             if (send_ping) |nonce_value| {
                 self.writeFrame(.ping, FLAG_SYN, 0, nonce_value, "") catch |err| {
                     self.beginClosing(.closed);
-                    self.transport.conn.close(self.transport.conn.io) catch {};
+                    self.transport.conn.close() catch {};
                     return err;
                 };
             }
@@ -358,7 +358,7 @@ pub const Session = struct {
                     self.sendGoAway(.internal_error) catch {};
                 }
                 self.beginClosing(.closed);
-                self.transport.conn.close(self.transport.conn.io) catch {};
+                self.transport.conn.close() catch {};
                 return err;
             };
         }
@@ -490,7 +490,7 @@ pub const Session = struct {
             },
             else => {
                 self.beginClosing(.closed);
-                self.transport.conn.close(self.transport.conn.io) catch {};
+                self.transport.conn.close() catch {};
                 return YamuxError.GoAway;
             },
         }
@@ -611,7 +611,7 @@ pub const Session = struct {
 
         if (code != .normal) {
             self.beginClosing(.closed);
-            self.transport.conn.close(self.transport.conn.io) catch {};
+            self.transport.conn.close() catch {};
         }
     }
 

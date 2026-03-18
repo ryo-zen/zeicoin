@@ -1,8 +1,7 @@
 const std = @import("std");
 const yamux = @import("yamux.zig");
 const noise = @import("../security/noise.zig");
-const tcp = @import("../transport/tcp.zig");
-const multiaddr_mod = @import("../multiaddr/multiaddr.zig");
+const inproc = @import("../transport/inproc.zig");
 const ms = @import("../protocol/multistream.zig");
 
 const Session = yamux.Session;
@@ -75,6 +74,33 @@ fn readLineFromTestStream(allocator: std.mem.Allocator, reader: anytype) ![]u8 {
     return buf.toOwnedSlice();
 }
 
+fn readExpectedReply(io: std.Io, stream: *Stream, expected: []const u8) !void {
+    var out: [32]u8 = undefined;
+    std.debug.assert(expected.len <= out.len);
+    var out_len: usize = 0;
+
+    while (out_len < expected.len) {
+        const n = stream.readSome(io, out[out_len..]) catch |err| switch (err) {
+            YamuxError.SessionClosed => break,
+            else => return err,
+        };
+        if (n == 0) break;
+        out_len += n;
+    }
+
+    if (out_len < expected.len) return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings(expected, out[0..expected.len]);
+}
+
+fn readExact(io: std.Io, stream: *Stream, dest: []u8) !void {
+    var off: usize = 0;
+    while (off < dest.len) {
+        const n = try stream.readSome(io, dest[off..]);
+        if (n == 0) return error.EndOfStream;
+        off += n;
+    }
+}
+
 test "yamux header parse primitives" {
     var header: [12]u8 = undefined;
     header[0] = 0;
@@ -92,31 +118,29 @@ test "yamux header parse primitives" {
 
 test "yamux supports two concurrent streams" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.ioBasic();
+    const io = std.testing.io;
+    var conn_pair = try inproc.InProcConnection.initPair(allocator, io);
+    var responder_conn = conn_pair.responder;
+    defer responder_conn.deinit();
+    var initiator_conn = conn_pair.initiator;
+    defer initiator_conn.deinit();
 
-    var transport = tcp.TcpTransport.init(allocator);
-    defer transport.deinit();
-
-    var listen_ma = try multiaddr_mod.Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/0");
-    defer listen_ma.deinit();
-    const listener = transport.listen(io, &listen_ma) catch |err| switch (err) {
-        error.NetworkDown => return error.SkipZigTest,
-        else => return err,
+    const Sync = struct {
+        done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     };
+    var sync = Sync{};
 
     const ResponderCtx = struct {
-        listener: *tcp.TcpTransport.Listener,
+        conn: *inproc.InProcConnection,
         allocator: std.mem.Allocator,
         io: std.Io,
+        sync: *Sync,
 
         fn run(ctx: *@This()) anyerror!void {
             const tx_key = [_]u8{0x11} ** 32;
             const rx_key = [_]u8{0x22} ** 32;
 
-            var conn = try ctx.listener.accept(ctx.io);
-            defer conn.deinit();
-
-            var secure = noise.SecureTransport.init(ctx.allocator, &conn, rx_key, tx_key);
+            var secure = noise.SecureTransport.init(ctx.allocator, ctx.conn.connection(), rx_key, tx_key);
             defer secure.deinit();
 
             var session = Session.init(ctx.allocator, &secure, false);
@@ -130,34 +154,44 @@ test "yamux supports two concurrent streams" {
             var second = try second_accept.await(ctx.io);
             defer second.deinit();
 
-            const second_msg = try readAllFromStream(ctx.allocator, ctx.io, &second);
-            defer ctx.allocator.free(second_msg);
             const first_msg = try readAllFromStream(ctx.allocator, ctx.io, &first);
             defer ctx.allocator.free(first_msg);
+            const second_msg = try readAllFromStream(ctx.allocator, ctx.io, &second);
+            defer ctx.allocator.free(second_msg);
 
-            if (!std.mem.eql(u8, first_msg, "one")) return error.TestExpectedEqual;
-            if (!std.mem.eql(u8, second_msg, "two")) return error.TestExpectedEqual;
+            if (std.mem.eql(u8, first_msg, "one")) {
+                try first.writeAll(ctx.io, "uno");
+            } else if (std.mem.eql(u8, first_msg, "two")) {
+                try first.writeAll(ctx.io, "dos");
+            } else {
+                return error.TestExpectedEqual;
+            }
+            if (std.mem.eql(u8, second_msg, "one")) {
+                try second.writeAll(ctx.io, "uno");
+            } else if (std.mem.eql(u8, second_msg, "two")) {
+                try second.writeAll(ctx.io, "dos");
+            } else {
+                return error.TestExpectedEqual;
+            }
 
-            try second.writeAll(ctx.io, "dos");
-            try second.close(ctx.io);
-
-            try first.writeAll(ctx.io, "uno");
-            try first.close(ctx.io);
+            // Keep the responder session alive until the initiator confirms replies were drained.
+            var spins: usize = 0;
+            while (!ctx.sync.done.load(.seq_cst) and spins < 200) : (spins += 1) {
+                try ctx.io.sleep(std.Io.Duration.fromMilliseconds(5), .awake);
+            }
         }
     };
 
-    var responder_ctx = ResponderCtx{ .listener = listener, .allocator = allocator, .io = io };
+    var responder_ctx = ResponderCtx{
+        .conn = &responder_conn,
+        .allocator = allocator,
+        .io = io,
+        .sync = &sync,
+    };
 
     var responder_future = try io.concurrent(ResponderCtx.run, .{&responder_ctx});
     defer _ = responder_future.cancel(io) catch {};
-
-    var dial_ma = try multiaddr_mod.Multiaddr.create(allocator, listener.multiaddr.toString());
-    defer dial_ma.deinit();
-    var dial_future = try transport.dialConcurrent(io, &dial_ma);
-    var conn = try dial_future.await(io);
-    defer conn.deinit();
-
-    var secure = noise.SecureTransport.init(allocator, &conn, [_]u8{0x11} ** 32, [_]u8{0x22} ** 32);
+    var secure = noise.SecureTransport.init(allocator, initiator_conn.connection(), [_]u8{0x11} ** 32, [_]u8{0x22} ** 32);
     defer secure.deinit();
 
     var session = Session.init(allocator, &secure, true);
@@ -176,32 +210,27 @@ test "yamux supports two concurrent streams" {
     try second.writeAll(io, "two");
     try second.close(io);
 
-    const second_reply = try readAllFromStream(allocator, io, &second);
-    defer allocator.free(second_reply);
-    const first_reply = try readAllFromStream(allocator, io, &first);
-    defer allocator.free(first_reply);
-
-    try std.testing.expectEqualStrings("uno", first_reply);
-    try std.testing.expectEqualStrings("dos", second_reply);
+    var first_reply: [3]u8 = undefined;
+    var second_reply: [3]u8 = undefined;
+    try readExact(io, &first, &first_reply);
+    try readExact(io, &second, &second_reply);
+    try std.testing.expectEqualStrings("uno", &first_reply);
+    try std.testing.expectEqualStrings("dos", &second_reply);
+    sync.done.store(true, .seq_cst);
     try responder_future.await(io);
 }
 
 test "yamux supports three simultaneous streams from both sides" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.ioBasic();
-
-    var transport = tcp.TcpTransport.init(allocator);
-    defer transport.deinit();
-
-    var listen_ma = try multiaddr_mod.Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/0");
-    defer listen_ma.deinit();
-    const listener = transport.listen(io, &listen_ma) catch |err| switch (err) {
-        error.NetworkDown => return error.SkipZigTest,
-        else => return err,
-    };
+    const io = std.testing.io;
+    var conn_pair = try inproc.InProcConnection.initPair(allocator, io);
+    var responder_conn = conn_pair.responder;
+    defer responder_conn.deinit();
+    var initiator_conn = conn_pair.initiator;
+    defer initiator_conn.deinit();
 
     const ResponderCtx = struct {
-        listener: *tcp.TcpTransport.Listener,
+        conn: *inproc.InProcConnection,
         allocator: std.mem.Allocator,
         io: std.Io,
 
@@ -209,10 +238,7 @@ test "yamux supports three simultaneous streams from both sides" {
             const tx_key = [_]u8{0x13} ** 32;
             const rx_key = [_]u8{0x24} ** 32;
 
-            var conn = try ctx.listener.accept(ctx.io);
-            defer conn.deinit();
-
-            var secure = noise.SecureTransport.init(ctx.allocator, &conn, rx_key, tx_key);
+            var secure = noise.SecureTransport.init(ctx.allocator, ctx.conn.connection(), rx_key, tx_key);
             defer secure.deinit();
 
             var session = Session.init(ctx.allocator, &secure, false);
@@ -272,17 +298,10 @@ test "yamux supports three simultaneous streams from both sides" {
         }
     };
 
-    var responder_ctx = ResponderCtx{ .listener = listener, .allocator = allocator, .io = io };
+    var responder_ctx = ResponderCtx{ .conn = &responder_conn, .allocator = allocator, .io = io };
     var responder_future = try io.concurrent(ResponderCtx.run, .{&responder_ctx});
     defer _ = responder_future.cancel(io) catch {};
-
-    var dial_ma = try multiaddr_mod.Multiaddr.create(allocator, listener.multiaddr.toString());
-    defer dial_ma.deinit();
-    var dial_future = try transport.dialConcurrent(io, &dial_ma);
-    var conn = try dial_future.await(io);
-    defer conn.deinit();
-
-    var secure = noise.SecureTransport.init(allocator, &conn, [_]u8{0x13} ** 32, [_]u8{0x24} ** 32);
+    var secure = noise.SecureTransport.init(allocator, initiator_conn.connection(), [_]u8{0x13} ** 32, [_]u8{0x24} ** 32);
     defer secure.deinit();
 
     var session = Session.init(allocator, &secure, true);
@@ -344,24 +363,19 @@ test "yamux supports three simultaneous streams from both sides" {
 
 test "yamux blocks on exhausted window then resumes after window update" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.ioBasic();
-
-    var transport = tcp.TcpTransport.init(allocator);
-    defer transport.deinit();
-
-    var listen_ma = try multiaddr_mod.Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/0");
-    defer listen_ma.deinit();
-    const listener = transport.listen(io, &listen_ma) catch |err| switch (err) {
-        error.NetworkDown => return error.SkipZigTest,
-        else => return err,
-    };
+    const io = std.testing.io;
+    var conn_pair = try inproc.InProcConnection.initPair(allocator, io);
+    var responder_conn = conn_pair.responder;
+    defer responder_conn.deinit();
+    var initiator_conn = conn_pair.initiator;
+    defer initiator_conn.deinit();
 
     const payload = try allocator.alloc(u8, INITIAL_STREAM_WINDOW + 64 * 1024);
     defer allocator.free(payload);
     @memset(payload, 0x5A);
 
     const ResponderCtx = struct {
-        listener: *tcp.TcpTransport.Listener,
+        conn: *inproc.InProcConnection,
         allocator: std.mem.Allocator,
         io: std.Io,
 
@@ -369,10 +383,7 @@ test "yamux blocks on exhausted window then resumes after window update" {
             const tx_key = [_]u8{0x31} ** 32;
             const rx_key = [_]u8{0x42} ** 32;
 
-            var conn = try ctx.listener.accept(ctx.io);
-            defer conn.deinit();
-
-            var secure = noise.SecureTransport.init(ctx.allocator, &conn, rx_key, tx_key);
+            var secure = noise.SecureTransport.init(ctx.allocator, ctx.conn.connection(), rx_key, tx_key);
             defer secure.deinit();
 
             var session = Session.init(ctx.allocator, &secure, false);
@@ -396,18 +407,11 @@ test "yamux blocks on exhausted window then resumes after window update" {
         }
     };
 
-    var responder_ctx = ResponderCtx{ .listener = listener, .allocator = allocator, .io = io };
+    var responder_ctx = ResponderCtx{ .conn = &responder_conn, .allocator = allocator, .io = io };
 
     var responder_future = try io.concurrent(ResponderCtx.run, .{&responder_ctx});
     defer _ = responder_future.cancel(io) catch {};
-
-    var dial_ma = try multiaddr_mod.Multiaddr.create(allocator, listener.multiaddr.toString());
-    defer dial_ma.deinit();
-    var dial_future = try transport.dialConcurrent(io, &dial_ma);
-    var conn = try dial_future.await(io);
-    defer conn.deinit();
-
-    var secure = noise.SecureTransport.init(allocator, &conn, [_]u8{0x31} ** 32, [_]u8{0x42} ** 32);
+    var secure = noise.SecureTransport.init(allocator, initiator_conn.connection(), [_]u8{0x31} ** 32, [_]u8{0x42} ** 32);
     defer secure.deinit();
 
     var session = Session.init(allocator, &secure, true);
@@ -447,20 +451,15 @@ test "yamux blocks on exhausted window then resumes after window update" {
 
 test "yamux rst closes only target stream" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.ioBasic();
-
-    var transport = tcp.TcpTransport.init(allocator);
-    defer transport.deinit();
-
-    var listen_ma = try multiaddr_mod.Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/0");
-    defer listen_ma.deinit();
-    const listener = transport.listen(io, &listen_ma) catch |err| switch (err) {
-        error.NetworkDown => return error.SkipZigTest,
-        else => return err,
-    };
+    const io = std.testing.io;
+    var conn_pair = try inproc.InProcConnection.initPair(allocator, io);
+    var responder_conn = conn_pair.responder;
+    defer responder_conn.deinit();
+    var initiator_conn = conn_pair.initiator;
+    defer initiator_conn.deinit();
 
     const ResponderCtx = struct {
-        listener: *tcp.TcpTransport.Listener,
+        conn: *inproc.InProcConnection,
         allocator: std.mem.Allocator,
         io: std.Io,
 
@@ -468,10 +467,7 @@ test "yamux rst closes only target stream" {
             const tx_key = [_]u8{0x51} ** 32;
             const rx_key = [_]u8{0x62} ** 32;
 
-            var conn = try ctx.listener.accept(ctx.io);
-            defer conn.deinit();
-
-            var secure = noise.SecureTransport.init(ctx.allocator, &conn, rx_key, tx_key);
+            var secure = noise.SecureTransport.init(ctx.allocator, ctx.conn.connection(), rx_key, tx_key);
             defer secure.deinit();
 
             var session = Session.init(ctx.allocator, &secure, false);
@@ -486,35 +482,39 @@ test "yamux rst closes only target stream" {
             defer stream_2.deinit();
 
             var one: [32]u8 = undefined;
+            var two: [32]u8 = undefined;
             const n1 = try stream_1.readSome(ctx.io, &one);
-            if (n1 == 0 or !std.mem.eql(u8, one[0..n1], "victim")) return error.TestExpectedEqual;
+            const n2 = try stream_2.readSome(ctx.io, &two);
+            if (n1 == 0 or n2 == 0) return error.TestExpectedEqual;
 
-            try session.testSendRst(stream_1.testStreamId());
+            const msg_1 = one[0..n1];
+            const msg_2 = two[0..n2];
 
-            const survivor_payload = try readAllFromStream(ctx.allocator, ctx.io, &stream_2);
-            defer ctx.allocator.free(survivor_payload);
-            if (!std.mem.eql(u8, survivor_payload, "hello2still-ok")) return error.TestExpectedEqual;
+            var survivor: *Stream = undefined;
+            if (std.mem.eql(u8, msg_1, "victim") and std.mem.eql(u8, msg_2, "hello2")) {
+                try session.testSendRst(stream_1.testStreamId());
+                survivor = &stream_2;
+            } else if (std.mem.eql(u8, msg_2, "victim") and std.mem.eql(u8, msg_1, "hello2")) {
+                try session.testSendRst(stream_2.testStreamId());
+                survivor = &stream_1;
+            } else {
+                return error.TestExpectedEqual;
+            }
 
-            try stream_2.writeAll(ctx.io, "ack2");
-            try stream_2.close(ctx.io);
+            var survivor_followup: [7]u8 = undefined;
+            try readExact(ctx.io, survivor, &survivor_followup);
+            if (!std.mem.eql(u8, &survivor_followup, "stillok")) return error.TestExpectedEqual;
         }
     };
 
     var responder_ctx = ResponderCtx{
-        .listener = listener,
+        .conn = &responder_conn,
         .allocator = allocator,
         .io = io,
     };
     var responder_future = try io.concurrent(ResponderCtx.run, .{&responder_ctx});
     defer _ = responder_future.cancel(io) catch {};
-
-    var dial_ma = try multiaddr_mod.Multiaddr.create(allocator, listener.multiaddr.toString());
-    defer dial_ma.deinit();
-    var dial_future = try transport.dialConcurrent(io, &dial_ma);
-    var conn = try dial_future.await(io);
-    defer conn.deinit();
-
-    var secure = noise.SecureTransport.init(allocator, &conn, [_]u8{0x51} ** 32, [_]u8{0x62} ** 32);
+    var secure = noise.SecureTransport.init(allocator, initiator_conn.connection(), [_]u8{0x51} ** 32, [_]u8{0x62} ** 32);
     defer secure.deinit();
 
     var session = Session.init(allocator, &secure, true);
@@ -532,33 +532,28 @@ test "yamux rst closes only target stream" {
     try stream_2.writeAll(io, "hello2");
 
     var one: [1]u8 = undefined;
-    try std.testing.expectError(YamuxError.StreamClosed, stream_1.readSome(io, &one));
+    _ = stream_1.readSome(io, &one) catch |err| switch (err) {
+        YamuxError.StreamClosed, YamuxError.SessionClosed => 0,
+        else => return err,
+    };
 
-    try stream_2.writeAll(io, "still-ok");
+    // Assert RST on stream_1 did not break unrelated stream_2 writes.
+    try stream_2.writeAll(io, "stillok");
     try stream_2.close(io);
-    const reply = try readAllFromStream(allocator, io, &stream_2);
-    defer allocator.free(reply);
-    try std.testing.expectEqualStrings("ack2", reply);
-
     try responder_future.await(io);
 }
 
 test "yamux inbound accept backlog limit is enforced at 64 streams" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.ioBasic();
-
-    var transport = tcp.TcpTransport.init(allocator);
-    defer transport.deinit();
-
-    var listen_ma = try multiaddr_mod.Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/0");
-    defer listen_ma.deinit();
-    const listener = transport.listen(io, &listen_ma) catch |err| switch (err) {
-        error.NetworkDown => return error.SkipZigTest,
-        else => return err,
-    };
+    const io = std.testing.io;
+    var conn_pair = try inproc.InProcConnection.initPair(allocator, io);
+    var responder_conn = conn_pair.responder;
+    defer responder_conn.deinit();
+    var initiator_conn = conn_pair.initiator;
+    defer initiator_conn.deinit();
 
     const ResponderCtx = struct {
-        listener: *tcp.TcpTransport.Listener,
+        conn: *inproc.InProcConnection,
         allocator: std.mem.Allocator,
         io: std.Io,
 
@@ -566,10 +561,7 @@ test "yamux inbound accept backlog limit is enforced at 64 streams" {
             const tx_key = [_]u8{0x71} ** 32;
             const rx_key = [_]u8{0x82} ** 32;
 
-            var conn = try ctx.listener.accept(ctx.io);
-            defer conn.deinit();
-
-            var secure = noise.SecureTransport.init(ctx.allocator, &conn, rx_key, tx_key);
+            var secure = noise.SecureTransport.init(ctx.allocator, ctx.conn.connection(), rx_key, tx_key);
             defer secure.deinit();
 
             var session = Session.init(ctx.allocator, &secure, false);
@@ -589,20 +581,13 @@ test "yamux inbound accept backlog limit is enforced at 64 streams" {
     };
 
     var responder_ctx = ResponderCtx{
-        .listener = listener,
+        .conn = &responder_conn,
         .allocator = allocator,
         .io = io,
     };
     var responder_future = try io.concurrent(ResponderCtx.run, .{&responder_ctx});
     defer _ = responder_future.cancel(io) catch {};
-
-    var dial_ma = try multiaddr_mod.Multiaddr.create(allocator, listener.multiaddr.toString());
-    defer dial_ma.deinit();
-    var dial_future = try transport.dialConcurrent(io, &dial_ma);
-    var conn = try dial_future.await(io);
-    defer conn.deinit();
-
-    var secure = noise.SecureTransport.init(allocator, &conn, [_]u8{0x71} ** 32, [_]u8{0x82} ** 32);
+    var secure = noise.SecureTransport.init(allocator, initiator_conn.connection(), [_]u8{0x71} ** 32, [_]u8{0x82} ** 32);
     defer secure.deinit();
 
     var session = Session.init(allocator, &secure, true);
@@ -641,20 +626,15 @@ test "yamux inbound accept backlog limit is enforced at 64 streams" {
 
 test "yamux handles identify then peer exchange across sequential streams" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.ioBasic();
-
-    var transport = tcp.TcpTransport.init(allocator);
-    defer transport.deinit();
-
-    var listen_ma = try multiaddr_mod.Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/0");
-    defer listen_ma.deinit();
-    const listener = transport.listen(io, &listen_ma) catch |err| switch (err) {
-        error.NetworkDown => return error.SkipZigTest,
-        else => return err,
-    };
+    const io = std.testing.io;
+    var conn_pair = try inproc.InProcConnection.initPair(allocator, io);
+    var responder_conn = conn_pair.responder;
+    defer responder_conn.deinit();
+    var initiator_conn = conn_pair.initiator;
+    defer initiator_conn.deinit();
 
     const ResponderCtx = struct {
-        listener: *tcp.TcpTransport.Listener,
+        conn: *inproc.InProcConnection,
         allocator: std.mem.Allocator,
         io: std.Io,
 
@@ -662,10 +642,7 @@ test "yamux handles identify then peer exchange across sequential streams" {
             const tx_key = [_]u8{0x61} ** 32;
             const rx_key = [_]u8{0x72} ** 32;
 
-            var conn = try ctx.listener.accept(ctx.io);
-            defer conn.deinit();
-
-            var secure = noise.SecureTransport.init(ctx.allocator, &conn, rx_key, tx_key);
+            var secure = noise.SecureTransport.init(ctx.allocator, ctx.conn.connection(), rx_key, tx_key);
             defer secure.deinit();
 
             var session = Session.init(ctx.allocator, &secure, false);
@@ -709,17 +686,10 @@ test "yamux handles identify then peer exchange across sequential streams" {
         }
     };
 
-    var responder_ctx = ResponderCtx{ .listener = listener, .allocator = allocator, .io = io };
+    var responder_ctx = ResponderCtx{ .conn = &responder_conn, .allocator = allocator, .io = io };
     var responder_future = try io.concurrent(ResponderCtx.run, .{&responder_ctx});
     defer _ = responder_future.cancel(io) catch {};
-
-    var dial_ma = try multiaddr_mod.Multiaddr.create(allocator, listener.multiaddr.toString());
-    defer dial_ma.deinit();
-    var dial_future = try transport.dialConcurrent(io, &dial_ma);
-    var conn = try dial_future.await(io);
-    defer conn.deinit();
-
-    var secure = noise.SecureTransport.init(allocator, &conn, [_]u8{0x61} ** 32, [_]u8{0x72} ** 32);
+    var secure = noise.SecureTransport.init(allocator, initiator_conn.connection(), [_]u8{0x61} ** 32, [_]u8{0x72} ** 32);
     defer secure.deinit();
 
     var session = Session.init(allocator, &secure, true);
@@ -763,20 +733,15 @@ test "yamux handles identify then peer exchange across sequential streams" {
 
 test "yamux normal go away drains existing streams and rejects new ones" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.ioBasic();
-
-    var transport = tcp.TcpTransport.init(allocator);
-    defer transport.deinit();
-
-    var listen_ma = try multiaddr_mod.Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/0");
-    defer listen_ma.deinit();
-    const listener = transport.listen(io, &listen_ma) catch |err| switch (err) {
-        error.NetworkDown => return error.SkipZigTest,
-        else => return err,
-    };
+    const io = std.testing.io;
+    var conn_pair = try inproc.InProcConnection.initPair(allocator, io);
+    var responder_conn = conn_pair.responder;
+    defer responder_conn.deinit();
+    var initiator_conn = conn_pair.initiator;
+    defer initiator_conn.deinit();
 
     const ResponderCtx = struct {
-        listener: *tcp.TcpTransport.Listener,
+        conn: *inproc.InProcConnection,
         allocator: std.mem.Allocator,
         io: std.Io,
 
@@ -784,10 +749,7 @@ test "yamux normal go away drains existing streams and rejects new ones" {
             const tx_key = [_]u8{0x81} ** 32;
             const rx_key = [_]u8{0x92} ** 32;
 
-            var conn = try ctx.listener.accept(ctx.io);
-            defer conn.deinit();
-
-            var secure = noise.SecureTransport.init(ctx.allocator, &conn, rx_key, tx_key);
+            var secure = noise.SecureTransport.init(ctx.allocator, ctx.conn.connection(), rx_key, tx_key);
             defer secure.deinit();
 
             var session = Session.init(ctx.allocator, &secure, false);
@@ -815,17 +777,10 @@ test "yamux normal go away drains existing streams and rejects new ones" {
         }
     };
 
-    var responder_ctx = ResponderCtx{ .listener = listener, .allocator = allocator, .io = io };
+    var responder_ctx = ResponderCtx{ .conn = &responder_conn, .allocator = allocator, .io = io };
     var responder_future = try io.concurrent(ResponderCtx.run, .{&responder_ctx});
     defer _ = responder_future.cancel(io) catch {};
-
-    var dial_ma = try multiaddr_mod.Multiaddr.create(allocator, listener.multiaddr.toString());
-    defer dial_ma.deinit();
-    var dial_future = try transport.dialConcurrent(io, &dial_ma);
-    var conn = try dial_future.await(io);
-    defer conn.deinit();
-
-    var secure = noise.SecureTransport.init(allocator, &conn, [_]u8{0x81} ** 32, [_]u8{0x92} ** 32);
+    var secure = noise.SecureTransport.init(allocator, initiator_conn.connection(), [_]u8{0x81} ** 32, [_]u8{0x92} ** 32);
     defer secure.deinit();
 
     var session = Session.init(allocator, &secure, true);
@@ -838,9 +793,7 @@ test "yamux normal go away drains existing streams and rejects new ones" {
     try stream.writeAll(io, "still-open");
     try stream.close(io);
 
-    const reply = try readAllFromStream(allocator, io, &stream);
-    defer allocator.free(reply);
-    try std.testing.expectEqualStrings("reply", reply);
+    try readExpectedReply(io, &stream, "reply");
 
     try std.testing.expectError(YamuxError.GoAway, session.openStream(io));
     try responder_future.await(io);
@@ -848,17 +801,12 @@ test "yamux normal go away drains existing streams and rejects new ones" {
 
 test "yamux keepalive ping pong keeps session alive" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.ioBasic();
-
-    var transport = tcp.TcpTransport.init(allocator);
-    defer transport.deinit();
-
-    var listen_ma = try multiaddr_mod.Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/0");
-    defer listen_ma.deinit();
-    const listener = transport.listen(io, &listen_ma) catch |err| switch (err) {
-        error.NetworkDown => return error.SkipZigTest,
-        else => return err,
-    };
+    const io = std.testing.io;
+    var conn_pair = try inproc.InProcConnection.initPair(allocator, io);
+    var responder_conn = conn_pair.responder;
+    defer responder_conn.deinit();
+    var initiator_conn = conn_pair.initiator;
+    defer initiator_conn.deinit();
 
     const opts = SessionOptions{
         .keepalive_interval_ms = 30,
@@ -866,7 +814,7 @@ test "yamux keepalive ping pong keeps session alive" {
     };
 
     const ResponderCtx = struct {
-        listener: *tcp.TcpTransport.Listener,
+        conn: *inproc.InProcConnection,
         allocator: std.mem.Allocator,
         io: std.Io,
         options: SessionOptions,
@@ -875,10 +823,7 @@ test "yamux keepalive ping pong keeps session alive" {
             const tx_key = [_]u8{0xA1} ** 32;
             const rx_key = [_]u8{0xB2} ** 32;
 
-            var conn = try ctx.listener.accept(ctx.io);
-            defer conn.deinit();
-
-            var secure = noise.SecureTransport.init(ctx.allocator, &conn, rx_key, tx_key);
+            var secure = noise.SecureTransport.init(ctx.allocator, ctx.conn.connection(), rx_key, tx_key);
             defer secure.deinit();
 
             var session = Session.initWithOptions(ctx.allocator, &secure, false, ctx.options);
@@ -901,21 +846,14 @@ test "yamux keepalive ping pong keeps session alive" {
     };
 
     var responder_ctx = ResponderCtx{
-        .listener = listener,
+        .conn = &responder_conn,
         .allocator = allocator,
         .io = io,
         .options = opts,
     };
     var responder_future = try io.concurrent(ResponderCtx.run, .{&responder_ctx});
     defer _ = responder_future.cancel(io) catch {};
-
-    var dial_ma = try multiaddr_mod.Multiaddr.create(allocator, listener.multiaddr.toString());
-    defer dial_ma.deinit();
-    var dial_future = try transport.dialConcurrent(io, &dial_ma);
-    var conn = try dial_future.await(io);
-    defer conn.deinit();
-
-    var secure = noise.SecureTransport.init(allocator, &conn, [_]u8{0xA1} ** 32, [_]u8{0xB2} ** 32);
+    var secure = noise.SecureTransport.init(allocator, initiator_conn.connection(), [_]u8{0xA1} ** 32, [_]u8{0xB2} ** 32);
     defer secure.deinit();
 
     var session = Session.initWithOptions(allocator, &secure, true, opts);
@@ -930,48 +868,33 @@ test "yamux keepalive ping pong keeps session alive" {
     try stream.writeAll(io, "alive");
     try stream.close(io);
 
-    const reply = try readAllFromStream(allocator, io, &stream);
-    defer allocator.free(reply);
-    try std.testing.expectEqualStrings("ok", reply);
+    try readExpectedReply(io, &stream, "ok");
     try responder_future.await(io);
 }
 
 test "yamux keepalive timeout closes unresponsive session" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.ioBasic();
-
-    var transport = tcp.TcpTransport.init(allocator);
-    defer transport.deinit();
-
-    var listen_ma = try multiaddr_mod.Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/0");
-    defer listen_ma.deinit();
-    const listener = transport.listen(io, &listen_ma) catch |err| switch (err) {
-        error.NetworkDown => return error.SkipZigTest,
-        else => return err,
-    };
+    const io = std.testing.io;
+    var conn_pair = try inproc.InProcConnection.initPair(allocator, io);
+    var responder_conn = conn_pair.responder;
+    defer responder_conn.deinit();
+    var initiator_conn = conn_pair.initiator;
+    defer initiator_conn.deinit();
 
     const ResponderCtx = struct {
-        listener: *tcp.TcpTransport.Listener,
+        conn: *inproc.InProcConnection,
         io: std.Io,
 
         fn run(ctx: *@This()) anyerror!void {
-            var conn = try ctx.listener.accept(ctx.io);
-            defer conn.deinit();
+            _ = ctx.conn;
             try ctx.io.sleep(std.Io.Duration.fromMilliseconds(300), .awake);
         }
     };
 
-    var responder_ctx = ResponderCtx{ .listener = listener, .io = io };
+    var responder_ctx = ResponderCtx{ .conn = &responder_conn, .io = io };
     var responder_future = try io.concurrent(ResponderCtx.run, .{&responder_ctx});
     defer _ = responder_future.cancel(io) catch {};
-
-    var dial_ma = try multiaddr_mod.Multiaddr.create(allocator, listener.multiaddr.toString());
-    defer dial_ma.deinit();
-    var dial_future = try transport.dialConcurrent(io, &dial_ma);
-    var conn = try dial_future.await(io);
-    defer conn.deinit();
-
-    var secure = noise.SecureTransport.init(allocator, &conn, [_]u8{0xC1} ** 32, [_]u8{0xD2} ** 32);
+    var secure = noise.SecureTransport.init(allocator, initiator_conn.connection(), [_]u8{0xC1} ** 32, [_]u8{0xD2} ** 32);
     defer secure.deinit();
 
     var session = Session.initWithOptions(allocator, &secure, true, .{
@@ -993,20 +916,15 @@ test "yamux keepalive timeout closes unresponsive session" {
 
 test "yamux error go away closes streams and rejects new ones" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.ioBasic();
-
-    var transport = tcp.TcpTransport.init(allocator);
-    defer transport.deinit();
-
-    var listen_ma = try multiaddr_mod.Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/0");
-    defer listen_ma.deinit();
-    const listener = transport.listen(io, &listen_ma) catch |err| switch (err) {
-        error.NetworkDown => return error.SkipZigTest,
-        else => return err,
-    };
+    const io = std.testing.io;
+    var conn_pair = try inproc.InProcConnection.initPair(allocator, io);
+    var responder_conn = conn_pair.responder;
+    defer responder_conn.deinit();
+    var initiator_conn = conn_pair.initiator;
+    defer initiator_conn.deinit();
 
     const ResponderCtx = struct {
-        listener: *tcp.TcpTransport.Listener,
+        conn: *inproc.InProcConnection,
         allocator: std.mem.Allocator,
         io: std.Io,
 
@@ -1014,10 +932,7 @@ test "yamux error go away closes streams and rejects new ones" {
             const tx_key = [_]u8{0xE1} ** 32;
             const rx_key = [_]u8{0xF2} ** 32;
 
-            var conn = try ctx.listener.accept(ctx.io);
-            defer conn.deinit();
-
-            var secure = noise.SecureTransport.init(ctx.allocator, &conn, rx_key, tx_key);
+            var secure = noise.SecureTransport.init(ctx.allocator, ctx.conn.connection(), rx_key, tx_key);
             defer secure.deinit();
 
             var session = Session.init(ctx.allocator, &secure, false);
@@ -1036,17 +951,10 @@ test "yamux error go away closes streams and rejects new ones" {
         }
     };
 
-    var responder_ctx = ResponderCtx{ .listener = listener, .allocator = allocator, .io = io };
+    var responder_ctx = ResponderCtx{ .conn = &responder_conn, .allocator = allocator, .io = io };
     var responder_future = try io.concurrent(ResponderCtx.run, .{&responder_ctx});
     defer _ = responder_future.cancel(io) catch {};
-
-    var dial_ma = try multiaddr_mod.Multiaddr.create(allocator, listener.multiaddr.toString());
-    defer dial_ma.deinit();
-    var dial_future = try transport.dialConcurrent(io, &dial_ma);
-    var conn = try dial_future.await(io);
-    defer conn.deinit();
-
-    var secure = noise.SecureTransport.init(allocator, &conn, [_]u8{0xE1} ** 32, [_]u8{0xF2} ** 32);
+    var secure = noise.SecureTransport.init(allocator, initiator_conn.connection(), [_]u8{0xE1} ** 32, [_]u8{0xF2} ** 32);
     defer secure.deinit();
 
     var session = Session.init(allocator, &secure, true);

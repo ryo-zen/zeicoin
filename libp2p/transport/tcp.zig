@@ -5,6 +5,7 @@
 const std = @import("std");
 const net = std.Io.net;
 const multiaddr = @import("../multiaddr/multiaddr.zig");
+const connection_mod = @import("connection.zig");
 const Multiaddr = multiaddr.Multiaddr;
 const stream_buffer_size = 64 * 1024;
 
@@ -140,6 +141,10 @@ pub const TcpConnection = struct {
         return self.is_initiator;
     }
 
+    pub fn connection(self: *Self) connection_mod.Connection {
+        return .{ .io = self.io, .ctx = self, .vtable = &connection_vtable };
+    }
+
     /// Get local multiaddr (matches C++ localMultiaddr)
     pub fn localMultiaddr(self: *const Self) ?Multiaddr {
         return self.local_multiaddr;
@@ -180,6 +185,40 @@ pub const TcpConnection = struct {
         }
         return &self.writer.?;
     }
+
+    fn connectionReadSome(ctx: *anyopaque, dest: []u8) anyerror!usize {
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        return self.readSome(self.io, dest);
+    }
+
+    fn connectionWriteVecAll(ctx: *anyopaque, fragments: []const []const u8) anyerror!void {
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        if (self.is_closed) return error.ConnectionClosed;
+
+        var total_bytes: usize = 0;
+        const writer = self.getWriter(self.io);
+        for (fragments) |fragment| {
+            writer.interface.writeAll(fragment) catch {
+                return writer.err orelse error.WriteFailed;
+            };
+            total_bytes += fragment.len;
+        }
+        writer.interface.flush() catch {
+            return writer.err orelse error.WriteFailed;
+        };
+        self.bytes_written += total_bytes;
+    }
+
+    fn connectionClose(ctx: *anyopaque) anyerror!void {
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        return self.close(self.io);
+    }
+
+    const connection_vtable = connection_mod.Connection.VTable{
+        .readSome = connectionReadSome,
+        .writeVecAll = connectionWriteVecAll,
+        .close = connectionClose,
+    };
 };
 
 pub const TcpTransport = struct {
