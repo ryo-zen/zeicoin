@@ -1181,7 +1181,7 @@ test "yamux supports three simultaneous streams from both sides" {
     try responder_future.await(io);
 }
 
-test "yamux restores flow control with window updates" {
+test "yamux blocks on exhausted window then resumes after window update" {
     const allocator = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.ioBasic();
 
@@ -1222,6 +1222,9 @@ test "yamux restores flow control with window updates" {
             var stream = try accept_future.await(ctx.io);
             defer stream.deinit();
 
+            // Delay reads so the remote writer exhausts send_window and blocks.
+            try ctx.io.sleep(std.Io.Duration.fromMilliseconds(180), .awake);
+
             const received = try readAllFromStream(ctx.allocator, ctx.io, &stream);
             defer ctx.allocator.free(received);
 
@@ -1250,11 +1253,34 @@ test "yamux restores flow control with window updates" {
     defer session.deinit();
     try session.start();
 
+    const WriterCtx = struct {
+        stream: *Stream,
+        io: std.Io,
+        payload: []const u8,
+        elapsed_ns: u64 = 0,
+
+        fn run(ctx: *@This()) anyerror!void {
+            var timer = try std.time.Timer.start();
+            try ctx.stream.writeAll(ctx.io, ctx.payload);
+            try ctx.stream.close(ctx.io);
+            ctx.elapsed_ns = timer.read();
+        }
+    };
+
     var open_future = try session.openStreamConcurrent(io);
     var stream = try open_future.await(io);
     defer stream.deinit();
-    try stream.writeAll(io, payload);
-    try stream.close(io);
+
+    var writer_ctx = WriterCtx{
+        .stream = &stream,
+        .io = io,
+        .payload = payload,
+    };
+    var writer_future = try io.concurrent(WriterCtx.run, .{&writer_ctx});
+    defer _ = writer_future.cancel(io) catch {};
+
+    try writer_future.await(io);
+    try std.testing.expect(writer_ctx.elapsed_ns >= 120 * std.time.ns_per_ms);
     try responder_future.await(io);
 }
 
