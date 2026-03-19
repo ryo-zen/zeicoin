@@ -197,19 +197,35 @@ pub const SecureTransport = struct {
         var fragment_offset: usize = 0;
 
         while (fragment_index < fragments.len) {
+            const fragment = fragments[fragment_index][fragment_offset..];
+            // Fast path: if the next frame can be sourced from a single fragment,
+            // encrypt directly from that slice and skip tx_plain assembly.
+            if (fragment.len > 0 and (fragment.len >= noise_frame_plaintext_limit or fragment_index + 1 == fragments.len)) {
+                const take = @min(fragment.len, noise_frame_plaintext_limit);
+                try self.tx_cipher.resize(take + ChaCha20Poly1305.tag_length);
+                const ciphertext = try self.tx.encryptInto(fragment[0..take], self.tx_cipher.items);
+                try writeNoiseFrame(self.conn, ciphertext);
+                fragment_offset += take;
+                if (fragment_offset == fragments[fragment_index].len) {
+                    fragment_index += 1;
+                    fragment_offset = 0;
+                }
+                continue;
+            }
+
             self.tx_plain.clearRetainingCapacity();
             var remaining = noise_frame_plaintext_limit;
 
             while (fragment_index < fragments.len and remaining > 0) {
-                const fragment = fragments[fragment_index][fragment_offset..];
-                if (fragment.len == 0) {
+                const part = fragments[fragment_index][fragment_offset..];
+                if (part.len == 0) {
                     fragment_index += 1;
                     fragment_offset = 0;
                     continue;
                 }
 
-                const take = @min(fragment.len, remaining);
-                try self.tx_plain.appendSlice(fragment[0..take]);
+                const take = @min(part.len, remaining);
+                try self.tx_plain.appendSlice(part[0..take]);
                 remaining -= take;
                 fragment_offset += take;
 
