@@ -122,6 +122,8 @@ pub const SecureTransport = struct {
     rx_frame: std.array_list.Managed(u8),
     rx_buffer: std.array_list.Managed(u8),
     rx_offset: usize = 0,
+    rx_frame_prealloc_done: bool = false,
+    tx_cipher_prealloc_done: bool = false,
 
     const Self = @This();
 
@@ -141,6 +143,8 @@ pub const SecureTransport = struct {
             .rx_frame = std.array_list.Managed(u8).init(allocator),
             .rx_buffer = std.array_list.Managed(u8).init(allocator),
             .rx_offset = 0,
+            .rx_frame_prealloc_done = false,
+            .tx_cipher_prealloc_done = false,
         };
     }
 
@@ -178,6 +182,11 @@ pub const SecureTransport = struct {
     pub fn readSome(self: *Self, io: std.Io, dest: []u8) !usize {
         if (dest.len == 0) return 0;
 
+        if (!self.rx_frame_prealloc_done) {
+            try self.rx_frame.ensureTotalCapacity(noise_frame_ciphertext_limit);
+            self.rx_frame_prealloc_done = true;
+        }
+
         while (self.rx_offset >= self.rx_buffer.items.len) {
             self.rx_offset = 0;
             try readNoiseFrameInto(&self.rx_frame, self.conn, io);
@@ -193,6 +202,11 @@ pub const SecureTransport = struct {
     }
 
     fn writeSlices(self: *Self, fragments: []const []const u8) !void {
+        if (!self.tx_cipher_prealloc_done) {
+            try self.tx_cipher.ensureTotalCapacity(noise_frame_ciphertext_limit);
+            self.tx_cipher_prealloc_done = true;
+        }
+
         var fragment_index: usize = 0;
         var fragment_offset: usize = 0;
 
@@ -202,7 +216,10 @@ pub const SecureTransport = struct {
             // encrypt directly from that slice and skip tx_plain assembly.
             if (fragment.len > 0 and (fragment.len >= noise_frame_plaintext_limit or fragment_index + 1 == fragments.len)) {
                 const take = @min(fragment.len, noise_frame_plaintext_limit);
-                try self.tx_cipher.resize(take + ChaCha20Poly1305.tag_length);
+                if (self.tx_cipher.capacity < take + ChaCha20Poly1305.tag_length) {
+                    try self.tx_cipher.ensureTotalCapacity(take + ChaCha20Poly1305.tag_length);
+                }
+                self.tx_cipher.items.len = take + ChaCha20Poly1305.tag_length;
                 const ciphertext = try self.tx.encryptInto(fragment[0..take], self.tx_cipher.items);
                 try writeNoiseFrame(self.conn, ciphertext);
                 fragment_offset += take;
@@ -235,7 +252,11 @@ pub const SecureTransport = struct {
                 }
             }
 
-            try self.tx_cipher.resize(self.tx_plain.items.len + ChaCha20Poly1305.tag_length);
+            const out_len = self.tx_plain.items.len + ChaCha20Poly1305.tag_length;
+            if (self.tx_cipher.capacity < out_len) {
+                try self.tx_cipher.ensureTotalCapacity(out_len);
+            }
+            self.tx_cipher.items.len = out_len;
             const ciphertext = try self.tx.encryptInto(self.tx_plain.items, self.tx_cipher.items);
             try writeNoiseFrame(self.conn, ciphertext);
         }
@@ -734,7 +755,10 @@ fn readNoiseFrameInto(buffer: *std.array_list.Managed(u8), conn: Connection, io:
     var len_prefix: [2]u8 = undefined;
     try readNoEof(conn, &len_prefix);
     const frame_len = std.mem.readInt(u16, &len_prefix, .big);
-    try buffer.resize(frame_len);
+    if (buffer.capacity < frame_len) {
+        try buffer.ensureTotalCapacity(frame_len);
+    }
+    buffer.items.len = frame_len;
     try readNoEof(conn, buffer.items);
 }
 
