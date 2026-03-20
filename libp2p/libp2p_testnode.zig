@@ -587,11 +587,10 @@ const SecureConnWriter = struct {
 
 const YamuxReader = struct {
     stream: *yamux.Stream,
-    io: std.Io,
 
     pub fn readByte(self: *YamuxReader) !u8 {
         var one: [1]u8 = undefined;
-        const n = try self.stream.readSome(self.io, &one);
+        const n = try self.stream.readSome(&one);
         if (n == 0) return error.EndOfStream;
         return one[0];
     }
@@ -599,7 +598,7 @@ const YamuxReader = struct {
     pub fn readNoEof(self: *YamuxReader, dest: []u8) !void {
         var off: usize = 0;
         while (off < dest.len) {
-            const n = try self.stream.readSome(self.io, dest[off..]);
+            const n = try self.stream.readSome(dest[off..]);
             if (n == 0) return error.EndOfStream;
             off += n;
         }
@@ -608,14 +607,13 @@ const YamuxReader = struct {
 
 const YamuxWriter = struct {
     stream: *yamux.Stream,
-    io: std.Io,
 
     pub fn writeAll(self: *YamuxWriter, data: []const u8) !void {
-        try self.stream.writeAll(self.io, data);
+        try self.stream.writeAll(data);
     }
 
     pub fn writeByte(self: *YamuxWriter, b: u8) !void {
-        try self.stream.writeByte(self.io, b);
+        try self.stream.writeByte(b);
     }
 };
 
@@ -659,17 +657,17 @@ fn runInitiatorHandshake(
     var mux_session = yamux.Session.init(allocator, &secure, true);
     try mux_session.start();
     defer mux_session.deinit();
-    var id_stream = try mux_session.openStream(io);
+    var id_stream = try mux_session.openStream();
     defer id_stream.deinit();
-    var id_reader: YamuxReader = .{ .stream = &id_stream, .io = io };
-    var id_writer: YamuxWriter = .{ .stream = &id_stream, .io = io };
+    var id_reader: YamuxReader = .{ .stream = &id_stream };
+    var id_writer: YamuxWriter = .{ .stream = &id_stream };
 
     try ms.writeMessage(io, &id_writer, identify.PROTOCOL_ID);
     const identify_ack = try ms.readMessage(io, &id_reader, allocator);
     defer allocator.free(identify_ack);
     if (!std.mem.eql(u8, identify_ack, identify.PROTOCOL_ID)) return error.ProtocolMismatch;
 
-    const identify_bytes = try readAllFromStream(allocator, io, &id_stream);
+    const identify_bytes = try readAllFromStream(allocator, &id_stream);
     defer allocator.free(identify_bytes);
     var identify_info = try identify.decodeIdentify(allocator, identify_bytes);
     defer identify_info.deinit(allocator);
@@ -690,10 +688,10 @@ fn runInitiatorHandshake(
         try address_book.learnAdvertised(addr, noise_result.remote_peer_id.toString(), nowMs());
     }
 
-    var mux_stream = try mux_session.openStream(io);
+    var mux_stream = try mux_session.openStream();
     defer mux_stream.deinit();
-    var mux_reader: YamuxReader = .{ .stream = &mux_stream, .io = io };
-    var mux_writer: YamuxWriter = .{ .stream = &mux_stream, .io = io };
+    var mux_reader: YamuxReader = .{ .stream = &mux_stream };
+    var mux_writer: YamuxWriter = .{ .stream = &mux_stream };
 
     try ms.writeMessage(io, &mux_writer, test_protocol);
     const proto_ack = try ms.readMessage(io, &mux_reader, allocator);
@@ -775,7 +773,7 @@ fn runResponderHandshake(
         var stream_group: std.Io.Group = .init;
         defer stream_group.cancel(io);
         while (true) {
-            var mux_stream = mux_session.acceptStream(io) catch |err| switch (err) {
+            var mux_stream = mux_session.acceptStream() catch |err| switch (err) {
                 yamux.YamuxError.GoAway,
                 yamux.YamuxError.SessionClosed,
                 => break,
@@ -842,8 +840,8 @@ fn handleResponderMuxStreamInner(
 ) !void {
     var owned_stream = mux_stream;
     defer owned_stream.deinit();
-    var mux_reader: YamuxReader = .{ .stream = &owned_stream, .io = io };
-    var mux_writer: YamuxWriter = .{ .stream = &owned_stream, .io = io };
+    var mux_reader: YamuxReader = .{ .stream = &owned_stream };
+    var mux_writer: YamuxWriter = .{ .stream = &owned_stream };
 
     const proposal_on_stream = try ms.readMessage(io, &mux_reader, allocator);
     defer allocator.free(proposal_on_stream);
@@ -875,13 +873,13 @@ fn handleResponderMuxStreamInner(
         );
         defer allocator.free(identify_payload);
         try mux_writer.writeAll(identify_payload);
-        try owned_stream.close(io);
+        try owned_stream.close();
         return;
     }
 
     if (!std.mem.eql(u8, proposal_on_stream, test_protocol)) {
         try ms.writeMessage(io, &mux_writer, ms.NA);
-        try owned_stream.close(io);
+        try owned_stream.close();
         return error.UnsupportedProtocol;
     }
     try ms.writeMessage(io, &mux_writer, test_protocol);
@@ -914,7 +912,7 @@ fn handleResponderMuxStreamInner(
     for (peers.items) |entry| {
         try writePeerExchangeAddr(allocator, &mux_writer, entry.addr);
     }
-    try owned_stream.close(io);
+    try owned_stream.close();
 }
 
 fn readLine(allocator: std.mem.Allocator, reader: anytype) ![]u8 {
@@ -931,13 +929,13 @@ fn readLine(allocator: std.mem.Allocator, reader: anytype) ![]u8 {
     return buf.toOwnedSlice();
 }
 
-fn readAllFromStream(allocator: std.mem.Allocator, io: std.Io, stream: *yamux.Stream) ![]u8 {
+fn readAllFromStream(allocator: std.mem.Allocator, stream: *yamux.Stream) ![]u8 {
     var out = std.array_list.Managed(u8).init(allocator);
     errdefer out.deinit();
 
     var buf: [1024]u8 = undefined;
     while (true) {
-        const n = try stream.readSome(io, &buf);
+        const n = try stream.readSome(&buf);
         if (n == 0) break;
         try out.appendSlice(buf[0..n]);
     }

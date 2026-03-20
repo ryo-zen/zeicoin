@@ -261,7 +261,7 @@ const TcpNoiseYamuxServerCtx = struct {
 
         var accepted: usize = 0;
         while (accepted < ctx.streams) : (accepted += 1) {
-            accepted_streams[accepted] = try session.acceptStream(ctx.io);
+            accepted_streams[accepted] = try session.acceptStream();
         }
 
         const result: ServerResult = switch (ctx.direction) {
@@ -613,25 +613,25 @@ fn runTcpNoiseYamuxIteration(
     try session.start();
 
     if (streams == 1) {
-        var stream = try session.openStream(io);
+        var stream = try session.openStream();
         defer stream.deinit();
 
         var client_c2s: u64 = 0;
         var client_s2c: u64 = 0;
         var timer = try std.time.Timer.start();
         switch (direction) {
-            .upload => client_c2s = try writeAllToYamuxStream(&stream, io, payload, duration_secs),
-            .download => client_s2c = try readAllFromYamuxStream(&stream, io),
+            .upload => client_c2s = try writeAllToYamuxStream(&stream, payload, duration_secs),
+            .download => client_s2c = try readAllFromYamuxStream(&stream),
             .bidirectional => {
-                var read_future = try io.concurrent(readAllFromYamuxStreamTask, .{ &stream, io });
-                client_c2s = try writeAllToYamuxStream(&stream, io, payload, duration_secs);
+                var read_future = try io.concurrent(readAllFromYamuxStreamTask, .{&stream});
+                client_c2s = try writeAllToYamuxStream(&stream, payload, duration_secs);
                 client_s2c = try read_future.await(io);
             },
         }
         const elapsed_ns: u64 = timer.read();
 
         if (direction != .download) {
-            stream.close(io) catch {};
+            stream.close() catch {};
         }
         const server_result = try server_future.await(io);
         return .{
@@ -644,7 +644,7 @@ fn runTcpNoiseYamuxIteration(
     const opened_streams = try allocator.alloc(yamux.Stream, streams);
     defer allocator.free(opened_streams);
     for (opened_streams) |*stream| {
-        stream.* = try session.openStream(io);
+        stream.* = try session.openStream();
     }
 
     var timer = try std.time.Timer.start();
@@ -744,11 +744,11 @@ const TransferCounts = struct {
     write_bytes: u64 = 0,
 };
 
-fn readAllFromYamuxStream(stream: *yamux.Stream, io: std.Io) !u64 {
+fn readAllFromYamuxStream(stream: *yamux.Stream) !u64 {
     var total: u64 = 0;
     var buf: [256 * 1024]u8 = undefined;
     while (true) {
-        const n = stream.readSome(io, &buf) catch |err| switch (err) {
+        const n = stream.readSome(&buf) catch |err| switch (err) {
             YamuxError.StreamClosed, YamuxError.SessionClosed => return total,
             else => return err,
         };
@@ -757,16 +757,16 @@ fn readAllFromYamuxStream(stream: *yamux.Stream, io: std.Io) !u64 {
     }
 }
 
-fn readAllFromYamuxStreamTask(stream: *yamux.Stream, io: std.Io) anyerror!u64 {
-    return readAllFromYamuxStream(stream, io);
+fn readAllFromYamuxStreamTask(stream: *yamux.Stream) anyerror!u64 {
+    return readAllFromYamuxStream(stream);
 }
 
-fn writeAllToYamuxStream(stream: *yamux.Stream, io: std.Io, payload: []const u8, duration_secs: u64) !u64 {
+fn writeAllToYamuxStream(stream: *yamux.Stream, payload: []const u8, duration_secs: u64) !u64 {
     var timer = try std.time.Timer.start();
     const target_ns = duration_secs * std.time.ns_per_s;
     var total: u64 = 0;
     while (timer.read() < target_ns) {
-        stream.writeAll(io, payload) catch |err| switch (err) {
+        stream.writeAll(payload) catch |err| switch (err) {
             YamuxError.StreamClosed, YamuxError.SessionClosed => break,
             else => return err,
         };
@@ -781,7 +781,7 @@ fn readAllFromYamuxStreams(io: std.Io, streams: []yamux.Stream) !u64 {
     defer group.cancel(io);
 
     for (streams) |stream| {
-        try group.concurrent(io, readYamuxStreamTask, .{ stream, io, &total });
+        try group.concurrent(io, readYamuxStreamTask, .{ stream, &total });
     }
     try group.await(io);
     return total.load(.acquire);
@@ -794,7 +794,7 @@ fn writeAllToYamuxStreams(io: std.Io, streams: []yamux.Stream, payload: []const 
     defer group.cancel(io);
 
     for (streams) |stream| {
-        try group.concurrent(io, writeYamuxStreamTask, .{ stream, io, payload, &stop, &total });
+        try group.concurrent(io, writeYamuxStreamTask, .{ stream, payload, &stop, &total });
     }
     try io.sleep(std.Io.Duration.fromSeconds(@as(i64, @intCast(duration_secs))), .awake);
     stop.store(true, .release);
@@ -810,8 +810,8 @@ fn runBidirectionalYamuxStreams(io: std.Io, streams: []yamux.Stream, payload: []
     defer group.cancel(io);
 
     for (streams) |stream| {
-        try group.concurrent(io, readYamuxStreamTask, .{ stream, io, &read_total });
-        try group.concurrent(io, writeYamuxStreamTask, .{ stream, io, payload, &stop, &write_total });
+        try group.concurrent(io, readYamuxStreamTask, .{ stream, &read_total });
+        try group.concurrent(io, writeYamuxStreamTask, .{ stream, payload, &stop, &write_total });
     }
     try io.sleep(std.Io.Duration.fromSeconds(@as(i64, @intCast(duration_secs))), .awake);
     stop.store(true, .release);
@@ -824,7 +824,6 @@ fn runBidirectionalYamuxStreams(io: std.Io, streams: []yamux.Stream, payload: []
 
 fn readYamuxStreamTask(
     stream: yamux.Stream,
-    io: std.Io,
     total: *std.atomic.Value(u64),
 ) error{Canceled}!void {
     var owned_stream = stream;
@@ -832,7 +831,7 @@ fn readYamuxStreamTask(
 
     var buf: [256 * 1024]u8 = undefined;
     while (true) {
-        const n = owned_stream.readSome(io, &buf) catch |err| switch (err) {
+        const n = owned_stream.readSome(&buf) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             else => std.debug.panic("readYamuxStreamTask failed: {s}", .{@errorName(err)}),
         };
@@ -843,7 +842,6 @@ fn readYamuxStreamTask(
 
 fn writeYamuxStreamTask(
     stream: yamux.Stream,
-    io: std.Io,
     payload: []const u8,
     stop: *std.atomic.Value(bool),
     total: *std.atomic.Value(u64),
@@ -852,14 +850,14 @@ fn writeYamuxStreamTask(
     defer owned_stream.deinit();
 
     while (!stop.load(.acquire)) {
-        owned_stream.writeAll(io, payload) catch |err| switch (err) {
+        owned_stream.writeAll(payload) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
             YamuxError.StreamClosed, YamuxError.SessionClosed => return,
             else => std.debug.panic("writeYamuxStreamTask failed: {s}", .{@errorName(err)}),
         };
         _ = total.fetchAdd(payload.len, .acq_rel);
     }
-    owned_stream.close(io) catch {};
+    owned_stream.close() catch {};
 }
 
 fn parseNextU64(args_it: *std.process.Args.Iterator, flag: []const u8) !u64 {

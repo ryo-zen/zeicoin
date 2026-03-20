@@ -1,5 +1,6 @@
 const std = @import("std");
 const tcp = @import("../transport/tcp.zig");
+const inproc = @import("../transport/inproc.zig");
 const peer = @import("../peer/peer_id.zig");
 const Multiaddr = @import("../multiaddr/multiaddr.zig").Multiaddr;
 
@@ -913,4 +914,58 @@ test "noise concurrent handshake helpers" {
     try std.testing.expectEqualStrings(initiator_identity.peer_id.toString(), responder_result.remote_peer_id.toString());
     try std.testing.expectEqualSlices(u8, &initiator_result.tx_key, &responder_result.rx_key);
     try std.testing.expectEqualSlices(u8, &initiator_result.rx_key, &responder_result.tx_key);
+}
+
+test "noise wrong peer id is rejected during handshake" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var conn_pair = try inproc.InProcConnection.initPair(allocator, io);
+    var initiator_conn = conn_pair.initiator;
+    defer initiator_conn.deinit();
+    var responder_conn = conn_pair.responder;
+    defer responder_conn.deinit();
+
+    var initiator_identity = try IdentityKey.generate(allocator, io);
+    defer initiator_identity.deinit();
+    var responder_identity = try IdentityKey.generate(allocator, io);
+    defer responder_identity.deinit();
+    var unrelated_identity = try IdentityKey.generate(allocator, io);
+    defer unrelated_identity.deinit();
+
+    const RespCtx = struct {
+        conn: *inproc.InProcConnection,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        identity: *IdentityKey,
+
+        fn run(ctx: *@This()) anyerror!HandshakeResult {
+            return performResponder(ctx.allocator, ctx.io, ctx.conn.connection(), ctx.identity, null);
+        }
+    };
+    var resp_ctx = RespCtx{ .conn = &responder_conn, .allocator = allocator, .io = io, .identity = &responder_identity };
+    var resp_future = try io.concurrent(RespCtx.run, .{&resp_ctx});
+
+    // Initiator presents an expected peer ID that does not match the responder's.
+    const init_result = performInitiator(allocator, io, initiator_conn.connection(), &initiator_identity, unrelated_identity.peer_id.toString());
+    try std.testing.expectError(HandshakeError.UnexpectedPeerId, init_result);
+
+    // Signal the responder that the connection is gone so it can exit cleanly.
+    try initiator_conn.close(io);
+    _ = resp_future.await(io) catch {};
+}
+
+test "noise cipher nonce exhaustion is rejected" {
+    const allocator = std.testing.allocator;
+
+    const key = [_]u8{0x42} ** 32;
+
+    // Encrypt at the nonce boundary — should fail before attempting AEAD.
+    var enc = CipherState{ .key = key, .nonce = std.math.maxInt(u64) };
+    try std.testing.expectError(HandshakeError.NonceExhausted, enc.encrypt(allocator, "test"));
+
+    // Decrypt at the nonce boundary — same guard.
+    var dec = CipherState{ .key = key, .nonce = std.math.maxInt(u64) };
+    const dummy_ct = [_]u8{0} ** (4 + ChaCha20Poly1305.tag_length);
+    try std.testing.expectError(HandshakeError.NonceExhausted, dec.decrypt(allocator, &dummy_ct));
 }

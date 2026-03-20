@@ -14,13 +14,13 @@ const FLAG_ACK: u16 = 0x2;
 const INITIAL_STREAM_WINDOW: usize = 8 * 1024 * 1024;
 const MAX_PENDING_ACCEPT: usize = 64;
 
-fn readAllFromStream(allocator: std.mem.Allocator, io: std.Io, stream: *Stream) ![]u8 {
+fn readAllFromStream(allocator: std.mem.Allocator, stream: *Stream) ![]u8 {
     var out = std.array_list.Managed(u8).init(allocator);
     errdefer out.deinit();
 
     var buf: [4096]u8 = undefined;
     while (true) {
-        const n = try stream.readSome(io, &buf);
+        const n = try stream.readSome(&buf);
         if (n == 0) break;
         try out.appendSlice(buf[0..n]);
     }
@@ -29,11 +29,10 @@ fn readAllFromStream(allocator: std.mem.Allocator, io: std.Io, stream: *Stream) 
 
 const TestReader = struct {
     stream: *Stream,
-    io: std.Io,
 
     pub fn readByte(self: *TestReader) !u8 {
         var one: [1]u8 = undefined;
-        const n = try self.stream.readSome(self.io, &one);
+        const n = try self.stream.readSome(&one);
         if (n == 0) return error.EndOfStream;
         return one[0];
     }
@@ -41,7 +40,7 @@ const TestReader = struct {
     pub fn readNoEof(self: *TestReader, dest: []u8) !void {
         var off: usize = 0;
         while (off < dest.len) {
-            const n = try self.stream.readSome(self.io, dest[off..]);
+            const n = try self.stream.readSome(dest[off..]);
             if (n == 0) return error.EndOfStream;
             off += n;
         }
@@ -50,14 +49,13 @@ const TestReader = struct {
 
 const TestWriter = struct {
     stream: *Stream,
-    io: std.Io,
 
     pub fn writeAll(self: *TestWriter, data: []const u8) !void {
-        try self.stream.writeAll(self.io, data);
+        try self.stream.writeAll(data);
     }
 
     pub fn writeByte(self: *TestWriter, b: u8) !void {
-        try self.stream.writeByte(self.io, b);
+        try self.stream.writeByte(b);
     }
 };
 
@@ -74,13 +72,13 @@ fn readLineFromTestStream(allocator: std.mem.Allocator, reader: anytype) ![]u8 {
     return buf.toOwnedSlice();
 }
 
-fn readExpectedReply(io: std.Io, stream: *Stream, expected: []const u8) !void {
+fn readExpectedReply(stream: *Stream, expected: []const u8) !void {
     var out: [32]u8 = undefined;
     std.debug.assert(expected.len <= out.len);
     var out_len: usize = 0;
 
     while (out_len < expected.len) {
-        const n = stream.readSome(io, out[out_len..]) catch |err| switch (err) {
+        const n = stream.readSome(out[out_len..]) catch |err| switch (err) {
             YamuxError.SessionClosed => break,
             else => return err,
         };
@@ -92,10 +90,10 @@ fn readExpectedReply(io: std.Io, stream: *Stream, expected: []const u8) !void {
     try std.testing.expectEqualStrings(expected, out[0..expected.len]);
 }
 
-fn readExact(io: std.Io, stream: *Stream, dest: []u8) !void {
+fn readExact(stream: *Stream, dest: []u8) !void {
     var off: usize = 0;
     while (off < dest.len) {
-        const n = try stream.readSome(io, dest[off..]);
+        const n = try stream.readSome(dest[off..]);
         if (n == 0) return error.EndOfStream;
         off += n;
     }
@@ -147,29 +145,29 @@ test "yamux supports two concurrent streams" {
             defer session.deinit();
             try session.start();
 
-            var first_accept = try session.acceptStreamConcurrent(ctx.io);
-            var second_accept = try session.acceptStreamConcurrent(ctx.io);
+            var first_accept = try session.acceptStreamConcurrent();
+            var second_accept = try session.acceptStreamConcurrent();
             var first = try first_accept.await(ctx.io);
             defer first.deinit();
             var second = try second_accept.await(ctx.io);
             defer second.deinit();
 
-            const first_msg = try readAllFromStream(ctx.allocator, ctx.io, &first);
+            const first_msg = try readAllFromStream(ctx.allocator, &first);
             defer ctx.allocator.free(first_msg);
-            const second_msg = try readAllFromStream(ctx.allocator, ctx.io, &second);
+            const second_msg = try readAllFromStream(ctx.allocator, &second);
             defer ctx.allocator.free(second_msg);
 
             if (std.mem.eql(u8, first_msg, "one")) {
-                try first.writeAll(ctx.io, "uno");
+                try first.writeAll("uno");
             } else if (std.mem.eql(u8, first_msg, "two")) {
-                try first.writeAll(ctx.io, "dos");
+                try first.writeAll("dos");
             } else {
                 return error.TestExpectedEqual;
             }
             if (std.mem.eql(u8, second_msg, "one")) {
-                try second.writeAll(ctx.io, "uno");
+                try second.writeAll("uno");
             } else if (std.mem.eql(u8, second_msg, "two")) {
-                try second.writeAll(ctx.io, "dos");
+                try second.writeAll("dos");
             } else {
                 return error.TestExpectedEqual;
             }
@@ -198,22 +196,22 @@ test "yamux supports two concurrent streams" {
     defer session.deinit();
     try session.start();
 
-    var first_open = try session.openStreamConcurrent(io);
-    var second_open = try session.openStreamConcurrent(io);
+    var first_open = try session.openStreamConcurrent();
+    var second_open = try session.openStreamConcurrent();
     var first = try first_open.await(io);
     defer first.deinit();
     var second = try second_open.await(io);
     defer second.deinit();
 
-    try first.writeAll(io, "one");
-    try first.close(io);
-    try second.writeAll(io, "two");
-    try second.close(io);
+    try first.writeAll("one");
+    try first.close();
+    try second.writeAll("two");
+    try second.close();
 
     var first_reply: [3]u8 = undefined;
     var second_reply: [3]u8 = undefined;
-    try readExact(io, &first, &first_reply);
-    try readExact(io, &second, &second_reply);
+    try readExact(&first, &first_reply);
+    try readExact(&second, &second_reply);
     try std.testing.expectEqualStrings("uno", &first_reply);
     try std.testing.expectEqualStrings("dos", &second_reply);
     sync.done.store(true, .seq_cst);
@@ -245,12 +243,12 @@ test "yamux supports three simultaneous streams from both sides" {
             defer session.deinit();
             try session.start();
 
-            var accept_1_future = try session.acceptStreamConcurrent(ctx.io);
-            var accept_2_future = try session.acceptStreamConcurrent(ctx.io);
-            var accept_3_future = try session.acceptStreamConcurrent(ctx.io);
-            var open_1_future = try session.openStreamConcurrent(ctx.io);
-            var open_2_future = try session.openStreamConcurrent(ctx.io);
-            var open_3_future = try session.openStreamConcurrent(ctx.io);
+            var accept_1_future = try session.acceptStreamConcurrent();
+            var accept_2_future = try session.acceptStreamConcurrent();
+            var accept_3_future = try session.acceptStreamConcurrent();
+            var open_1_future = try session.openStreamConcurrent();
+            var open_2_future = try session.openStreamConcurrent();
+            var open_3_future = try session.openStreamConcurrent();
 
             var out_1 = try open_1_future.await(ctx.io);
             defer out_1.deinit();
@@ -259,12 +257,12 @@ test "yamux supports three simultaneous streams from both sides" {
             var out_3 = try open_3_future.await(ctx.io);
             defer out_3.deinit();
 
-            try out_1.writeAll(ctx.io, "resp-1");
-            try out_1.close(ctx.io);
-            try out_2.writeAll(ctx.io, "resp-2");
-            try out_2.close(ctx.io);
-            try out_3.writeAll(ctx.io, "resp-3");
-            try out_3.close(ctx.io);
+            try out_1.writeAll("resp-1");
+            try out_1.close();
+            try out_2.writeAll("resp-2");
+            try out_2.close();
+            try out_3.writeAll("resp-3");
+            try out_3.close();
 
             var in_1 = try accept_1_future.await(ctx.io);
             defer in_1.deinit();
@@ -273,11 +271,11 @@ test "yamux supports three simultaneous streams from both sides" {
             var in_3 = try accept_3_future.await(ctx.io);
             defer in_3.deinit();
 
-            const msg_1 = try readAllFromStream(ctx.allocator, ctx.io, &in_1);
+            const msg_1 = try readAllFromStream(ctx.allocator, &in_1);
             defer ctx.allocator.free(msg_1);
-            const msg_2 = try readAllFromStream(ctx.allocator, ctx.io, &in_2);
+            const msg_2 = try readAllFromStream(ctx.allocator, &in_2);
             defer ctx.allocator.free(msg_2);
-            const msg_3 = try readAllFromStream(ctx.allocator, ctx.io, &in_3);
+            const msg_3 = try readAllFromStream(ctx.allocator, &in_3);
             defer ctx.allocator.free(msg_3);
 
             var saw_1 = false;
@@ -308,12 +306,12 @@ test "yamux supports three simultaneous streams from both sides" {
     defer session.deinit();
     try session.start();
 
-    var accept_1_future = try session.acceptStreamConcurrent(io);
-    var accept_2_future = try session.acceptStreamConcurrent(io);
-    var accept_3_future = try session.acceptStreamConcurrent(io);
-    var open_1_future = try session.openStreamConcurrent(io);
-    var open_2_future = try session.openStreamConcurrent(io);
-    var open_3_future = try session.openStreamConcurrent(io);
+    var accept_1_future = try session.acceptStreamConcurrent();
+    var accept_2_future = try session.acceptStreamConcurrent();
+    var accept_3_future = try session.acceptStreamConcurrent();
+    var open_1_future = try session.openStreamConcurrent();
+    var open_2_future = try session.openStreamConcurrent();
+    var open_3_future = try session.openStreamConcurrent();
 
     var out_1 = try open_1_future.await(io);
     defer out_1.deinit();
@@ -322,12 +320,12 @@ test "yamux supports three simultaneous streams from both sides" {
     var out_3 = try open_3_future.await(io);
     defer out_3.deinit();
 
-    try out_1.writeAll(io, "init-1");
-    try out_1.close(io);
-    try out_2.writeAll(io, "init-2");
-    try out_2.close(io);
-    try out_3.writeAll(io, "init-3");
-    try out_3.close(io);
+    try out_1.writeAll("init-1");
+    try out_1.close();
+    try out_2.writeAll("init-2");
+    try out_2.close();
+    try out_3.writeAll("init-3");
+    try out_3.close();
 
     var in_1 = try accept_1_future.await(io);
     defer in_1.deinit();
@@ -336,11 +334,11 @@ test "yamux supports three simultaneous streams from both sides" {
     var in_3 = try accept_3_future.await(io);
     defer in_3.deinit();
 
-    const msg_1 = try readAllFromStream(allocator, io, &in_1);
+    const msg_1 = try readAllFromStream(allocator, &in_1);
     defer allocator.free(msg_1);
-    const msg_2 = try readAllFromStream(allocator, io, &in_2);
+    const msg_2 = try readAllFromStream(allocator, &in_2);
     defer allocator.free(msg_2);
-    const msg_3 = try readAllFromStream(allocator, io, &in_3);
+    const msg_3 = try readAllFromStream(allocator, &in_3);
     defer allocator.free(msg_3);
 
     var saw_1 = false;
@@ -390,14 +388,14 @@ test "yamux blocks on exhausted window then resumes after window update" {
             defer session.deinit();
             try session.start();
 
-            var accept_future = try session.acceptStreamConcurrent(ctx.io);
+            var accept_future = try session.acceptStreamConcurrent();
             var stream = try accept_future.await(ctx.io);
             defer stream.deinit();
 
             // Delay reads so the remote writer exhausts send_window and blocks.
             try ctx.io.sleep(std.Io.Duration.fromMilliseconds(180), .awake);
 
-            const received = try readAllFromStream(ctx.allocator, ctx.io, &stream);
+            const received = try readAllFromStream(ctx.allocator, &stream);
             defer ctx.allocator.free(received);
 
             if (received.len != INITIAL_STREAM_WINDOW + 64 * 1024) return error.TestExpectedEqual;
@@ -420,25 +418,23 @@ test "yamux blocks on exhausted window then resumes after window update" {
 
     const WriterCtx = struct {
         stream: *Stream,
-        io: std.Io,
         payload: []const u8,
         elapsed_ns: u64 = 0,
 
         fn run(ctx: *@This()) anyerror!void {
             var timer = try std.time.Timer.start();
-            try ctx.stream.writeAll(ctx.io, ctx.payload);
-            try ctx.stream.close(ctx.io);
+            try ctx.stream.writeAll(ctx.payload);
+            try ctx.stream.close();
             ctx.elapsed_ns = timer.read();
         }
     };
 
-    var open_future = try session.openStreamConcurrent(io);
+    var open_future = try session.openStreamConcurrent();
     var stream = try open_future.await(io);
     defer stream.deinit();
 
     var writer_ctx = WriterCtx{
         .stream = &stream,
-        .io = io,
         .payload = payload,
     };
     var writer_future = try io.concurrent(WriterCtx.run, .{&writer_ctx});
@@ -474,8 +470,8 @@ test "yamux rst closes only target stream" {
             defer session.deinit();
             try session.start();
 
-            var accept_1 = try session.acceptStreamConcurrent(ctx.io);
-            var accept_2 = try session.acceptStreamConcurrent(ctx.io);
+            var accept_1 = try session.acceptStreamConcurrent();
+            var accept_2 = try session.acceptStreamConcurrent();
             var stream_1 = try accept_1.await(ctx.io);
             defer stream_1.deinit();
             var stream_2 = try accept_2.await(ctx.io);
@@ -483,8 +479,8 @@ test "yamux rst closes only target stream" {
 
             var one: [32]u8 = undefined;
             var two: [32]u8 = undefined;
-            const n1 = try stream_1.readSome(ctx.io, &one);
-            const n2 = try stream_2.readSome(ctx.io, &two);
+            const n1 = try stream_1.readSome(&one);
+            const n2 = try stream_2.readSome(&two);
             if (n1 == 0 or n2 == 0) return error.TestExpectedEqual;
 
             const msg_1 = one[0..n1];
@@ -502,7 +498,7 @@ test "yamux rst closes only target stream" {
             }
 
             var survivor_followup: [7]u8 = undefined;
-            try readExact(ctx.io, survivor, &survivor_followup);
+            try readExact(survivor, &survivor_followup);
             if (!std.mem.eql(u8, &survivor_followup, "stillok")) return error.TestExpectedEqual;
         }
     };
@@ -521,25 +517,25 @@ test "yamux rst closes only target stream" {
     defer session.deinit();
     try session.start();
 
-    var open_1 = try session.openStreamConcurrent(io);
-    var open_2 = try session.openStreamConcurrent(io);
+    var open_1 = try session.openStreamConcurrent();
+    var open_2 = try session.openStreamConcurrent();
     var stream_1 = try open_1.await(io);
     defer stream_1.deinit();
     var stream_2 = try open_2.await(io);
     defer stream_2.deinit();
 
-    try stream_1.writeAll(io, "victim");
-    try stream_2.writeAll(io, "hello2");
+    try stream_1.writeAll("victim");
+    try stream_2.writeAll("hello2");
 
     var one: [1]u8 = undefined;
-    _ = stream_1.readSome(io, &one) catch |err| switch (err) {
+    _ = stream_1.readSome(&one) catch |err| switch (err) {
         YamuxError.StreamClosed, YamuxError.SessionClosed => 0,
         else => return err,
     };
 
     // Assert RST on stream_1 did not break unrelated stream_2 writes.
-    try stream_2.writeAll(io, "stillok");
-    try stream_2.close(io);
+    try stream_2.writeAll("stillok");
+    try stream_2.close();
     try responder_future.await(io);
 }
 
@@ -573,9 +569,9 @@ test "yamux inbound accept backlog limit is enforced at 64 streams" {
 
             var accepted_count: usize = 0;
             while (accepted_count < MAX_PENDING_ACCEPT) : (accepted_count += 1) {
-                var accepted = try session.acceptStream(ctx.io);
+                var accepted = try session.acceptStream();
                 defer accepted.deinit();
-                try accepted.close(ctx.io);
+                try accepted.close();
             }
         }
     };
@@ -596,7 +592,7 @@ test "yamux inbound accept backlog limit is enforced at 64 streams" {
 
     var futures: [MAX_PENDING_ACCEPT + 1]std.Io.Future(anyerror!Stream) = undefined;
     for (&futures) |*future| {
-        future.* = try session.openStreamConcurrent(io);
+        future.* = try session.openStreamConcurrent();
     }
 
     var opened = std.array_list.Managed(Stream).init(allocator);
@@ -618,7 +614,7 @@ test "yamux inbound accept backlog limit is enforced at 64 streams" {
     try std.testing.expectEqual(@as(usize, 1), stream_closed_count);
 
     for (opened.items) |*stream| {
-        stream.close(io) catch {};
+        stream.close() catch {};
         stream.deinit();
     }
     try responder_future.await(io);
@@ -649,12 +645,12 @@ test "yamux handles identify then peer exchange across sequential streams" {
             defer session.deinit();
             try session.start();
 
-            var identify_accept = try session.acceptStreamConcurrent(ctx.io);
+            var identify_accept = try session.acceptStreamConcurrent();
             var identify_stream = try identify_accept.await(ctx.io);
             defer identify_stream.deinit();
 
-            var identify_reader = TestReader{ .stream = &identify_stream, .io = ctx.io };
-            var identify_writer = TestWriter{ .stream = &identify_stream, .io = ctx.io };
+            var identify_reader = TestReader{ .stream = &identify_stream };
+            var identify_writer = TestWriter{ .stream = &identify_stream };
 
             const identify_proto = try ms.readMessage(ctx.io, &identify_reader, ctx.allocator);
             defer ctx.allocator.free(identify_proto);
@@ -662,14 +658,14 @@ test "yamux handles identify then peer exchange across sequential streams" {
 
             try ms.writeMessage(ctx.io, &identify_writer, "/ipfs/id/1.0.0");
             try identify_writer.writeAll("identify-payload");
-            try identify_stream.close(ctx.io);
+            try identify_stream.close();
 
-            var peer_accept = try session.acceptStreamConcurrent(ctx.io);
+            var peer_accept = try session.acceptStreamConcurrent();
             var peer_stream = try peer_accept.await(ctx.io);
             defer peer_stream.deinit();
 
-            var peer_reader = TestReader{ .stream = &peer_stream, .io = ctx.io };
-            var peer_writer = TestWriter{ .stream = &peer_stream, .io = ctx.io };
+            var peer_reader = TestReader{ .stream = &peer_stream };
+            var peer_writer = TestWriter{ .stream = &peer_stream };
 
             const proto = try ms.readMessage(ctx.io, &peer_reader, ctx.allocator);
             defer ctx.allocator.free(proto);
@@ -682,7 +678,7 @@ test "yamux handles identify then peer exchange across sequential streams" {
             if (!std.mem.eql(u8, req_line, "GET_PEERS 12011")) return error.TestExpectedEqual;
 
             try peer_writer.writeAll("PEERS 1\n");
-            try peer_stream.close(ctx.io);
+            try peer_stream.close();
         }
     };
 
@@ -696,28 +692,28 @@ test "yamux handles identify then peer exchange across sequential streams" {
     defer session.deinit();
     try session.start();
 
-    var identify_open = try session.openStreamConcurrent(io);
+    var identify_open = try session.openStreamConcurrent();
     var identify_stream = try identify_open.await(io);
     defer identify_stream.deinit();
 
-    var identify_reader = TestReader{ .stream = &identify_stream, .io = io };
-    var identify_writer = TestWriter{ .stream = &identify_stream, .io = io };
+    var identify_reader = TestReader{ .stream = &identify_stream };
+    var identify_writer = TestWriter{ .stream = &identify_stream };
 
     try ms.writeMessage(io, &identify_writer, "/ipfs/id/1.0.0");
     const identify_ack = try ms.readMessage(io, &identify_reader, allocator);
     defer allocator.free(identify_ack);
     try std.testing.expectEqualStrings("/ipfs/id/1.0.0", identify_ack);
 
-    const identify_payload = try readAllFromStream(allocator, io, &identify_stream);
+    const identify_payload = try readAllFromStream(allocator, &identify_stream);
     defer allocator.free(identify_payload);
     try std.testing.expectEqualStrings("identify-payload", identify_payload);
 
-    var peer_open = try session.openStreamConcurrent(io);
+    var peer_open = try session.openStreamConcurrent();
     var peer_stream = try peer_open.await(io);
     defer peer_stream.deinit();
 
-    var peer_reader = TestReader{ .stream = &peer_stream, .io = io };
-    var peer_writer = TestWriter{ .stream = &peer_stream, .io = io };
+    var peer_reader = TestReader{ .stream = &peer_stream };
+    var peer_writer = TestWriter{ .stream = &peer_stream };
 
     try ms.writeMessage(io, &peer_writer, "/zeicoin/peers/1.0.0");
     const peer_ack = try ms.readMessage(io, &peer_reader, allocator);
@@ -756,20 +752,20 @@ test "yamux normal go away drains existing streams and rejects new ones" {
             defer session.deinit();
             try session.start();
 
-            var accept_future = try session.acceptStreamConcurrent(ctx.io);
+            var accept_future = try session.acceptStreamConcurrent();
             var stream = try accept_future.await(ctx.io);
             defer stream.deinit();
 
             try session.testSendGoAway(0);
 
-            const req = try readAllFromStream(ctx.allocator, ctx.io, &stream);
+            const req = try readAllFromStream(ctx.allocator, &stream);
             defer ctx.allocator.free(req);
             if (!std.mem.eql(u8, req, "still-open")) return error.TestExpectedEqual;
 
-            try stream.writeAll(ctx.io, "reply");
-            try stream.close(ctx.io);
+            try stream.writeAll("reply");
+            try stream.close();
 
-            _ = session.acceptStream(ctx.io) catch |err| {
+            _ = session.acceptStream() catch |err| {
                 if (err != YamuxError.GoAway) return err;
                 return;
             };
@@ -787,15 +783,15 @@ test "yamux normal go away drains existing streams and rejects new ones" {
     defer session.deinit();
     try session.start();
 
-    var open_future = try session.openStreamConcurrent(io);
+    var open_future = try session.openStreamConcurrent();
     var stream = try open_future.await(io);
     defer stream.deinit();
-    try stream.writeAll(io, "still-open");
-    try stream.close(io);
+    try stream.writeAll("still-open");
+    try stream.close();
 
-    try readExpectedReply(io, &stream, "reply");
+    try readExpectedReply(&stream, "reply");
 
-    try std.testing.expectError(YamuxError.GoAway, session.openStream(io));
+    try std.testing.expectError(YamuxError.GoAway, session.openStream());
     try responder_future.await(io);
 }
 
@@ -808,9 +804,11 @@ test "yamux keepalive ping pong keeps session alive" {
     var initiator_conn = conn_pair.initiator;
     defer initiator_conn.deinit();
 
+    // sleep(400ms) > first_ping(30ms) + timeout(300ms) = 330ms: session would die
+    // without keepalive.  300ms gives enough margin over scheduling jitter.
     const opts = SessionOptions{
         .keepalive_interval_ms = 30,
-        .keepalive_timeout_ms = 150,
+        .keepalive_timeout_ms = 300,
     };
 
     const ResponderCtx = struct {
@@ -830,18 +828,18 @@ test "yamux keepalive ping pong keeps session alive" {
             defer session.deinit();
             try session.start();
 
-            try ctx.io.sleep(std.Io.Duration.fromMilliseconds(220), .awake);
+            try ctx.io.sleep(std.Io.Duration.fromMilliseconds(400), .awake);
 
-            var accept_future = try session.acceptStreamConcurrent(ctx.io);
+            var accept_future = try session.acceptStreamConcurrent();
             var stream = try accept_future.await(ctx.io);
             defer stream.deinit();
 
-            const req = try readAllFromStream(ctx.allocator, ctx.io, &stream);
+            const req = try readAllFromStream(ctx.allocator, &stream);
             defer ctx.allocator.free(req);
             if (!std.mem.eql(u8, req, "alive")) return error.TestExpectedEqual;
 
-            try stream.writeAll(ctx.io, "ok");
-            try stream.close(ctx.io);
+            try stream.writeAll("ok");
+            try stream.close();
         }
     };
 
@@ -860,15 +858,15 @@ test "yamux keepalive ping pong keeps session alive" {
     defer session.deinit();
     try session.start();
 
-    try io.sleep(std.Io.Duration.fromMilliseconds(220), .awake);
+    try io.sleep(std.Io.Duration.fromMilliseconds(400), .awake);
 
-    var open_future = try session.openStreamConcurrent(io);
+    var open_future = try session.openStreamConcurrent();
     var stream = try open_future.await(io);
     defer stream.deinit();
-    try stream.writeAll(io, "alive");
-    try stream.close(io);
+    try stream.writeAll("alive");
+    try stream.close();
 
-    try readExpectedReply(io, &stream, "ok");
+    try readExpectedReply(&stream, "ok");
     try responder_future.await(io);
 }
 
@@ -906,7 +904,7 @@ test "yamux keepalive timeout closes unresponsive session" {
 
     try io.sleep(std.Io.Duration.fromMilliseconds(220), .awake);
 
-    _ = session.openStream(io) catch |err| switch (err) {
+    _ = session.openStream() catch |err| switch (err) {
         YamuxError.GoAway, YamuxError.SessionClosed => {},
         else => return err,
     };
@@ -939,11 +937,11 @@ test "yamux error go away closes streams and rejects new ones" {
             defer session.deinit();
             try session.start();
 
-            var accept_future = try session.acceptStreamConcurrent(ctx.io);
+            var accept_future = try session.acceptStreamConcurrent();
             var stream = try accept_future.await(ctx.io);
             defer stream.deinit();
 
-            const req = try readAllFromStream(ctx.allocator, ctx.io, &stream);
+            const req = try readAllFromStream(ctx.allocator, &stream);
             defer ctx.allocator.free(req);
             if (!std.mem.eql(u8, req, "boom")) return error.TestExpectedEqual;
 
@@ -961,18 +959,18 @@ test "yamux error go away closes streams and rejects new ones" {
     defer session.deinit();
     try session.start();
 
-    var open_future = try session.openStreamConcurrent(io);
+    var open_future = try session.openStreamConcurrent();
     var stream = try open_future.await(io);
     defer stream.deinit();
-    try stream.writeAll(io, "boom");
-    try stream.close(io);
+    try stream.writeAll("boom");
+    try stream.close();
 
     var one: [1]u8 = undefined;
-    _ = stream.readSome(io, &one) catch |err| switch (err) {
+    _ = stream.readSome(&one) catch |err| switch (err) {
         YamuxError.StreamClosed, YamuxError.SessionClosed => 0,
         else => return err,
     };
-    _ = session.openStream(io) catch |err| switch (err) {
+    _ = session.openStream() catch |err| switch (err) {
         YamuxError.GoAway, YamuxError.SessionClosed => {},
         else => return err,
     };

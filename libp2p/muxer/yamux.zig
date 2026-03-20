@@ -115,6 +115,7 @@ const StreamCore = struct {
 pub const Session = struct {
     allocator: std.mem.Allocator,
     transport: *noise.SecureTransport,
+    session_io: std.Io,
     is_initiator: bool,
     next_stream_id: u32,
     state: SessionState = .open,
@@ -154,6 +155,7 @@ pub const Session = struct {
         return .{
             .allocator = allocator,
             .transport = transport,
+            .session_io = transport.conn.io,
             .is_initiator = is_initiator,
             .next_stream_id = if (is_initiator) 1 else 2,
             .streams = std.AutoHashMap(u32, *StreamCore).init(allocator),
@@ -193,7 +195,7 @@ pub const Session = struct {
         self.frame_payload.deinit();
     }
 
-    pub fn openStream(self: *Self, io: std.Io) !Stream {
+    pub fn openStream(self: *Self) !Stream {
         if (!self.canOpenNewStreams()) {
             return YamuxError.GoAway;
         }
@@ -222,7 +224,7 @@ pub const Session = struct {
                 .closed => return YamuxError.SessionClosed,
                 else => {
                     if (self.sessionIsClosed()) return YamuxError.SessionClosed;
-                    try condWait(&core.cond, io, &core.mutex);
+                    try condWait(&core.cond, self.session_io, &core.mutex);
                 },
             }
         }
@@ -230,11 +232,11 @@ pub const Session = struct {
         return Stream.init(self.allocator, self, core);
     }
 
-    pub fn openStreamConcurrent(self: *Self, io: std.Io) std.Io.ConcurrentError!OpenStreamFuture {
-        return io.concurrent(openStreamTaskMain, .{ self, io });
+    pub fn openStreamConcurrent(self: *Self) std.Io.ConcurrentError!OpenStreamFuture {
+        return self.session_io.concurrent(openStreamTaskMain, .{self});
     }
 
-    pub fn acceptStream(self: *Self, io: std.Io) !Stream {
+    pub fn acceptStream(self: *Self) !Stream {
         while (true) {
             mutexLock(&self.pending_accept_mu);
             while (self.pending_accept.items.len == 0) {
@@ -242,7 +244,7 @@ pub const Session = struct {
                     mutexUnlock(&self.pending_accept_mu);
                     return YamuxError.GoAway;
                 }
-                try condWait(&self.pending_accept_cv, io, &self.pending_accept_mu);
+                try condWait(&self.pending_accept_cv, self.session_io, &self.pending_accept_mu);
             }
             const stream_id = self.pending_accept.orderedRemove(0);
             mutexUnlock(&self.pending_accept_mu);
@@ -256,8 +258,8 @@ pub const Session = struct {
         }
     }
 
-    pub fn acceptStreamConcurrent(self: *Self, io: std.Io) std.Io.ConcurrentError!AcceptStreamFuture {
-        return io.concurrent(acceptStreamTaskMain, .{ self, io });
+    pub fn acceptStreamConcurrent(self: *Self) std.Io.ConcurrentError!AcceptStreamFuture {
+        return self.session_io.concurrent(acceptStreamTaskMain, .{self});
     }
 
     pub fn ping(self: *Self, nonce_value: u32) !void {
@@ -451,7 +453,7 @@ pub const Session = struct {
         }
 
         if (should_signal) {
-            core.cond.broadcast(syncIo());
+            core.cond.broadcast(self.transport.conn.io);
         }
     }
 
@@ -534,7 +536,7 @@ pub const Session = struct {
         }
 
         if (should_signal) {
-            core.cond.broadcast(syncIo());
+            core.cond.broadcast(self.transport.conn.io);
         }
     }
 
@@ -567,7 +569,7 @@ pub const Session = struct {
         mutexLock(&self.pending_accept_mu);
         defer mutexUnlock(&self.pending_accept_mu);
         self.pending_accept.append(stream_id) catch return;
-        self.pending_accept_cv.signal(syncIo());
+        self.pending_accept_cv.signal(self.transport.conn.io);
     }
 
     fn decrementAckBacklog(self: *Self) void {
@@ -586,7 +588,7 @@ pub const Session = struct {
         mutexUnlock(&self.state_mu);
 
         mutexLock(&self.pending_accept_mu);
-        self.pending_accept_cv.broadcast(syncIo());
+        self.pending_accept_cv.broadcast(self.transport.conn.io);
         mutexUnlock(&self.pending_accept_mu);
 
         if (next_state != .closing and next_state != .closed) return;
@@ -594,7 +596,7 @@ pub const Session = struct {
         mutexLock(&self.streams_mu);
         var it = self.streams.iterator();
         while (it.next()) |entry| {
-            entry.value_ptr.*.cond.broadcast(syncIo());
+            entry.value_ptr.*.cond.broadcast(self.transport.conn.io);
         }
         mutexUnlock(&self.streams_mu);
     }
@@ -724,7 +726,7 @@ pub const Stream = struct {
         return self.core.stream_id;
     }
 
-    pub fn writeAll(self: *Self, io: std.Io, data: []const u8) !void {
+    pub fn writeAll(self: *Self, data: []const u8) !void {
         var off: usize = 0;
         while (off < data.len) {
             mutexLock(&self.core.mutex);
@@ -737,7 +739,7 @@ pub const Stream = struct {
                     mutexUnlock(&self.core.mutex);
                     return YamuxError.SessionClosed;
                 }
-                try condWait(&self.core.cond, io, &self.core.mutex);
+                try condWait(&self.core.cond, self.session.session_io, &self.core.mutex);
             }
 
             if (self.core.state == .reset or self.core.state == .closed or self.core.state == .local_half_closed) {
@@ -758,12 +760,12 @@ pub const Stream = struct {
         }
     }
 
-    pub fn writeByte(self: *Self, io: std.Io, b: u8) !void {
+    pub fn writeByte(self: *Self, b: u8) !void {
         const one = [_]u8{b};
-        try self.writeAll(io, &one);
+        try self.writeAll(&one);
     }
 
-    pub fn close(self: *Self, io: std.Io) !void {
+    pub fn close(self: *Self) !void {
         mutexLock(&self.core.mutex);
         if (self.core.state == .local_half_closed or self.core.state == .closed or self.core.state == .reset) {
             mutexUnlock(&self.core.mutex);
@@ -774,11 +776,10 @@ pub const Stream = struct {
             else => .local_half_closed,
         };
         mutexUnlock(&self.core.mutex);
-        _ = io;
         try self.session.writeFrame(.data, FLAG_FIN, self.core.stream_id, 0, "");
     }
 
-    pub fn readSome(self: *Self, io: std.Io, dest: []u8) !usize {
+    pub fn readSome(self: *Self, dest: []u8) !usize {
         if (dest.len == 0) return 0;
 
         while (true) {
@@ -812,7 +813,7 @@ pub const Stream = struct {
                 mutexUnlock(&self.core.mutex);
                 return YamuxError.SessionClosed;
             }
-            try condWait(&self.core.cond, io, &self.core.mutex);
+            try condWait(&self.core.cond, self.session.session_io, &self.core.mutex);
             mutexUnlock(&self.core.mutex);
         }
     }
@@ -844,12 +845,12 @@ fn keepaliveTaskMain(session: *Session) anyerror!void {
     return session.keepaliveTask();
 }
 
-fn openStreamTaskMain(session: *Session, io: std.Io) anyerror!Stream {
-    return session.openStream(io);
+fn openStreamTaskMain(session: *Session) anyerror!Stream {
+    return session.openStream();
 }
 
-fn acceptStreamTaskMain(session: *Session, io: std.Io) anyerror!Stream {
-    return session.acceptStream(io);
+fn acceptStreamTaskMain(session: *Session) anyerror!Stream {
+    return session.acceptStream();
 }
 
 fn syncIo() std.Io {
