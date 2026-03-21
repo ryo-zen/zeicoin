@@ -445,6 +445,80 @@ test "yamux blocks on exhausted window then resumes after window update" {
     try responder_future.await(io);
 }
 
+test "yamux accepts window update credit larger than max frame payload" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var conn_pair = try inproc.InProcConnection.initPair(allocator, io);
+    var responder_conn = conn_pair.responder;
+    defer responder_conn.deinit();
+    var initiator_conn = conn_pair.initiator;
+    defer initiator_conn.deinit();
+
+    const chunk_len = 262_076;
+    const repeats = 33;
+    const expected_total = chunk_len * repeats;
+
+    const chunk = try allocator.alloc(u8, chunk_len);
+    defer allocator.free(chunk);
+    @memset(chunk, 0x6B);
+
+    const ResponderCtx = struct {
+        conn: *inproc.InProcConnection,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        total_read: usize = 0,
+
+        fn run(ctx: *@This()) anyerror!void {
+            const tx_key = [_]u8{0x61} ** 32;
+            const rx_key = [_]u8{0x72} ** 32;
+
+            var secure = noise.SecureTransport.init(ctx.allocator, ctx.conn.connection(), rx_key, tx_key);
+            defer secure.deinit();
+
+            var session = Session.init(ctx.allocator, &secure, false);
+            defer session.deinit();
+            try session.start();
+
+            var stream = try session.acceptStream();
+            defer stream.deinit();
+
+            var buf: [chunk_len]u8 = undefined;
+            while (true) {
+                const n = try stream.readSome(&buf);
+                if (n == 0) break;
+                ctx.total_read += n;
+            }
+        }
+    };
+
+    var responder_ctx = ResponderCtx{
+        .conn = &responder_conn,
+        .allocator = allocator,
+        .io = io,
+    };
+
+    var responder_future = try io.concurrent(ResponderCtx.run, .{&responder_ctx});
+    defer _ = responder_future.cancel(io) catch {};
+
+    var secure = noise.SecureTransport.init(allocator, initiator_conn.connection(), [_]u8{0x61} ** 32, [_]u8{0x72} ** 32);
+    defer secure.deinit();
+
+    var session = Session.init(allocator, &secure, true);
+    defer session.deinit();
+    try session.start();
+
+    var stream = try session.openStream();
+    defer stream.deinit();
+
+    for (0..repeats) |_| {
+        try stream.writeAll(chunk);
+    }
+    try stream.close();
+
+    try responder_future.await(io);
+    try std.testing.expectEqual(expected_total, responder_ctx.total_read);
+}
+
 test "yamux rst closes only target stream" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;

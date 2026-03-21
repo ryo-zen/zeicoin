@@ -1,5 +1,5 @@
 const std = @import("std");
-const libp2p = @import("libp2p");
+const libp2p = @import("api.zig");
 
 const Multiaddr = libp2p.Multiaddr;
 const TcpTransport = libp2p.TcpTransport;
@@ -8,6 +8,7 @@ const IdentityKey = libp2p.IdentityKey;
 const noise = libp2p.noise;
 const yamux = libp2p.yamux;
 const YamuxError = yamux.YamuxError;
+const inproc = @import("transport/inproc.zig");
 const print = std.debug.print;
 
 const default_duration_secs: u64 = 5;
@@ -833,6 +834,7 @@ fn readYamuxStreamTask(
     while (true) {
         const n = owned_stream.readSome(&buf) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
+            YamuxError.StreamClosed, YamuxError.SessionClosed => return,
             else => std.debug.panic("readYamuxStreamTask failed: {s}", .{@errorName(err)}),
         };
         if (n == 0) return;
@@ -915,4 +917,63 @@ fn printUsage() void {
         \\defaults: --duration-secs 5 --payload-bytes 262144 --iterations 3 --yamux-streams 4
         \\
     , .{});
+}
+
+test "readYamuxStreamTask treats session close as eof" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var conn_pair = try inproc.InProcConnection.initPair(allocator, io);
+    var responder_conn = conn_pair.responder;
+    defer responder_conn.deinit();
+    var initiator_conn = conn_pair.initiator;
+    defer initiator_conn.deinit();
+
+    const ResponderCtx = struct {
+        conn: *inproc.InProcConnection,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+
+        fn run(ctx: *@This()) anyerror!void {
+            const tx_key = [_]u8{0x41} ** 32;
+            const rx_key = [_]u8{0x52} ** 32;
+
+            var secure = noise.SecureTransport.init(ctx.allocator, ctx.conn.connection(), rx_key, tx_key);
+            defer secure.deinit();
+
+            var session = yamux.Session.init(ctx.allocator, &secure, false);
+            defer session.deinit();
+            try session.start();
+
+            var accepted = try session.acceptStream();
+            defer accepted.deinit();
+
+            // Give the initiator reader task time to block in readSome before the
+            // responder session shuts down and surfaces SessionClosed.
+            try ctx.io.sleep(std.Io.Duration.fromMilliseconds(10), .awake);
+        }
+    };
+
+    var responder_ctx = ResponderCtx{
+        .conn = &responder_conn,
+        .allocator = allocator,
+        .io = io,
+    };
+    var responder_future = try io.concurrent(ResponderCtx.run, .{&responder_ctx});
+    defer _ = responder_future.cancel(io) catch {};
+
+    var secure = noise.SecureTransport.init(allocator, initiator_conn.connection(), [_]u8{0x41} ** 32, [_]u8{0x52} ** 32);
+    defer secure.deinit();
+
+    var session = yamux.Session.init(allocator, &secure, true);
+    defer session.deinit();
+    try session.start();
+
+    const stream = try session.openStream();
+    var total = std.atomic.Value(u64).init(0);
+    var read_future = try io.concurrent(readYamuxStreamTask, .{ stream, &total });
+
+    try responder_future.await(io);
+    try read_future.await(io);
+    try std.testing.expectEqual(@as(u64, 0), total.load(.acquire));
 }

@@ -6,6 +6,7 @@ test {
     _ = @import("peer/peer_id.zig");
     _ = @import("protocol/identify.zig");
     _ = @import("security/noise.zig");
+    _ = @import("libp2p_bench.zig");
     _ = @import("muxer/yamux.zig");
     _ = @import("muxer/test_yamux.zig");
     _ = @import("transport/tcp.zig");

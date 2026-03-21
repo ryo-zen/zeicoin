@@ -677,8 +677,9 @@ pub const Session = struct {
         const stream_id = std.mem.readInt(u32, header_bytes[4..8], .big);
         const length = std.mem.readInt(u32, header_bytes[8..12], .big);
 
+        // Only data frames carry payload bytes governed by MAX_FRAME_PAYLOAD.
+        // Control-frame length fields are semantic values like window credit.
         if (typ == .data and length > MAX_FRAME_PAYLOAD) return YamuxError.InvalidFrame;
-        if (typ != .data and length > MAX_FRAME_PAYLOAD and typ != .ping and typ != .go_away) return YamuxError.InvalidFrame;
 
         const payload_len: usize = if (typ == .data) length else 0;
         try self.frame_payload.resize(payload_len);
