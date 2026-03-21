@@ -6,7 +6,6 @@ RUN apt-get update && apt-get install -y \
     xz-utils \
     ca-certificates \
     build-essential \
-    netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 
 # Local nightly tarball is prepared by scripts/test_libp2p_docker.sh
@@ -22,13 +21,15 @@ RUN set -eux; \
 WORKDIR /zeicoin
 
 COPY libp2p ./libp2p
-COPY src/apps/libp2p_testnode.zig ./src/apps/libp2p_testnode.zig
+RUN printf 'pub const use_evented = false;\n' > build_options.zig
 
 RUN mkdir -p zig-out/bin && \
     zig build-exe -ODebug \
     --dep libp2p \
-    -Mroot=src/apps/libp2p_testnode.zig \
+    --dep build_options \
+    -Mroot=libp2p/libp2p_testnode.zig \
     -Mlibp2p=libp2p/api.zig \
+    -Mbuild_options=build_options.zig \
     -lc \
     -femit-bin=zig-out/bin/libp2p_testnode
 

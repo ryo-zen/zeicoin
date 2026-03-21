@@ -17,6 +17,7 @@ zeicoin_data_mainnet/
 *.md
 !README.md
 docs/
+reference/
 
 # Environment files
 .env
@@ -46,3 +47,6 @@ Thumbs.db
 # Temporary files
 tmp/
 temp/
+
+# Local project tooling and trackers not needed for the libp2p test image
+.izumi/
