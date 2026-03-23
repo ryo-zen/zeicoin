@@ -377,6 +377,7 @@ zig build clean                    # Clean artifacts
 
 **Focus Areas**:
 
+- libp2p implementation
 - Multi-node mining and sync testing
 - Bug fixes and stability improvements
 - Documentation improvements
@@ -390,18 +391,7 @@ zig build clean                    # Clean artifacts
 
 ## Contributing
 
-We welcome contributions to ZeiCoin! There are several ways to help:
-
-### Run a Bootstrap Node
-
-Help grow the testnet by running a public bootstrap node! Requirements:
-- Public static IP with port 10801 open
-- 2GB+ RAM, 10GB+ storage
-- 99%+ uptime commitment
-
-See **[CONTRIBUTING.md](CONTRIBUTING.md#running-a-bootstrap-node)** for detailed setup instructions and how to submit your node via pull request.
-
-**Current Bootstrap Nodes**: See [config/bootstrap_testnet.json](config/bootstrap_testnet.json)
+Contributions to ZeiCoin are welcome.
 
 ### Code Contributions
 
@@ -417,8 +407,6 @@ See **[CONTRIBUTING.md](CONTRIBUTING.md#running-a-bootstrap-node)** for detailed
 - Add tests for new features
 - Update documentation
 - Ensure code compiles and tests pass
-
-For detailed guidelines, see **[CONTRIBUTING.md](CONTRIBUTING.md)**
 
 ## License
 

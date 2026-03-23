@@ -32,19 +32,14 @@ server.log
 logs
 .obsidian
 .docker-cache
-.izumi
 
 # === Documentation & Markdown ===
 .CLAUDE.md
 CLAUDE.md
 CLAUDE.local.md
 GEMINI.md
+AGENTS.md
 DOCKER.md
-todo.md
-TODO.md
-PLAN.md
-SECURITY_AUDIT.md
-new-miner.md
 
 # === Docker ===
 Dockerfile.debug
@@ -93,7 +88,7 @@ fuzz/network_message_fuzz.zig
 /optimizations
 /deployment
 /monitoring
-tests_dev/
+/tests_dev
 
 # === Test Outputs ===
 /test_broadcast_integration
@@ -109,7 +104,6 @@ tests_dev/
 # === Other ===
 web/l2-test-app.html
 test_spinner3.zig
-AGENTS.md
 .envrc
 .gemini/settings.json
 /test_manual_data
