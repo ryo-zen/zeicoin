@@ -53,6 +53,7 @@ docker-compose.debug.yml
 docker-compose.randomx.yml
 docker-compose.sync-proof-test.yml
 docker-compose.libp2p-test.yml
+docker-compose.libp2p-ref.yml
 docker-compose.mempool-gossip-test.yml
 docker-compose.single-test.yml
 docker-compose.sync-mining-test.yml
@@ -102,6 +103,9 @@ tests_dev/
 /test_zeicoin_data_mempool
 /test_coinbase_maturity
 
+# === libp2p runtime artifacts ===
+.libp2p_identity_*.key
+
 # === Other ===
 web/l2-test-app.html
 test_spinner3.zig
@@ -112,6 +116,3 @@ AGENTS.md
 server_debug.log
 node1.log
 node2.log
-
-# === libp2p ===
-libp2p/
