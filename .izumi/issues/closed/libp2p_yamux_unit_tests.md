@@ -14,10 +14,10 @@ sprint: null
 story_points: 5
 due_date: null
 parent_id: libp2p_yamux_completion
-rank: 1773709068621.0
+rank: 1774094709520.0
 comments: []
 created_at: 2026-03-17T00:00:00+00:00
-updated_at: 2026-03-21T23:00:08+11:00
+updated_at: 2026-03-26T12:00:51.267033100+00:00
 ---
 
 ## Summary

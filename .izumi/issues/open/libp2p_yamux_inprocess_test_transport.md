@@ -1,9 +1,9 @@
 ---
-id: yamux_inprocess_test_transport
+id: libp2p_yamux_inprocess_test_transport
 key: ZEI-48
 title: Refactor Yamux unit tests to use in-process transport
 type: Subtask
-status: Todo
+status: Done
 priority: Medium
 assignee: null
 labels:
@@ -14,10 +14,10 @@ sprint: null
 story_points: null
 due_date: null
 parent_id: libp2p_yamux_unit_tests
-rank: 9000.0
+rank: 34000.0
 comments: []
 created_at: 2026-03-18T11:10:03+00:00
-updated_at: 2026-03-22T05:41:01.784526394+00:00
+updated_at: 2026-03-27T00:00:00+00:00
 ---
 
 ## Summary
@@ -26,11 +26,11 @@ Replace Yamux unit test network setup with an in-process duplex transport so tes
 
 ## Acceptance Criteria
 
-- [ ] Add a test transport path that provides bidirectional in-process I/O compatible with `noise.SecureTransport` usage in Yamux tests
-- [ ] Migrate Yamux unit tests that cover demux, flow control, RST isolation, GO_AWAY, and backlog behavior to the in-process path
-- [ ] Remove direct `TcpTransport.listen`/`dial` usage from Yamux unit tests
-- [ ] Keep existing Yamux behavioral assertions passing under the new in-process harness (`zig build test-libp2p`)
-- [ ] Document the in-process harness usage in test code comments or nearby notes to keep future Yamux tests consistent
+- [x] Add a test transport path that provides bidirectional in-process I/O compatible with `noise.SecureTransport` usage in Yamux tests
+- [x] Migrate Yamux unit tests that cover demux, flow control, RST isolation, GO_AWAY, and backlog behavior to the in-process path
+- [x] Remove direct `TcpTransport.listen`/`dial` usage from Yamux unit tests
+- [x] Keep existing Yamux behavioral assertions passing under the new in-process harness (`zig build test-libp2p`)
+- [x] Document the in-process harness usage in test code comments or nearby notes to keep future Yamux tests consistent
 
 ## Notes
 
