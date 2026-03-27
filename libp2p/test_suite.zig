@@ -11,4 +11,6 @@ test {
     _ = @import("muxer/test_yamux.zig");
     _ = @import("transport/tcp.zig");
     _ = @import("protocol/multistream.zig");
+    _ = @import("host/handler_registry.zig");
+    _ = @import("host/host.zig");
 }

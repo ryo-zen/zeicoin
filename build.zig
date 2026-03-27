@@ -205,6 +205,35 @@ pub fn build(b: *std.Build) !void {
     }
 
     // **************************************************************
+    // *              LIBP2P STRESS HARNESS                         *
+    // **************************************************************
+    {
+        const libp2p_stress_module = b.createModule(.{
+            .root_source_file = b.path("libp2p/libp2p_stress.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        libp2p_stress_module.addImport("libp2p", libp2p_module_def);
+
+        const exe = b.addExecutable(.{
+            .name = "libp2p_stress",
+            .root_module = libp2p_stress_module,
+        });
+
+        b.installArtifact(exe);
+
+        const run_cmd = b.addRunArtifact(exe);
+        run_cmd.step.dependOn(b.getInstallStep());
+        if (b.args) |args| {
+            run_cmd.addArgs(args);
+        }
+
+        const run_step = b.step("run-libp2p-stress", "Run in-process libp2p stress harness (session/stream/chaos)");
+        run_step.dependOn(&run_cmd.step);
+    }
+
+    // **************************************************************
     // *              ANALYTICS EXECUTABLES                         *
     // *              (Require pg dependency - now compatible)      *
     // **************************************************************
