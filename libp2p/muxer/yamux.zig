@@ -135,6 +135,8 @@ pub const Session = struct {
     demux_future: ?DemuxFuture = null,
     keepalive_future: ?KeepaliveFuture = null,
     demux_started: bool = false,
+    lifecycle_mu: std.Thread.Mutex = .{},
+    shutdown_started: bool = false,
 
     const Self = @This();
 
@@ -172,16 +174,24 @@ pub const Session = struct {
         self.demux_started = true;
     }
 
-    pub fn deinit(self: *Self) void {
-        self.beginClosing(.closing);
-        self.transport.conn.close() catch {};
+    pub fn shutdown(self: *Self) void {
+        self.lifecycle_mu.lock();
+        defer self.lifecycle_mu.unlock();
 
-        if (self.demux_future) |*future| {
-            _ = future.cancel(self.transport.conn.io) catch {};
+        if (self.shutdown_started) return;
+        self.shutdown_started = true;
+        self.shutdownLocked();
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.lifecycle_mu.lock();
+        defer self.lifecycle_mu.unlock();
+
+        if (!self.shutdown_started) {
+            self.shutdown_started = true;
+            self.shutdownLocked();
         }
-        if (self.keepalive_future) |*future| {
-            _ = future.cancel(self.transport.conn.io) catch {};
-        }
+        self.cancelFuturesLocked();
 
         mutexLock(&self.streams_mu);
         var it = self.streams.iterator();
@@ -193,6 +203,20 @@ pub const Session = struct {
         self.streams.deinit();
         self.pending_accept.deinit();
         self.frame_payload.deinit();
+    }
+
+    fn shutdownLocked(self: *Self) void {
+        self.beginClosing(.closing);
+        self.transport.conn.close() catch {};
+    }
+
+    fn cancelFuturesLocked(self: *Self) void {
+        if (self.demux_future) |*future| {
+            _ = future.cancel(self.transport.conn.io) catch {};
+        }
+        if (self.keepalive_future) |*future| {
+            _ = future.cancel(self.transport.conn.io) catch {};
+        }
     }
 
     pub fn openStream(self: *Self) !Stream {

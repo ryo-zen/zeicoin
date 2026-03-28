@@ -308,7 +308,7 @@ pub const NetworkManager = struct {
         defer _ = self.active_connections.fetchSub(1, .acq_rel);
 
         self.setRunning(true);
-        // host.serve() blocks until the listener is closed (via host.deinit/transport.deinit).
+        // host.serve() blocks until shutdown requests a listener wake-up.
         try self.host.serve(self.io);
     }
 
@@ -336,12 +336,13 @@ pub const NetworkManager = struct {
         const io = self.io;
         io.sleep(std.Io.Duration.fromMilliseconds(100), std.Io.Clock.awake) catch {};
 
+        // Wake the blocking accept() loop before any resources are deinitialized.
+        self.host.requestStop(self.io) catch |err| {
+            log.warn("Failed to wake listener during shutdown: {}", .{err});
+        };
+
         // Stop peer manager (closes yamux streams to wake blocked readers)
         self.peer_manager.stop();
-
-        // Deinit the host — closes the listener to unblock host.serve()
-        // and cleans up all outbound sessions.
-        self.host.deinit();
 
         // Wait for all detached threads to finish
         log.info("Waiting for network threads to finish...", .{});
@@ -367,6 +368,10 @@ pub const NetworkManager = struct {
         } else {
             log.info("Network shutdown complete", .{});
         }
+
+        // After the accept loop and peer threads have drained, it is safe to
+        // release listener/session resources owned by Host.
+        self.host.deinit();
     }
 
     /// Broadcast to all peers

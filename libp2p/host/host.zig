@@ -334,7 +334,6 @@ fn handleInbound(
 
     var stream_group: std.Io.Group = .init;
     defer {
-        stream_group.cancel(io);
         stream_group.await(io) catch {};
     }
 
@@ -361,6 +360,8 @@ pub const Host = struct {
     sessions_mutex: std.Thread.Mutex,
     // Our listen address — set in listen(), used in identify responses.
     listen_addr: ?Multiaddr,
+    // Set during shutdown so serve() exits after the next accepted connection.
+    stopping: std.atomic.Value(bool),
 
     const Self = @This();
 
@@ -375,10 +376,12 @@ pub const Host = struct {
             .sessions = std.array_list.Managed(*UpgradedConn).init(allocator),
             .sessions_mutex = .{},
             .listen_addr = null,
+            .stopping = std.atomic.Value(bool).init(false),
         };
     }
 
     pub fn deinit(self: *Self) void {
+        self.stopping.store(true, .release);
         for (self.sessions.items) |uc| {
             uc.deinit();
             self.allocator.destroy(uc);
@@ -398,6 +401,8 @@ pub const Host = struct {
     // Bind to addr. Must be called before serve().
     // Also stores the listen address and registers the identify inbound handler.
     pub fn listen(self: *Self, io: std.Io, addr: *const Multiaddr) !void {
+        self.stopping.store(false, .release);
+
         // Store a copy of our listen address for identify responses.
         if (self.listen_addr) |*la| la.deinit();
         self.listen_addr = try Multiaddr.create(self.allocator, addr.getStringAddress());
@@ -411,6 +416,23 @@ pub const Host = struct {
         }
 
         self.listener = try self.transport.listen(io, addr);
+    }
+
+    // Ask serve() to stop accepting new connections, then poke the listener so a
+    // blocking accept() wakes up and notices the shutdown flag.
+    pub fn requestStop(self: *Self, io: std.Io) !void {
+        self.stopping.store(true, .release);
+        if (self.listener == null) return;
+
+        const wake_addr = self.getWakeupAddress() orelse return;
+        var stream = wake_addr.connect(io, .{ .mode = .stream }) catch |err| switch (err) {
+            error.ConnectionRefused,
+            error.NetworkUnreachable,
+            error.HostUnreachable,
+            => return,
+            else => return err,
+        };
+        defer stream.close(io);
     }
 
     // Dial addr, run the full upgrade stack, and return the Yamux session.
@@ -499,7 +521,9 @@ pub const Host = struct {
             observed_ma = blk: {
                 const ma_str = switch (ra) {
                     .ip4 => |a| try std.fmt.allocPrint(
-                        host.allocator, "/ip4/{}.{}.{}.{}/tcp/{}", .{
+                        host.allocator,
+                        "/ip4/{}.{}.{}.{}/tcp/{}",
+                        .{
                             a.bytes[0], a.bytes[1], a.bytes[2], a.bytes[3], a.port,
                         },
                     ),
@@ -552,11 +576,12 @@ pub const Host = struct {
         const listener = self.listener orelse return error.NotListening;
         var group: std.Io.Group = .init;
         defer {
-            group.cancel(io);
             group.await(io) catch {};
         }
         while (true) {
             try std.Io.checkCancel(io);
+            if (self.stopping.load(.acquire)) break;
+
             var conn = listener.accept(io) catch |err| switch (err) {
                 error.Canceled, error.SocketNotListening => break,
                 else => {
@@ -564,6 +589,10 @@ pub const Host = struct {
                     continue;
                 },
             };
+            if (self.stopping.load(.acquire)) {
+                conn.deinit();
+                break;
+            }
             group.concurrent(io, handleInbound, .{
                 conn,
                 &self.registry,
@@ -574,6 +603,17 @@ pub const Host = struct {
                 conn.deinit();
             };
         }
+    }
+
+    fn getWakeupAddress(self: *const Self) ?std.Io.net.IpAddress {
+        const listen_addr = self.listen_addr orelse return null;
+        return switch (listen_addr.getTcpAddress() orelse return null) {
+            .ip4 => |addr| if (std.mem.eql(u8, &addr.bytes, &[_]u8{ 0, 0, 0, 0 }))
+                .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = addr.port } }
+            else
+                .{ .ip4 = addr },
+            .ip6 => |addr| .{ .ip6 = addr },
+        };
     }
 };
 
@@ -979,4 +1019,29 @@ test "host: identify round-trip" {
         }
     }
     try std.testing.expect(found_identify);
+}
+
+test "host: requestStop wakes serve accept loop" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var server = Host.init(alloc, try IdentityKey.generate(alloc, io));
+    defer server.deinit();
+
+    var listen_addr = try Multiaddr.create(alloc, "/ip4/127.0.0.1/tcp/19807");
+    defer listen_addr.deinit();
+    try server.listen(io, &listen_addr);
+
+    var serve_future = try io.concurrent(Host.serve, .{ &server, io });
+    var serve_done = false;
+    defer {
+        if (!serve_done) {
+            _ = serve_future.cancel(io) catch {};
+            serve_future.await(io) catch {};
+        }
+    }
+
+    try server.requestStop(io);
+    try serve_future.await(io);
+    serve_done = true;
 }

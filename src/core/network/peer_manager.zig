@@ -84,14 +84,14 @@ pub const Peer = struct {
 
     // Response queues for synchronous request/response patterns (fork detection)
     // These are used by fork_detector.zig to wait for specific responses
-    block_hash_responses: std.AutoHashMap(u32, BlockHashResponse),  // height -> response
-    chain_work_response: ?types.ChainWork,  // Latest chain work response
-    
+    block_hash_responses: std.AutoHashMap(u32, BlockHashResponse), // height -> response
+    chain_work_response: ?types.ChainWork, // Latest chain work response
+
     // Block caches for synchronous requests (ZSP-001)
-    received_blocks: std.AutoHashMap([32]u8, types.Block),          // hash -> block
-    received_blocks_by_height: std.AutoHashMap(u32, types.Block),   // height -> block
-    
-    response_mutex: std.Thread.Mutex,  // Protects response queues and block caches
+    received_blocks: std.AutoHashMap([32]u8, types.Block), // hash -> block
+    received_blocks_by_height: std.AutoHashMap(u32, types.Block), // height -> block
+
+    response_mutex: std.Thread.Mutex, // Protects response queues and block caches
 
     // libp2p identity of the remote peer (owned; null until Noise handshake completes)
     peer_id: ?libp2p.PeerId,
@@ -99,6 +99,9 @@ pub const Peer = struct {
     // Yamux stream reference for timeout wakeup — pointer into PeerConnection, NOT owned.
     // PeerManager.stop() / cleanupTimedOut() calls stream.close() to wake blocked readSome().
     yamux_stream: ?*yamux.Stream,
+    // Yamux session reference for full connection shutdown — pointer into Host/handleInbound, NOT owned.
+    // Used to wake blocked stream reads and acceptStream() during shutdown.
+    yamux_session: ?*yamux.Session,
 
     // Reference counting for thread-safe peer lifecycle
     ref_count: std.atomic.Value(u32),
@@ -146,6 +149,7 @@ pub const Peer = struct {
             .response_mutex = std.Thread.Mutex{},
             .peer_id = null,
             .yamux_stream = null,
+            .yamux_session = null,
             .ref_count = std.atomic.Value(u32).init(1),
         };
     }
@@ -165,7 +169,7 @@ pub const Peer = struct {
 
         // Clean up response queues and block caches
         self.block_hash_responses.deinit();
-        
+
         // Properly deinit all cached blocks
         var block_it = self.received_blocks.iterator();
         while (block_it.next()) |entry| {
@@ -209,7 +213,7 @@ pub const Peer = struct {
         if (self.is_shutting_down.load(.acquire)) {
             return error.PeerShuttingDown;
         }
-        
+
         self.last_recv = util.getTime();
         try self.connection.receiveData(data);
     }
@@ -220,7 +224,7 @@ pub const Peer = struct {
         if (self.is_shutting_down.load(.acquire)) {
             return null; // Return null to stop message processing
         }
-        
+
         const result = try self.connection.readMessage();
         if (result) |_| {
             self.last_recv = util.getTime();
@@ -283,7 +287,7 @@ pub const Peer = struct {
         defer self.response_mutex.unlock();
 
         const work = self.chain_work_response;
-        self.chain_work_response = null;  // Clear after reading
+        self.chain_work_response = null; // Clear after reading
         return work;
     }
 
@@ -293,10 +297,10 @@ pub const Peer = struct {
         defer self.response_mutex.unlock();
 
         const hash = block.hash();
-        
+
         // Deep copy block to ensure ownership in cache
         const block_copy = try block.clone(self.allocator);
-        
+
         // Remove existing block if any to prevent leaks
         if (self.received_blocks.get(hash)) |old_block| {
             var mutable_old = old_block;
@@ -583,7 +587,10 @@ pub const Peer = struct {
         switch (self.address) {
             .ip4 => |a| try writer.print("Peer[{}:{}.{}.{}.{}:{}:{}]", .{
                 self.id,
-                a.bytes[0], a.bytes[1], a.bytes[2], a.bytes[3],
+                a.bytes[0],
+                a.bytes[1],
+                a.bytes[2],
+                a.bytes[3],
                 a.port,
                 self.state,
             }),
@@ -644,6 +651,10 @@ pub const PeerManager = struct {
         for (self.peers.items) |peer| {
             peer.state = .disconnected;
             peer.is_shutting_down.store(true, .release);
+            if (peer.yamux_session) |sess| {
+                sess.shutdown();
+                peer.yamux_session = null;
+            }
             if (peer.yamux_stream) |s| {
                 s.close() catch {};
                 peer.yamux_stream = null;
@@ -767,7 +778,7 @@ pub const PeerManager = struct {
                 }
             }
         }
-        
+
         if (best) |p| p.addRef();
         return best;
     }
@@ -827,6 +838,10 @@ pub const PeerManager = struct {
         while (i < self.peers.items.len) {
             const peer = self.peers.items[i];
             if (peer.isTimedOut()) {
+                if (peer.yamux_session) |sess| {
+                    sess.shutdown();
+                    peer.yamux_session = null;
+                }
                 // Close the yamux stream to wake the blocked readSome() in PeerConnection.run()
                 if (peer.yamux_stream) |s| {
                     s.close() catch {};
