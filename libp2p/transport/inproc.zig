@@ -147,10 +147,9 @@ pub const InProcConnection = struct {
 
                 var total: usize = 0;
                 const vecs: [array_info.len][]const u8 = fragments.*;
-                inline for (vecs) |part| {
-                    try dst.appendSlice(part);
-                    total += part.len;
-                }
+                inline for (vecs) |part| total += part.len;
+                try dst.ensureUnusedCapacity(total);
+                inline for (vecs) |part| dst.appendSliceAssumeCapacity(part);
                 self.bytes_written += total;
                 self.shared.cond.broadcast(io);
             },
@@ -200,10 +199,9 @@ pub const InProcConnection = struct {
         compactBuffer(dst, dst_off);
 
         var total: usize = 0;
-        for (fragments) |part| {
-            try dst.appendSlice(part);
-            total += part.len;
-        }
+        for (fragments) |part| total += part.len;
+        try dst.ensureUnusedCapacity(total);
+        for (fragments) |part| dst.appendSliceAssumeCapacity(part);
         self.bytes_written += total;
         self.shared.cond.broadcast(self.io);
     }
