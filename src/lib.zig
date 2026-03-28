@@ -26,6 +26,7 @@ pub const mempool = struct {
 // Network components
 pub const peer = @import("core/network/peer.zig");
 pub const server = @import("core/server/server.zig");
+pub const libp2p_wire = @import("core/network/libp2p_wire.zig");
 pub const protocol = struct {
     pub const message_envelope = @import("core/network/protocol/message_envelope.zig");
     pub const protocol = @import("core/network/protocol/protocol.zig");

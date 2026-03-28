@@ -10,11 +10,11 @@
 **Branch:** `libp2p-integration`
 **Active initiative:** Wire libp2p into zen_server (ZEI-11)
 
-**Last worked on:** Created `libp2p-integration` branch. Wrote integration plan at `docs/LIBP2P_INTEGRATION_PLAN.md`. No code changes yet.
+**Last worked on:** 2026-03-28 — Phase 1 complete. `src/core/network/libp2p_wire.zig` written and tested.
 
-**Next step:** Start Phase 1 — create `src/core/network/libp2p_wire.zig`, the protocol adapter shim that wraps a yamux stream behind the existing `WireConnection` interface (`/zeicoin/1.0.0`).
+**Next step:** Phase 2 — bootstrap config migration. Create `src/core/network/bootstrap.zig`, replace `ZEICOIN_BOOTSTRAP=ip:port` parsing with multiaddr format. No old-format fallback.
 
-**In flight:** Nothing — clean starting point.
+**In flight:** Nothing — Phase 1 committed cleanly.
 
 ---
 
@@ -30,7 +30,7 @@
 
 | Phase | Ticket | What | Status |
 |-------|--------|------|--------|
-| 1 | ZEI-39 | Protocol adapter (`LibP2pWireConnection`) | **Not started** |
+| 1 | ZEI-39 | Protocol adapter (`LibP2pWireConnection`) | **Done** ✅ |
 | 2 | ZEI-31/35/36 | Bootstrap config → multiaddr | Not started |
 | 3 | ZEI-40/41 | peer_manager → libp2p Host | Not started |
 | 4 | ZEI-58 | Wire identify handler | Not started |

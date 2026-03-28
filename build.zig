@@ -65,6 +65,9 @@ pub fn build(b: *std.Build) !void {
         .link_libc = true,
     });
 
+    // libp2p transport layer — imported by src/core/network/libp2p_wire.zig
+    zeicoin_module.addImport("libp2p", libp2p_module_def);
+
     // **************************************************************
     // *              ZEICOIN AS A LIBRARY                          *
     // **************************************************************

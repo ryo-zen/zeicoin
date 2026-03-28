@@ -19,5 +19,8 @@ pub const yamux = yamux_proto;
 pub const HandlerRegistry = handler_registry_mod.HandlerRegistry;
 pub const Handler = handler_registry_mod.Handler;
 
+const inproc_mod = @import("transport/inproc.zig");
+pub const InProcConnection = inproc_mod.InProcConnection;
+
 const host_mod = @import("host/host.zig");
 pub const Host = host_mod.Host;
