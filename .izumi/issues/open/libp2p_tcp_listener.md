@@ -1,20 +1,22 @@
 ---
 id: libp2p_tcp_listener
 key: ZEI-55
-title: "Add TCP listener and server-side accept loop to libp2p transport"
+title: Add TCP listener and server-side accept loop to libp2p transport
 type: Task
 status: Done
 priority: High
 assignee: null
-labels: [libp2p, transport]
+labels:
+- libp2p
+- transport
 sprint: null
 story_points: null
 due_date: null
 parent_id: null
-rank: null
+rank: 1774605664333.0
 comments: []
 created_at: 2026-03-24T00:00:00+00:00
-updated_at: 2026-03-27T00:00:00+00:00
+updated_at: 2026-03-28T14:43:27.612320044+00:00
 ---
 
 ## Summary
