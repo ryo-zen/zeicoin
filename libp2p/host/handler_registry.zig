@@ -33,6 +33,9 @@ pub const HandlerRegistry = struct {
     allocator: std.mem.Allocator,
     // Keys are owned by the registry (duped on register, freed on deinit).
     handlers: std.StringHashMap(Handler),
+    // Cached slice of registered protocol IDs — slices point into handlers keys.
+    // Rebuilt only on register(); reused on every dispatch().
+    protocol_ids: std.array_list.Managed([]const u8),
 
     const Self = @This();
 
@@ -40,6 +43,7 @@ pub const HandlerRegistry = struct {
         return .{
             .allocator = allocator,
             .handlers = std.StringHashMap(Handler).init(allocator),
+            .protocol_ids = std.array_list.Managed([]const u8).init(allocator),
         };
     }
 
@@ -49,6 +53,7 @@ pub const HandlerRegistry = struct {
             self.allocator.free(entry.key_ptr.*);
         }
         self.handlers.deinit();
+        self.protocol_ids.deinit();
     }
 
     // Register a handler for a protocol. protocol_id must start with '/'.
@@ -57,6 +62,7 @@ pub const HandlerRegistry = struct {
         const owned_key = try self.allocator.dupe(u8, protocol_id);
         errdefer self.allocator.free(owned_key);
         try self.handlers.put(owned_key, handler);
+        try self.protocol_ids.append(owned_key);
     }
 
     // Dispatch an inbound stream: run Multistream responder negotiation then
@@ -67,23 +73,14 @@ pub const HandlerRegistry = struct {
     // Returns DispatchError.ProtocolNegotiationFailed if negotiation ends
     // without selecting a protocol (e.g. peer closed before agreeing).
     pub fn dispatch(self: *Self, stream: *yamux.Stream) !void {
-        if (self.handlers.count() == 0) return DispatchError.NoHandlersRegistered;
-
-        // Build the protocol list for the Negotiator from the registered keys.
-        var protocol_list = std.array_list.Managed([]const u8).init(self.allocator);
-        defer protocol_list.deinit();
-
-        var key_it = self.handlers.keyIterator();
-        while (key_it.next()) |key| {
-            try protocol_list.append(key.*);
-        }
+        if (self.protocol_ids.items.len == 0) return DispatchError.NoHandlersRegistered;
 
         const io = stream.session.session_io;
 
         var reader = StreamReader{ .stream = stream };
         var writer = StreamWriter{ .stream = stream };
 
-        var negotiator = ms.Negotiator.init(self.allocator, protocol_list.items, false);
+        var negotiator = ms.Negotiator.init(self.allocator, self.protocol_ids.items, false);
         const selected = negotiator.negotiate(io, &reader, &writer) catch {
             return DispatchError.ProtocolNegotiationFailed;
         };
@@ -103,7 +100,7 @@ pub const HandlerRegistry = struct {
 
     // Returns the number of registered protocols.
     pub fn count(self: *const Self) usize {
-        return self.handlers.count();
+        return self.protocol_ids.items.len;
     }
 };
 

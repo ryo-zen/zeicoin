@@ -31,22 +31,6 @@ const print = std.debug.print;
 
 // ── profiles ─────────────────────────────────────────────────────────────────
 
-const CiProfile = struct {
-    duration_secs: u64 = 5,
-    session_cycles: usize = 8,
-    stream_count: usize = 1000,
-    payload_bytes: usize = 4 * 1024,
-    concurrent_workers: usize = 4,
-};
-
-const SoakProfile = struct {
-    duration_secs: u64 = 120,
-    session_cycles: usize = 200,
-    stream_count: usize = 100_000,
-    payload_bytes: usize = 64 * 1024,
-    concurrent_workers: usize = 8,
-};
-
 const Config = struct {
     duration_secs: u64,
     session_cycles: usize,
@@ -55,24 +39,22 @@ const Config = struct {
     concurrent_workers: usize,
 
     fn ci() Config {
-        const p = CiProfile{};
         return .{
-            .duration_secs = p.duration_secs,
-            .session_cycles = p.session_cycles,
-            .stream_count = p.stream_count,
-            .payload_bytes = p.payload_bytes,
-            .concurrent_workers = p.concurrent_workers,
+            .duration_secs = 5,
+            .session_cycles = 8,
+            .stream_count = 1000,
+            .payload_bytes = 4 * 1024,
+            .concurrent_workers = 4,
         };
     }
 
     fn soak() Config {
-        const p = SoakProfile{};
         return .{
-            .duration_secs = p.duration_secs,
-            .session_cycles = p.session_cycles,
-            .stream_count = p.stream_count,
-            .payload_bytes = p.payload_bytes,
-            .concurrent_workers = p.concurrent_workers,
+            .duration_secs = 120,
+            .session_cycles = 200,
+            .stream_count = 100_000,
+            .payload_bytes = 64 * 1024,
+            .concurrent_workers = 8,
         };
     }
 };

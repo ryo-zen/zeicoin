@@ -291,9 +291,12 @@ fn upgradeInbound(
 // Concurrent target: Multistream responder negotiation + handler call for one stream.
 
 fn dispatchStream(stream: yamux.Stream, registry: *HandlerRegistry) void {
+    const log = std.log.scoped(.host);
     var s = stream;
     defer s.deinit();
-    registry.dispatch(&s) catch {};
+    registry.dispatch(&s) catch |err| {
+        log.warn("stream dispatch failed: {s}", .{@errorName(err)});
+    };
 }
 
 // ── handleInbound ─────────────────────────────────────────────────────────────
