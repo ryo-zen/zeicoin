@@ -15,6 +15,7 @@ const yamux = @import("../muxer/yamux.zig");
 const ms = @import("../protocol/multistream.zig");
 const peer_id_mod = @import("../peer/peer_id.zig");
 const handler_registry_mod = @import("handler_registry.zig");
+const identify_mod = @import("../protocol/identify.zig");
 
 const Multiaddr = @import("../multiaddr/multiaddr.zig").Multiaddr;
 const IdentityKey = peer_id_mod.IdentityKey;
@@ -358,6 +359,8 @@ pub const Host = struct {
     sessions: std.array_list.Managed(*UpgradedConn),
     // Protects sessions list for concurrent dial() calls.
     sessions_mutex: std.Thread.Mutex,
+    // Our listen address — set in listen(), used in identify responses.
+    listen_addr: ?Multiaddr,
 
     const Self = @This();
 
@@ -371,6 +374,7 @@ pub const Host = struct {
             .listener = null,
             .sessions = std.array_list.Managed(*UpgradedConn).init(allocator),
             .sessions_mutex = .{},
+            .listen_addr = null,
         };
     }
 
@@ -383,6 +387,7 @@ pub const Host = struct {
         self.registry.deinit();
         self.transport.deinit(); // closes listener
         self.identity.deinit();
+        if (self.listen_addr) |*la| la.deinit();
     }
 
     // Register a handler for an application protocol (e.g. "/zeicoin/sync/1.0.0").
@@ -391,7 +396,20 @@ pub const Host = struct {
     }
 
     // Bind to addr. Must be called before serve().
+    // Also stores the listen address and registers the identify inbound handler.
     pub fn listen(self: *Self, io: std.Io, addr: *const Multiaddr) !void {
+        // Store a copy of our listen address for identify responses.
+        if (self.listen_addr) |*la| la.deinit();
+        self.listen_addr = try Multiaddr.create(self.allocator, addr.getStringAddress());
+
+        // Register identify responder — must be registered before serve() starts.
+        if (!self.registry.has(identify_mod.PROTOCOL_ID)) {
+            try self.registry.register(identify_mod.PROTOCOL_ID, .{
+                .func = identifyInboundHandler,
+                .userdata = self,
+            });
+        }
+
         self.listener = try self.transport.listen(io, addr);
     }
 
@@ -458,6 +476,73 @@ pub const Host = struct {
         var negotiator = ms.Negotiator.init(self.allocator, &protos, true);
         _ = try negotiator.negotiate(io, &yr, &yw);
         return stream;
+    }
+
+    // Identify responder: called when a remote opens a /ipfs/id/1.0.0 stream.
+    // Sends our IdentifyInfo (public key, listen addr, protocols, agent) then closes.
+    fn identifyInboundHandler(stream: *yamux.Stream, conn_info: ConnInfo, userdata: ?*anyopaque) anyerror!void {
+        const host = @as(*Host, @ptrCast(@alignCast(userdata.?)));
+
+        // listen_addrs: one entry if we have a listen address.
+        var la_bytes_buf: [1][]const u8 = undefined;
+        var la_slice: []const []const u8 = &[_][]const u8{};
+        if (host.listen_addr) |*la| {
+            la_bytes_buf[0] = la.getBytesAddress();
+            la_slice = la_bytes_buf[0..1];
+        }
+
+        // observed_addr: the multiaddr bytes of the remote's TCP address.
+        // Build it on the stack; if unavailable leave empty (optional field).
+        var observed_ma: ?Multiaddr = null;
+        defer if (observed_ma) |*ma| ma.deinit();
+        if (conn_info.remote_addr) |ra| {
+            observed_ma = blk: {
+                const ma_str = switch (ra) {
+                    .ip4 => |a| try std.fmt.allocPrint(
+                        host.allocator, "/ip4/{}.{}.{}.{}/tcp/{}", .{
+                            a.bytes[0], a.bytes[1], a.bytes[2], a.bytes[3], a.port,
+                        },
+                    ),
+                    .ip6 => null,
+                };
+                defer if (ma_str) |s| host.allocator.free(s);
+                break :blk if (ma_str) |s| try Multiaddr.create(host.allocator, s) else null;
+            };
+        }
+        const observed_bytes = if (observed_ma) |*ma| ma.getBytesAddress() else &[_]u8{};
+
+        const encoded = try identify_mod.encodeIdentify(
+            host.allocator,
+            "/zeicoin/testnet/1.0.0",
+            "zeicoin/0.1.0",
+            host.identity.peer_id.getBytes(),
+            la_slice,
+            observed_bytes,
+            host.registry.protocol_ids.items,
+        );
+        defer host.allocator.free(encoded);
+
+        try stream.writeAll(encoded);
+        try stream.close();
+    }
+
+    // Identify initiator: open a /ipfs/id/1.0.0 stream on session and read
+    // the remote's IdentifyInfo. Caller owns the returned IdentifyInfo.
+    pub fn identifyPeer(self: *Self, io: std.Io, session: *yamux.Session) !identify_mod.IdentifyInfo {
+        var stream = try self.newStream(io, session, identify_mod.PROTOCOL_ID);
+        defer stream.deinit();
+
+        var buf = std.array_list.Managed(u8).init(self.allocator);
+        defer buf.deinit();
+
+        var tmp: [4096]u8 = undefined;
+        while (true) {
+            const n = stream.readSome(&tmp) catch break;
+            if (n == 0) break;
+            try buf.appendSlice(tmp[0..n]);
+        }
+
+        return identify_mod.decodeIdentify(self.allocator, buf.items);
     }
 
     // Accept and upgrade inbound connections, dispatching streams to registered
@@ -850,4 +935,48 @@ test "host: large payload integrity" {
 
     try std.testing.expectEqual(payload_size, total);
     try std.testing.expectEqualSlices(u8, payload, received[0..total]);
+}
+
+test "host: identify round-trip" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var server = Host.init(alloc, try IdentityKey.generate(alloc, io));
+    defer server.deinit();
+
+    var listen_addr = try Multiaddr.create(alloc, "/ip4/127.0.0.1/tcp/19806");
+    defer listen_addr.deinit();
+    try server.listen(io, &listen_addr);
+
+    var serve_future = try io.concurrent(Host.serve, .{ &server, io });
+    defer {
+        _ = serve_future.cancel(io) catch {};
+        serve_future.await(io) catch {};
+    }
+
+    var client = Host.init(alloc, try IdentityKey.generate(alloc, io));
+    defer client.deinit();
+
+    var dial_addr = try Multiaddr.create(alloc, "/ip4/127.0.0.1/tcp/19806");
+    defer dial_addr.deinit();
+    const session = try client.dial(io, &dial_addr);
+
+    var info = try client.identifyPeer(io, session);
+    defer info.deinit(alloc);
+
+    try std.testing.expectEqualStrings("/zeicoin/testnet/1.0.0", info.protocol_version);
+    try std.testing.expectEqualStrings("zeicoin/0.1.0", info.agent_version);
+    // server's peer ID bytes are encoded as the public_key field
+    try std.testing.expectEqualSlices(u8, server.identity.peer_id.getBytes(), info.public_key);
+    // server reported its listen address
+    try std.testing.expectEqual(@as(usize, 1), info.listen_addrs.items.len);
+    // identify protocol itself is in the registered protocols list
+    var found_identify = false;
+    for (info.protocols.items) |p| {
+        if (std.mem.eql(u8, p, identify_mod.PROTOCOL_ID)) {
+            found_identify = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_identify);
 }
