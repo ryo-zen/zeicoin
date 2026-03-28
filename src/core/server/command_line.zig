@@ -5,26 +5,23 @@ const std = @import("std");
 const log = std.log.scoped(.server);
 const network = @import("../network/peer.zig");
 const util = @import("../util/util.zig");
+const bootstrap = @import("../network/bootstrap.zig");
 
 pub const Config = struct {
     port: u16 = network.DEFAULT_PORT,
     api_port: u16 = 10802,
     rpc_port: u16 = 10803,
-    bootstrap_nodes: []const BootstrapNode = &[_]BootstrapNode{},
+    bootstrap_nodes: []const bootstrap.BootstrapAddr = &[_]bootstrap.BootstrapAddr{},
     enable_mining: bool = false,
     miner_wallet: ?[]const u8 = null,
     client_api_disabled: bool = false,
     bind_address: []const u8 = "127.0.0.1",
     bind_address_allocated: bool = false, // Track if bind_address was allocated
     allocator: std.mem.Allocator,
-    
+
     pub fn deinit(self: *Config) void {
         if (self.bootstrap_nodes.len > 0) {
-            // Free each IP string
-            for (self.bootstrap_nodes) |node| {
-                self.allocator.free(node.ip);
-            }
-            self.allocator.free(self.bootstrap_nodes);
+            bootstrap.freeList(self.allocator, self.bootstrap_nodes);
         }
         // Free miner_wallet if owned
         if (self.miner_wallet) |wallet_name| {
@@ -37,16 +34,14 @@ pub const Config = struct {
     }
 };
 
-pub const BootstrapNode = struct {
-    ip: []const u8,
-    port: u16,
-};
-
 pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Config {
     var config = Config{ .allocator = allocator };
-    var bootstrap_list = std.array_list.Managed(BootstrapNode).init(allocator);
-    defer bootstrap_list.deinit();
-    
+    var bootstrap_list = std.array_list.Managed(bootstrap.BootstrapAddr).init(allocator);
+    defer {
+        for (bootstrap_list.items) |*n| n.deinit();
+        bootstrap_list.deinit();
+    }
+
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h") or std.mem.eql(u8, args[i], "help")) {
@@ -56,7 +51,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Conf
             config.port = try std.fmt.parseInt(u16, args[i + 1], 10);
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--bootstrap") and i + 1 < args.len) {
-            try parseBootstrapNodes(&bootstrap_list, args[i + 1]);
+            try appendBootstrapNodes(allocator, &bootstrap_list, args[i + 1]);
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--mine")) {
             // Check if wallet name follows (REQUIRED)
@@ -90,7 +85,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Conf
     if (bootstrap_list.items.len == 0) {
         if (util.getEnvVarOwned(allocator, "ZEICOIN_BOOTSTRAP")) |env_bootstrap| {
             defer allocator.free(env_bootstrap);
-            try parseBootstrapNodes(&bootstrap_list, env_bootstrap);
+            try appendBootstrapNodes(allocator, &bootstrap_list, env_bootstrap);
         } else |_| {}
     }
 
@@ -140,20 +135,23 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Conf
     return config;
 }
 
-fn parseBootstrapNodes(list: *std.array_list.Managed(BootstrapNode), input: []const u8) !void {
-    var iter = std.mem.tokenizeScalar(u8, input, ',');
-    while (iter.next()) |node| {
-        var parts = std.mem.tokenizeScalar(u8, node, ':');
-        const ip = parts.next() orelse continue;
-        const port = if (parts.next()) |p| 
-            try std.fmt.parseInt(u16, p, 10) 
-        else 
-            network.DEFAULT_PORT;
-        
-        // Duplicate the IP string to ensure it's owned by the list
-        const ip_copy = try list.allocator.dupe(u8, ip);
-        try list.append(.{ .ip = ip_copy, .port = port });
+fn appendBootstrapNodes(
+    allocator: std.mem.Allocator,
+    list: *std.array_list.Managed(bootstrap.BootstrapAddr),
+    input: []const u8,
+) !void {
+    const parsed = try bootstrap.parseList(allocator, input);
+    var transferred: usize = 0;
+    errdefer {
+        // Free elements that were not yet transferred into the list.
+        for (parsed[transferred..]) |*n| n.deinit();
+        allocator.free(parsed);
     }
+    for (parsed) |node| {
+        try list.append(node);
+        transferred += 1;
+    }
+    allocator.free(parsed); // Slice header only; elements now owned by list.
 }
 
 fn printHelp() void {
@@ -165,7 +163,7 @@ fn printHelp() void {
         \\
         \\Options:
         \\  --port <port>           Listen on specified port (default: 10801)
-        \\  --bootstrap <nodes>     Bootstrap nodes (ip:port,ip:port,...)
+        \\  --bootstrap <nodes>     Bootstrap nodes (multiaddr, comma-separated)
         \\  --mine <wallet>         Enable mining to specified wallet (REQUIRED)
         \\  --no-client-api         Disable client API on port 10802
         \\  --help, -h, help        Show this help message
@@ -173,14 +171,14 @@ fn printHelp() void {
         \\Environment variables:
         \\  ZEICOIN_P2P_PORT        P2P listen port (default: 10801)
         \\  ZEICOIN_BIND_IP         Bind IP address (default: 127.0.0.1)
-        \\  ZEICOIN_BOOTSTRAP       Comma-separated list of bootstrap nodes
+        \\  ZEICOIN_BOOTSTRAP       Comma-separated bootstrap multiaddrs
         \\  ZEICOIN_MINE_ENABLED    Enable mining (true/false)
         \\  ZEICOIN_MINER_WALLET    Wallet name for mining rewards
         \\  ZEICOIN_CLIENT_API_ENABLED  Enable client API (true/false, default: true)
         \\
         \\Examples:
         \\  zen_server --port 10801
-        \\  zen_server --bootstrap 192.168.1.10:10801,192.168.1.11:10801
+        \\  zen_server --bootstrap /ip4/192.168.1.10/tcp/10801,/ip4/192.168.1.11/tcp/10801
         \\  zen_server --mine miner
         \\
     , .{});

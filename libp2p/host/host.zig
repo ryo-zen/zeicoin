@@ -19,6 +19,7 @@ const handler_registry_mod = @import("handler_registry.zig");
 const Multiaddr = @import("../multiaddr/multiaddr.zig").Multiaddr;
 const IdentityKey = peer_id_mod.IdentityKey;
 const PeerId = peer_id_mod.PeerId;
+const ConnInfo = handler_registry_mod.ConnInfo;
 
 pub const HandlerRegistry = handler_registry_mod.HandlerRegistry;
 pub const Handler = handler_registry_mod.Handler;
@@ -290,11 +291,11 @@ fn upgradeInbound(
 // ── dispatchStream ────────────────────────────────────────────────────────────
 // Concurrent target: Multistream responder negotiation + handler call for one stream.
 
-fn dispatchStream(stream: yamux.Stream, registry: *HandlerRegistry) void {
+fn dispatchStream(stream: yamux.Stream, registry: *HandlerRegistry, conn_info: ConnInfo) void {
     const log = std.log.scoped(.host);
     var s = stream;
     defer s.deinit();
-    registry.dispatch(&s) catch |err| {
+    registry.dispatch(&s, conn_info) catch |err| {
         log.warn("stream dispatch failed: {s}", .{@errorName(err)});
     };
 }
@@ -320,6 +321,16 @@ fn handleInbound(
         alloc.destroy(uc);
     }
 
+    // Build per-connection info from the upgrade result.
+    const remote_addr: ?std.Io.net.IpAddress = if (uc.tcp_conn.remote_multiaddr) |*ma|
+        ma.getTcpAddress()
+    else
+        null;
+    const conn_info = ConnInfo{
+        .remote_peer_id = &uc.remote_peer_id,
+        .remote_addr = remote_addr,
+    };
+
     var stream_group: std.Io.Group = .init;
     defer {
         stream_group.cancel(io);
@@ -328,7 +339,7 @@ fn handleInbound(
 
     while (true) {
         var stream = uc.session.acceptStream() catch break;
-        stream_group.concurrent(io, dispatchStream, .{ stream, registry }) catch {
+        stream_group.concurrent(io, dispatchStream, .{ stream, registry, conn_info }) catch {
             stream.deinit();
         };
     }
@@ -394,6 +405,16 @@ pub const Host = struct {
         return &uc.session;
     }
 
+    // Return the remote PeerId for an outbound session created by dial().
+    // The returned pointer is valid while the session is alive (i.e. while this Host is alive).
+    // Returns null if the session is not found in the outbound session list.
+    pub fn peerIdForSession(self: *const Self, session: *const yamux.Session) ?*const PeerId {
+        for (self.sessions.items) |uc| {
+            if (&uc.session == session) return &uc.remote_peer_id;
+        }
+        return null;
+    }
+
     // Open a Yamux stream on session and negotiate protocol via Multistream.
     // Returns a ready-to-use stream. Caller owns it and must call stream.deinit().
     pub fn newStream(self: *Self, io: std.Io, session: *yamux.Session, protocol: []const u8) !yamux.Stream {
@@ -454,7 +475,7 @@ test "host: dial and newStream echo" {
     try server.listen(io, &listen_addr);
 
     const EchoHandler = struct {
-        fn handle(stream: *yamux.Stream, _: ?*anyopaque) anyerror!void {
+        fn handle(stream: *yamux.Stream, _: ConnInfo, _: ?*anyopaque) anyerror!void {
             var buf: [4]u8 = undefined;
             var n: usize = 0;
             while (n < buf.len) {
@@ -509,7 +530,7 @@ test "host: unregistered protocol returns error" {
     try server.listen(io, &listen_addr);
 
     const DummyHandler = struct {
-        fn handle(_: *yamux.Stream, _: ?*anyopaque) anyerror!void {}
+        fn handle(_: *yamux.Stream, _: ConnInfo, _: ?*anyopaque) anyerror!void {}
     };
     try server.setStreamHandler("/known/1.0.0", .{ .func = DummyHandler.handle });
 
@@ -543,7 +564,7 @@ test "host: multiple concurrent streams on one session" {
     try server.listen(io, &listen_addr);
 
     const EchoHandler = struct {
-        fn handle(stream: *yamux.Stream, _: ?*anyopaque) anyerror!void {
+        fn handle(stream: *yamux.Stream, _: ConnInfo, _: ?*anyopaque) anyerror!void {
             var buf: [4]u8 = undefined;
             var n: usize = 0;
             while (n < buf.len) {
@@ -622,12 +643,12 @@ test "host: multiple protocols dispatch to correct handler" {
 
     // Each handler writes a distinct marker byte so the client can tell them apart.
     const HandlerA = struct {
-        fn handle(stream: *yamux.Stream, _: ?*anyopaque) anyerror!void {
+        fn handle(stream: *yamux.Stream, _: ConnInfo, _: ?*anyopaque) anyerror!void {
             try stream.writeAll("A");
         }
     };
     const HandlerB = struct {
-        fn handle(stream: *yamux.Stream, _: ?*anyopaque) anyerror!void {
+        fn handle(stream: *yamux.Stream, _: ConnInfo, _: ?*anyopaque) anyerror!void {
             try stream.writeAll("B");
         }
     };
@@ -677,12 +698,12 @@ test "host: handler error does not kill the session" {
     try server.listen(io, &listen_addr);
 
     const FailHandler = struct {
-        fn handle(_: *yamux.Stream, _: ?*anyopaque) anyerror!void {
+        fn handle(_: *yamux.Stream, _: ConnInfo, _: ?*anyopaque) anyerror!void {
             return error.IntentionalFailure;
         }
     };
     const EchoHandler = struct {
-        fn handle(stream: *yamux.Stream, _: ?*anyopaque) anyerror!void {
+        fn handle(stream: *yamux.Stream, _: ConnInfo, _: ?*anyopaque) anyerror!void {
             var buf: [2]u8 = undefined;
             var n: usize = 0;
             while (n < buf.len) {
@@ -744,7 +765,7 @@ test "host: large payload integrity" {
 
     // Handler reads exactly payload_size bytes and echoes them back in 64 KiB chunks.
     const LargeEchoHandler = struct {
-        fn handle(stream: *yamux.Stream, userdata: ?*anyopaque) anyerror!void {
+        fn handle(stream: *yamux.Stream, _: ConnInfo, userdata: ?*anyopaque) anyerror!void {
             const size: usize = @as(*const usize, @ptrCast(@alignCast(userdata.?))).*;
             var buf: [65536]u8 = undefined;
             var done: usize = 0;

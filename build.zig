@@ -420,6 +420,7 @@ pub fn build(b: *std.Build) !void {
             .target = target,
             .link_libc = true,
         });
+        check_test_module.addImport("libp2p", libp2p_module_def);
 
         const check_test = b.addTest(.{
             .root_module = check_test_module,
@@ -442,6 +443,7 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
         .link_libc = true,
     });
+    test_module.addImport("libp2p", libp2p_module_def);
 
     // Test the library which includes all modules
     const lib_unit_tests = b.addTest(.{

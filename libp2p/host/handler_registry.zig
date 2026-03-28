@@ -16,11 +16,21 @@
 const std = @import("std");
 const yamux = @import("../muxer/yamux.zig");
 const ms = @import("../protocol/multistream.zig");
+const peer_id_mod = @import("../peer/peer_id.zig");
 
-// Handler function type. The registry calls func(stream, userdata) after
+pub const PeerId = peer_id_mod.PeerId;
+
+// Per-connection context passed to every handler after Multistream negotiation.
+// All fields are optional so callers (including tests) can omit fields they don't have.
+pub const ConnInfo = struct {
+    remote_peer_id: ?*const PeerId = null,     // valid for handler call duration; null if unknown
+    remote_addr: ?std.Io.net.IpAddress = null, // TCP remote address; null if unknown
+};
+
+// Handler function type. The registry calls func(stream, conn_info, userdata) after
 // Multistream negotiation selects this handler's protocol.
 pub const Handler = struct {
-    func: *const fn (stream: *yamux.Stream, userdata: ?*anyopaque) anyerror!void,
+    func: *const fn (stream: *yamux.Stream, conn_info: ConnInfo, userdata: ?*anyopaque) anyerror!void,
     userdata: ?*anyopaque = null,
 };
 
@@ -72,7 +82,7 @@ pub const HandlerRegistry = struct {
     // Returns DispatchError.NoHandlersRegistered if the registry is empty.
     // Returns DispatchError.ProtocolNegotiationFailed if negotiation ends
     // without selecting a protocol (e.g. peer closed before agreeing).
-    pub fn dispatch(self: *Self, stream: *yamux.Stream) !void {
+    pub fn dispatch(self: *Self, stream: *yamux.Stream, conn_info: ConnInfo) !void {
         if (self.protocol_ids.items.len == 0) return DispatchError.NoHandlersRegistered;
 
         const io = stream.session.session_io;
@@ -90,7 +100,7 @@ pub const HandlerRegistry = struct {
             return DispatchError.ProtocolNegotiationFailed;
         };
 
-        try handler.func(stream, handler.userdata);
+        try handler.func(stream, conn_info, handler.userdata);
     }
 
     // Returns true if the registry has a handler for the given protocol.
@@ -211,7 +221,7 @@ test "handler registry: register and count" {
     try std.testing.expect(!registry.has("/test/1.0.0"));
 
     const noop = struct {
-        fn handle(_: *Stream, _: ?*anyopaque) anyerror!void {}
+        fn handle(_: *Stream, _: ConnInfo, _: ?*anyopaque) anyerror!void {}
     };
 
     try registry.register("/test/1.0.0", .{ .func = noop.handle });
@@ -237,7 +247,7 @@ test "handler registry: dispatch to matched handler" {
         received: []u8 = &[_]u8{},
 
         // Handler called after negotiation.
-        fn handlePing(stream: *Stream, userdata: ?*anyopaque) anyerror!void {
+        fn handlePing(stream: *Stream, _: ConnInfo, userdata: ?*anyopaque) anyerror!void {
             const rctx: *@This() = @ptrCast(@alignCast(userdata.?));
             var buf: [32]u8 = undefined;
             var n: usize = 0;
@@ -257,7 +267,7 @@ test "handler registry: dispatch to matched handler" {
 
             var stream = try rctx.session.acceptStream();
             defer stream.deinit();
-            try registry.dispatch(&stream);
+            try registry.dispatch(&stream, .{});
         }
     };
 
@@ -305,7 +315,7 @@ test "handler registry: unregistered protocol sends NA and dispatch fails" {
         allocator: std.mem.Allocator,
         dispatch_err: ?anyerror = null,
 
-        fn handleDummy(_: *Stream, _: ?*anyopaque) anyerror!void {}
+        fn handleDummy(_: *Stream, _: ConnInfo, _: ?*anyopaque) anyerror!void {}
 
         fn run(rctx: *@This()) anyerror!void {
             var registry = HandlerRegistry.init(rctx.allocator);
@@ -316,7 +326,7 @@ test "handler registry: unregistered protocol sends NA and dispatch fails" {
             var stream = try rctx.session.acceptStream();
             defer stream.deinit();
 
-            registry.dispatch(&stream) catch |err| {
+            registry.dispatch(&stream, .{}) catch |err| {
                 rctx.dispatch_err = err;
             };
         }
@@ -380,7 +390,7 @@ test "handler registry: dispatch fails with no handlers" {
 
     try std.testing.expectError(
         DispatchError.NoHandlersRegistered,
-        registry.dispatch(&stream),
+        registry.dispatch(&stream, .{}),
     );
 
     resp_future.await(io) catch {};

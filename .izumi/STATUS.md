@@ -10,18 +10,19 @@
 **Branch:** `libp2p-integration`
 **Active initiative:** Wire libp2p into zen_server (ZEI-11)
 
-**Last worked on:** 2026-03-28 — Phase 1 complete. `src/core/network/libp2p_wire.zig` written and tested.
+**Last worked on:** 2026-03-28 — Phase 3 complete. All connections now go through `libp2p.Host` (Noise XX + yamux). Raw TCP server removed. Node identity key persisted to `ZEICOIN_DATA_DIR/node_key`. All tests pass, binaries build.
 
-**Next step:** Phase 2 — bootstrap config migration. Create `src/core/network/bootstrap.zig`, replace `ZEICOIN_BOOTSTRAP=ip:port` parsing with multiaddr format. No old-format fallback.
+**Next step:** Commit Phase 3, then integration test: start server, verify it logs node identity, connects to bootstrap over libp2p.
 
-**In flight:** Nothing — Phase 1 committed cleanly.
+**In flight:** Nothing — Phase 3 done, not yet committed.
 
 ---
 
 ## Decisions Made This Session
 
 - **No backward compatibility** — ZeiCoin has no users. Old formats/paths are deleted, not shimmed. Applies to: bootstrap env var format, raw TCP path in peer_manager, etc.
-- **Bootstrap format:** Switching directly to multiaddr (`/ip4/x.x.x.x/tcp/port/p2p/<peer-id>`). Old `ip:port` format removed entirely.
+- **Bootstrap format:** Switched to multiaddr (`/ip4/x.x.x.x/tcp/port` or with `/p2p/<peer-id>`). Old `ip:port` format logs a migration hint and is skipped.
+- **Bootstrap fallback:** Hardcoded in `bootstrap.zig` (no JSON config file). `config/bootstrap_testnet.json` deleted.
 - **Integration plan doc:** `docs/LIBP2P_INTEGRATION_PLAN.md` is the source of truth for phase order, acceptance criteria, and key file locations.
 
 ---
@@ -31,7 +32,7 @@
 | Phase | Ticket | What | Status |
 |-------|--------|------|--------|
 | 1 | ZEI-39 | Protocol adapter (`LibP2pWireConnection`) | **Done** ✅ |
-| 2 | ZEI-31/35/36 | Bootstrap config → multiaddr | Not started |
+| 2 | ZEI-31/35/36 | Bootstrap config → multiaddr | **Done** ✅ |
 | 3 | ZEI-40/41 | peer_manager → libp2p Host | Not started |
 | 4 | ZEI-58 | Wire identify handler | Not started |
 | 5 | ZEI-59 | Connection pool (dedup dials) | Not started |

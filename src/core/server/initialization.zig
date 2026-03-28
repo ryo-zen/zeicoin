@@ -2,6 +2,7 @@
 // Handles blockchain, network, and miner initialization
 
 const std = @import("std");
+const libp2p = @import("libp2p");
 const zen = @import("../node.zig");
 const network = @import("../network/peer.zig");
 const sync = @import("../sync/manager.zig");
@@ -10,6 +11,7 @@ const wallet = @import("../wallet/wallet.zig");
 const password_util = @import("../util/password.zig");
 const key = @import("../crypto/key.zig");
 const command_line = @import("command_line.zig");
+const bootstrap = @import("../network/bootstrap.zig");
 const types = @import("../types/types.zig");
 const bech32 = @import("../crypto/bech32.zig");
 const util = @import("../util/util.zig");
@@ -21,60 +23,6 @@ fn acceptConnectionsThread(network_manager: *network.NetworkManager) void {
     };
 }
 
-/// Load bootstrap nodes from JSON config, with command line fallback
-fn loadBootstrapNodes(allocator: std.mem.Allocator, io: std.Io, cmd_line_nodes: []const command_line.BootstrapNode) ![]const command_line.BootstrapNode {
-    // If command line nodes are provided, use them (they override JSON)
-    if (cmd_line_nodes.len > 0) {
-        std.log.info("Using {} command line bootstrap nodes", .{cmd_line_nodes.len});
-        // Duplicate the slice to ensure consistent memory management
-        var result = try allocator.alloc(command_line.BootstrapNode, cmd_line_nodes.len);
-        for (cmd_line_nodes, 0..) |node, i| {
-            result[i] = command_line.BootstrapNode{
-                .ip = try allocator.dupe(u8, node.ip),
-                .port = node.port,
-            };
-        }
-        return result;
-    }
-    
-    // Try to load from JSON config
-    const json_nodes = types.loadBootstrapNodes(allocator, io) catch |err| {
-        std.log.warn("Failed to load bootstrap nodes from JSON: {}", .{err});
-        // Return empty slice if both JSON and command line fail
-        return try allocator.alloc(command_line.BootstrapNode, 0);
-    };
-    defer types.freeBootstrapNodes(allocator, json_nodes);
-    
-    std.log.info("Loaded {} bootstrap nodes from JSON config", .{json_nodes.len});
-    
-    // Convert JSON format (ip:port strings) to BootstrapNode format
-    var result = try allocator.alloc(command_line.BootstrapNode, json_nodes.len);
-    for (json_nodes, 0..) |node_str, i| {
-        // Parse "ip:port" format
-        var it = std.mem.splitScalar(u8, node_str, ':');
-        const ip_str = it.next() orelse {
-            std.log.warn("Invalid bootstrap node format: {s}", .{node_str});
-            continue;
-        };
-        const port_str = it.next() orelse "10801"; // Default port
-        const port = std.fmt.parseInt(u16, port_str, 10) catch 10801;
-        
-        result[i] = command_line.BootstrapNode{
-            .ip = try allocator.dupe(u8, ip_str),
-            .port = port,
-        };
-    }
-    
-    return result;
-}
-
-/// Free bootstrap nodes memory
-fn freeBootstrapNodes(allocator: std.mem.Allocator, nodes: []const command_line.BootstrapNode) void {
-    for (nodes) |node| {
-        allocator.free(node.ip);
-    }
-    allocator.free(nodes);
-}
 
 /// Load consensus configuration from environment variables
 fn loadConsensusConfig() void {
@@ -197,9 +145,17 @@ pub fn initializeNode(allocator: std.mem.Allocator, io: std.Io, config: command_
     const handler_result = try createMessageHandler(allocator, blockchain);
     errdefer allocator.destroy(handler_result.impl);
     
+    // Load or create persistent node identity key (Ed25519, stored at data_dir/node_key).
+    const data_dir_for_key = if (data_dir_override) |dir| dir else types.CURRENT_NETWORK.getDataDir();
+    const node_key_path = try std.fmt.allocPrint(allocator, "{s}/node_key", .{data_dir_for_key});
+    defer allocator.free(node_key_path);
+    const identity = try libp2p.IdentityKey.loadOrCreate(allocator, io, node_key_path);
+    // Ownership transferred to NetworkManager.init() below — do not call identity.deinit().
+    std.log.info("🔑 Node identity: {s}", .{identity.peer_id.toString()});
+
     // Initialize network
     var network_manager = try allocator.create(network.NetworkManager);
-    network_manager.* = network.NetworkManager.init(allocator, io, handler_result.handler);
+    network_manager.* = network.NetworkManager.init(allocator, io, handler_result.handler, identity);
     // Note: network_manager ownership is transferred to blockchain.network_coordinator
     // No errdefer needed - NodeComponents.deinit() handles cleanup
     
@@ -226,24 +182,24 @@ pub fn initializeNode(allocator: std.mem.Allocator, io: std.Io, config: command_
     std.log.info("Connection accept thread started", .{});
     
     
-    // Load bootstrap nodes - JSON first, then command line fallback
-    const bootstrap_nodes = try loadBootstrapNodes(allocator, io, config.bootstrap_nodes);
-    defer freeBootstrapNodes(allocator, bootstrap_nodes);
-    
+    // Resolve bootstrap nodes: CLI > env var > hardcoded fallback
+    const bootstrap_nodes = try bootstrap.resolveBootstrapNodes(allocator, config.bootstrap_nodes);
+    defer bootstrap.freeList(allocator, bootstrap_nodes);
+
     // Set bootstrap nodes for auto-reconnect (NetworkManager will copy them)
     try network_manager.setBootstrapNodes(bootstrap_nodes);
-    
+
     // Connect to bootstrap nodes
     std.log.info("Connecting to {} bootstrap nodes", .{bootstrap_nodes.len});
-    for (bootstrap_nodes) |node| {
-        std.log.info("Attempting to connect to bootstrap node {s}:{}", .{ node.ip, node.port });
-        const address = std.Io.net.IpAddress.parse(node.ip, node.port) catch |err| {
-            std.log.warn("Failed to parse bootstrap node {s}:{} - {}", .{ node.ip, node.port, err });
+    for (bootstrap_nodes) |*node| {
+        const address = node.tcpAddress() orelse {
+            std.log.warn("Bootstrap node '{s}' has no TCP address, skipping",
+                .{node.multiaddr.getStringAddress()});
             continue;
         };
-        
+        std.log.info("Attempting to connect to bootstrap node {any}", .{address});
         network_manager.connectToPeer(address) catch |err| {
-            std.log.warn("Failed to connect to bootstrap node {any} - {}", .{ address, err });
+            std.log.warn("Failed to connect to bootstrap node {any}: {}", .{ address, err });
         };
     }
     

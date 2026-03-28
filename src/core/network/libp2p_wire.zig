@@ -7,20 +7,17 @@
 //   READ:  stream.readSome → peer.receiveData (same as PeerConnection.run)
 //   WRITE: peer.sendMessage → sendCallback → stream.writeAll (replaces tcpSendCallback)
 //
-// Usage (Phase 3 — peer_manager integration):
+// Outbound usage:
+//   var stream = try host.newStream(io, session, PROTOCOL_ID);
+//   var runner = StreamRunner.init(&stream, peer);
+//   try runner.run();
 //
-//   Inbound (HandlerRegistry):
-//     var ctx = HandlerCtx{ .peer = peer };
-//     try registry.register(PROTOCOL_ID, .{ .func = handler, .userdata = &ctx });
-//
-//   Outbound:
-//     var stream = try host.newStream(io, session, PROTOCOL_ID);
-//     var runner = StreamRunner.init(&stream, peer);
-//     try runner.run();
+// Inbound usage: see NetworkManager.zeicoinInboundHandler() in peer.zig.
 
 const std = @import("std");
 const libp2p = @import("libp2p");
 const yamux = libp2p.yamux;
+const ConnInfo = libp2p.ConnInfo;
 const peer_manager = @import("peer_manager.zig");
 
 const Peer = peer_manager.Peer;
@@ -29,22 +26,9 @@ pub const PROTOCOL_ID: []const u8 = "/zeicoin/1.0.0";
 
 // Send callback registered on Peer via setTcpSendCallback.
 // Writes framed bytes directly to the yamux stream.
-fn sendCallback(ctx: ?*anyopaque, data: []const u8) anyerror!void {
+pub fn sendCallback(ctx: ?*anyopaque, data: []const u8) anyerror!void {
     const stream: *yamux.Stream = @ptrCast(@alignCast(ctx.?));
     try stream.writeAll(data);
-}
-
-// Context passed as userdata to the HandlerRegistry handler function.
-pub const HandlerCtx = struct {
-    peer: *Peer,
-};
-
-// HandlerRegistry-compatible entry point for inbound /zeicoin/1.0.0 streams.
-// Called by HandlerRegistry.dispatch() after multistream negotiation completes.
-pub fn handler(stream: *yamux.Stream, userdata: ?*anyopaque) anyerror!void {
-    const ctx: *HandlerCtx = @ptrCast(@alignCast(userdata.?));
-    var runner = StreamRunner.init(stream, ctx.peer);
-    try runner.run();
 }
 
 // Runs the ZeiCoin wire protocol on a negotiated yamux stream.

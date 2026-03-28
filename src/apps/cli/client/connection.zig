@@ -94,17 +94,15 @@ pub fn getServerIP(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
         if (testServerConnection(io, detected_ip)) return allocator.dupe(u8, detected_ip);
     }
 
-    const bootstrap_nodes = types.loadBootstrapNodes(allocator, io) catch |err| {
+    const bootstrap_nodes = zeicoin.bootstrap.hardcodedNodes(allocator) catch |err| {
         log.info("⚠️  Failed to load bootstrap nodes: {}", .{err});
         return ConnectionError.NetworkError;
     };
-    defer types.freeBootstrapNodes(allocator, bootstrap_nodes);
+    defer zeicoin.bootstrap.freeList(allocator, bootstrap_nodes);
 
-    for (bootstrap_nodes) |bootstrap_addr| {
-        var it = std.mem.splitScalar(u8, bootstrap_addr, ':');
-        if (it.next()) |ip_str| {
-            if (testServerConnection(io, ip_str)) return allocator.dupe(u8, ip_str);
-        }
+    for (bootstrap_nodes) |*node| {
+        const ip_str = node.multiaddr.getFirstValueForProtocol(.ip4) catch continue;
+        if (testServerConnection(io, ip_str)) return allocator.dupe(u8, ip_str);
     }
 
     print("💡 Using localhost fallback\n", .{});

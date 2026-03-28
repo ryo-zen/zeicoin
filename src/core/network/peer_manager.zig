@@ -3,6 +3,8 @@
 
 const std = @import("std");
 const net = std.Io.net;
+const libp2p = @import("libp2p");
+const yamux = libp2p.yamux;
 const protocol = @import("protocol/protocol.zig");
 const wire = @import("wire/wire.zig");
 const message_types = @import("protocol/messages/message_types.zig");
@@ -91,8 +93,12 @@ pub const Peer = struct {
     
     response_mutex: std.Thread.Mutex,  // Protects response queues and block caches
 
-    // Stream reference for external close (PeerManager timeout wakeup)
-    stream: ?net.Stream,
+    // libp2p identity of the remote peer (owned; null until Noise handshake completes)
+    peer_id: ?libp2p.PeerId,
+
+    // Yamux stream reference for timeout wakeup — pointer into PeerConnection, NOT owned.
+    // PeerManager.stop() / cleanupTimedOut() calls stream.close() to wake blocked readSome().
+    yamux_stream: ?*yamux.Stream,
 
     // Reference counting for thread-safe peer lifecycle
     ref_count: std.atomic.Value(u32),
@@ -138,7 +144,8 @@ pub const Peer = struct {
             .received_blocks = std.AutoHashMap([32]u8, types.Block).init(allocator),
             .received_blocks_by_height = std.AutoHashMap(u32, types.Block).init(allocator),
             .response_mutex = std.Thread.Mutex{},
-            .stream = null,
+            .peer_id = null,
+            .yamux_stream = null,
             .ref_count = std.atomic.Value(u32).init(1),
         };
     }
@@ -153,6 +160,8 @@ pub const Peer = struct {
         if (self.user_agent.len > 0) {
             self.allocator.free(self.user_agent);
         }
+
+        if (self.peer_id) |*pid| pid.deinit();
 
         // Clean up response queues and block caches
         self.block_hash_responses.deinit();
@@ -562,28 +571,23 @@ pub const Peer = struct {
     pub fn format(self: *const Self, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = fmt;
         _ = options;
-        
-        // Safe address formatting to avoid std.net.IpAddress crashes
-        switch (self.address.any.family) {
-            std.posix.AF.INET => {
-                const addr = self.address.in.sa.addr;
-                const port = std.mem.bigToNative(u16, self.address.in.sa.port);
-                try writer.print("Peer[{}:{}.{}.{}.{}:{}:{}]", .{
-                    self.id,
-                    (addr >> 0) & 0xFF,
-                    (addr >> 8) & 0xFF,
-                    (addr >> 16) & 0xFF,
-                    (addr >> 24) & 0xFF,
-                    port,
-                    self.state,
-                });
-            },
-            std.posix.AF.INET6 => {
-                try writer.print("Peer[{}:ipv6:{}]", .{ self.id, self.state });
-            },
-            else => {
-                try writer.print("Peer[{}:unknown:{}]", .{ self.id, self.state });
-            },
+
+        // Show truncated PeerId when available, otherwise fall back to IP:port.
+        if (self.peer_id) |*pid| {
+            const id_str = pid.toString();
+            const truncated = if (id_str.len > 12) id_str[0..12] else id_str;
+            try writer.print("Peer[{}:{s}...:{}]", .{ self.id, truncated, self.state });
+            return;
+        }
+
+        switch (self.address) {
+            .ip4 => |a| try writer.print("Peer[{}:{}.{}.{}.{}:{}:{}]", .{
+                self.id,
+                a.bytes[0], a.bytes[1], a.bytes[2], a.bytes[3],
+                a.port,
+                self.state,
+            }),
+            .ip6 => try writer.print("Peer[{}:ipv6:{}]", .{ self.id, self.state }),
         }
     }
 };
@@ -635,17 +639,14 @@ pub const PeerManager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        // Mark all peers as disconnected and signal shutdown
-        // Close streams to wake any blocked readers in PeerConnection.run()
+        // Mark all peers as disconnected and signal shutdown.
+        // Close yamux streams to wake any blocked readSome() in PeerConnection.run().
         for (self.peers.items) |peer| {
             peer.state = .disconnected;
             peer.is_shutting_down.store(true, .release);
-            if (peer.stream) |s| {
-                // shutdown() interrupts any blocked netRead in the connection thread.
-                // close() alone does not reliably unblock a recv() on Linux.
-                s.shutdown(self.io, .recv) catch {};
-                s.close(self.io);
-                peer.stream = null;
+            if (peer.yamux_stream) |s| {
+                s.close() catch {};
+                peer.yamux_stream = null;
             }
         }
     }
@@ -670,14 +671,18 @@ pub const PeerManager = struct {
         };
     }
 
-    /// Add a new peer connection
-    pub fn addPeer(self: *Self, address: net.IpAddress) !*Peer {
+    /// Add a new peer connection.
+    /// peer_id is an owned PeerId (moved into the Peer); pass null if not yet known.
+    /// Duplicate detection: by PeerId if both sides have one, else by IP address.
+    pub fn addPeer(self: *Self, address: net.IpAddress, peer_id: ?libp2p.PeerId) !*Peer {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        // SECURITY: Check if IP already has a connection (compare IP only, ignore port)
+        // SECURITY: deduplicate by PeerId (preferred) or IP
         for (self.peers.items) |peer| {
-            if (sameIpIgnoringPort(peer.address, address)) {
+            if (peer.peer_id != null and peer_id != null) {
+                if (peer.peer_id.?.equals(&peer_id.?)) return error.AlreadyConnected;
+            } else if (sameIpIgnoringPort(peer.address, address)) {
                 return error.AlreadyConnected;
             }
         }
@@ -692,6 +697,7 @@ pub const PeerManager = struct {
         errdefer self.allocator.destroy(peer);
         const assigned_id = self.next_peer_id;
         peer.* = Peer.init(self.allocator, self.io, assigned_id, address);
+        peer.peer_id = peer_id; // transfer ownership
         self.next_peer_id += 1;
 
         try self.peers.append(peer);
@@ -821,10 +827,10 @@ pub const PeerManager = struct {
         while (i < self.peers.items.len) {
             const peer = self.peers.items[i];
             if (peer.isTimedOut()) {
-                // Close the stream to wake the blocked reader in PeerConnection.run()
-                if (peer.stream) |s| {
-                    s.close(self.io);
-                    peer.stream = null;  // Prevent double-close in PeerConnection.deinit()
+                // Close the yamux stream to wake the blocked readSome() in PeerConnection.run()
+                if (peer.yamux_stream) |s| {
+                    s.close() catch {};
+                    peer.yamux_stream = null;
                 }
                 peer.is_shutting_down.store(true, .release);
                 peer.release();
