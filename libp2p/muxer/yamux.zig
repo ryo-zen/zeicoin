@@ -290,8 +290,7 @@ pub const Session = struct {
         try self.sendGoAway(go_away_code);
     }
 
-    // Test-only helper: expose closed-state check.
-    pub fn testSessionIsClosed(self: *Self) bool {
+    pub fn isClosed(self: *Self) bool {
         return self.sessionIsClosed();
     }
 

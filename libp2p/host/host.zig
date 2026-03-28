@@ -356,6 +356,8 @@ pub const Host = struct {
     // Outbound sessions created via dial(). Inbound sessions are owned by
     // their handleInbound concurrent task and not tracked here.
     sessions: std.array_list.Managed(*UpgradedConn),
+    // Protects sessions list for concurrent dial() calls.
+    sessions_mutex: std.Thread.Mutex,
 
     const Self = @This();
 
@@ -368,6 +370,7 @@ pub const Host = struct {
             .transport = tcp.TcpTransport.init(allocator),
             .listener = null,
             .sessions = std.array_list.Managed(*UpgradedConn).init(allocator),
+            .sessions_mutex = .{},
         };
     }
 
@@ -393,6 +396,8 @@ pub const Host = struct {
     }
 
     // Dial addr, run the full upgrade stack, and return the Yamux session.
+    // If a live session to the same remote PeerId already exists, the new
+    // connection is closed and the existing session is returned (dedup).
     // The returned *Session is stable for the lifetime of this Host.
     pub fn dial(self: *Self, io: std.Io, addr: *const Multiaddr) !*yamux.Session {
         const conn = try self.transport.dial(io, addr);
@@ -401,6 +406,31 @@ pub const Host = struct {
             uc.deinit();
             self.allocator.destroy(uc);
         }
+
+        self.sessions_mutex.lock();
+        defer self.sessions_mutex.unlock();
+
+        // Evict stale (closed) sessions.
+        var i: usize = 0;
+        while (i < self.sessions.items.len) {
+            if (self.sessions.items[i].session.isClosed()) {
+                const dead = self.sessions.swapRemove(i);
+                dead.deinit();
+                self.allocator.destroy(dead);
+            } else {
+                i += 1;
+            }
+        }
+
+        // Return the existing session if we already have one for this PeerId.
+        for (self.sessions.items) |existing| {
+            if (existing.remote_peer_id.equals(&uc.remote_peer_id)) {
+                uc.deinit();
+                self.allocator.destroy(uc);
+                return &existing.session;
+            }
+        }
+
         try self.sessions.append(uc);
         return &uc.session;
     }
@@ -408,7 +438,9 @@ pub const Host = struct {
     // Return the remote PeerId for an outbound session created by dial().
     // The returned pointer is valid while the session is alive (i.e. while this Host is alive).
     // Returns null if the session is not found in the outbound session list.
-    pub fn peerIdForSession(self: *const Self, session: *const yamux.Session) ?*const PeerId {
+    pub fn peerIdForSession(self: *Self, session: *const yamux.Session) ?*const PeerId {
+        self.sessions_mutex.lock();
+        defer self.sessions_mutex.unlock();
         for (self.sessions.items) |uc| {
             if (&uc.session == session) return &uc.remote_peer_id;
         }
