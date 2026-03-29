@@ -1,7 +1,6 @@
-# Simplified docker-compose.yml using YAML anchors
-# Reduces duplication from 105 lines to 65 lines
+# docker-compose.yml — 3-node zen_server topology with libp2p
+# Uses static IPs so ZEICOIN_BOOTSTRAP can be multiaddr (/ip4/.../tcp/...)
 
-# Common configuration (defined once, reused everywhere)
 x-common: &common
   build:
     context: ..
@@ -15,10 +14,9 @@ x-common: &common
     retries: 5
     start_period: 30s
 
-# Common environment variables
 x-common-env: &common-env
   ZEICOIN_NETWORK: testnet
-  ZEICOIN_TEST_MODE: "true"  # Enable easy difficulty for Docker testing/reorg scenarios
+  ZEICOIN_TEST_MODE: "true"
   ZEICOIN_BIND_IP: 0.0.0.0
   ZEICOIN_P2P_PORT: 10801
   ZEICOIN_API_PORT: 10802
@@ -29,17 +27,20 @@ services:
     <<: *common
     container_name: zeicoin-miner-1
     ports:
-      - "10801:10801"  # P2P
-      - "10802:10802"  # Client API
-      - "10803:10803"  # RPC
+      - "10801:10801"
+      - "10802:10802"
+      - "10803:10803"
     volumes:
       - miner1-data:/zeicoin/zeicoin_data_testnet
     environment:
       <<: *common-env
-      ZEICOIN_BOOTSTRAP: ""  # Seed node - no bootstrap needed
-      ZEICOIN_MINE_ENABLED: true
+      ZEICOIN_BOOTSTRAP: ""
+      ZEICOIN_MINE_ENABLED: "true"
       ZEICOIN_MINER_WALLET: miner1
       ZEICOIN_WALLET_PASSWORD: miner123
+    networks:
+      zeicoin-network:
+        ipv4_address: 172.33.0.10
     command: ["/scripts/init-seed.sh"]
 
   miner-2:
@@ -53,14 +54,16 @@ services:
       - miner2-data:/zeicoin/zeicoin_data_testnet
     environment:
       <<: *common-env
-      ZEICOIN_BOOTSTRAP: miner-1:10801
-      ZEICOIN_MINE_ENABLED: true
+      ZEICOIN_BOOTSTRAP: "/ip4/172.33.0.10/tcp/10801"
+      ZEICOIN_MINE_ENABLED: "true"
       ZEICOIN_MINER_WALLET: miner2
       ZEICOIN_WALLET_PASSWORD: miner123
-      MAX_CONNECT_ATTEMPTS: 5
     depends_on:
       miner-1:
         condition: service_healthy
+    networks:
+      zeicoin-network:
+        ipv4_address: 172.33.0.11
     command: ["/scripts/init-node.sh"]
 
   node-1:
@@ -74,24 +77,24 @@ services:
       - node1-data:/zeicoin/zeicoin_data_testnet
     environment:
       <<: *common-env
-      ZEICOIN_BOOTSTRAP: miner-1:10801,miner-2:10801
-      ZEICOIN_MINE_ENABLED: true
+      ZEICOIN_BOOTSTRAP: "/ip4/172.33.0.10/tcp/10801,/ip4/172.33.0.11/tcp/10801"
+      ZEICOIN_MINE_ENABLED: "true"
     depends_on:
       miner-1:
         condition: service_healthy
       miner-2:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "10801"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 20s  # Non-mining node starts faster
+    networks:
+      zeicoin-network:
+        ipv4_address: 172.33.0.12
     command: ["/scripts/init-node.sh"]
 
 networks:
   zeicoin-network:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.33.0.0/24
 
 volumes:
   miner1-data:

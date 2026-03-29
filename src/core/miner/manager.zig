@@ -85,7 +85,7 @@ pub fn miningThreadFn(ctx: MiningContext, miner_keypair: key.KeyPair, mining_add
 
         // Check if we should mine - wait for multiple transactions or timeout
         const tx_count = ctx.mempool_manager.getTransactionCount();
-        const min_batch_size = 1; // Wait for at least 1 transaction before mining
+        const min_batch_size: usize = if (types.TEST_MODE) 0 else 1;
         const should_mine = tx_count >= min_batch_size;
         const current_height = ctx.blockchain.getHeight() catch 0;
         log.info("🔍 [MINING CHECK] Height {} - mempool has {} transactions, should_mine={}", .{ current_height, tx_count, should_mine });
