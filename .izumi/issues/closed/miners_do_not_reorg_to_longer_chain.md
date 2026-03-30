@@ -3,7 +3,7 @@ id: miners_do_not_reorg_to_longer_chain
 key: ZEI-62
 title: "Miners do not reorg to longer chain from competing peer"
 type: Bug
-status: Todo
+status: Done
 priority: High
 assignee: null
 labels: ["consensus", "chain", "reorg"]
@@ -14,7 +14,7 @@ parent_id: null
 rank: null
 comments: []
 created_at: 2026-03-29T21:00:00+00:00
-updated_at: 2026-03-29T21:00:00+00:00
+updated_at: 2026-03-30T06:48:09+00:00
 ---
 
 ## Summary
@@ -50,11 +50,11 @@ Step 3-5 is not implemented.
 
 ## Acceptance Criteria
 
-- [ ] When a block arrives that doesn't extend the current tip but comes from a peer with a longer chain, a reorg evaluation is triggered
-- [ ] The reorg evaluation fetches the competing chain from the peer (back to the fork point) and validates it
-- [ ] If the competing chain is longer, the node reorgs: rolls back blocks to fork point, applies competing chain
-- [ ] Docker 2-miner test: both miners converge to the same chain within a few blocks of divergence
-- [ ] Reorg does not trigger on shorter/equal-length competing chains (no flip-flopping)
+- [x] When a block arrives that doesn't extend the current tip but comes from a peer with a longer chain, a reorg evaluation is triggered
+- [x] The reorg evaluation fetches the competing chain from the peer (back to the fork point) and validates it
+- [x] If the competing chain is longer, the node reorgs: rolls back blocks to fork point, applies competing chain
+- [x] Docker 2-miner test: both miners converge to the same chain within a few blocks of divergence
+- [x] Reorg does not trigger on shorter/equal-length competing chains (no flip-flopping)
 
 ## Key Files
 
@@ -65,9 +65,6 @@ Step 3-5 is not implemented.
 
 ## Notes
 
-This is the harder of the two fork-related bugs (ZEI-61 is the sync stall). A proper reorg implementation requires:
-- Rolling back UTXO state to fork point
-- Re-applying blocks from competing chain
-- Handling in-flight mining (stop mining on old tip, restart on new tip)
-
-ZEI-61 (batch sync continuity) should be fixed first — it's simpler and unblocks sync-only nodes.
+- Core convergence is now fixed on `libp2p-integration`: incoming orphaned competing blocks trigger `triggerPeerSync()`, the decision routes through `SyncManager.startSync()`, and the reorg path uses fetched competing blocks plus local work verification before switching chains.
+- Both `./docker/scripts/test_libp2p_zen_server.sh` and `./docker/scripts/verify_deep_reorg.sh` now pass on the current branch.
+- Remaining hardening work was split into follow-on tickets: `ZEI-18`, `ZEI-64`, `ZEI-65`, `ZEI-66`, and `ZEI-52`.

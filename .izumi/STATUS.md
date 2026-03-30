@@ -10,11 +10,11 @@
 **Branch:** `libp2p-integration`
 **Active initiative:** Reorg safety process hardening after the canonical replay/state fix
 
-**Last worked on:** 2026-03-30 — Added `docs/REORG_SAFETY_PROFILE.md` as a reorg-specific adaptation of the NASA rules and wired it into `CLAUDE.md` and `AGENTS.md` so future reorg/replay/state-root work follows explicit subsystem rules. The profile requires one canonical state-apply path, one canonical `state_root` algorithm, no read-path persistence, bounded reorg work, and focused regression coverage.
+**Last worked on:** 2026-03-30 — Committed the canonical replay/state-root fix as `8d044f0`, kept the reorg safety profile in place, and aligned the stale reorg tracker items so `ZEI-61`, `ZEI-62`, `ZEI-63`, and `ZEI-67` reflect the landed work on `libp2p-integration`.
 
-**Next step:** Review and commit both the canonical replay/state-root fix and the new reorg safety profile, then use the profile as the checklist for any follow-up reorg changes.
+**Next step:** Implement `ZEI-18` real state snapshots so reorg rollback/restore stops replaying from genesis.
 
-**In flight:** Uncommitted work is currently in `docs/REORG_SAFETY_PROFILE.md`, `CLAUDE.md`, `AGENTS.md`, `src/core/sync/fork_detector.zig`, `src/core/sync/manager.zig`, `src/core/chain/state.zig`, `src/core/chain/reorg_executor.zig`, `src/core/chain/processor.zig`, `src/core/chain/operations.zig`, `src/core/miner/core.zig`, `src/core/node.zig`, `src/core/chain/state_root.zig`, `src/core/util/util.zig`, `src/tests.zig`, and `.izumi/STATUS.md`. The earlier reorg recovery / idiomatic cleanup / `ZEI-63` guard work is already committed (`323972b`, `9905ac4`, `2495d14`, `1e5ae08`).
+**In flight:** Housekeeping updates are uncommitted in `.izumi/STATUS.md` and the `ZEI-61` / `ZEI-62` / `ZEI-63` / `ZEI-67` issue files. After that cleanup, the immediate queue is `ZEI-18`, then `ZEI-64` / `ZEI-65` / `ZEI-66`; `ZEI-52` remains the broader deep-reorg hardening umbrella.
 
 ---
 
@@ -22,6 +22,7 @@
 
 - **Reorg work now has an explicit safety profile** — `docs/REORG_SAFETY_PROFILE.md` adapts the NASA rules to ZeiCoin's consensus-critical replay/reorg path and makes the intended discipline concrete.
 - **Workflow docs now point to the reorg profile** — `CLAUDE.md` and `AGENTS.md` both tell implementers and reviewers to read the profile before changing reorg/replay/state-root code, so the rules are part of the normal coding/review loop rather than a passive reference doc.
+- **Reorg ticket bookkeeping is now caught up with the code** — `ZEI-61`, `ZEI-62`, `ZEI-63`, and `ZEI-67` are no longer active blockers on this branch; the remaining reorg queue is `ZEI-18`, `ZEI-64`, `ZEI-65`, `ZEI-66`, and `ZEI-52`.
 - **`ChainState.getAccount()` is now a pure read on misses** — querying a missing address returns an in-memory zero/default account without writing it to RocksDB, so node-local reads can no longer leak synthetic zero accounts into the persisted account set or the state root.
 - **Canonical header.state_root now commits `address + balance + nonce + immature_balance`** — the shared `util.MerkleTree.hashAccountState()` helper was updated to include `immature_balance`, and `state_root.zig` no longer exposes a second competing root algorithm.
 - **`ChainState.processBlockTransactions()` is now the authoritative block-state apply path** — live block application, mining, replay/rebuild, and reorg apply all route through the same staged account-update logic, including coinbase maturity transitions and supply updates.
@@ -49,7 +50,7 @@
 - **Explicit empty bootstrap disables fallback** — `ZEICOIN_BOOTSTRAP=""` is now treated as an intentional “no bootstrap” setting, which keeps Docker seed nodes from dialing the hardcoded external testnet bootstrap.
 - **Docker validation is now clean enough to advance** — `./docker/scripts/test_libp2p_zen_server.sh` passes end-to-end, and the latest logs show only local Docker bootstrap addresses for the configured topology.
 - **High-height scripted deep reorg is now green too** — after rebuilding Docker images on 2026-03-30, `docker/scripts/verify_deep_reorg.sh` passed with divergence at height 50 and convergence back to miner-1’s height-50 hash after the forced restart/reconnect.
-- **Post-Docker mainnet blockers are now explicit** — after the deep reorg path went green, the next priority queue is `ZEI-63` (concurrency guard), `ZEI-67` (local work verification), and `ZEI-18` (real snapshots). `ZEI-64`/`65`/`66` remain important follow-ons, with `ZEI-52` covering related deep-reorg defenses.
+- **Post-Docker mainnet blockers are now explicit** — with `ZEI-61`, `ZEI-62`, `ZEI-63`, and `ZEI-67` closed on this branch, the next priority queue is `ZEI-18` (real snapshots), then `ZEI-64`/`65`/`66`; `ZEI-52` remains the umbrella deep-reorg hardening ticket.
 - **Replay/index rebuild errors must not be hidden** — `replayFromGenesis()` now logs and propagates the real failure from `getBlock()` / `indexBlock()` so recovery bugs are debuggable instead of collapsing into a generic replay failure.
 - **Transaction hot-path logging should not allocate at info level** — `processTransaction()` now keeps detailed sender/recipient/account-delta logging in Debug-mode-only blocks and reuses the formatted addresses once per transaction instead of allocating multiple Bech32 strings per info log line.
 - **Reorg results should use typed reasons, not ad hoc strings** — `ReorgResult` now carries an enum `failure_reason`, which is safer than storing optional string slices and clearer for future branching.
@@ -100,7 +101,7 @@
 | 5 | ZEI-59 | Connection pool (dedup dials) | **Done** ✅ |
 | 6 | ZEI-49 | Fix inproc writeVecAll OOM bug | **Done** ✅ |
 | 7 | ZEI-60 | Docker validation | **Done** ✅ (infra + test pass, revealed ZEI-61/62) |
-| 8 | ZEI-54 | Real-network integration test | Pending - after ZEI-61 fix |
+| 8 | ZEI-54 | Real-network integration test | Pending - after the current reorg/mainnet hardening queue |
 | 9 | ZEI-20 | Kademlia DHT | Post-MVP |
 
 Full details: `docs/LIBP2P_INTEGRATION_PLAN.md`
@@ -111,8 +112,8 @@ Full details: `docs/LIBP2P_INTEGRATION_PLAN.md`
 
 | Ticket | Bug | Severity | Status |
 |--------|-----|----------|--------|
-| ZEI-61 | Batch sync stalls on chain fork (previous_hash mismatch → infinite retry) | High | Fixed — committed as `a87f3e4`, Docker node converges |
-| ZEI-62 | Miners don't reorg to longer chain (orphaned blocks never trigger reorg eval) | High | InProgress — replay/root/coinbase bugs fixed, TEST_MODE PoW validation fixed, deep-reorg harness fixed, and both smoke + scripted high-height restart/reconnect Docker validations now pass |
+| ZEI-61 | Batch sync stalls on chain fork (previous_hash mismatch → infinite retry) | High | Fixed — committed as `a87f3e4`; sync restarts now clear stale peer block cache and the Docker node converges |
+| ZEI-62 | Miners don't reorg to longer chain (orphaned blocks never trigger reorg eval) | High | Fixed on `libp2p-integration` — orphan follow-up now routes into sync/reorg evaluation, and both smoke + scripted high-height restart/reconnect Docker validations pass |
 
 ---
 

@@ -3,7 +3,7 @@ id: batch_sync_chain_continuity_validation
 key: ZEI-61
 title: "Batch sync must validate chain continuity before applying blocks"
 type: Bug
-status: Todo
+status: Done
 priority: High
 assignee: null
 labels: ["consensus", "sync", "docker"]
@@ -14,7 +14,7 @@ parent_id: null
 rank: null
 comments: []
 created_at: 2026-03-29T21:00:00+00:00
-updated_at: 2026-03-29T21:00:00+00:00
+updated_at: 2026-03-30T06:48:09+00:00
 ---
 
 ## Summary
@@ -38,13 +38,14 @@ On failure, `failSync()` is called but the same peer and same cached blocks are 
 
 ## Acceptance Criteria
 
-- [ ] `processSequentialBlocks()` validates `block.header.previous_hash == previous_block_hash` before calling `applyBlock()`
-- [ ] When a chain discontinuity is detected mid-batch, the sync session aborts cleanly and resets (does not retry the same invalid block)
-- [ ] After abort, the sync manager can re-initiate sync from the current chain tip with a fresh peer or fresh block requests
-- [ ] Docker 3-node test with 2 competing miners: sync node converges to one chain without stalling
+- [x] `processSequentialBlocks()` validates `block.header.previous_hash == previous_block_hash` before calling `applyBlock()`
+- [x] When a chain discontinuity is detected mid-batch, the sync session aborts cleanly and resets (does not retry the same invalid block)
+- [x] After abort, the sync manager can re-initiate sync from the current chain tip with a fresh peer or fresh block requests
+- [x] Docker 3-node test with 2 competing miners: sync node converges to one chain without stalling
 
-## Key Files
+## Notes
 
-- `src/core/sync/protocol/batch_sync.zig` — `processSequentialBlocks()` (line ~858)
-- `src/core/server/server_handlers.zig` — `onBlock()` caches blocks per-peer without continuity check
-- `src/core/sync/manager.zig` — retry/failover logic after sync failure
+- Fixed in `a87f3e4`.
+- `processSequentialBlocks()` now detects continuity mismatches, queues a restart instead of mutating the tracker mid-iteration, and forces a fresh block request by clearing the sync peer's cached received blocks.
+- The Docker 3-node harness converged again after the fix instead of stalling on the same invalid height forever.
+- Key files: `src/core/sync/protocol/batch_sync.zig`, `src/core/network/peer_manager.zig`, `src/core/sync/manager.zig`
