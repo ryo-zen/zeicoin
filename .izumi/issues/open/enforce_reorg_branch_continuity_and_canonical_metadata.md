@@ -3,7 +3,7 @@ id: enforce_reorg_branch_continuity_and_canonical_metadata
 key: ZEI-69
 title: Enforce reorg branch continuity and recompute canonical block metadata
 type: Bug
-status: Backlog
+status: InProgress
 priority: High
 assignee: null
 labels:
@@ -18,7 +18,7 @@ parent_id: reorg_safety_and_recovery_hardening
 rank: null
 comments: []
 created_at: 2026-03-30T06:34:03+00:00
-updated_at: 2026-03-30T07:10:22+00:00
+updated_at: 2026-03-30T19:20:50+11:00
 ---
 
 ## Summary
@@ -28,19 +28,20 @@ updated_at: 2026-03-30T07:10:22+00:00
 ## Acceptance Criteria
 
 - [ ] The sync manager passes the known `fork_height` into the reorg executor instead of requiring the executor to rediscover it
-- [ ] Reorg application rejects any block whose `block.height` does not equal the expected target height
-- [ ] Reorg application rejects any replacement slice whose first block does not connect to the known fork point
-- [ ] Reorg application rejects any replacement slice where `block[n].header.previous_hash != hash(block[n-1])`
+- [x] Reorg application rejects any block whose `block.height` does not equal the expected target height
+- [x] Reorg application rejects any replacement slice whose first block does not connect to the known fork point
+- [x] Reorg application rejects any replacement slice where `block[n].header.previous_hash != hash(block[n-1])`
 - [ ] Reorg-applied blocks recompute local cumulative `chain_work` before being saved, matching the normal block-acceptance path
-- [ ] A regression test covers a misordered or mixed-fork replacement slice and proves it is rejected before canonical state is mutated
-- [ ] `zig build test` passes with no regressions
+- [x] A regression test covers a misordered or mixed-fork replacement slice and proves it is rejected before canonical state is mutated
+- [x] `zig build test` passes with no regressions
 
 ## Notes
 
 - Current path differences:
   - `src/core/sync/manager.zig` already knows the fork point
-  - `src/core/chain/reorg_executor.zig` recomputes it from the first block's `previous_hash`
+  - `src/core/chain/reorg_executor.zig` still recomputes it from the first block's `previous_hash`
   - `src/core/chain/processor.zig` recomputes `chain_work` on normal acceptance, but `reorg_executor.zig` currently saves the incoming `Block` struct as-is
+- Partial progress landed with `ZEI-18`: `ReorgExecutor.validateCompetingBranch()` now rejects height mismatches and broken `previous_hash` continuity before state mutation, and `src/tests.zig` covers malformed competing-branch rejection.
 - Related:
   - `ZEI-65` tracks removing the duplicate fork-point search
   - this ticket covers the stronger correctness contract around branch continuity and metadata parity once the known fork point is passed through

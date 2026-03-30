@@ -8,6 +8,7 @@ const types = @import("../types/types.zig");
 const util = @import("../util/util.zig");
 const db = @import("../storage/db.zig");
 const block_index = @import("block_index.zig");
+const state_root = @import("state_root.zig");
 const bech32 = @import("../crypto/bech32.zig");
 
 const log = std.log.scoped(.chain);
@@ -30,6 +31,8 @@ const Hash = types.Hash;
 /// - Transaction processing and validation
 /// - State rollback and replay operations
 pub const ChainState = struct {
+    pub const SNAPSHOT_INTERVAL: u32 = 1000;
+
     // Core state storage
     database: *db.Database,
     processed_transactions: std.array_list.Managed([32]u8),
@@ -456,6 +459,139 @@ pub const ChainState = struct {
         try self.replayFromGenesis(io, target_height);
     }
 
+    fn replayRange(self: *Self, io: std.Io, start_height: u32, end_height: u32) !void {
+        if (start_height > end_height) return;
+
+        var height = start_height;
+        while (height <= end_height) : (height += 1) {
+            var block = self.database.getBlock(io, height) catch |err| {
+                log.err("❌ [REPLAY] Failed to load block {}: {}", .{ height, err });
+                return err;
+            };
+            defer block.deinit(self.allocator);
+
+            const block_hash = block.hash();
+            self.indexBlock(height, block_hash) catch |err| {
+                log.err("❌ [REPLAY] Failed to index block {}: {}", .{ height, err });
+                return err;
+            };
+
+            try self.processBlockTransactions(io, block.transactions, height, true);
+        }
+    }
+
+    fn resetVolatileStateFromHeight(self: *Self, from_height: u32) void {
+        self.invalidateStateRootCache();
+        self.clearProcessedTransactions();
+        self.removeBlocksFromIndex(from_height);
+    }
+
+    fn loadCanonicalBlockHash(self: *Self, io: std.Io, height: u32) !Hash {
+        if (self.getBlockHash(height)) |block_hash| {
+            return block_hash;
+        }
+
+        var block = try self.database.getBlock(io, height);
+        defer block.deinit(self.allocator);
+        return block.hash();
+    }
+
+    pub fn verifyCurrentStateRoot(self: *Self, expected_state_root: Hash) !void {
+        const restored_root = try self.calculateStateRoot();
+        if (!std.mem.eql(u8, &restored_root, &expected_state_root)) {
+            log.err("❌ [SNAPSHOT] Restored state root mismatch", .{});
+            log.err("   Expected: {x}", .{&expected_state_root});
+            log.err("   Actual:   {x}", .{&restored_root});
+            return error.SnapshotStateRootMismatch;
+        }
+    }
+
+    fn shouldSavePeriodicSnapshot(height: u32) bool {
+        return height == 0 or (height % SNAPSHOT_INTERVAL) == 0;
+    }
+
+    pub fn maybeSavePeriodicStateSnapshot(self: *Self, io: std.Io, height: u32, block_hash: Hash) !void {
+        _ = io;
+        if (!shouldSavePeriodicSnapshot(height)) {
+            return;
+        }
+
+        const current_state_root = try self.calculateStateRoot();
+        try state_root.saveStateSnapshot(self.allocator, self.database, height, block_hash, current_state_root);
+    }
+
+    pub fn saveExactStateSnapshotAtHeight(self: *Self, io: std.Io, height: u32) !void {
+        const block_hash = try self.loadCanonicalBlockHash(io, height);
+        const current_state_root = try self.calculateStateRoot();
+        try state_root.saveStateSnapshot(self.allocator, self.database, height, block_hash, current_state_root);
+    }
+
+    pub fn restoreStateSnapshot(self: *Self, io: std.Io, target_height: u32) !bool {
+        const expected_block_hash = try self.loadCanonicalBlockHash(io, target_height);
+        const restored = try state_root.loadStateSnapshot(
+            self.allocator,
+            self.database,
+            target_height,
+            expected_block_hash,
+        );
+        const anchor = restored orelse return false;
+
+        self.resetVolatileStateFromHeight(target_height + 1);
+        try self.verifyCurrentStateRoot(anchor.state_root);
+        return true;
+    }
+
+    pub fn restoreNearestStateSnapshotAtOrBelow(self: *Self, io: std.Io, target_height: u32) !?state_root.SnapshotAnchor {
+        const snapshot_heights = try state_root.collectSnapshotHeightsAtOrBelow(self.allocator, self.database, target_height);
+        defer self.allocator.free(snapshot_heights);
+
+        var index = snapshot_heights.len;
+        while (index > 0) {
+            index -= 1;
+            const snapshot_height = snapshot_heights[index];
+            const expected_block_hash = self.loadCanonicalBlockHash(io, snapshot_height) catch |err| {
+                log.warn("⚠️ [SNAPSHOT] Skipping snapshot at height {}: failed to load canonical block hash: {}", .{ snapshot_height, err });
+                continue;
+            };
+
+            const restored = state_root.loadStateSnapshot(
+                self.allocator,
+                self.database,
+                snapshot_height,
+                expected_block_hash,
+            ) catch |err| switch (err) {
+                error.SnapshotBlockHashMismatch => {
+                    log.warn("⚠️ [SNAPSHOT] Skipping stale snapshot at height {} due to block-hash mismatch", .{snapshot_height});
+                    continue;
+                },
+                error.SnapshotStateRootMismatch => {
+                    log.err("❌ [SNAPSHOT] Skipping corrupted snapshot at height {} due to state-root mismatch", .{snapshot_height});
+                    continue;
+                },
+                error.SnapshotHeightMismatch => {
+                    log.err("❌ [SNAPSHOT] Skipping malformed snapshot at height {}", .{snapshot_height});
+                    continue;
+                },
+                else => return err,
+            };
+
+            const anchor = restored orelse continue;
+            self.resetVolatileStateFromHeight(snapshot_height + 1);
+            try self.verifyCurrentStateRoot(anchor.state_root);
+            return anchor;
+        }
+
+        return null;
+    }
+
+    pub fn refreshBlockIndexRange(self: *Self, from_height: u32, blocks: []const types.Block) !void {
+        self.resetVolatileStateFromHeight(from_height);
+        for (blocks, 0..) |block, i| {
+            const height = from_height + @as(u32, @intCast(i));
+            try self.indexBlock(height, block.hash());
+        }
+    }
+
     /// Rollback blockchain to specific height
     pub fn rollbackToHeight(self: *Self, io: std.Io, target_height: u32, current_height: u32) !void {
         if (target_height >= current_height) {
@@ -477,9 +613,25 @@ pub const ChainState = struct {
             return; // Nothing to rollback
         }
 
-        try self.rebuildStateToHeight(io, target_height);
+        if (try self.restoreStateSnapshot(io, target_height)) {
+            try self.saveExactStateSnapshotAtHeight(io, target_height);
+            std.log.info("🔄 [STATE ROLLBACK] State reverted to height {} from exact snapshot (blocks preserved)", .{target_height});
+            return;
+        }
 
-        std.log.info("🔄 [STATE ROLLBACK] State reverted to height {} (blocks preserved)", .{target_height});
+        if (try self.restoreNearestStateSnapshotAtOrBelow(io, target_height)) |snapshot_anchor| {
+            if (snapshot_anchor.height < target_height) {
+                try self.replayRange(io, snapshot_anchor.height + 1, target_height);
+            }
+            try self.saveExactStateSnapshotAtHeight(io, target_height);
+            std.log.info("🔄 [STATE ROLLBACK] State reverted to height {} from nearest snapshot at {}", .{ target_height, snapshot_anchor.height });
+            return;
+        }
+
+        try self.rebuildStateToHeight(io, target_height);
+        try self.saveExactStateSnapshotAtHeight(io, target_height);
+
+        std.log.info("🔄 [STATE ROLLBACK] State reverted to height {} via replay fallback (blocks preserved)", .{target_height});
     }
 
     /// Mature coinbase rewards after 100 block confirmation period

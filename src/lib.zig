@@ -10,6 +10,8 @@ pub const miner = @import("core/miner/main.zig");
 pub const chain = struct {
     pub const ChainState = @import("core/chain/state.zig").ChainState;
     pub const ChainProcessor = @import("core/chain/processor.zig").ChainProcessor;
+    pub const reorg_executor = @import("core/chain/reorg_executor.zig");
+    pub const state_root = @import("core/chain/state_root.zig");
     pub const validator = @import("core/chain/validator.zig");
 };
 

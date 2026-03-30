@@ -221,41 +221,7 @@ pub const Database = struct {
         return std.fmt.allocPrint(self.allocator, "{s}{s}", .{ WALLET_PREFIX, wallet_name });
     }
 
-    pub fn saveBlock(self: *Database, io: std.Io, height: u32, block: Block) !void {
-        _ = io;
-        const key = try self.makeBlockKey(height);
-        defer self.allocator.free(key);
-
-        var aw: std.Io.Writer.Allocating = .init(self.allocator);
-        defer aw.deinit();
-        serialize.serialize(&aw.writer, block) catch return DatabaseError.SerializationFailed;
-        const data = aw.written();
-
-        var err: ?[*:0]u8 = null;
-        c.rocksdb_put(
-            self.db,
-            self.write_options,
-            key.ptr,
-            key.len,
-            data.ptr,
-            data.len,
-            @ptrCast(&err),
-        );
-
-        if (err != null) {
-            log.info("RocksDB write error: {s}", .{err.?});
-            c.rocksdb_free(@constCast(@ptrCast(err)));
-            return DatabaseError.SaveFailed;
-        }
-
-        try self.updateHeight(height);
-    }
-
-    pub fn getBlock(self: *Database, io: std.Io, height: u32) !Block {
-        _ = io;
-        const key = try self.makeBlockKey(height);
-        defer self.allocator.free(key);
-
+    fn readRawValue(self: *Database, key: []const u8) ![]u8 {
         var err: ?[*:0]u8 = null;
         var val_len: usize = 0;
         const val_ptr = c.rocksdb_get(
@@ -278,7 +244,90 @@ pub const Database = struct {
         }
         defer c.rocksdb_free(val_ptr);
 
-        const data = val_ptr[0..val_len];
+        return try self.allocator.dupe(u8, val_ptr[0..val_len]);
+    }
+
+    fn writeRawValue(self: *Database, key: []const u8, value: []const u8) !void {
+        var err: ?[*:0]u8 = null;
+        c.rocksdb_put(
+            self.db,
+            self.write_options,
+            key.ptr,
+            key.len,
+            value.ptr,
+            value.len,
+            @ptrCast(&err),
+        );
+
+        if (err != null) {
+            log.info("RocksDB write error: {s}", .{err.?});
+            c.rocksdb_free(@constCast(@ptrCast(err)));
+            return DatabaseError.SaveFailed;
+        }
+    }
+
+    fn readNumericMetadata(self: *Database, comptime T: type, key: []const u8) T {
+        const data = self.readRawValue(key) catch return 0;
+        defer self.allocator.free(data);
+
+        if (data.len == @sizeOf(T)) {
+            return std.mem.readInt(T, data[0..@sizeOf(T)], .little);
+        }
+
+        return std.fmt.parseInt(T, data, 10) catch 0;
+    }
+
+    fn writeNumericMetadata(self: *Database, comptime T: type, key: []const u8, value: T) !void {
+        var buffer: [@sizeOf(T)]u8 = undefined;
+        std.mem.writeInt(T, &buffer, value, .little);
+        try self.writeRawValue(key, &buffer);
+    }
+
+    pub fn putKey(self: *Database, key: []const u8, value: []const u8) !void {
+        try self.writeRawValue(key, value);
+    }
+
+    pub fn getKey(self: *Database, key: []const u8) ![]u8 {
+        return try self.readRawValue(key);
+    }
+
+    pub fn deleteKey(self: *Database, key: []const u8) !void {
+        var err: ?[*:0]u8 = null;
+        c.rocksdb_delete(
+            self.db,
+            self.write_options,
+            key.ptr,
+            key.len,
+            @ptrCast(&err),
+        );
+
+        if (err != null) {
+            log.info("RocksDB delete error: {s}", .{err.?});
+            c.rocksdb_free(@constCast(@ptrCast(err)));
+            return DatabaseError.DeletionFailed;
+        }
+    }
+
+    pub fn saveBlock(self: *Database, io: std.Io, height: u32, block: Block) !void {
+        _ = io;
+        const key = try self.makeBlockKey(height);
+        defer self.allocator.free(key);
+
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        serialize.serialize(&aw.writer, block) catch return DatabaseError.SerializationFailed;
+        try self.writeRawValue(key, aw.written());
+
+        try self.updateHeight(height);
+    }
+
+    pub fn getBlock(self: *Database, io: std.Io, height: u32) !Block {
+        _ = io;
+        const key = try self.makeBlockKey(height);
+        defer self.allocator.free(key);
+
+        const data = try self.readRawValue(key);
+        defer self.allocator.free(data);
         var reader = std.Io.Reader.fixed(data);
 
         return serialize.deserialize(&reader, Block, self.allocator) catch DatabaseError.SerializationFailed;
@@ -291,24 +340,7 @@ pub const Database = struct {
         var aw: std.Io.Writer.Allocating = .init(self.allocator);
         defer aw.deinit();
         serialize.serialize(&aw.writer, account) catch return DatabaseError.SerializationFailed;
-        const data = aw.written();
-
-        var err: ?[*:0]u8 = null;
-        c.rocksdb_put(
-            self.db,
-            self.write_options,
-            key.ptr,
-            key.len,
-            data.ptr,
-            data.len,
-            @ptrCast(&err),
-        );
-
-        if (err != null) {
-            log.info("RocksDB write error: {s}", .{err.?});
-            c.rocksdb_free(@constCast(@ptrCast(err)));
-            return DatabaseError.SaveFailed;
-        }
+        try self.writeRawValue(key, aw.written());
 
         try self.incrementAccountCount();
     }
@@ -317,58 +349,15 @@ pub const Database = struct {
         const key = try self.makeAccountKey(address);
         defer self.allocator.free(key);
 
-        var err: ?[*:0]u8 = null;
-        var val_len: usize = 0;
-        const val_ptr = c.rocksdb_get(
-            self.db,
-            self.read_options,
-            key.ptr,
-            key.len,
-            &val_len,
-            @ptrCast(&err),
-        );
-
-        if (err != null) {
-            log.info("RocksDB read error: {s}", .{err.?});
-            c.rocksdb_free(@constCast(@ptrCast(err)));
-            return DatabaseError.LoadFailed;
-        }
-
-        if (val_ptr == null) {
-            return DatabaseError.NotFound;
-        }
-        defer c.rocksdb_free(val_ptr);
-
-        const data = val_ptr[0..val_len];
+        const data = try self.readRawValue(key);
+        defer self.allocator.free(data);
         var reader = std.Io.Reader.fixed(data);
 
         return serialize.deserialize(&reader, Account, self.allocator) catch DatabaseError.SerializationFailed;
     }
 
     pub fn getHeight(self: *Database) !u32 {
-        var err: ?[*:0]u8 = null;
-        var val_len: usize = 0;
-        const val_ptr = c.rocksdb_get(
-            self.db,
-            self.read_options,
-            HEIGHT_KEY.ptr,
-            HEIGHT_KEY.len,
-            &val_len,
-            @ptrCast(&err),
-        );
-
-        if (err != null) {
-            c.rocksdb_free(@constCast(@ptrCast(err)));
-            return 0;
-        }
-
-        if (val_ptr == null) {
-            return 0;
-        }
-        defer c.rocksdb_free(val_ptr);
-
-        const data = val_ptr[0..val_len];
-        return std.fmt.parseInt(u32, data, 10) catch 0;
+        return self.readNumericMetadata(u32, HEIGHT_KEY);
     }
 
     fn updateHeight(self: *Database, height: u32) !void {
@@ -379,24 +368,7 @@ pub const Database = struct {
     }
 
     fn writeHeight(self: *Database, height: u32) !void {
-        const height_str = try std.fmt.allocPrint(self.allocator, "{}", .{height});
-        defer self.allocator.free(height_str);
-
-        var err: ?[*:0]u8 = null;
-        c.rocksdb_put(
-            self.db,
-            self.write_options,
-            HEIGHT_KEY.ptr,
-            HEIGHT_KEY.len,
-            height_str.ptr,
-            height_str.len,
-            @ptrCast(&err),
-        );
-
-        if (err != null) {
-            c.rocksdb_free(@constCast(@ptrCast(err)));
-            return DatabaseError.SaveFailed;
-        }
+        try self.writeNumericMetadata(u32, HEIGHT_KEY, height);
     }
 
     pub fn saveHeight(self: *Database, height: u32) !void {
@@ -404,51 +376,16 @@ pub const Database = struct {
     }
 
     pub fn getAccountCount(self: *Database) !u32 {
-        var err: ?[*:0]u8 = null;
-        var val_len: usize = 0;
-        const val_ptr = c.rocksdb_get(
-            self.db,
-            self.read_options,
-            ACCOUNT_COUNT_KEY.ptr,
-            ACCOUNT_COUNT_KEY.len,
-            &val_len,
-            @ptrCast(&err),
-        );
-
-        if (err != null) {
-            c.rocksdb_free(@constCast(@ptrCast(err)));
-            return 0;
-        }
-
-        if (val_ptr == null) {
-            return 0;
-        }
-        defer c.rocksdb_free(val_ptr);
-
-        const data = val_ptr[0..val_len];
-        return std.fmt.parseInt(u32, data, 10) catch 0;
+        return self.readNumericMetadata(u32, ACCOUNT_COUNT_KEY);
     }
 
     fn incrementAccountCount(self: *Database) !void {
         const count = (try self.getAccountCount()) + 1;
-        const count_str = try std.fmt.allocPrint(self.allocator, "{}", .{count});
-        defer self.allocator.free(count_str);
+        try self.saveAccountCount(count);
+    }
 
-        var err: ?[*:0]u8 = null;
-        c.rocksdb_put(
-            self.db,
-            self.write_options,
-            ACCOUNT_COUNT_KEY.ptr,
-            ACCOUNT_COUNT_KEY.len,
-            count_str.ptr,
-            count_str.len,
-            @ptrCast(&err),
-        );
-
-        if (err != null) {
-            c.rocksdb_free(@constCast(@ptrCast(err)));
-            return DatabaseError.SaveFailed;
-        }
+    pub fn saveAccountCount(self: *Database, count: u32) !void {
+        try self.writeNumericMetadata(u32, ACCOUNT_COUNT_KEY, count);
     }
 
     // ============================================
@@ -457,51 +394,12 @@ pub const Database = struct {
 
     /// Get current total supply (all minted coins including immature)
     pub fn getTotalSupply(self: *Database) u64 {
-        var err: ?[*:0]u8 = null;
-        var val_len: usize = 0;
-        const val_ptr = c.rocksdb_get(
-            self.db,
-            self.read_options,
-            TOTAL_SUPPLY_KEY.ptr,
-            TOTAL_SUPPLY_KEY.len,
-            &val_len,
-            @ptrCast(&err),
-        );
-
-        if (err != null) {
-            c.rocksdb_free(@constCast(@ptrCast(err)));
-            return 0;
-        }
-
-        if (val_ptr == null) {
-            return 0;
-        }
-        defer c.rocksdb_free(val_ptr);
-
-        const data = val_ptr[0..val_len];
-        return std.fmt.parseInt(u64, data, 10) catch 0;
+        return self.readNumericMetadata(u64, TOTAL_SUPPLY_KEY);
     }
 
     /// Update total supply (called when coinbase is processed)
     pub fn updateTotalSupply(self: *Database, new_supply: u64) !void {
-        const supply_str = try std.fmt.allocPrint(self.allocator, "{}", .{new_supply});
-        defer self.allocator.free(supply_str);
-
-        var err: ?[*:0]u8 = null;
-        c.rocksdb_put(
-            self.db,
-            self.write_options,
-            TOTAL_SUPPLY_KEY.ptr,
-            TOTAL_SUPPLY_KEY.len,
-            supply_str.ptr,
-            supply_str.len,
-            @ptrCast(&err),
-        );
-
-        if (err != null) {
-            c.rocksdb_free(@constCast(@ptrCast(err)));
-            return DatabaseError.SaveFailed;
-        }
+        try self.writeNumericMetadata(u64, TOTAL_SUPPLY_KEY, new_supply);
     }
 
     /// Add to total supply atomically
@@ -520,51 +418,12 @@ pub const Database = struct {
 
     /// Get circulating supply (mature coins only, excludes immature coinbase)
     pub fn getCirculatingSupply(self: *Database) u64 {
-        var err: ?[*:0]u8 = null;
-        var val_len: usize = 0;
-        const val_ptr = c.rocksdb_get(
-            self.db,
-            self.read_options,
-            CIRCULATING_SUPPLY_KEY.ptr,
-            CIRCULATING_SUPPLY_KEY.len,
-            &val_len,
-            @ptrCast(&err),
-        );
-
-        if (err != null) {
-            c.rocksdb_free(@constCast(@ptrCast(err)));
-            return 0;
-        }
-
-        if (val_ptr == null) {
-            return 0;
-        }
-        defer c.rocksdb_free(val_ptr);
-
-        const data = val_ptr[0..val_len];
-        return std.fmt.parseInt(u64, data, 10) catch 0;
+        return self.readNumericMetadata(u64, CIRCULATING_SUPPLY_KEY);
     }
 
     /// Update circulating supply (called when coinbase matures)
     pub fn updateCirculatingSupply(self: *Database, new_supply: u64) !void {
-        const supply_str = try std.fmt.allocPrint(self.allocator, "{}", .{new_supply});
-        defer self.allocator.free(supply_str);
-
-        var err: ?[*:0]u8 = null;
-        c.rocksdb_put(
-            self.db,
-            self.write_options,
-            CIRCULATING_SUPPLY_KEY.ptr,
-            CIRCULATING_SUPPLY_KEY.len,
-            supply_str.ptr,
-            supply_str.len,
-            @ptrCast(&err),
-        );
-
-        if (err != null) {
-            c.rocksdb_free(@constCast(@ptrCast(err)));
-            return DatabaseError.SaveFailed;
-        }
+        try self.writeNumericMetadata(u64, CIRCULATING_SUPPLY_KEY, new_supply);
     }
 
     /// Add to circulating supply (when coinbase matures)
@@ -583,6 +442,7 @@ pub const Database = struct {
 
     /// Iterator callback function type for account iteration
     pub const AccountIteratorCallback = fn (account: Account, user_data: ?*anyopaque) bool;
+    pub const KeyIteratorCallback = fn (key: []const u8, user_data: ?*anyopaque) bool;
 
     /// Iterate over all accounts in the database in deterministic order (sorted by address)
     /// The callback function should return true to continue iteration, false to stop
@@ -664,19 +524,39 @@ pub const Database = struct {
         }
     }
 
-    /// Delete all accounts from the database (used for chain rollback/replay)
-    /// This fixes the state corruption bug where reverted accounts would persist
-    pub fn deleteAllAccounts(self: *Database) !void {
+    pub fn iterateKeysWithPrefix(self: *Database, prefix: []const u8, callback: KeyIteratorCallback, user_data: ?*anyopaque) !void {
         const it = c.rocksdb_create_iterator(self.db, self.read_options);
         defer c.rocksdb_iter_destroy(it);
 
-        // Collect all account keys to delete
-        var keys_to_delete = std.array_list.Managed([]u8).init(self.allocator);
-        defer {
-            for (keys_to_delete.items) |key| {
+        c.rocksdb_iter_seek(it, prefix.ptr, prefix.len);
+
+        while (c.rocksdb_iter_valid(it) == 1) {
+            var key_len: usize = 0;
+            const key_ptr = c.rocksdb_iter_key(it, &key_len);
+            const key = key_ptr[0..key_len];
+
+            if (!std.mem.startsWith(u8, key, prefix)) {
+                break;
+            }
+
+            if (!callback(key, user_data)) {
+                break;
+            }
+
+            c.rocksdb_iter_next(it);
+        }
+    }
+
+    fn collectAccountKeys(self: *Database) !std.array_list.Managed([]u8) {
+        const it = c.rocksdb_create_iterator(self.db, self.read_options);
+        defer c.rocksdb_iter_destroy(it);
+
+        var keys = std.array_list.Managed([]u8).init(self.allocator);
+        errdefer {
+            for (keys.items) |key| {
                 self.allocator.free(key);
             }
-            keys_to_delete.deinit();
+            keys.deinit();
         }
 
         const prefix = ACCOUNT_PREFIX;
@@ -687,55 +567,56 @@ pub const Database = struct {
             const key_ptr = c.rocksdb_iter_key(it, &key_len);
             const key = key_ptr[0..key_len];
 
-            // Stop if we've moved past the account prefix
             if (!std.mem.startsWith(u8, key, prefix)) {
                 break;
             }
 
-            // Copy key to safely delete later
-            const key_copy = try self.allocator.dupe(u8, key);
-            try keys_to_delete.append(key_copy);
-
+            try keys.append(try self.allocator.dupe(u8, key));
             c.rocksdb_iter_next(it);
         }
 
-        if (keys_to_delete.items.len == 0) {
-            return; // Nothing to delete
+        return keys;
+    }
+
+    pub fn appendDeleteAllAccountsToBatch(self: *Database, batch: *WriteBatch) !u32 {
+        var keys_to_delete = try self.collectAccountKeys();
+        defer {
+            for (keys_to_delete.items) |key| {
+                self.allocator.free(key);
+            }
+            keys_to_delete.deinit();
         }
-
-        log.info("🗑️ Deleting {} accounts for state rollback", .{keys_to_delete.items.len});
-
-        // Batch delete all collected keys
-        const batch = c.rocksdb_writebatch_create();
-        defer c.rocksdb_writebatch_destroy(batch);
 
         for (keys_to_delete.items) |key| {
-            c.rocksdb_writebatch_delete(batch, key.ptr, key.len);
+            batch.deleteKey(key);
         }
 
-        // Reset account count
-        const count_key = ACCOUNT_COUNT_KEY;
-        const zero_count = "0";
-        c.rocksdb_writebatch_put(batch, count_key.ptr, count_key.len, zero_count.ptr, zero_count.len);
+        batch.saveAccountCount(0);
+        return @intCast(keys_to_delete.items.len);
+    }
 
-        // Commit batch
-        var err: ?[*:0]u8 = null;
-        c.rocksdb_write(self.db, self.write_options, batch, @ptrCast(&err));
+    /// Delete all accounts from the database (used for chain rollback/replay)
+    /// This fixes the state corruption bug where reverted accounts would persist
+    pub fn deleteAllAccounts(self: *Database) !void {
+        var batch = self.createWriteBatch();
+        defer batch.deinit();
 
-        if (err != null) {
-            log.err("RocksDB batch delete error: {s}", .{err.?});
-            c.rocksdb_free(@constCast(@ptrCast(err)));
-            return DatabaseError.DeletionFailed;
+        const deleted_count = try self.appendDeleteAllAccountsToBatch(&batch);
+        if (deleted_count == 0) {
+            return;
         }
+
+        log.info("🗑️ Deleting {} accounts for state rollback", .{deleted_count});
+        try batch.commit();
     }
 
     pub fn resetTotalSupply(self: *Database) !void {
         const batch = c.rocksdb_writebatch_create();
         defer c.rocksdb_writebatch_destroy(batch);
 
-        const zero_val = [_]u8{0} ** 8;
-        c.rocksdb_writebatch_put(batch, TOTAL_SUPPLY_KEY.ptr, TOTAL_SUPPLY_KEY.len, &zero_val, zero_val.len);
-        c.rocksdb_writebatch_put(batch, CIRCULATING_SUPPLY_KEY.ptr, CIRCULATING_SUPPLY_KEY.len, &zero_val, zero_val.len);
+        const zero_supply = [_]u8{0} ** @sizeOf(u64);
+        c.rocksdb_writebatch_put(batch, TOTAL_SUPPLY_KEY.ptr, TOTAL_SUPPLY_KEY.len, &zero_supply, zero_supply.len);
+        c.rocksdb_writebatch_put(batch, CIRCULATING_SUPPLY_KEY.ptr, CIRCULATING_SUPPLY_KEY.len, &zero_supply, zero_supply.len);
 
         var err: ?[*:0]u8 = null;
         c.rocksdb_write(self.db, self.write_options, batch, @ptrCast(&err));
@@ -991,6 +872,30 @@ pub const Database = struct {
             );
         }
 
+        pub fn putKey(self: *WriteBatch, key: []const u8, value: []const u8) void {
+            c.rocksdb_writebatch_put(
+                self.batch,
+                key.ptr,
+                key.len,
+                value.ptr,
+                value.len,
+            );
+        }
+
+        pub fn deleteKey(self: *WriteBatch, key: []const u8) void {
+            c.rocksdb_writebatch_delete(
+                self.batch,
+                key.ptr,
+                key.len,
+            );
+        }
+
+        pub fn deleteBlock(self: *WriteBatch, height: u32) !void {
+            const key = try self.db.makeBlockKey(height);
+            defer self.db.allocator.free(key);
+            self.deleteKey(key);
+        }
+
         pub fn commit(self: *WriteBatch) !void {
             var err: ?[*:0]u8 = null;
             c.rocksdb_write(
@@ -1030,6 +935,32 @@ pub const Database = struct {
                 self.batch,
                 key.ptr,
                 key.len,
+                &buffer,
+                buffer.len,
+            );
+        }
+
+        pub fn saveAccountCount(self: *WriteBatch, count: u32) void {
+            var buffer: [@sizeOf(u32)]u8 = undefined;
+            std.mem.writeInt(u32, &buffer, count, .little);
+
+            c.rocksdb_writebatch_put(
+                self.batch,
+                ACCOUNT_COUNT_KEY.ptr,
+                ACCOUNT_COUNT_KEY.len,
+                &buffer,
+                buffer.len,
+            );
+        }
+
+        pub fn saveHeight(self: *WriteBatch, height: u32) void {
+            var buffer: [@sizeOf(u32)]u8 = undefined;
+            std.mem.writeInt(u32, &buffer, height, .little);
+
+            c.rocksdb_writebatch_put(
+                self.batch,
+                HEIGHT_KEY.ptr,
+                HEIGHT_KEY.len,
                 &buffer,
                 buffer.len,
             );

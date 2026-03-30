@@ -253,6 +253,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
 
         // CRITICAL FIX: Index the new block in memory so getBlockHash/getHash works
         try ctx.blockchain.chain_state.indexBlock(block_height, new_block.hash());
+        try ctx.blockchain.chain_state.maybeSavePeriodicStateSnapshot(ctx.blockchain.io, block_height, new_block.hash());
 
         // Clean mempool of confirmed transactions
         try ctx.mempool_manager.cleanAfterBlock(new_block);

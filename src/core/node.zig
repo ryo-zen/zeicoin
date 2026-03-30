@@ -222,6 +222,7 @@ pub const ZeiCoin = struct {
 
         // CRITICAL FIX: Index genesis block
         try self.chain_state.indexBlock(0, genesis_block.hash());
+        try self.chain_state.maybeSavePeriodicStateSnapshot(self.io, 0, genesis_block.hash());
 
         // Genesis initialization handled by chain state
         // Modern reorganization system doesn't require explicit genesis setup

@@ -116,6 +116,7 @@ pub const ChainProcessor = struct {
         // Update block index for O(1) lookups in reorganizations
         const index_block_hash = block.hash();
         try self.chain_state.indexBlock(height, index_block_hash);
+        try self.chain_state.maybeSavePeriodicStateSnapshot(io, height, index_block_hash);
 
         // Remove processed transactions from mempool
         self.cleanMempool(block);
@@ -142,6 +143,7 @@ pub const ChainProcessor = struct {
         // Update block index for O(1) lookups in reorganizations
         const block_hash = block.hash();
         try self.chain_state.indexBlock(block_height, block_hash);
+        try self.chain_state.maybeSavePeriodicStateSnapshot(io, block_height, block_hash);
 
         // Remove processed transactions from mempool
         self.cleanMempool(block);
@@ -240,6 +242,7 @@ pub const ChainProcessor = struct {
         // Update block index for O(1) lookups in reorganizations
         const index_block_hash = block.hash();
         try self.chain_state.indexBlock(target_height, index_block_hash);
+        try self.chain_state.maybeSavePeriodicStateSnapshot(io, target_height, index_block_hash);
 
         const old_height = self.chain_state.getHeight() catch 0;
         log.info("📦 [BLOCK PROCESS] Block #{} accepted - chain height: {} → {}", .{ target_height, old_height, target_height });

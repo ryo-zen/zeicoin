@@ -10,16 +10,29 @@
 **Branch:** `libp2p-integration`
 **Active initiative:** `ZEI-70` reorg safety and recovery hardening after the canonical replay/state fix
 
-**Last worked on:** 2026-03-30 — Created epic `ZEI-70` (`reorg_safety_and_recovery_hardening`) and parented the remaining open reorg/replay/state-root tickets under it after the `8d044f0` canonical replay/state-root fix landed.
+**Last worked on:** 2026-03-30 — Finished `ZEI-18`, cleaned up Izumi (`ZEI-18`/`ZEI-60` closed, `ZEI-70`/`ZEI-69` refreshed), and opened `ZEI-71` to investigate possible RocksDB `account_count` metadata drift.
 
-**Next step:** Implement `ZEI-18` under `ZEI-70`: real state snapshots so reorg rollback/restore stops replaying from genesis.
+**Next step:** Commit the finished `ZEI-18` + Izumi cleanup work, then pick the next `ZEI-70` follow-on; `ZEI-71` is available for the side investigation into `account_count` metadata drift.
 
-**In flight:** Tracker-only updates are uncommitted in `.izumi/STATUS.md`, `ZEI-70`, and the reparented reorg tickets. Immediate implementation queue inside `ZEI-70`: `ZEI-18`, then `ZEI-68` / `ZEI-69`, `ZEI-21`, `ZEI-52`, and `ZEI-64` / `ZEI-65` / `ZEI-66`.
+**In flight:** `ZEI-18` code is complete but still uncommitted in `src/core/storage/db.zig`, `src/core/chain/state_root.zig`, `src/core/chain/state.zig`, `src/core/chain/reorg_executor.zig`, `src/core/node.zig`, `src/core/miner/core.zig`, `src/core/chain/processor.zig`, `src/lib.zig`, `src/tests.zig`, `.izumi/STATUS.md`, and the related Izumi ticket files. `ZEI-71` is open for the new `account_count` investigation.
 
 ---
 
 ## Decisions Made This Session
 
+- **`ZEI-71` now tracks the `account_count` metadata concern** — the snapshot/recovery work exposed that direct and batched account-write paths do not maintain `meta:account_count` symmetrically, so the issue is now captured for focused investigation instead of being left as tribal knowledge.
+- **`ZEI-18` is now functionally complete** — snapshots are no longer just stored markers; rollback/reorg restore can use exact or nearest anchored snapshots, and the required Zig + Docker reorg gates passed on 2026-03-30.
+- **Snapshot restore must be one atomic RocksDB batch** — account deletion, account rewrite, metadata rewrite, and recovery height updates now get staged together instead of wiping accounts and restoring them in separate commits.
+- **Snapshots must be anchored to canonical identity, not just height** — each snapshot now stores `height + block_hash + state_root`, and restore rejects stale/corrupt snapshots whose block hash or recomputed state root no longer matches the canonical chain.
+- **Bounded rollback now means “restore nearest snapshot, then replay the tail”** — `rollbackStateWithoutDeletingBlocks()` first tries the exact target snapshot, then the nearest earlier valid snapshot, then only falls back to full replay if no usable anchor exists.
+- **Canonical progression must create periodic recovery anchors automatically** — genesis and every `SNAPSHOT_INTERVAL`th canonical block now save a snapshot so first-time rollbacks are bounded even before any failure path has saved an exact snapshot.
+- **Reorg executor must locally validate competing branch continuity before mutating state** — `executeReorg()` now rejects malformed replacement branches on height/previous-hash inconsistencies instead of relying only on upstream callers.
+- **Old-tip snapshots are the safest failed-reorg recovery point** — before mutating a canonical tip, reorg now snapshots that exact tip and restores it atomically on apply failure, with replay left as an explicit fallback rather than the normal recovery path.
+- **This hardening changed real execution flow, so Docker reorg validation was mandatory** — both `./docker/scripts/test_libp2p_zen_server.sh` and `docker/scripts/verify_deep_reorg.sh` passed after the new snapshot/rollback path landed.
+- **State snapshots now live in RocksDB under `SNAPSHOT:v1:<height>`** — `state_root.zig` now serializes the full persisted account set plus total/circulating supply, and `db.zig` now exposes arbitrary key `put/get/delete` helpers so snapshots are real stored records rather than markers.
+- **Exact fork snapshots must be taken after rollback reaches the ancestor** — saving a “fork snapshot” before `rollbackStateWithoutDeletingBlocks()` just stores old-tip state under the fork height label and makes reorg recovery restore the wrong account root.
+- **Failed reorg recovery now restores fork state from snapshot, then reapplies the saved original branch** — `restoreOriginalChain()` no longer jumps straight to replay-from-genesis on the happy recovery path; replay remains only an explicit fallback when the snapshot is missing/corrupt or reapplying the saved canonical blocks fails.
+- **Snapshot round-trips need metadata parity, not just accounts** — account-count plus total/circulating supply bookkeeping now uses consistent little-endian metadata encoding across direct and batched RocksDB writes so restored snapshots preserve the same supply state they captured.
 - **Reorg work now has an explicit safety profile** — `docs/REORG_SAFETY_PROFILE.md` adapts the NASA rules to ZeiCoin's consensus-critical replay/reorg path and makes the intended discipline concrete.
 - **Workflow docs now point to the reorg profile** — `CLAUDE.md` and `AGENTS.md` both tell implementers and reviewers to read the profile before changing reorg/replay/state-root code, so the rules are part of the normal coding/review loop rather than a passive reference doc.
 - **The active reorg queue now has one Izumi umbrella** — `ZEI-70` groups the remaining open reorg/replay/state-root work so snapshots, validation, mempool recovery, deep-reorg defenses, and cleanup follow-ons are visible in one place.

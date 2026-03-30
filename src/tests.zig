@@ -21,6 +21,7 @@ const Transaction = types.Transaction;
 const Address = types.Address;
 const Account = types.Account;
 const Block = types.Block;
+const reorg_executor = zei.chain.reorg_executor;
 
 // Test helper functions
 fn createTestZeiCoin(io: std.Io, data_dir: []const u8) !*ZeiCoin {
@@ -1365,4 +1366,644 @@ test "rollback rebuild restores the winning branch ancestor pre-state root" {
 
     const rebuilt_fork_root = try local_state.calculateStateRoot();
     try testing.expectEqualDeep(expected_pre_state_root.?, rebuilt_fork_root);
+}
+
+test "state snapshot restore reproduces saved account state and supply" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const test_db_path = "test_state_snapshot_restore";
+    defer std.Io.Dir.cwd().deleteTree(io, test_db_path) catch {};
+
+    var db = try zei.db.Database.init(testing.allocator, io, test_db_path);
+    defer db.deinit();
+
+    var chain_state = zei.chain.ChainState.init(testing.allocator, &db);
+    defer chain_state.deinit();
+
+    var alice_keypair = try key.KeyPair.generateNew(io);
+    defer alice_keypair.deinit();
+    var bob_keypair = try key.KeyPair.generateNew(io);
+    defer bob_keypair.deinit();
+    var carol_keypair = try key.KeyPair.generateNew(io);
+    defer carol_keypair.deinit();
+
+    const alice_addr = alice_keypair.getAddress();
+    const bob_addr = bob_keypair.getAddress();
+    const carol_addr = carol_keypair.getAddress();
+
+    const snapshot_height: u32 = types.getCoinbaseMaturity() + 1;
+    const base_timestamp: u64 = 1_900_000_000_000;
+    const block_reward = 25 * types.ZEI_COIN;
+    const genesis_balance = 200 * types.ZEI_COIN;
+
+    var previous_hash = std.mem.zeroes(types.Hash);
+    for (0..snapshot_height + 1) |height_index| {
+        const height: u32 = @intCast(height_index);
+        const timestamp_ms = base_timestamp + @as(u64, height) * 1000;
+
+        var block_transactions: [3]Transaction = undefined;
+        var tx_count: usize = 1;
+
+        if (height == 0) {
+            block_transactions[0] = createCoinbaseTransaction(alice_addr, genesis_balance, timestamp_ms);
+        } else {
+            block_transactions[0] = createCoinbaseTransaction(if (height % 2 == 0) bob_addr else carol_addr, block_reward, timestamp_ms);
+
+            if (height == snapshot_height) {
+                block_transactions[1] = try createTimedTestTransaction(
+                    alice_addr,
+                    bob_addr,
+                    5 * types.ZEI_COIN,
+                    types.ZenFees.MIN_FEE,
+                    0,
+                    timestamp_ms + 1,
+                    alice_keypair,
+                    testing.allocator,
+                );
+                block_transactions[2] = try createTimedTestTransaction(
+                    alice_addr,
+                    carol_addr,
+                    3 * types.ZEI_COIN,
+                    types.ZenFees.MIN_FEE,
+                    1,
+                    timestamp_ms + 2,
+                    alice_keypair,
+                    testing.allocator,
+                );
+                tx_count = 3;
+            }
+        }
+
+        var block = try buildCanonicalTestBlock(
+            testing.allocator,
+            &chain_state,
+            previous_hash,
+            height,
+            block_transactions[0..tx_count],
+            timestamp_ms,
+        );
+        defer block.deinit(testing.allocator);
+
+        try applyCanonicalTestBlock(io, &db, &chain_state, height, block);
+        previous_hash = block.hash();
+    }
+
+    try chain_state.saveExactStateSnapshotAtHeight(io, snapshot_height);
+
+    const expected_accounts = try snapshotAccounts(testing.allocator, &db);
+    defer testing.allocator.free(expected_accounts);
+    const expected_root = try chain_state.calculateStateRoot();
+    const expected_total_supply = db.getTotalSupply();
+    const expected_circulating_supply = db.getCirculatingSupply();
+
+    var mutation_transactions = [_]Transaction{
+        createCoinbaseTransaction(carol_addr, block_reward, base_timestamp + @as(u64, snapshot_height + 1) * 1000),
+        try createTimedTestTransaction(
+            alice_addr,
+            carol_addr,
+            2 * types.ZEI_COIN,
+            types.ZenFees.MIN_FEE,
+            2,
+            base_timestamp + @as(u64, snapshot_height + 1) * 1000 + 1,
+            alice_keypair,
+            testing.allocator,
+        ),
+    };
+
+    var mutation_block = try buildCanonicalTestBlock(
+        testing.allocator,
+        &chain_state,
+        previous_hash,
+        snapshot_height + 1,
+        mutation_transactions[0..2],
+        base_timestamp + @as(u64, snapshot_height + 1) * 1000,
+    );
+    defer mutation_block.deinit(testing.allocator);
+
+    try applyCanonicalTestBlock(io, &db, &chain_state, snapshot_height + 1, mutation_block);
+
+    const restored = try chain_state.restoreStateSnapshot(io, snapshot_height);
+    try testing.expect(restored);
+
+    const restored_accounts = try snapshotAccounts(testing.allocator, &db);
+    defer testing.allocator.free(restored_accounts);
+    const restored_root = try chain_state.calculateStateRoot();
+
+    try testing.expectEqualDeep(expected_accounts, restored_accounts);
+    try testing.expectEqualDeep(expected_root, restored_root);
+    try testing.expectEqual(expected_total_supply, db.getTotalSupply());
+    try testing.expectEqual(expected_circulating_supply, db.getCirculatingSupply());
+    try testing.expectEqual(@as(?types.Hash, null), chain_state.getBlockHash(snapshot_height + 1));
+}
+
+test "state snapshot restore rejects stale snapshot when canonical block hash changes" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const test_db_path = "test_state_snapshot_block_hash_anchor";
+    defer std.Io.Dir.cwd().deleteTree(io, test_db_path) catch {};
+
+    var db = try zei.db.Database.init(testing.allocator, io, test_db_path);
+    defer db.deinit();
+
+    var chain_state = zei.chain.ChainState.init(testing.allocator, &db);
+    defer chain_state.deinit();
+
+    var alice_keypair = try key.KeyPair.generateNew(io);
+    defer alice_keypair.deinit();
+    var bob_keypair = try key.KeyPair.generateNew(io);
+    defer bob_keypair.deinit();
+
+    const alice_addr = alice_keypair.getAddress();
+    const bob_addr = bob_keypair.getAddress();
+
+    const snapshot_height: u32 = types.getCoinbaseMaturity() + 1;
+    const base_timestamp: u64 = 1_950_000_000_000;
+    const block_reward = 19 * types.ZEI_COIN;
+    const genesis_balance = 210 * types.ZEI_COIN;
+
+    var previous_hash = std.mem.zeroes(types.Hash);
+    for (0..snapshot_height + 1) |height_index| {
+        const height: u32 = @intCast(height_index);
+        const timestamp_ms = base_timestamp + @as(u64, height) * 1000;
+
+        var transactions = [_]Transaction{
+            if (height == 0)
+                createCoinbaseTransaction(alice_addr, genesis_balance, timestamp_ms)
+            else
+                createCoinbaseTransaction(bob_addr, block_reward, timestamp_ms),
+        };
+
+        var block = try buildCanonicalTestBlock(
+            testing.allocator,
+            &chain_state,
+            previous_hash,
+            height,
+            transactions[0..1],
+            timestamp_ms,
+        );
+        defer block.deinit(testing.allocator);
+
+        try applyCanonicalTestBlock(io, &db, &chain_state, height, block);
+        previous_hash = block.hash();
+    }
+
+    try chain_state.saveExactStateSnapshotAtHeight(io, snapshot_height);
+
+    var mutated_block = try db.getBlock(io, snapshot_height);
+    defer mutated_block.deinit(testing.allocator);
+    mutated_block.header.timestamp += 777;
+
+    try db.saveBlock(io, snapshot_height, mutated_block);
+    chain_state.removeBlocksFromIndex(snapshot_height);
+    try chain_state.indexBlock(snapshot_height, mutated_block.hash());
+
+    try testing.expectError(error.SnapshotBlockHashMismatch, chain_state.restoreStateSnapshot(io, snapshot_height));
+}
+
+test "rollback uses nearest earlier snapshot and replays the bounded tail" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const test_db_path = "test_state_snapshot_nearest_rollback";
+    defer std.Io.Dir.cwd().deleteTree(io, test_db_path) catch {};
+
+    var db = try zei.db.Database.init(testing.allocator, io, test_db_path);
+    defer db.deinit();
+
+    var chain_state = zei.chain.ChainState.init(testing.allocator, &db);
+    defer chain_state.deinit();
+
+    var alice_keypair = try key.KeyPair.generateNew(io);
+    defer alice_keypair.deinit();
+    var bob_keypair = try key.KeyPair.generateNew(io);
+    defer bob_keypair.deinit();
+    var carol_keypair = try key.KeyPair.generateNew(io);
+    defer carol_keypair.deinit();
+
+    const alice_addr = alice_keypair.getAddress();
+    const bob_addr = bob_keypair.getAddress();
+    const carol_addr = carol_keypair.getAddress();
+
+    const snapshot_height: u32 = types.getCoinbaseMaturity();
+    const target_height: u32 = snapshot_height + 2;
+    const current_height: u32 = target_height + 2;
+    const base_timestamp: u64 = 2_100_000_000_000;
+    const block_reward = 18 * types.ZEI_COIN;
+    const genesis_balance = 220 * types.ZEI_COIN;
+
+    var previous_hash = std.mem.zeroes(types.Hash);
+    var expected_accounts: ?[]Account = null;
+    defer if (expected_accounts) |accounts| testing.allocator.free(accounts);
+    var expected_root: ?types.Hash = null;
+
+    for (0..current_height + 1) |height_index| {
+        const height: u32 = @intCast(height_index);
+        const timestamp_ms = base_timestamp + @as(u64, height) * 1000;
+
+        var block_transactions: [3]Transaction = undefined;
+        var tx_count: usize = 1;
+
+        if (height == 0) {
+            block_transactions[0] = createCoinbaseTransaction(alice_addr, genesis_balance, timestamp_ms);
+        } else {
+            block_transactions[0] = createCoinbaseTransaction(if (height % 2 == 0) bob_addr else carol_addr, block_reward, timestamp_ms);
+
+            if (height >= snapshot_height and height <= target_height) {
+                block_transactions[1] = try createTimedTestTransaction(
+                    alice_addr,
+                    if (height % 2 == 0) bob_addr else carol_addr,
+                    @as(u64, @intCast(height - snapshot_height + 1)) * types.ZEI_COIN,
+                    types.ZenFees.MIN_FEE,
+                    @as(u64, @intCast(height - snapshot_height)),
+                    timestamp_ms + 1,
+                    alice_keypair,
+                    testing.allocator,
+                );
+                tx_count = 2;
+            }
+        }
+
+        var block = try buildCanonicalTestBlock(
+            testing.allocator,
+            &chain_state,
+            previous_hash,
+            height,
+            block_transactions[0..tx_count],
+            timestamp_ms,
+        );
+        defer block.deinit(testing.allocator);
+
+        try applyCanonicalTestBlock(io, &db, &chain_state, height, block);
+        previous_hash = block.hash();
+
+        if (height == snapshot_height) {
+            try chain_state.saveExactStateSnapshotAtHeight(io, snapshot_height);
+        }
+
+        if (height == target_height) {
+            expected_accounts = try snapshotAccounts(testing.allocator, &db);
+            expected_root = try chain_state.calculateStateRoot();
+        }
+    }
+
+    try chain_state.rollbackStateWithoutDeletingBlocks(io, target_height);
+
+    const restored_accounts = try snapshotAccounts(testing.allocator, &db);
+    defer testing.allocator.free(restored_accounts);
+    const restored_root = try chain_state.calculateStateRoot();
+
+    try testing.expectEqualDeep(expected_accounts.?, restored_accounts);
+    try testing.expectEqualDeep(expected_root.?, restored_root);
+}
+
+test "failed reorg restores original canonical chain from fork snapshot" {
+    var local_threaded = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer local_threaded.deinit();
+    const local_io = local_threaded.io();
+
+    const local_db_path = "test_reorg_snapshot_restore_local";
+    defer std.Io.Dir.cwd().deleteTree(local_io, local_db_path) catch {};
+
+    var local_db = try zei.db.Database.init(testing.allocator, local_io, local_db_path);
+    defer local_db.deinit();
+
+    var local_state = zei.chain.ChainState.init(testing.allocator, &local_db);
+    defer local_state.deinit();
+
+    var winning_threaded = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer winning_threaded.deinit();
+    const winning_io = winning_threaded.io();
+
+    const winning_db_path = "test_reorg_snapshot_restore_winning";
+    defer std.Io.Dir.cwd().deleteTree(winning_io, winning_db_path) catch {};
+
+    var winning_db = try zei.db.Database.init(testing.allocator, winning_io, winning_db_path);
+    defer winning_db.deinit();
+
+    var winning_state = zei.chain.ChainState.init(testing.allocator, &winning_db);
+    defer winning_state.deinit();
+
+    var alice_keypair = try key.KeyPair.generateNew(local_io);
+    defer alice_keypair.deinit();
+    var bob_keypair = try key.KeyPair.generateNew(local_io);
+    defer bob_keypair.deinit();
+    var carol_keypair = try key.KeyPair.generateNew(local_io);
+    defer carol_keypair.deinit();
+
+    const alice_addr = alice_keypair.getAddress();
+    const bob_addr = bob_keypair.getAddress();
+    const carol_addr = carol_keypair.getAddress();
+
+    const fork_height: u32 = types.getCoinbaseMaturity() + 1;
+    const old_tip_height: u32 = fork_height + 2;
+    const base_timestamp: u64 = 2_000_000_000_000;
+    const block_reward = 20 * types.ZEI_COIN;
+    const genesis_balance = 250 * types.ZEI_COIN;
+
+    var shared_previous_hash = std.mem.zeroes(types.Hash);
+    for (0..fork_height + 1) |height_index| {
+        const height: u32 = @intCast(height_index);
+        const timestamp_ms = base_timestamp + @as(u64, height) * 1000;
+
+        var shared_transactions = [_]Transaction{
+            if (height == 0)
+                createCoinbaseTransaction(alice_addr, genesis_balance, timestamp_ms)
+            else
+                createCoinbaseTransaction(if (height % 2 == 0) bob_addr else carol_addr, block_reward, timestamp_ms),
+        };
+
+        var shared_block = try buildCanonicalTestBlock(
+            testing.allocator,
+            &local_state,
+            shared_previous_hash,
+            height,
+            shared_transactions[0..1],
+            timestamp_ms,
+        );
+        defer shared_block.deinit(testing.allocator);
+
+        var shared_block_copy = try shared_block.clone(testing.allocator);
+        defer shared_block_copy.deinit(testing.allocator);
+
+        try applyCanonicalTestBlock(local_io, &local_db, &local_state, height, shared_block);
+        try applyCanonicalTestBlock(winning_io, &winning_db, &winning_state, height, shared_block_copy);
+        shared_previous_hash = shared_block.hash();
+    }
+
+    var local_previous_hash = shared_previous_hash;
+    for (0..2) |offset| {
+        const height = fork_height + 1 + @as(u32, @intCast(offset));
+        const timestamp_ms = base_timestamp + @as(u64, height) * 1000;
+
+        var local_transactions: [2]Transaction = undefined;
+        local_transactions[0] = createCoinbaseTransaction(bob_addr, block_reward, timestamp_ms);
+        local_transactions[1] = try createTimedTestTransaction(
+            alice_addr,
+            if (offset == 0) bob_addr else carol_addr,
+            4 * types.ZEI_COIN,
+            types.ZenFees.MIN_FEE,
+            @intCast(offset),
+            timestamp_ms + 1,
+            alice_keypair,
+            testing.allocator,
+        );
+
+        var local_block = try buildCanonicalTestBlock(
+            testing.allocator,
+            &local_state,
+            local_previous_hash,
+            height,
+            local_transactions[0..2],
+            timestamp_ms,
+        );
+        defer local_block.deinit(testing.allocator);
+
+        try applyCanonicalTestBlock(local_io, &local_db, &local_state, height, local_block);
+        local_previous_hash = local_block.hash();
+    }
+
+    const expected_accounts = try snapshotAccounts(testing.allocator, &local_db);
+    defer testing.allocator.free(expected_accounts);
+    const expected_root = try local_state.calculateStateRoot();
+
+    var new_blocks = std.array_list.Managed(Block).init(testing.allocator);
+    defer {
+        for (new_blocks.items) |*block| {
+            block.deinit(testing.allocator);
+        }
+        new_blocks.deinit();
+    }
+
+    var winning_previous_hash = shared_previous_hash;
+
+    {
+        const height = fork_height + 1;
+        const timestamp_ms = base_timestamp + @as(u64, height) * 1000 + 100;
+
+        var winning_transactions = [_]Transaction{
+            createCoinbaseTransaction(carol_addr, block_reward, timestamp_ms),
+            try createTimedTestTransaction(
+                alice_addr,
+                carol_addr,
+                6 * types.ZEI_COIN,
+                types.ZenFees.MIN_FEE,
+                0,
+                timestamp_ms + 1,
+                alice_keypair,
+                testing.allocator,
+            ),
+        };
+
+        var winning_block = try buildCanonicalTestBlock(
+            testing.allocator,
+            &winning_state,
+            winning_previous_hash,
+            height,
+            winning_transactions[0..2],
+            timestamp_ms,
+        );
+        try new_blocks.append(winning_block);
+
+        var winning_block_copy = try winning_block.clone(testing.allocator);
+        defer winning_block_copy.deinit(testing.allocator);
+        try applyCanonicalTestBlock(winning_io, &winning_db, &winning_state, height, winning_block_copy);
+        winning_previous_hash = winning_block.hash();
+    }
+
+    {
+        const height = fork_height + 2;
+        const timestamp_ms = base_timestamp + @as(u64, height) * 1000 + 200;
+
+        var invalid_transactions = [_]Transaction{
+            createCoinbaseTransaction(carol_addr, block_reward, timestamp_ms),
+            try createTimedTestTransaction(
+                alice_addr,
+                bob_addr,
+                genesis_balance * 10,
+                types.ZenFees.MIN_FEE,
+                1,
+                timestamp_ms + 1,
+                alice_keypair,
+                testing.allocator,
+            ),
+        };
+
+        const invalid_block = try buildCanonicalTestBlock(
+            testing.allocator,
+            &winning_state,
+            winning_previous_hash,
+            height,
+            invalid_transactions[0..2],
+            timestamp_ms,
+        );
+        try new_blocks.append(invalid_block);
+    }
+
+    var executor = reorg_executor.ReorgExecutor.init(testing.allocator, &local_state, &local_db);
+    const result = try executor.executeReorg(local_io, old_tip_height, old_tip_height, new_blocks.items);
+
+    try testing.expect(!result.success);
+    try testing.expectEqual(reorg_executor.ReorgFailureReason.apply_block_failed, result.failure_reason.?);
+
+    const restored_accounts = try snapshotAccounts(testing.allocator, &local_db);
+    defer testing.allocator.free(restored_accounts);
+    const restored_root = try local_state.calculateStateRoot();
+
+    try testing.expectEqualDeep(expected_accounts, restored_accounts);
+    try testing.expectEqualDeep(expected_root, restored_root);
+    try testing.expectEqual(old_tip_height, try local_db.getHeight());
+
+    for (fork_height + 1..old_tip_height + 1) |height_index| {
+        const height: u32 = @intCast(height_index);
+        var block = try local_db.getBlock(local_io, height);
+        defer block.deinit(testing.allocator);
+
+        const indexed_hash = local_state.getBlockHash(height) orelse return error.MissingBlockIndexEntry;
+        try testing.expectEqualDeep(block.hash(), indexed_hash);
+    }
+}
+
+test "reorg rejects malformed competing branch before state mutation" {
+    var local_threaded = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer local_threaded.deinit();
+    const local_io = local_threaded.io();
+
+    const local_db_path = "test_reorg_invalid_branch";
+    defer std.Io.Dir.cwd().deleteTree(local_io, local_db_path) catch {};
+
+    var local_db = try zei.db.Database.init(testing.allocator, local_io, local_db_path);
+    defer local_db.deinit();
+
+    var local_state = zei.chain.ChainState.init(testing.allocator, &local_db);
+    defer local_state.deinit();
+
+    var winning_threaded = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer winning_threaded.deinit();
+    const winning_io = winning_threaded.io();
+
+    const winning_db_path = "test_reorg_invalid_branch_winning";
+    defer std.Io.Dir.cwd().deleteTree(winning_io, winning_db_path) catch {};
+
+    var winning_db = try zei.db.Database.init(testing.allocator, winning_io, winning_db_path);
+    defer winning_db.deinit();
+
+    var winning_state = zei.chain.ChainState.init(testing.allocator, &winning_db);
+    defer winning_state.deinit();
+
+    var alice_keypair = try key.KeyPair.generateNew(local_io);
+    defer alice_keypair.deinit();
+    var bob_keypair = try key.KeyPair.generateNew(local_io);
+    defer bob_keypair.deinit();
+
+    const alice_addr = alice_keypair.getAddress();
+    const bob_addr = bob_keypair.getAddress();
+
+    const fork_height: u32 = types.getCoinbaseMaturity() + 1;
+    const old_tip_height: u32 = fork_height + 2;
+    const base_timestamp: u64 = 2_200_000_000_000;
+    const block_reward = 21 * types.ZEI_COIN;
+    const genesis_balance = 260 * types.ZEI_COIN;
+
+    var shared_previous_hash = std.mem.zeroes(types.Hash);
+    for (0..fork_height + 1) |height_index| {
+        const height: u32 = @intCast(height_index);
+        const timestamp_ms = base_timestamp + @as(u64, height) * 1000;
+
+        var shared_transactions = [_]Transaction{
+            if (height == 0)
+                createCoinbaseTransaction(alice_addr, genesis_balance, timestamp_ms)
+            else
+                createCoinbaseTransaction(bob_addr, block_reward, timestamp_ms),
+        };
+
+        var shared_block = try buildCanonicalTestBlock(
+            testing.allocator,
+            &local_state,
+            shared_previous_hash,
+            height,
+            shared_transactions[0..1],
+            timestamp_ms,
+        );
+        defer shared_block.deinit(testing.allocator);
+
+        var shared_block_copy = try shared_block.clone(testing.allocator);
+        defer shared_block_copy.deinit(testing.allocator);
+
+        try applyCanonicalTestBlock(local_io, &local_db, &local_state, height, shared_block);
+        try applyCanonicalTestBlock(winning_io, &winning_db, &winning_state, height, shared_block_copy);
+        shared_previous_hash = shared_block.hash();
+    }
+
+    var local_previous_hash = shared_previous_hash;
+    for (0..2) |offset| {
+        const height = fork_height + 1 + @as(u32, @intCast(offset));
+        const timestamp_ms = base_timestamp + @as(u64, height) * 1000;
+
+        var local_transactions = [_]Transaction{
+            createCoinbaseTransaction(bob_addr, block_reward, timestamp_ms),
+        };
+
+        var local_block = try buildCanonicalTestBlock(
+            testing.allocator,
+            &local_state,
+            local_previous_hash,
+            height,
+            local_transactions[0..1],
+            timestamp_ms,
+        );
+        defer local_block.deinit(testing.allocator);
+
+        try applyCanonicalTestBlock(local_io, &local_db, &local_state, height, local_block);
+        local_previous_hash = local_block.hash();
+    }
+
+    const expected_accounts = try snapshotAccounts(testing.allocator, &local_db);
+    defer testing.allocator.free(expected_accounts);
+    const expected_root = try local_state.calculateStateRoot();
+
+    var malformed_blocks = std.array_list.Managed(Block).init(testing.allocator);
+    defer {
+        for (malformed_blocks.items) |*block| {
+            block.deinit(testing.allocator);
+        }
+        malformed_blocks.deinit();
+    }
+
+    var winning_block_one = try buildCanonicalTestBlock(
+        testing.allocator,
+        &winning_state,
+        shared_previous_hash,
+        fork_height + 1,
+        &[_]Transaction{createCoinbaseTransaction(bob_addr, block_reward, base_timestamp + @as(u64, fork_height + 1) * 1000 + 100)},
+        base_timestamp + @as(u64, fork_height + 1) * 1000 + 100,
+    );
+    try malformed_blocks.append(winning_block_one);
+
+    const winning_block_two = try buildCanonicalTestBlock(
+        testing.allocator,
+        &winning_state,
+        winning_block_one.hash(),
+        fork_height + 3,
+        &[_]Transaction{createCoinbaseTransaction(bob_addr, block_reward, base_timestamp + @as(u64, fork_height + 2) * 1000 + 200)},
+        base_timestamp + @as(u64, fork_height + 2) * 1000 + 200,
+    );
+    try malformed_blocks.append(winning_block_two);
+
+    var executor = reorg_executor.ReorgExecutor.init(testing.allocator, &local_state, &local_db);
+    const result = try executor.executeReorg(local_io, old_tip_height, old_tip_height, malformed_blocks.items);
+
+    try testing.expect(!result.success);
+    try testing.expectEqual(reorg_executor.ReorgFailureReason.invalid_competing_branch, result.failure_reason.?);
+
+    const restored_accounts = try snapshotAccounts(testing.allocator, &local_db);
+    defer testing.allocator.free(restored_accounts);
+    const restored_root = try local_state.calculateStateRoot();
+
+    try testing.expectEqualDeep(expected_accounts, restored_accounts);
+    try testing.expectEqualDeep(expected_root, restored_root);
 }
