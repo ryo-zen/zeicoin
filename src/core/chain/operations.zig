@@ -199,13 +199,6 @@ pub const ChainOperations = struct {
         // Save block to database
         try self.chain_state.database.saveBlock(io, height, block);
 
-        // Mature coinbase rewards if enough blocks have passed
-        const coinbase_maturity = types.getCoinbaseMaturity();
-        if (height >= coinbase_maturity) {
-            const maturity_height = height - coinbase_maturity;
-            try self.chain_state.matureCoinbaseRewards(io, maturity_height);
-        }
-
         log.info("✅ Block #{} added to chain ({} txs)", .{ height, block.txCount() });
     }
 

@@ -152,12 +152,13 @@ pub const MerkleTree = struct {
         return result;
     }
 
-    /// Hash an individual account state for Merkle tree inclusion
-    /// Format: address_bytes + balance_bytes + nonce_bytes (deterministic serialization)
+    /// Hash an individual account state for Merkle tree inclusion.
+    /// This is the canonical account-state commitment used by header.state_root.
+    /// Format: address_bytes + balance_bytes + nonce_bytes + immature_balance_bytes
     pub fn hashAccountState(account: anytype) [32]u8 {
         // Create deterministic serialization buffer
-        // Address (21 bytes) + balance (8 bytes) + nonce (8 bytes) = 37 bytes
-        var buffer: [37]u8 = undefined;
+        // Address (21 bytes) + balance (8 bytes) + nonce (8 bytes) + immature (8 bytes) = 45 bytes
+        var buffer: [45]u8 = undefined;
         
         // Serialize address (21 bytes: version + hash)
         const address_bytes = account.address.toBytes();
@@ -166,8 +167,11 @@ pub const MerkleTree = struct {
         // Serialize balance (8 bytes, little endian)
         std.mem.writeInt(u64, buffer[21..29], account.balance, .little);
         
-        // Serialize nonce (8 bytes, little endian) 
+        // Serialize nonce (8 bytes, little endian)
         std.mem.writeInt(u64, buffer[29..37], account.nonce, .little);
+
+        // Serialize immature balance (8 bytes, little endian)
+        std.mem.writeInt(u64, buffer[37..45], account.immature_balance, .little);
 
         return blake3Hash(&buffer);
     }

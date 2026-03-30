@@ -318,23 +318,46 @@ pub const SyncManager = struct {
                     return error.ForkDetectionFailed;
                 };
 
-                // Use cumulative work comparison (Bitcoin's method)
-                const should_reorg = fork_detector.shouldReorganize(
-                    self.allocator,
-                    g_blockchain.?.database,
-                    peer,
-                    current_height,
-                    target_height,
-                    fork_point,
-                ) catch |err| {
+                log.info("📥 [REORG] Fetching competing chain blocks for local work verification...", .{});
+                var competing_blocks = self.fetchCompetingChainBlocks(peer, fork_point, target_height) catch |err| {
                     if (err == error.PeerDisconnected) {
-                        log.warn("⚠️ [REORG] Peer disconnected during chain-work comparison, aborting this sync attempt", .{});
+                        log.warn("⚠️ [REORG] Peer disconnected while fetching competing chain, aborting this sync attempt", .{});
                         self.setState(.idle);
                         return;
                     }
 
-                    log.err("❌ [REORG] Failed to compare chain work: {}", .{err});
-                    log.err("⚠️  [REORG] Work comparison failed - will retry after cooldown", .{});
+                    log.err("❌ [REORG] Failed to fetch competing chain: {}", .{err});
+                    log.err("⚠️  [REORG] Competing chain fetch failed - will retry after cooldown", .{});
+
+                    // Add extended cooldown to prevent rapid retry loops
+                    self.addForkCooldown(current_height, 60) catch {};
+
+                    // Keep mining paused to prevent fork from worsening
+                    should_resume_mining = false;
+
+                    // Set sync to failed state
+                    self.setState(.failed);
+
+                    // Return error
+                    return error.ForkDetectionFailed;
+                };
+                defer {
+                    for (competing_blocks.items) |*block| {
+                        block.deinit(self.allocator);
+                    }
+                    competing_blocks.deinit();
+                }
+
+                // Use cumulative work comparison (Bitcoin's method) based on locally fetched blocks
+                const should_reorg = fork_detector.shouldReorganize(
+                    self.allocator,
+                    g_blockchain.?.database,
+                    current_height,
+                    fork_point,
+                    competing_blocks.items,
+                ) catch |err| {
+                    log.err("❌ [REORG] Failed to compare locally verified chain work: {}", .{err});
+                    log.err("⚠️  [REORG] Local work comparison failed - will retry after cooldown", .{});
 
                     // Add extended cooldown to prevent rapid retry loops
                     self.addForkCooldown(current_height, 60) catch {};
@@ -350,8 +373,8 @@ pub const SyncManager = struct {
                 };
 
                 if (should_reorg) {
-                    log.warn("🔄 [REORG DECISION] Peer chain has more work - reorganizing!", .{});
-                    try self.executeBulkReorg(io, peer, fork_point, target_height);
+                    log.warn("🔄 [REORG DECISION] Peer chain has more locally verified work - reorganizing!", .{});
+                    try self.executeBulkReorg(io, fork_point, competing_blocks.items);
                     self.setState(.idle); // executeBulkReorg finishes sync
                     return;
                 } else {
@@ -1058,30 +1081,15 @@ pub const SyncManager = struct {
         return false;
     }
 
-    /// Execute bulk reorganization to switch to peer's longer chain
-    fn executeBulkReorg(self: *Self, io: std.Io, peer: *Peer, fork_point: u32, peer_height: u32) !void {
-        log.warn("🔄 [BULK REORG] ========================================", .{});
-        log.warn("🔄 [BULK REORG] Starting chain reorganization from fork point {}", .{fork_point});
-        log.warn("🔄 [BULK REORG] ========================================", .{});
-
-        const current_height = try getBlockchainHeight();
-        log.warn("   Current height: {}", .{current_height});
-        log.warn("   Target height: {}", .{peer_height});
-        log.warn("   Blocks to fetch: {}", .{peer_height - fork_point});
-
-        // Fetch the competing chain from peer starting at fork_point + 1
-        log.info("📥 [BULK REORG] Fetching competing chain blocks...", .{});
-
-        // Use batch sync to fetch all blocks
+    fn fetchCompetingChainBlocks(self: *Self, peer: *Peer, fork_point: u32, peer_height: u32) !std.array_list.Managed(Block) {
         var all_blocks = std.array_list.Managed(Block).init(self.allocator);
-        defer {
+        errdefer {
             for (all_blocks.items) |*block| {
                 block.deinit(self.allocator);
             }
             all_blocks.deinit();
         }
 
-        // Fetch blocks in batches (50 at a time)
         var batch_start: u32 = fork_point + 1;
         while (batch_start <= peer_height) {
             const batch_end = @min(batch_start + 49, peer_height);
@@ -1092,7 +1100,6 @@ pub const SyncManager = struct {
             const batch_blocks = try sequential.requestBlockRange(self.allocator, peer, batch_start, batch_size);
             defer batch_blocks.deinit();
 
-            // Add to our collection
             for (batch_blocks.items) |block| {
                 const block_copy = try block.clone(self.allocator);
                 try all_blocks.append(block_copy);
@@ -1101,13 +1108,27 @@ pub const SyncManager = struct {
             batch_start = batch_end + 1;
         }
 
-        log.warn("✅ [BULK REORG] Fetched {} blocks from peer", .{all_blocks.items.len});
+        return all_blocks;
+    }
+
+    /// Execute bulk reorganization to switch to peer's longer chain
+    fn executeBulkReorg(_: *Self, io: std.Io, fork_point: u32, new_blocks: []const Block) !void {
+        const peer_height = if (new_blocks.len > 0) new_blocks[new_blocks.len - 1].height else fork_point;
+
+        log.warn("🔄 [BULK REORG] ========================================", .{});
+        log.warn("🔄 [BULK REORG] Starting chain reorganization from fork point {}", .{fork_point});
+        log.warn("🔄 [BULK REORG] ========================================", .{});
+
+        const current_height = try getBlockchainHeight();
+        log.warn("   Current height: {}", .{current_height});
+        log.warn("   Target height: {}", .{peer_height});
+        log.warn("   Prefetched competing blocks: {}", .{new_blocks.len});
 
         // Execute reorganization via chain processor
         log.warn("🔄 [BULK REORG] Executing chain reorganization...", .{});
 
         if (g_blockchain) |blockchain| {
-            blockchain.chain_processor.executeBulkReorg(io, all_blocks.items) catch |err| switch (err) {
+            blockchain.chain_processor.executeBulkReorg(io, new_blocks) catch |err| switch (err) {
                 error.ReorgInProgress => {
                     log.info("🔒 [BULK REORG] Another reorganization is already active, deferring this request", .{});
                     return;

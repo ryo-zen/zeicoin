@@ -128,6 +128,7 @@ pub const ReorgExecutor = struct {
                     std.log.err("❌ [REORG] Pre-state root mismatch at height {}", .{expected_height});
                     std.log.err("   Expected: {x}", .{&new_block.header.state_root});
                     std.log.err("   Actual:   {x}", .{&current_state_root});
+                    self.logPreStateDiagnostics(expected_height, &new_block, current_state_root);
 
                     try self.restoreOriginalChain(io, old_tip_height, original_blocks.items, fork_height);
 
@@ -232,13 +233,19 @@ pub const ReorgExecutor = struct {
         // Update block index
         try self.chain_state.indexBlock(height, block.header.hash());
 
-        // Mirror normal block application so post-block state matches the block's state root.
-        const coinbase_maturity = types.getCoinbaseMaturity();
-        if (height >= coinbase_maturity) {
-            try self.chain_state.matureCoinbaseRewards(io, height - coinbase_maturity);
-        }
-
         std.log.debug("⏩ Applied block at height {}", .{height});
+    }
+
+    fn logPreStateDiagnostics(self: *Self, expected_height: u32, block: *const Block, current_state_root: Hash) void {
+        std.log.warn("🧪 [REORG DEBUG] Inspecting pre-state mismatch for height {}", .{expected_height});
+        std.log.warn("🧪 [REORG DEBUG] Candidate block hash: {x}", .{block.hash()});
+        std.log.warn("🧪 [REORG DEBUG] Candidate previous hash: {x}", .{&block.header.previous_hash});
+        std.log.warn("🧪 [REORG DEBUG] Candidate header state_root: {x}", .{&block.header.state_root});
+        std.log.warn("🧪 [REORG DEBUG] Local ChainState root:     {x}", .{&current_state_root});
+
+        self.chain_state.debugLogAccounts("reorg-pre-state", 16) catch |err| {
+            std.log.err("🧪 [REORG DEBUG] Failed to log account snapshot: {}", .{err});
+        };
     }
 
     fn backupExistingChainSegment(self: *Self, io: std.Io, start_height: u32, end_height: u32) !std.array_list.Managed(Block) {

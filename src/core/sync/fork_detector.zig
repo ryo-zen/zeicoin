@@ -152,15 +152,17 @@ fn requestBlockHashAtHeight(peer: *Peer, height: u32) !types.BlockHash {
 pub fn shouldReorganize(
     allocator: std.mem.Allocator,
     database: *db.Database,
-    peer: *Peer,
     our_height: u32,
-    peer_height: u32,
     fork_point: u32,
+    peer_blocks: []const types.Block,
 ) !bool {
+    const peer_height = if (peer_blocks.len > 0) peer_blocks[peer_blocks.len - 1].height else fork_point;
+
     log.info("🔄 [REORG DECISION] Comparing chain work", .{});
     log.info("   Fork point: {}", .{fork_point});
     log.info("   Our blocks after fork: {}", .{our_height - fork_point});
-    log.info("   Peer blocks after fork: {}", .{peer_height - fork_point});
+    log.info("   Peer blocks after fork: {}", .{peer_blocks.len});
+    log.info("   Peer tip height: {}", .{peer_height});
 
     // CRITICAL FIX: If fork_point == our_height, we are a prefix of the peer's chain.
     // We have 0 divergent work (our_work is 0), but this is NOT a reorg scenario.
@@ -173,8 +175,8 @@ pub fn shouldReorganize(
     // Calculate our cumulative work from fork point to tip
     const our_work = try calculateChainWork(allocator, database, fork_point + 1, our_height);
 
-    // Request peer's cumulative work from fork point to tip
-    const peer_work = try requestChainWork(peer, fork_point + 1, peer_height);
+    // Calculate the peer chain work locally from the fetched competing branch.
+    const peer_work = calculateFetchedChainWork(peer_blocks);
 
     log.info("   Our cumulative work:  {}", .{our_work});
     log.info("   Peer cumulative work: {}", .{peer_work});
@@ -187,6 +189,16 @@ pub fn shouldReorganize(
 
     log.info("   Decision: Keep our chain ⛔", .{});
     return false;
+}
+
+fn calculateFetchedChainWork(peer_blocks: []const types.Block) types.ChainWork {
+    var total_work: types.ChainWork = 0;
+
+    for (peer_blocks) |block| {
+        total_work += block.header.getWork();
+    }
+
+    return total_work;
 }
 
 /// Calculate cumulative chain work for a range of blocks
@@ -208,72 +220,4 @@ fn calculateChainWork(
     }
 
     return total_work;
-}
-
-/// Request cumulative chain work from peer for a range of blocks
-fn requestChainWork(peer: *Peer, start_height: u32, end_height: u32) !types.ChainWork {
-    const msg_types = @import("../network/protocol/messages/message_types.zig");
-
-    // Retry configuration
-    const max_retries = 3;
-    var attempt: u32 = 0;
-
-    while (attempt < max_retries) : (attempt += 1) {
-        // Check connection
-        if (!peer.isConnected()) return error.PeerDisconnected;
-
-        // Send GetChainWork request
-        const request = msg_types.GetChainWorkMessage{
-            .start_height = start_height,
-            .end_height = end_height,
-        };
-
-        if (attempt > 0) {
-            log.warn("⚠️ [CHAIN WORK] Retry attempt {}/{}", .{ attempt + 1, max_retries });
-        } else {
-            log.debug("📤 [CHAIN WORK] Requesting work from height {} to {} from peer", .{ start_height, end_height });
-        }
-
-        // Send the request
-        _ = peer.sendMessage(.get_chain_work, request) catch |err| {
-            log.warn("⚠️ [CHAIN WORK] Failed to send request: {}", .{err});
-            if (!peer.isConnected()) return error.PeerDisconnected;
-            continue;
-        };
-
-        // Wait for response
-        const timeout_ms: u64 = 10000; // 10 seconds for work calculation
-        const start_time = @as(u64, @intCast(util.getTime())) * 1000;
-
-        while (true) {
-            // Check for timeout
-            const elapsed = @as(u64, @intCast(util.getTime())) * 1000 - start_time;
-            if (elapsed > timeout_ms) {
-                log.warn("⏱️ [CHAIN WORK] Timeout waiting for chain work response (attempt {}/{})", .{ attempt + 1, max_retries });
-                break; // Retry
-            }
-
-            // CRITICAL FIX: fail fast
-            if (!peer.isConnected()) return error.PeerDisconnected;
-
-            // Check if response is available in the peer's response queue
-            if (peer.getChainWorkResponse()) |work| {
-                log.debug("✅ [CHAIN WORK] Received work: {}", .{work});
-                return work;
-            }
-
-            // Sleep briefly before checking again
-            const io = std.Io.Threaded.global_single_threaded.ioBasic();
-            io.sleep(std.Io.Duration.fromMilliseconds(10), std.Io.Clock.awake) catch {};
-        }
-
-        // Backoff
-        if (attempt < max_retries - 1) {
-            const io = std.Io.Threaded.global_single_threaded.ioBasic();
-            io.sleep(std.Io.Duration.fromMilliseconds(500), std.Io.Clock.awake) catch {};
-        }
-    }
-
-    log.warn("❌ [CHAIN WORK] All retry attempts failed", .{});
-    return error.Timeout;
 }

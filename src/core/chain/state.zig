@@ -53,6 +53,42 @@ pub const ChainState = struct {
         return formatAddress(self.allocator, address);
     }
 
+    fn defaultAccount(address: Address) Account {
+        return .{
+            .address = address,
+            .balance = 0,
+            .nonce = 0,
+            .immature_balance = 0,
+        };
+    }
+
+    fn invalidateStateRootCache(self: *Self) void {
+        self.cached_state_root = std.mem.zeroes([32]u8);
+        self.state_dirty = true;
+    }
+
+    fn readPersistedAccount(self: *Self, address: Address) !?Account {
+        if (self.database.getAccount(address)) |account| {
+            return account;
+        } else |err| switch (err) {
+            db.DatabaseError.NotFound => return null,
+            else => return err,
+        }
+    }
+
+    fn getOrLoadStagedAccount(
+        self: *Self,
+        io: std.Io,
+        staged_accounts: *std.AutoHashMap(Address, Account),
+        address: Address,
+    ) !*Account {
+        const account_entry = try staged_accounts.getOrPut(address);
+        if (!account_entry.found_existing) {
+            account_entry.value_ptr.* = try self.getAccount(io, address);
+        }
+        return account_entry.value_ptr;
+    }
+
     /// Initialize ChainState with database and allocator
     pub fn init(allocator: std.mem.Allocator, database: *db.Database) Self {
         return .{
@@ -140,31 +176,10 @@ pub const ChainState = struct {
 
     // Database & Account Management Methods
 
-    /// Get account by address, creating new account if not found
+    /// Get account by address without mutating persistent state on misses.
     pub fn getAccount(self: *Self, io: std.Io, address: Address) !types.Account {
         _ = io;
-        // Try to load from database
-        if (self.database.getAccount(address)) |account| {
-            // Account load logging disabled - too verbose during reorganization
-            return account;
-        } else |err| switch (err) {
-            db.DatabaseError.NotFound => {
-                // CACHE INVALIDATION: Creating new account changes state
-                self.state_dirty = true;
-
-                // Create new account with zero balance
-                const new_account = types.Account{
-                    .address = address,
-                    .balance = 0,
-                    .nonce = 0,
-                };
-                // New account creation logging disabled - too verbose during reorganization
-                // Save to database immediately
-                try self.database.saveAccount(address, new_account);
-                return new_account;
-            },
-            else => return err,
-        }
+        return (try self.readPersistedAccount(address)) orelse defaultAccount(address);
     }
 
     /// Get account balance
@@ -188,7 +203,7 @@ pub const ChainState = struct {
         }
 
         // CACHE INVALIDATION: Account state will change
-        self.state_dirty = true;
+        self.invalidateStateRootCache();
 
         var debug_sender_addr: ?[]const u8 = null;
         defer if (debug_sender_addr) |addr| self.allocator.free(addr);
@@ -315,7 +330,7 @@ pub const ChainState = struct {
         // deduplication must guard replay instead of tx-hash checks here.
 
         // CACHE INVALIDATION: Miner account state will change
-        self.state_dirty = true;
+        self.invalidateStateRootCache();
 
         // SECURITY: Validate supply cap before processing coinbase
         const current_supply = self.database.getTotalSupply();
@@ -335,11 +350,7 @@ pub const ChainState = struct {
         log.info("🔍 [COINBASE TX] Coinbase amount: {} ZEI, height: {}", .{ coinbase_tx.amount, current_height });
 
         // Get or create miner account
-        var miner_account = self.getAccount(io, miner_address) catch types.Account{
-            .address = miner_address,
-            .balance = 0,
-            .nonce = 0,
-        };
+        var miner_account = try self.getAccount(io, miner_address);
 
         const balance_before = @as(f64, @floatFromInt(miner_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
         const immature_before = @as(f64, @floatFromInt(miner_account.immature_balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
@@ -378,13 +389,15 @@ pub const ChainState = struct {
         }
 
         // Log supply tracking
-        const new_total_supply = self.database.getTotalSupply();
-        const supply_pct = @as(f64, @floatFromInt(new_total_supply)) / @as(f64, @floatFromInt(types.MAX_SUPPLY)) * 100.0;
-        log.info("📊 [SUPPLY] Total: {} / {} ({d:.4}% of max)", .{
-            new_total_supply / types.ZEI_COIN,
-            types.MAX_SUPPLY / types.ZEI_COIN,
-            supply_pct,
-        });
+        if (batch == null) {
+            const new_total_supply = self.database.getTotalSupply();
+            const supply_pct = @as(f64, @floatFromInt(new_total_supply)) / @as(f64, @floatFromInt(types.MAX_SUPPLY)) * 100.0;
+            log.info("📊 [SUPPLY] Total: {} / {} ({d:.4}% of max)", .{
+                new_total_supply / types.ZEI_COIN,
+                types.MAX_SUPPLY / types.ZEI_COIN,
+                supply_pct,
+            });
+        }
 
         // Save miner account
         if (batch) |b| {
@@ -397,7 +410,7 @@ pub const ChainState = struct {
     /// Clear all account state for rebuild
     pub fn clearAllAccounts(self: *Self) !void {
         // CACHE INVALIDATION: All accounts being deleted
-        self.state_dirty = true;
+        self.invalidateStateRootCache();
 
         // Use the new batch deletion capability in Database
         // This ensures no "dirty state" remains from reverted blocks
@@ -407,8 +420,6 @@ pub const ChainState = struct {
 
     /// Replay blockchain from genesis to rebuild state
     pub fn replayFromGenesis(self: *Self, io: std.Io, up_to_height: u32) !void {
-        const coinbase_maturity = types.getCoinbaseMaturity();
-
         // Start from genesis (height 0)
         for (0..up_to_height + 1) |height| {
             const block_height: u32 = @intCast(height);
@@ -425,21 +436,7 @@ pub const ChainState = struct {
                 return err;
             };
 
-            // Process each transaction in the block using the same logic as normal chain processing
-            for (block.transactions) |tx| {
-                if (tx.isCoinbase()) {
-                    // Use the canonical coinbase processing logic
-                    try self.processCoinbaseTransaction(io, tx, tx.recipient, block_height, null, true);
-                } else {
-                    // Use the canonical regular transaction processing logic
-                    try self.processTransaction(io, tx, null, true);
-                }
-            }
-
-            // Match live chain application so mature/immature balances rebuild identically.
-            if (block_height >= coinbase_maturity) {
-                try self.matureCoinbaseRewards(io, block_height - coinbase_maturity);
-            }
+            try self.processBlockTransactions(io, block.transactions, block_height, true);
         }
     }
 
@@ -447,7 +444,7 @@ pub const ChainState = struct {
     /// This is the safe recovery path after rollback/reorg failures.
     pub fn rebuildStateToHeight(self: *Self, io: std.Io, target_height: u32) !void {
         // CACHE INVALIDATION: State is rebuilt from canonical blocks.
-        self.state_dirty = true;
+        self.invalidateStateRootCache();
 
         self.removeBlocksFromIndex(0);
         self.clearProcessedTransactions();
@@ -485,59 +482,19 @@ pub const ChainState = struct {
         std.log.info("🔄 [STATE ROLLBACK] State reverted to height {} (blocks preserved)", .{target_height});
     }
 
-    /// Replay coinbase transaction during state rebuild
-    fn replayCoinbaseTransaction(self: *Self, io: std.Io, tx: Transaction) !void {
-        // CACHE INVALIDATION: Replay modifies account state
-        self.state_dirty = true;
-
-        var miner_account = self.getAccount(io, tx.recipient) catch types.Account{
-            .address = tx.recipient,
-            .balance = 0,
-            .nonce = 0,
-        };
-
-        // Add to balance (simplified - no maturity tracking for now)
-        miner_account.balance += tx.amount;
-
-        // Save updated account
-        try self.database.saveAccount(tx.recipient, miner_account);
-    }
-
-    /// Replay regular transaction during state rebuild
-    fn replayRegularTransaction(self: *Self, io: std.Io, tx: Transaction) !void {
-        // CACHE INVALIDATION: Replay modifies account state
-        self.state_dirty = true;
-
-        // Get sender account (might not exist in test scenario)
-        var sender_account = self.getAccount(io, tx.sender) catch {
-            // In test scenarios, we might have pre-funded accounts that don't exist in blocks
-            // Skip this transaction during replay
-            return;
-        };
-
-        // Check if sender has sufficient balance (safety check)
-        const total_cost = tx.amount + tx.fee;
-        if (sender_account.balance < total_cost) {
-            return;
-        }
-
-        // Deduct amount and fee from sender
-        sender_account.balance -= total_cost;
-        sender_account.nonce = tx.nonce + 1;
-        try self.database.saveAccount(tx.sender, sender_account);
-
-        // Credit recipient
-        var recipient_account = self.getAccount(io, tx.recipient) catch types.Account{
-            .address = tx.recipient,
-            .balance = 0,
-            .nonce = 0,
-        };
-        recipient_account.balance += tx.amount;
-        try self.database.saveAccount(tx.recipient, recipient_account);
-    }
-
     /// Mature coinbase rewards after 100 block confirmation period
     pub fn matureCoinbaseRewards(self: *Self, io: std.Io, maturity_height: u32) !void {
+        var circulating_supply_delta: u64 = 0;
+        try self.applyCoinbaseMaturityTransitions(io, maturity_height, null, &circulating_supply_delta);
+    }
+
+    fn applyCoinbaseMaturityTransitions(
+        self: *Self,
+        io: std.Io,
+        maturity_height: u32,
+        batch: ?*db.Database.WriteBatch,
+        circulating_supply_delta: *u64,
+    ) !void {
         // Get the block at maturity height to find coinbase transactions
         var mature_block = self.database.getBlock(io, maturity_height) catch {
             // Block might not exist (genesis or test scenario)
@@ -545,70 +502,147 @@ pub const ChainState = struct {
         };
         defer mature_block.deinit(self.allocator);
 
-        // CACHE INVALIDATION: Immature balances moving to mature changes state
-        self.state_dirty = true;
-
         // Process coinbase transactions in the mature block
         for (mature_block.transactions) |tx| {
             if (tx.isCoinbase()) {
                 // Move rewards from immature to mature balance
-                var miner_account = self.getAccount(io, tx.recipient) catch {
-                    // Miner account should exist, but handle gracefully
+                var miner_account = try self.getAccount(io, tx.recipient);
+
+                if (miner_account.immature_balance < tx.amount) {
                     continue;
-                };
-
-                // Only mature if there's actually immature balance to move
-                if (miner_account.immature_balance >= tx.amount) {
-                    miner_account.immature_balance -= tx.amount;
-                    miner_account.balance += tx.amount;
-                    try self.database.saveAccount(tx.recipient, miner_account);
-
-                    // Update circulating supply when coinbase matures
-                    try self.database.addToCirculatingSupply(tx.amount);
-
-                    log.info("💰 Coinbase reward matured: {} ZEI for block {} (recipient: {x})", .{ tx.amount, maturity_height, tx.recipient.hash[0..8] });
                 }
+
+                self.invalidateStateRootCache();
+
+                miner_account.immature_balance -= tx.amount;
+                miner_account.balance = try std.math.add(u64, miner_account.balance, tx.amount);
+
+                if (batch) |b| {
+                    try b.saveAccount(tx.recipient, miner_account);
+                } else {
+                    try self.database.saveAccount(tx.recipient, miner_account);
+                }
+
+                circulating_supply_delta.* = try std.math.add(u64, circulating_supply_delta.*, tx.amount);
+
+                if (batch == null) {
+                    try self.database.addToCirculatingSupply(tx.amount);
+                }
+
+                log.info("💰 Coinbase reward matured: {} ZEI for block {} (recipient: {x})", .{ tx.amount, maturity_height, tx.recipient.hash[0..8] });
             }
         }
     }
 
     /// Process all transactions in a block
-    pub fn processBlockTransactions(self: *Self, io: std.Io, transactions: []Transaction, current_height: u32, force_processing: bool) !void {
+    pub fn processBlockTransactions(self: *Self, io: std.Io, transactions: []const Transaction, current_height: u32, force_processing: bool) !void {
         log.info("🔍 [BLOCK TX] Processing {} transactions at height {}", .{ transactions.len, current_height });
 
-        // First pass: process all coinbase transactions
+        var staged_accounts = std.AutoHashMap(Address, Account).init(self.allocator);
+        defer staged_accounts.deinit();
+
+        const current_total_supply = self.database.getTotalSupply();
+        var total_supply_delta: u64 = 0;
+        var circulating_supply_delta: u64 = 0;
+
         for (transactions, 0..) |tx, i| {
+            if (!tx.isValid()) {
+                return error.InvalidTransaction;
+            }
+
             if (tx.isCoinbase()) {
-                const tx_hash = tx.hash();
-
-                // Check for duplicate processing to prevent double-spend during sync replay
-                if (!force_processing and self.isTransactionProcessed(tx_hash)) {
-                    log.info("🔄 [TX DEDUP] Coinbase transaction {} already processed, skipping", .{i});
-                    continue;
-                }
-
                 log.info("🔍 [BLOCK TX] Processing coinbase transaction {} at height {}", .{ i, current_height });
-                try self.processCoinbaseTransaction(io, tx, tx.recipient, current_height, null, force_processing);
-            }
-        }
+                total_supply_delta = try std.math.add(u64, total_supply_delta, tx.amount);
 
-        // Second pass: process all regular transactions
-        for (transactions, 0..) |tx, i| {
-            if (!tx.isCoinbase()) {
-                const tx_hash = tx.hash();
-
-                // Check for duplicate processing to prevent double-spend during sync replay
-                if (!force_processing and self.isTransactionProcessed(tx_hash)) {
-                    log.info("🔄 [TX DEDUP] Regular transaction {} already processed, skipping", .{i});
-                    continue;
+                const staged_miner = try self.getOrLoadStagedAccount(io, &staged_accounts, tx.recipient);
+                if (current_height == 0) {
+                    staged_miner.balance = try std.math.add(u64, staged_miner.balance, tx.amount);
+                    circulating_supply_delta = try std.math.add(u64, circulating_supply_delta, tx.amount);
+                } else {
+                    staged_miner.immature_balance = try std.math.add(u64, staged_miner.immature_balance, tx.amount);
                 }
 
-                log.info("🔍 [BLOCK TX] Processing regular transaction {} at height {}", .{ i, current_height });
-                try self.processTransaction(io, tx, null, force_processing);
+                continue;
+            }
+
+            if (!force_processing and self.database.hasTransaction(io, tx.hash())) {
+                log.info("🚫 [DUPLICATE TX] Transaction {x} already exists in blockchain - SKIPPING to prevent double-spend", .{tx.hash()[0..8]});
+                continue;
+            }
+
+            log.info("🔍 [BLOCK TX] Processing regular transaction {} at height {}", .{ i, current_height });
+
+            _ = try self.getOrLoadStagedAccount(io, &staged_accounts, tx.sender);
+            _ = try self.getOrLoadStagedAccount(io, &staged_accounts, tx.recipient);
+
+            const staged_sender = staged_accounts.getPtr(tx.sender).?;
+            const staged_recipient = staged_accounts.getPtr(tx.recipient).?;
+            const total_cost = try std.math.add(u64, tx.amount, tx.fee);
+
+            if (staged_sender.balance < total_cost) {
+                return error.InsufficientBalance;
+            }
+
+            if (tx.nonce < staged_sender.nonce) {
+                return error.InvalidNonce;
+            }
+
+            staged_sender.balance -= total_cost;
+            staged_sender.nonce = try std.math.add(u64, tx.nonce, 1);
+            staged_recipient.balance = try std.math.add(u64, staged_recipient.balance, tx.amount);
+        }
+
+        const new_total_supply = try std.math.add(u64, current_total_supply, total_supply_delta);
+        if (new_total_supply > types.MAX_SUPPLY) {
+            return error.SupplyCapExceeded;
+        }
+
+        const coinbase_maturity = types.getCoinbaseMaturity();
+        if (current_height >= coinbase_maturity) {
+            const maturity_height = current_height - coinbase_maturity;
+            var mature_block = self.database.getBlock(io, maturity_height) catch null;
+            if (mature_block) |*block| {
+                defer block.deinit(self.allocator);
+
+                for (block.transactions) |mature_tx| {
+                    if (!mature_tx.isCoinbase()) continue;
+
+                    const staged_miner = try self.getOrLoadStagedAccount(io, &staged_accounts, mature_tx.recipient);
+                    if (staged_miner.immature_balance < mature_tx.amount) continue;
+
+                    staged_miner.immature_balance -= mature_tx.amount;
+                    staged_miner.balance = try std.math.add(u64, staged_miner.balance, mature_tx.amount);
+                    circulating_supply_delta = try std.math.add(u64, circulating_supply_delta, mature_tx.amount);
+
+                    log.info("💰 Coinbase reward matured: {} ZEI for block {} (recipient: {x})", .{ mature_tx.amount, maturity_height, mature_tx.recipient.hash[0..8] });
+                }
             }
         }
 
-        // Mark all transactions as processed to prevent re-broadcasting
+        var batch = self.database.createWriteBatch();
+        defer batch.deinit();
+
+        if (staged_accounts.count() > 0) {
+            self.invalidateStateRootCache();
+
+            var account_iterator = staged_accounts.iterator();
+            while (account_iterator.next()) |entry| {
+                try batch.saveAccount(entry.key_ptr.*, entry.value_ptr.*);
+            }
+        }
+
+        if (total_supply_delta > 0) {
+            try batch.updateTotalSupply(new_total_supply);
+        }
+
+        if (circulating_supply_delta > 0) {
+            const current_circulating_supply = self.database.getCirculatingSupply();
+            const new_circulating_supply = try std.math.add(u64, current_circulating_supply, circulating_supply_delta);
+            try batch.updateCirculatingSupply(new_circulating_supply);
+        }
+
+        try batch.commit();
+
         self.mutex.lock();
         defer self.mutex.unlock();
         for (transactions) |tx| {
@@ -677,5 +711,52 @@ pub const ChainState = struct {
         log.info("🌳 [STATE ROOT] Calculated from {} accounts: {x}", .{ account_count, root });
 
         return root;
+    }
+
+    /// Debug helper for reorg investigations: log a deterministic slice of account state.
+    pub fn debugLogAccounts(self: *Self, label: []const u8, max_accounts: usize) !void {
+        const AccountLogger = struct {
+            allocator: std.mem.Allocator,
+            label: []const u8,
+            seen: usize = 0,
+            max_accounts: usize,
+
+            fn callback(account: types.Account, user_data: ?*anyopaque) bool {
+                const logger = @as(*@This(), @ptrCast(@alignCast(user_data.?)));
+                if (logger.seen >= logger.max_accounts) {
+                    return false;
+                }
+
+                const addr = formatAddress(logger.allocator, account.address);
+                defer if (!std.mem.eql(u8, addr, "<invalid>")) logger.allocator.free(addr);
+
+                const account_hash = util.MerkleTree.hashAccountState(account);
+                log.warn("🧪 [STATE DEBUG] {s} account[{d}] addr={s} balance={} immature={} nonce={} hash={x}", .{
+                    logger.label,
+                    logger.seen,
+                    addr,
+                    account.balance,
+                    account.immature_balance,
+                    account.nonce,
+                    account_hash,
+                });
+
+                logger.seen += 1;
+                return true;
+            }
+        };
+
+        var logger = AccountLogger{
+            .allocator = self.allocator,
+            .label = label,
+            .max_accounts = max_accounts,
+        };
+
+        try self.database.iterateAccounts(AccountLogger.callback, &logger);
+        log.warn("🧪 [STATE DEBUG] {s} logged {} account(s){s}", .{
+            label,
+            logger.seen,
+            if (logger.seen == max_accounts) " (truncated)" else "",
+        });
     }
 };

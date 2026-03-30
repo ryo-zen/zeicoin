@@ -117,9 +117,6 @@ pub const ChainProcessor = struct {
         const index_block_hash = block.hash();
         try self.chain_state.indexBlock(height, index_block_hash);
 
-        // Mature any coinbase rewards that have reached 100 confirmations
-        try self.matureCoinbaseRewards(io, height);
-
         // Remove processed transactions from mempool
         self.cleanMempool(block);
 
@@ -145,9 +142,6 @@ pub const ChainProcessor = struct {
         // Update block index for O(1) lookups in reorganizations
         const block_hash = block.hash();
         try self.chain_state.indexBlock(block_height, block_hash);
-
-        // Mature any coinbase rewards that have reached 100 confirmations
-        try self.matureCoinbaseRewards(io, block_height);
 
         // Remove processed transactions from mempool
         self.cleanMempool(block);
@@ -269,115 +263,7 @@ pub const ChainProcessor = struct {
     }
 
     fn processBlockTransactions(self: *ChainProcessor, io: std.Io, transactions: []const types.Transaction, height: u32) !void {
-        // Handle empty blocks
-        if (transactions.len == 0) {
-            log.info("⚠️ [SAFETY] Block has no transactions at height {}", .{height});
-            return;
-        }
-
-        // PHASE 1: Pre-validate ALL transactions (read-only checks)
-        log.info("🔍 [PHASE 1] Validating {} transactions before applying", .{transactions.len});
-
-        // Track nonce increments within this block per sender so that multiple
-        // transactions from the same sender in one block validate correctly.
-        var pending_nonces = std.AutoHashMap(types.Address, u64).init(self.chain_state.allocator);
-        defer pending_nonces.deinit();
-
-        for (transactions, 0..) |tx, i| {
-            // Structure validation
-            if (!tx.isValid()) {
-                log.info("❌ [PHASE 1] Invalid transaction {} at height {}", .{i, height});
-                return error.InvalidTransaction;
-            }
-
-            // For regular transactions, validate balance and nonce
-            if (!tx.isCoinbase()) {
-                const sender = try self.chain_state.getAccount(io, tx.sender);
-                const total_cost = try std.math.add(u64, tx.amount, tx.fee);
-
-                if (sender.balance < total_cost) {
-                    log.info("❌ [PHASE 1] Insufficient balance for tx {}", .{i});
-                    return error.InsufficientBalance;
-                }
-
-                // Use pending nonce if this sender already appeared earlier in the block
-                const expected_nonce = pending_nonces.get(tx.sender) orelse sender.nonce;
-                if (tx.nonce < expected_nonce) {
-                    log.info("❌ [PHASE 1] Invalid nonce for tx {}", .{i});
-                    return error.InvalidNonce;
-                }
-                try pending_nonces.put(tx.sender, tx.nonce + 1);
-            }
-        }
-
-        log.info("✅ [PHASE 1] All transactions validated", .{});
-
-        // PHASE 2: Apply ALL transactions atomically via WriteBatch
-        log.info("🔄 [PHASE 2] Applying {} transactions atomically", .{transactions.len});
-
-        var batch = self.chain_state.database.createWriteBatch();
-        defer batch.deinit();
-        errdefer {
-            log.warn("❌ [PHASE 2] Batch application failed - rolling back", .{});
-        }
-
-        // Track supply changes for coinbase transactions
-        var total_supply_delta: u64 = 0;
-        var circulating_supply_delta: u64 = 0;
-
-        for (transactions, 0..) |tx, i| {
-            const tx_hash = tx.hash();
-            log.info("📦 [PHASE 2] Processing tx {}/{}: {x}", .{
-                i + 1, transactions.len, tx_hash[0..8]
-            });
-
-            if (tx.isCoinbase()) {
-                // Track supply increase
-                total_supply_delta += tx.amount;
-                if (height == 0) {
-                    circulating_supply_delta += tx.amount; // Genesis pre-mine
-                }
-
-                try self.chain_state.processCoinbaseTransaction(
-                    io, tx, tx.recipient, height, &batch, false
-                );
-            } else {
-                try self.chain_state.processTransaction(
-                    io, tx, &batch, false
-                );
-            }
-        }
-
-        // Apply supply changes to batch
-        if (total_supply_delta > 0) {
-            const current_total = self.chain_state.database.getTotalSupply();
-            const new_total = try std.math.add(u64, current_total, total_supply_delta);
-            try batch.updateTotalSupply(new_total);
-
-            log.info("📈 [SUPPLY] Total supply: {} → {}", .{current_total, new_total});
-        }
-
-        if (circulating_supply_delta > 0) {
-            const current_circ = self.chain_state.database.getCirculatingSupply();
-            const new_circ = try std.math.add(u64, current_circ, circulating_supply_delta);
-            try batch.updateCirculatingSupply(new_circ);
-
-            log.info("📈 [SUPPLY] Circulating supply: {} → {}", .{current_circ, new_circ});
-        }
-
-        // ATOMIC COMMIT: All-or-nothing
-        try batch.commit();
-
-        log.info("✅ [PHASE 2] {} transactions committed atomically", .{transactions.len});
-    }
-
-    fn matureCoinbaseRewards(self: *ChainProcessor, io: std.Io, current_height: u32) !void {
-        // Check if we have mature coinbase rewards
-        const coinbase_maturity = types.getCoinbaseMaturity();
-        if (current_height >= coinbase_maturity) {
-            const maturity_height = current_height - coinbase_maturity;
-            try self.chain_state.matureCoinbaseRewards(io, maturity_height);
-        }
+        try self.chain_state.processBlockTransactions(io, transactions, height, false);
     }
 
     fn cleanMempool(self: *ChainProcessor, block: types.Block) void {

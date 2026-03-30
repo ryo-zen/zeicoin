@@ -217,11 +217,7 @@ pub const ZeiCoin = struct {
     pub fn createCanonicalGenesis(self: *ZeiCoin) !void {
         var genesis_block = try genesis.createGenesis(self.allocator);
         defer genesis_block.deinit(self.allocator);
-        for (genesis_block.transactions) |tx| {
-            if (tx.isCoinbase()) {
-                try self.chain_state.processCoinbaseTransaction(self.io, tx, tx.recipient, 0, null, true);
-            }
-        }
+        try self.chain_state.processBlockTransactions(self.io, genesis_block.transactions, 0, true);
         try self.database.saveBlock(self.io, 0, genesis_block);
 
         // CRITICAL FIX: Index genesis block
