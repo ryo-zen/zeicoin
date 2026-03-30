@@ -1107,7 +1107,13 @@ pub const SyncManager = struct {
         log.warn("🔄 [BULK REORG] Executing chain reorganization...", .{});
 
         if (g_blockchain) |blockchain| {
-            try blockchain.chain_processor.executeBulkReorg(io, all_blocks.items);
+            blockchain.chain_processor.executeBulkReorg(io, all_blocks.items) catch |err| switch (err) {
+                error.ReorgInProgress => {
+                    log.info("🔒 [BULK REORG] Another reorganization is already active, deferring this request", .{});
+                    return;
+                },
+                else => return err,
+            };
             log.warn("✅ [BULK REORG] Reorganization completed successfully!", .{});
         } else {
             log.err("❌ [BULK REORG] No blockchain instance available", .{});

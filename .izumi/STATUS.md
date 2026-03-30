@@ -10,11 +10,11 @@
 **Branch:** `libp2p-integration`
 **Active initiative:** ZEI-62 reorg stability after restart/reconnect under long-running Docker traffic
 
-**Last worked on:** 2026-03-30 — Did a targeted idiomatic cleanup pass on the new reorg/replay code. `replayFromGenesis()` now logs and propagates real block/index rebuild errors instead of swallowing them, `ChainState` switched to `tx.isCoinbase()` instead of the misleading `isCoinbaseTransaction(self, ...)` helper, `rollbackStateWithoutDeletingBlocks()` no longer takes a fake incremental-work `current_height` parameter, `ReorgResult.error_message` became an enum-backed `failure_reason`, and `processTransaction()` moved its hottest detailed logs behind Debug-mode formatting so replay/reorg paths stop allocating Bech32 strings for every info log line. `zig build check`, `zig build test`, and `git diff --check` all pass.
+**Last worked on:** 2026-03-30 — Started `ZEI-63` and implemented a reorg concurrency guard in the live block-processing path. `ChainProcessor` now exposes an atomic `reorg_in_progress` flag, rejects overlapping `executeBulkReorg()` requests with `error.ReorgInProgress`, and defers `acceptBlock` / sync block application / orphan follow-up while a reorg owns chain mutation. `server_handlers.onBlock()` now treats `ReorgInProgress` as a retriable defer (the block stays cached on the peer instead of causing a peer-level failure), and `sync_manager.executeBulkReorg()` now logs and backs off if another reorg is already active. Validation passed: `zig build check`, `zig build test`, `git diff --check`, and `./docker/scripts/test_libp2p_zen_server.sh`.
 
-**Next step:** Start the mainnet-blocking follow-up queue with `ZEI-63` (reorg concurrency guard), then `ZEI-67` (verify peer work locally), then `ZEI-18` (real snapshots / avoid replay-from-genesis fallback).
+**Next step:** Review and commit the `ZEI-63` guard in `src/core/chain/processor.zig`, `src/core/server/server_handlers.zig`, and `src/core/sync/manager.zig`; then move on to `ZEI-67` (verify peer work locally).
 
-**In flight:** Uncommitted work is currently only in `src/core/chain/processor.zig`, `src/core/chain/reorg_executor.zig`, `src/core/chain/state.zig`, and this file from the post-review cleanup pass. The validated deep-reorg work and follow-up tickets were committed already (`323972b`, `9905ac4`). `.gitignore` still has an unrelated local modification.
+**In flight:** Uncommitted work is currently only in `src/core/chain/processor.zig`, `src/core/server/server_handlers.zig`, and `src/core/sync/manager.zig` from `ZEI-63`. The validated deep-reorg/runtime fixes and follow-up tickets are already committed (`323972b`, `9905ac4`, `2495d14`).
 
 ---
 

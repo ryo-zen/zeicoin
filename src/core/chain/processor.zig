@@ -20,6 +20,7 @@ pub const ChainProcessor = struct {
     chain_validator: *ChainValidator,
     mempool_manager: ?*@import("../mempool/manager.zig").MempoolManager,
     reorg_executor: ReorgExecutor,
+    reorg_in_progress: std.atomic.Value(bool),
     orphan_pool: OrphanPool,
     network_callback: ?*const fn (block: types.Block) void = null,
 
@@ -37,6 +38,7 @@ pub const ChainProcessor = struct {
             .chain_validator = chain_validator,
             .mempool_manager = mempool_manager,
             .reorg_executor = ReorgExecutor.init(allocator, chain_state, database),
+            .reorg_in_progress = std.atomic.Value(bool).init(false),
             .orphan_pool = OrphanPool.init(allocator, OrphanPool.MAX_ORPHANS_DEFAULT),
         };
     }
@@ -53,6 +55,22 @@ pub const ChainProcessor = struct {
         self.mempool_manager = mempool_manager;
     }
 
+    pub fn isReorgInProgress(self: *const ChainProcessor) bool {
+        return self.reorg_in_progress.load(.acquire);
+    }
+
+    fn rejectIfReorgInProgress(self: *const ChainProcessor, operation: []const u8, block_height: ?u32) !void {
+        if (!self.isReorgInProgress()) return;
+
+        if (block_height) |height| {
+            log.info("🔒 [REORG GUARD] Deferring {s} for block {} while reorganization is active", .{ operation, height });
+        } else {
+            log.info("🔒 [REORG GUARD] Deferring {s} while reorganization is active", .{operation});
+        }
+
+        return error.ReorgInProgress;
+    }
+
     /// Apply a valid block to the blockchain
     pub fn addBlockToChain(self: *ChainProcessor, io: std.Io, block: types.Block, height: u32) !void {
         // SAFETY: Basic validation - these should not be null in normal operation
@@ -62,6 +80,8 @@ pub const ChainProcessor = struct {
             log.info("🔄 [SYNC DEDUP] Block #{} already exists, skipping processing to prevent double-spend", .{height});
             return; // Skip processing but don't error - this is expected during crash recovery
         }
+
+        try self.rejectIfReorgInProgress("sync block application", height);
 
         const block_hash = block.hash();
         log.info("📦 [BLOCK PROCESS] Block #{} received with {} transactions (hash: {x})", .{ height, block.txCount(), block_hash[0..8] });
@@ -114,6 +134,8 @@ pub const ChainProcessor = struct {
         // Get the current height - this is the height for the new block
         const block_height = try self.database.getHeight();
 
+        try self.rejectIfReorgInProgress("block application", block_height);
+
         // Process all transactions in the block
         try self.processBlockTransactions(io, block.transactions, block_height);
 
@@ -142,6 +164,8 @@ pub const ChainProcessor = struct {
             log.info("🔄 [SYNC DEDUP] Block with hash {x} already exists at height {}, skipping processing to prevent double-spend", .{ block_hash[0..8], existing_height });
             return; // Skip processing but don't error - this is expected during sync replay
         }
+
+        try self.rejectIfReorgInProgress("block acceptance", block.height);
 
         const current_height = try self.database.getHeight();
         
@@ -446,6 +470,12 @@ pub const ChainProcessor = struct {
     /// Execute bulk chain reorganization
     /// Called by sync manager when a competing longer chain is detected
     pub fn executeBulkReorg(self: *ChainProcessor, io: std.Io, new_blocks: []const types.Block) !void {
+        if (self.reorg_in_progress.swap(true, .acq_rel)) {
+            log.warn("🔒 [REORG GUARD] Reorganization already in progress, rejecting overlapping request", .{});
+            return error.ReorgInProgress;
+        }
+        defer self.reorg_in_progress.store(false, .release);
+
         const current_height = try self.database.getHeight();
         const new_tip_height = if (new_blocks.len > 0) new_blocks[new_blocks.len - 1].height else current_height;
 
@@ -475,6 +505,11 @@ pub const ChainProcessor = struct {
     /// Process orphan blocks after a new block is added to the chain
     /// Checks if any orphans are now ready to be connected
     fn processOrphanBlocks(self: *ChainProcessor, io: std.Io) anyerror!void {
+        if (self.isReorgInProgress()) {
+            log.info("🔒 [REORG GUARD] Skipping orphan processing while reorganization is active", .{});
+            return;
+        }
+
         log.info("🔍 [ORPHAN PROCESS] Checking orphan pool for processable blocks", .{});
         log.info("   📊 Current orphan count: {}", .{self.orphan_pool.size()});
 

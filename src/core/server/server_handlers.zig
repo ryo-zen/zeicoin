@@ -283,6 +283,14 @@ pub const ServerHandlers = struct {
             }
         }
 
+        if (self.blockchain.chain_processor.isReorgInProgress()) {
+            std.log.info("🔒 [REORG GUARD] Deferring block {} while reorganization is active; block remains cached on peer {}", .{
+                block.height,
+                peer.id,
+            });
+            return;
+        }
+
         // Check if parent block exists (orphan detection)
         const parent_hash = block.header.previous_hash;
 
@@ -326,7 +334,21 @@ pub const ServerHandlers = struct {
         }
 
         // Process block normally
-        try self.blockchain.chain_processor.acceptBlock(io, block);
+        self.blockchain.chain_processor.acceptBlock(io, block) catch |err| switch (err) {
+            error.ReorgInProgress => {
+                std.log.info("🔒 [REORG GUARD] Deferred block {} while reorganization is active; block remains cached on peer {}", .{
+                    block.height,
+                    peer.id,
+                });
+                return;
+            },
+            else => return err,
+        };
+
+        if (self.blockchain.chain_processor.isReorgInProgress()) {
+            std.log.info("🔒 [REORG GUARD] Skipping orphan follow-up after block {} because reorganization started", .{block.height});
+            return;
+        }
 
         // After successfully processing, check for orphans that can now be processed
         try self.processOrphanChain(io, block_hash);
@@ -345,6 +367,11 @@ pub const ServerHandlers = struct {
 
     /// Process any orphan blocks that can now be applied
     fn processOrphanChain(self: *Self, io: std.Io, parent_hash: [32]u8) !void {
+        if (self.blockchain.chain_processor.isReorgInProgress()) {
+            std.log.info("🔒 [REORG GUARD] Skipping orphan chain processing while reorganization is active", .{});
+            return;
+        }
+
         var current_hash = parent_hash;
         var processed_count: usize = 0;
 
@@ -372,9 +399,15 @@ pub const ServerHandlers = struct {
 
                 // Process directly through acceptBlock to avoid recursion issues
                 const orphan_hash = orphan_block.hash();
-                self.blockchain.chain_processor.acceptBlock(io, orphan_block) catch |err| {
-                    std.log.warn("   ❌ Orphan block processing failed: {}", .{err});
-                    continue;
+                self.blockchain.chain_processor.acceptBlock(io, orphan_block) catch |err| switch (err) {
+                    error.ReorgInProgress => {
+                        std.log.info("   🔒 [REORG GUARD] Deferring orphan block at height {} while reorganization is active", .{orphan_block.height});
+                        return;
+                    },
+                    else => {
+                        std.log.warn("   ❌ Orphan block processing failed: {}", .{err});
+                        continue;
+                    },
                 };
 
                 processed_count += 1;
