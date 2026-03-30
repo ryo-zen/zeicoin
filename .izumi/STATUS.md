@@ -8,13 +8,13 @@
 
 **Date:** 2026-03-30
 **Branch:** `libp2p-integration`
-**Active initiative:** Reorg safety process hardening after the canonical replay/state fix
+**Active initiative:** `ZEI-70` reorg safety and recovery hardening after the canonical replay/state fix
 
-**Last worked on:** 2026-03-30 — Committed the canonical replay/state-root fix as `8d044f0`, kept the reorg safety profile in place, and aligned the stale reorg tracker items so `ZEI-61`, `ZEI-62`, `ZEI-63`, and `ZEI-67` reflect the landed work on `libp2p-integration`.
+**Last worked on:** 2026-03-30 — Created epic `ZEI-70` (`reorg_safety_and_recovery_hardening`) and parented the remaining open reorg/replay/state-root tickets under it after the `8d044f0` canonical replay/state-root fix landed.
 
-**Next step:** Implement `ZEI-18` real state snapshots so reorg rollback/restore stops replaying from genesis.
+**Next step:** Implement `ZEI-18` under `ZEI-70`: real state snapshots so reorg rollback/restore stops replaying from genesis.
 
-**In flight:** Housekeeping updates are uncommitted in `.izumi/STATUS.md` and the `ZEI-61` / `ZEI-62` / `ZEI-63` / `ZEI-67` issue files. After that cleanup, the immediate queue is `ZEI-18`, then `ZEI-64` / `ZEI-65` / `ZEI-66`; `ZEI-52` remains the broader deep-reorg hardening umbrella.
+**In flight:** Tracker-only updates are uncommitted in `.izumi/STATUS.md`, `ZEI-70`, and the reparented reorg tickets. Immediate implementation queue inside `ZEI-70`: `ZEI-18`, then `ZEI-68` / `ZEI-69`, `ZEI-21`, `ZEI-52`, and `ZEI-64` / `ZEI-65` / `ZEI-66`.
 
 ---
 
@@ -22,6 +22,7 @@
 
 - **Reorg work now has an explicit safety profile** — `docs/REORG_SAFETY_PROFILE.md` adapts the NASA rules to ZeiCoin's consensus-critical replay/reorg path and makes the intended discipline concrete.
 - **Workflow docs now point to the reorg profile** — `CLAUDE.md` and `AGENTS.md` both tell implementers and reviewers to read the profile before changing reorg/replay/state-root code, so the rules are part of the normal coding/review loop rather than a passive reference doc.
+- **The active reorg queue now has one Izumi umbrella** — `ZEI-70` groups the remaining open reorg/replay/state-root work so snapshots, validation, mempool recovery, deep-reorg defenses, and cleanup follow-ons are visible in one place.
 - **Reorg ticket bookkeeping is now caught up with the code** — `ZEI-61`, `ZEI-62`, `ZEI-63`, and `ZEI-67` are no longer active blockers on this branch; the remaining reorg queue is `ZEI-18`, `ZEI-64`, `ZEI-65`, `ZEI-66`, and `ZEI-52`.
 - **`ChainState.getAccount()` is now a pure read on misses** — querying a missing address returns an in-memory zero/default account without writing it to RocksDB, so node-local reads can no longer leak synthetic zero accounts into the persisted account set or the state root.
 - **Canonical header.state_root now commits `address + balance + nonce + immature_balance`** — the shared `util.MerkleTree.hashAccountState()` helper was updated to include `immature_balance`, and `state_root.zig` no longer exposes a second competing root algorithm.
@@ -50,7 +51,7 @@
 - **Explicit empty bootstrap disables fallback** — `ZEICOIN_BOOTSTRAP=""` is now treated as an intentional “no bootstrap” setting, which keeps Docker seed nodes from dialing the hardcoded external testnet bootstrap.
 - **Docker validation is now clean enough to advance** — `./docker/scripts/test_libp2p_zen_server.sh` passes end-to-end, and the latest logs show only local Docker bootstrap addresses for the configured topology.
 - **High-height scripted deep reorg is now green too** — after rebuilding Docker images on 2026-03-30, `docker/scripts/verify_deep_reorg.sh` passed with divergence at height 50 and convergence back to miner-1’s height-50 hash after the forced restart/reconnect.
-- **Post-Docker mainnet blockers are now explicit** — with `ZEI-61`, `ZEI-62`, `ZEI-63`, and `ZEI-67` closed on this branch, the next priority queue is `ZEI-18` (real snapshots), then `ZEI-64`/`65`/`66`; `ZEI-52` remains the umbrella deep-reorg hardening ticket.
+- **Post-Docker mainnet blockers are now explicit** — `ZEI-70` is the umbrella for the remaining reorg queue. Immediate priority inside it is `ZEI-18` (real snapshots), then `ZEI-68`/`69`, `ZEI-21`, `ZEI-52`, and `ZEI-64`/`65`/`66`.
 - **Replay/index rebuild errors must not be hidden** — `replayFromGenesis()` now logs and propagates the real failure from `getBlock()` / `indexBlock()` so recovery bugs are debuggable instead of collapsing into a generic replay failure.
 - **Transaction hot-path logging should not allocate at info level** — `processTransaction()` now keeps detailed sender/recipient/account-delta logging in Debug-mode-only blocks and reuses the formatted addresses once per transaction instead of allocating multiple Bech32 strings per info log line.
 - **Reorg results should use typed reasons, not ad hoc strings** — `ReorgResult` now carries an enum `failure_reason`, which is safer than storing optional string slices and clearer for future branching.

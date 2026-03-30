@@ -14,11 +14,11 @@ labels:
 sprint: null
 story_points: null
 due_date: null
-parent_id: null
+parent_id: reorg_safety_and_recovery_hardening
 rank: null
 comments: []
 created_at: 2026-03-07T00:00:00+00:00
-updated_at: 2026-03-10T00:00:00+00:00
+updated_at: 2026-03-30T07:10:22+00:00
 ---
 
 ## Summary
