@@ -3,6 +3,7 @@
 // This is the single source of truth for blockchain state
 
 const std = @import("std");
+const builtin = @import("builtin");
 const types = @import("../types/types.zig");
 const util = @import("../util/util.zig");
 const db = @import("../storage/db.zig");
@@ -189,34 +190,45 @@ pub const ChainState = struct {
         // CACHE INVALIDATION: Account state will change
         self.state_dirty = true;
 
-        log.info("🔍 [TX VALIDATION] =============================================", .{});
-        log.info("🔍 [TX VALIDATION] Processing transaction:", .{});
-        const sender_addr = self.formatAddressForLogging(tx.sender);
-        defer self.allocator.free(sender_addr);
-        const recipient_addr = self.formatAddressForLogging(tx.recipient);
-        defer self.allocator.free(recipient_addr);
-        log.info("🔍 [TX VALIDATION]   Sender: {s}", .{sender_addr});
-        log.info("🔍 [TX VALIDATION]   Recipient: {s}", .{recipient_addr});
-        log.info("🔍 [TX VALIDATION]   Amount: {} ZEI", .{tx.amount});
-        log.info("🔍 [TX VALIDATION]   Fee: {} ZEI", .{tx.fee});
-        log.info("🔍 [TX VALIDATION]   Nonce: {}", .{tx.nonce});
+        var debug_sender_addr: ?[]const u8 = null;
+        defer if (debug_sender_addr) |addr| self.allocator.free(addr);
+
+        var debug_recipient_addr: ?[]const u8 = null;
+        defer if (debug_recipient_addr) |addr| self.allocator.free(addr);
+
+        if (builtin.mode == .Debug) {
+            debug_sender_addr = self.formatAddressForLogging(tx.sender);
+            debug_recipient_addr = self.formatAddressForLogging(tx.recipient);
+
+            log.debug("🔍 [TX VALIDATION] tx={x} sender={s} recipient={s} amount={} fee={} nonce={}", .{
+                tx_hash[0..8],
+                debug_sender_addr.?,
+                debug_recipient_addr.?,
+                tx.amount,
+                tx.fee,
+                tx.nonce,
+            });
+        }
 
         // Get accounts
-        log.info("🔍 [TX VALIDATION] Loading sender account...", .{});
         var sender_account = try self.getAccount(io, tx.sender);
-        log.info("🔍 [TX VALIDATION] Loading recipient account...", .{});
         var recipient_account = try self.getAccount(io, tx.recipient);
 
-        const sender_addr_2 = self.formatAddressForLogging(tx.sender);
-        defer self.allocator.free(sender_addr_2);
-        log.info("🔍 [TX VALIDATION] Processing transaction from sender: {s}", .{sender_addr_2});
-        const sender_balance_zei = @as(f64, @floatFromInt(sender_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-        const recipient_balance_zei = @as(f64, @floatFromInt(recipient_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-        const amount_zei = @as(f64, @floatFromInt(tx.amount)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-        const fee_zei = @as(f64, @floatFromInt(tx.fee)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-        log.info("🔍 [TX VALIDATION] Sender balance: {d:.8} ZEI, nonce: {}", .{ sender_balance_zei, sender_account.nonce });
-        log.info("🔍 [TX VALIDATION] Recipient balance: {d:.8} ZEI, nonce: {}", .{ recipient_balance_zei, recipient_account.nonce });
-        log.info("🔍 [TX VALIDATION] Transaction amount: {d:.8} ZEI, fee: {d:.8} ZEI", .{ amount_zei, fee_zei });
+        if (builtin.mode == .Debug) {
+            const sender_balance_zei = @as(f64, @floatFromInt(sender_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+            const recipient_balance_zei = @as(f64, @floatFromInt(recipient_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+            const amount_zei = @as(f64, @floatFromInt(tx.amount)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+            const fee_zei = @as(f64, @floatFromInt(tx.fee)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+
+            log.debug("🔍 [TX VALIDATION] sender_balance={d:.8} nonce={} recipient_balance={d:.8} nonce={} amount={d:.8} fee={d:.8}", .{
+                sender_balance_zei,
+                sender_account.nonce,
+                recipient_balance_zei,
+                recipient_account.nonce,
+                amount_zei,
+                fee_zei,
+            });
+        }
 
         // 💰 Apply transaction with fee deduction
         // Check for integer overflow in addition
@@ -225,20 +237,20 @@ pub const ChainState = struct {
             return error.IntegerOverflow;
         };
 
-        const total_cost_zei = @as(f64, @floatFromInt(total_cost)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-        log.info("🔍 [TX VALIDATION] Total cost: {d:.8} ZEI", .{total_cost_zei});
+        if (builtin.mode == .Debug) {
+            const total_cost_zei = @as(f64, @floatFromInt(total_cost)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+            log.debug("🔍 [TX VALIDATION] total cost: {d:.8} ZEI", .{total_cost_zei});
+        }
 
         // Safety check for sufficient balance
         if (sender_account.balance < total_cost) {
-            const sender_balance_zei_err = @as(f64, @floatFromInt(sender_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-            const needed_zei = @as(f64, @floatFromInt(total_cost)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-            const shortfall_zei = @as(f64, @floatFromInt(total_cost - sender_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-            log.info("❌ [TX VALIDATION] INSUFFICIENT BALANCE! Sender has {d:.8} ZEI, needs {d:.8} ZEI", .{ sender_balance_zei_err, needed_zei });
-            log.info("❌ [TX VALIDATION] Shortfall: {d:.8} ZEI", .{shortfall_zei});
+            log.info("❌ [TX VALIDATION] Insufficient balance for tx {x}: has {}, needs {}", .{
+                tx_hash[0..8],
+                sender_account.balance,
+                total_cost,
+            });
             return error.InsufficientBalance;
         }
-
-        log.info("✅ [TX VALIDATION] Balance check passed", .{});
 
         // Log account state changes
         const sender_old_balance = sender_account.balance;
@@ -261,19 +273,29 @@ pub const ChainState = struct {
 
         // Log detailed account changes
 
-        const sender_old_zei = @as(f64, @floatFromInt(sender_old_balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-        const sender_new_zei = @as(f64, @floatFromInt(sender_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-        const recipient_old_zei = @as(f64, @floatFromInt(recipient_old_balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-        const recipient_new_zei = @as(f64, @floatFromInt(recipient_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-        const change_zei = @as(f64, @floatFromInt(tx.amount)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-        const update_fee_zei = @as(f64, @floatFromInt(tx.fee)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+        if (builtin.mode == .Debug) {
+            const sender_old_zei = @as(f64, @floatFromInt(sender_old_balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+            const sender_new_zei = @as(f64, @floatFromInt(sender_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+            const recipient_old_zei = @as(f64, @floatFromInt(recipient_old_balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+            const recipient_new_zei = @as(f64, @floatFromInt(recipient_account.balance)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+            const change_zei = @as(f64, @floatFromInt(tx.amount)) / @as(f64, @floatFromInt(types.ZEI_COIN));
+            const update_fee_zei = @as(f64, @floatFromInt(tx.fee)) / @as(f64, @floatFromInt(types.ZEI_COIN));
 
-        const sender_addr_update = self.formatAddressForLogging(tx.sender);
-        defer self.allocator.free(sender_addr_update);
-        const recipient_addr_update = self.formatAddressForLogging(tx.recipient);
-        defer self.allocator.free(recipient_addr_update);
-        log.info("💰 [ACCOUNT UPDATE] SENDER {s}: {d:.8} → {d:.8} ZEI (−{d:.8}, nonce: {}→{})", .{ sender_addr_update, sender_old_zei, sender_new_zei, change_zei + update_fee_zei, sender_old_nonce, sender_account.nonce });
-        log.info("💰 [ACCOUNT UPDATE] RECIPIENT {s}: {d:.8} → {d:.8} ZEI (+{d:.8})", .{ recipient_addr_update, recipient_old_zei, recipient_new_zei, change_zei });
+            log.debug("💰 [ACCOUNT UPDATE] SENDER {s}: {d:.8} → {d:.8} ZEI (−{d:.8}, nonce: {}→{})", .{
+                debug_sender_addr.?,
+                sender_old_zei,
+                sender_new_zei,
+                change_zei + update_fee_zei,
+                sender_old_nonce,
+                sender_account.nonce,
+            });
+            log.debug("💰 [ACCOUNT UPDATE] RECIPIENT {s}: {d:.8} → {d:.8} ZEI (+{d:.8})", .{
+                debug_recipient_addr.?,
+                recipient_old_zei,
+                recipient_new_zei,
+                change_zei,
+            });
+        }
 
         // Save updated accounts to database
         if (batch) |b| {
@@ -390,20 +412,22 @@ pub const ChainState = struct {
         // Start from genesis (height 0)
         for (0..up_to_height + 1) |height| {
             const block_height: u32 = @intCast(height);
-            var block = self.database.getBlock(io, block_height) catch {
-                return error.ReplayFailed;
+            var block = self.database.getBlock(io, block_height) catch |err| {
+                log.err("❌ [REPLAY] Failed to load block {}: {}", .{ block_height, err });
+                return err;
             };
             defer block.deinit(self.allocator);
 
             // Rebuild block index during replay
             const block_hash = block.hash();
-            self.indexBlock(block_height, block_hash) catch {
-                // Block index rebuild failure logging disabled - too verbose during reorganization
+            self.indexBlock(block_height, block_hash) catch |err| {
+                log.err("❌ [REPLAY] Failed to index block {}: {}", .{ block_height, err });
+                return err;
             };
 
             // Process each transaction in the block using the same logic as normal chain processing
             for (block.transactions) |tx| {
-                if (self.isCoinbaseTransaction(tx)) {
+                if (tx.isCoinbase()) {
                     // Use the canonical coinbase processing logic
                     try self.processCoinbaseTransaction(io, tx, tx.recipient, block_height, null, true);
                 } else {
@@ -450,7 +474,8 @@ pub const ChainState = struct {
     /// Rollback state (accounts) to specific height WITHOUT deleting blocks
     /// This is used during reorganization to safely revert state before applying new blocks
     /// If the reorg fails, the old blocks are still in the database for recovery
-    pub fn rollbackStateWithoutDeletingBlocks(self: *Self, io: std.Io, target_height: u32, current_height: u32) !void {
+    pub fn rollbackStateWithoutDeletingBlocks(self: *Self, io: std.Io, target_height: u32) !void {
+        const current_height = try self.getHeight();
         if (target_height >= current_height) {
             return; // Nothing to rollback
         }
@@ -458,13 +483,6 @@ pub const ChainState = struct {
         try self.rebuildStateToHeight(io, target_height);
 
         std.log.info("🔄 [STATE ROLLBACK] State reverted to height {} (blocks preserved)", .{target_height});
-    }
-
-    /// Check if transaction is a coinbase transaction
-    pub fn isCoinbaseTransaction(self: *Self, tx: Transaction) bool {
-        _ = self;
-        // Coinbase transactions have zero sender address and nonce
-        return tx.sender.isZero() and tx.nonce == 0;
     }
 
     /// Replay coinbase transaction during state rebuild
@@ -532,7 +550,7 @@ pub const ChainState = struct {
 
         // Process coinbase transactions in the mature block
         for (mature_block.transactions) |tx| {
-            if (self.isCoinbaseTransaction(tx)) {
+            if (tx.isCoinbase()) {
                 // Move rewards from immature to mature balance
                 var miner_account = self.getAccount(io, tx.recipient) catch {
                     // Miner account should exist, but handle gracefully
@@ -560,7 +578,7 @@ pub const ChainState = struct {
 
         // First pass: process all coinbase transactions
         for (transactions, 0..) |tx, i| {
-            if (self.isCoinbaseTransaction(tx)) {
+            if (tx.isCoinbase()) {
                 const tx_hash = tx.hash();
 
                 // Check for duplicate processing to prevent double-spend during sync replay
@@ -576,7 +594,7 @@ pub const ChainState = struct {
 
         // Second pass: process all regular transactions
         for (transactions, 0..) |tx, i| {
-            if (!self.isCoinbaseTransaction(tx)) {
+            if (!tx.isCoinbase()) {
                 const tx_hash = tx.hash();
 
                 // Check for duplicate processing to prevent double-spend during sync replay

@@ -7,13 +7,29 @@ const state_root = @import("./state_root.zig");
 const Block = types.Block;
 const Hash = types.Hash;
 
+pub const ReorgFailureReason = enum {
+    new_chain_shorter,
+    revert_state_failed,
+    pre_state_root_mismatch,
+    apply_block_failed,
+
+    pub fn description(self: ReorgFailureReason) []const u8 {
+        return switch (self) {
+            .new_chain_shorter => "New chain is shorter than current chain",
+            .revert_state_failed => "Failed to revert state",
+            .pre_state_root_mismatch => "State root verification failed before applying block",
+            .apply_block_failed => "Failed to apply new blocks",
+        };
+    }
+};
+
 /// Result of a reorganization operation
 pub const ReorgResult = struct {
     success: bool,
     blocks_reverted: u32,
     blocks_applied: u32,
     fork_height: u32,
-    error_message: ?[]const u8 = null,
+    failure_reason: ?ReorgFailureReason = null,
 };
 
 /// Simple State-Based Reorganization Executor
@@ -57,7 +73,7 @@ pub const ReorgExecutor = struct {
                 .blocks_reverted = 0,
                 .blocks_applied = 0,
                 .fork_height = 0,
-                .error_message = "New chain is shorter than current chain",
+                .failure_reason = .new_chain_shorter,
             };
         }
 
@@ -93,7 +109,7 @@ pub const ReorgExecutor = struct {
                     .blocks_reverted = 0,
                     .blocks_applied = 0,
                     .fork_height = fork_height,
-                    .error_message = "Failed to revert state",
+                    .failure_reason = .revert_state_failed,
                 };
             };
         }
@@ -120,7 +136,7 @@ pub const ReorgExecutor = struct {
                         .blocks_reverted = blocks_to_revert,
                         .blocks_applied = applied,
                         .fork_height = fork_height,
-                        .error_message = "State root verification failed before applying block",
+                        .failure_reason = .pre_state_root_mismatch,
                     };
                 }
             }
@@ -138,7 +154,7 @@ pub const ReorgExecutor = struct {
                     .blocks_reverted = blocks_to_revert,
                     .blocks_applied = applied,
                     .fork_height = fork_height,
-                    .error_message = "Failed to apply new blocks",
+                    .failure_reason = .apply_block_failed,
                 };
             };
 
@@ -196,7 +212,10 @@ pub const ReorgExecutor = struct {
         const current_height = try self.chain_state.getHeight();
 
         // Use ChainState's rollback functionality but WITHOUT deleting blocks
-        try self.chain_state.rollbackStateWithoutDeletingBlocks(io, target_height, current_height);
+        if (target_height >= current_height) {
+            return;
+        }
+        try self.chain_state.rollbackStateWithoutDeletingBlocks(io, target_height);
 
         std.log.debug("⏪ Reverted state from height {} to {}", .{current_height, target_height});
     }

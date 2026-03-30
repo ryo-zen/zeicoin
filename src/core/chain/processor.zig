@@ -465,8 +465,8 @@ pub const ChainProcessor = struct {
             self.orphan_pool.clear();
         } else {
             log.err("❌ [BULK REORG] Chain reorganization failed!", .{});
-            if (result.error_message) |msg| {
-                log.err("   💬 Error: {s}", .{msg});
+            if (result.failure_reason) |reason| {
+                log.err("   💬 Error: {s}", .{reason.description()});
             }
             return error.ReorgFailed;
         }
