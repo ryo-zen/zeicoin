@@ -486,19 +486,18 @@ pub const ChainProcessor = struct {
 
         // Check if any orphans are waiting for this block as their parent
         if (self.orphan_pool.getOrphansByParent(current_tip_hash)) |orphan_blocks| {
+            var owned_orphans = orphan_blocks;
             defer {
-                // Clean up the ArrayList wrapper
-                var list = std.array_list.Managed(types.Block).fromOwnedSlice(self.allocator, @constCast(orphan_blocks));
-                for (list.items) |*block| {
+                for (owned_orphans.items) |*block| {
                     block.deinit(self.allocator);
                 }
-                list.deinit();
+                owned_orphans.deinit();
             }
 
-            log.info("✅ [ORPHAN PROCESS] Found {} orphan(s) that can now be processed", .{orphan_blocks.len});
+            log.info("✅ [ORPHAN PROCESS] Found {} orphan(s) that can now be processed", .{owned_orphans.items.len});
 
             // Process each orphan block
-            for (orphan_blocks) |orphan_block| {
+            for (owned_orphans.items) |orphan_block| {
                 const orphan_hash = orphan_block.hash();
                 log.info("   📦 Processing orphan block at height {} (hash: {x})", .{
                     orphan_block.height,

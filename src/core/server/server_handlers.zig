@@ -300,9 +300,14 @@ pub const ServerHandlers = struct {
                 std.log.info("🔍 [ORPHAN] Block parent not found!", .{});
                 std.log.debug("   Missing parent: {x}", .{&parent_hash});
 
+                // Network-decoded messages are deinitialized when the handler returns,
+                // so the orphan pool must take ownership of its own deep copy.
+                var orphan_block = try block.clone(self.blockchain.allocator);
+
                 // Add to orphan pool
-                self.blockchain.chain_processor.orphan_pool.addOrphan(block) catch |err| {
+                self.blockchain.chain_processor.orphan_pool.addOrphan(orphan_block) catch |err| {
                     std.log.warn("Failed to add orphan block: {}", .{err});
+                    orphan_block.deinit(self.blockchain.allocator);
                     return;
                 };
 
@@ -351,13 +356,18 @@ pub const ServerHandlers = struct {
             const orphans_opt = self.blockchain.chain_processor.orphan_pool.getOrphansByParent(current_hash);
             if (orphans_opt == null) break;
 
-            const orphans = orphans_opt.?;
-            defer self.blockchain.allocator.free(orphans);
+            var orphans = orphans_opt.?;
+            defer {
+                for (orphans.items) |*orphan_block| {
+                    orphan_block.deinit(self.blockchain.allocator);
+                }
+                orphans.deinit();
+            }
 
-            std.log.info("   Found {} orphan(s) ready to process", .{orphans.len});
+            std.log.info("   Found {} orphan(s) ready to process", .{orphans.items.len});
 
             // Process each orphan
-            for (orphans) |orphan_block| {
+            for (orphans.items) |orphan_block| {
                 std.log.info("   Processing orphan at height {}", .{orphan_block.height});
 
                 // Process directly through acceptBlock to avoid recursion issues

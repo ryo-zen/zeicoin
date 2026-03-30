@@ -12,6 +12,7 @@ pub const Config = struct {
     api_port: u16 = 10802,
     rpc_port: u16 = 10803,
     bootstrap_nodes: []const bootstrap.BootstrapAddr = &[_]bootstrap.BootstrapAddr{},
+    bootstrap_nodes_configured: bool = false,
     enable_mining: bool = false,
     miner_wallet: ?[]const u8 = null,
     client_api_disabled: bool = false,
@@ -51,6 +52,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Conf
             config.port = try std.fmt.parseInt(u16, args[i + 1], 10);
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--bootstrap") and i + 1 < args.len) {
+            config.bootstrap_nodes_configured = true;
             try appendBootstrapNodes(allocator, &bootstrap_list, args[i + 1]);
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--mine")) {
@@ -85,6 +87,7 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const [:0]const u8) !Conf
     if (bootstrap_list.items.len == 0) {
         if (util.getEnvVarOwned(allocator, "ZEICOIN_BOOTSTRAP")) |env_bootstrap| {
             defer allocator.free(env_bootstrap);
+            config.bootstrap_nodes_configured = true;
             try appendBootstrapNodes(allocator, &bootstrap_list, env_bootstrap);
         } else |_| {}
     }

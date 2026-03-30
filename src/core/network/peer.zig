@@ -427,10 +427,23 @@ pub const NetworkManager = struct {
     /// Calculate exponential backoff delay
     fn calculateBackoff(consecutive_failures: u32) u32 {
         const base: u32 = 5;
-        const max_backoff: u32 = 300;
+        const max_backoff: u32 = 60;
         const capped = @min(consecutive_failures, 6);
         const backoff = base * std.math.pow(u32, 2, capped);
         return @min(backoff, max_backoff);
+    }
+
+    fn countMissingBootstrapNodes(self: *Self) usize {
+        var missing: usize = 0;
+
+        for (self.bootstrap_nodes) |*node| {
+            const address = node.tcpAddress() orelse continue;
+            if (!self.peer_manager.hasActivePeerAtAddress(address)) {
+                missing += 1;
+            }
+        }
+
+        return missing;
     }
 
     /// Clean up timed out connections and handle auto-reconnect
@@ -440,30 +453,37 @@ pub const NetworkManager = struct {
         self.peer_manager.cleanupTimedOut();
 
         const now = util.getTime();
-        const peer_stats = self.getPeerStats();
-        const connected_peers = peer_stats.connected;
+        const connected_peers = self.getConnectedPeerCount();
+        const missing_bootstrap_nodes = self.countMissingBootstrapNodes();
 
-        if (connected_peers == 0 and self.bootstrap_nodes.len > 0) {
+        if (missing_bootstrap_nodes > 0 and self.bootstrap_nodes.len > 0) {
             const backoff = calculateBackoff(self.reconnect_consecutive_failures);
 
             if (now - self.last_reconnect_attempt >= backoff) {
                 self.last_reconnect_attempt = now;
-                log.info("🔄 [RECONNECT] Attempting reconnection (backoff: {}s, failures: {})", .{
-                    backoff, self.reconnect_consecutive_failures,
+                log.info("🔄 [RECONNECT] Attempting reconnection (backoff: {}s, failures: {}, connected: {}, missing_bootstrap: {})", .{
+                    backoff,
+                    self.reconnect_consecutive_failures,
+                    connected_peers,
+                    missing_bootstrap_nodes,
                 });
 
                 var connection_succeeded = false;
                 for (self.bootstrap_nodes) |*node| {
+                    const address = node.tcpAddress() orelse continue;
+                    if (self.peer_manager.hasActivePeerAtAddress(address)) continue;
+
                     self.connectToMultiaddr(&node.multiaddr) catch |err| {
                         if (err == error.AlreadyConnected) {
                             log.debug("Already connected to bootstrap node", .{});
+                            connection_succeeded = true;
+                            continue;
                         } else {
                             log.debug("Failed to connect to bootstrap: {}", .{err});
                         }
                         continue;
                     };
                     connection_succeeded = true;
-                    break;
                 }
 
                 if (connection_succeeded) {

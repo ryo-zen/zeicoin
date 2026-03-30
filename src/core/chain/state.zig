@@ -105,6 +105,12 @@ pub const ChainState = struct {
         self.block_index.removeFromHeight(from_height);
     }
 
+    fn clearProcessedTransactions(self: *Self) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.processed_transactions.clearRetainingCapacity();
+    }
+
     /// Get block height by hash - O(1) operation
     /// Replaces the O(n) search in reorganization.zig
     pub fn getBlockHeight(self: *Self, block_hash: Hash) ?u32 {
@@ -281,12 +287,10 @@ pub const ChainState = struct {
 
     /// Process a coinbase transaction (mining reward)
     pub fn processCoinbaseTransaction(self: *Self, io: std.Io, coinbase_tx: Transaction, miner_address: Address, current_height: u32, batch: ?*db.Database.WriteBatch, force_processing: bool) !void {
-        // CRITICAL: Check for duplicate coinbase transaction before processing
-        const tx_hash = coinbase_tx.hash();
-        if (!force_processing and self.database.hasTransaction(io, tx_hash)) {
-            log.info("🚫 [DUPLICATE COINBASE] Coinbase transaction {x} already exists in blockchain - SKIPPING to prevent double-spend", .{tx_hash[0..8]});
-            return; // Skip processing duplicate coinbase transaction
-        }
+        _ = force_processing;
+
+        // Coinbase transaction hashes are not unique across heights, so block-level
+        // deduplication must guard replay instead of tx-hash checks here.
 
         // CACHE INVALIDATION: Miner account state will change
         self.state_dirty = true;
@@ -381,16 +385,19 @@ pub const ChainState = struct {
 
     /// Replay blockchain from genesis to rebuild state
     pub fn replayFromGenesis(self: *Self, io: std.Io, up_to_height: u32) !void {
+        const coinbase_maturity = types.getCoinbaseMaturity();
+
         // Start from genesis (height 0)
         for (0..up_to_height + 1) |height| {
-            var block = self.database.getBlock(io, @intCast(height)) catch {
+            const block_height: u32 = @intCast(height);
+            var block = self.database.getBlock(io, block_height) catch {
                 return error.ReplayFailed;
             };
             defer block.deinit(self.allocator);
 
             // Rebuild block index during replay
             const block_hash = block.hash();
-            self.indexBlock(@intCast(height), block_hash) catch {
+            self.indexBlock(block_height, block_hash) catch {
                 // Block index rebuild failure logging disabled - too verbose during reorganization
             };
 
@@ -398,13 +405,34 @@ pub const ChainState = struct {
             for (block.transactions) |tx| {
                 if (self.isCoinbaseTransaction(tx)) {
                     // Use the canonical coinbase processing logic
-                    try self.processCoinbaseTransaction(io, tx, tx.recipient, @intCast(height), null, true);
+                    try self.processCoinbaseTransaction(io, tx, tx.recipient, block_height, null, true);
                 } else {
                     // Use the canonical regular transaction processing logic
                     try self.processTransaction(io, tx, null, true);
                 }
             }
+
+            // Match live chain application so mature/immature balances rebuild identically.
+            if (block_height >= coinbase_maturity) {
+                try self.matureCoinbaseRewards(io, block_height - coinbase_maturity);
+            }
         }
+    }
+
+    /// Rebuild canonical account state and block index from genesis up to a height.
+    /// This is the safe recovery path after rollback/reorg failures.
+    pub fn rebuildStateToHeight(self: *Self, io: std.Io, target_height: u32) !void {
+        // CACHE INVALIDATION: State is rebuilt from canonical blocks.
+        self.state_dirty = true;
+
+        self.removeBlocksFromIndex(0);
+        self.clearProcessedTransactions();
+
+        try self.clearAllAccounts();
+        try self.database.resetTotalSupply();
+        try self.database.updateCirculatingSupply(0);
+
+        try self.replayFromGenesis(io, target_height);
     }
 
     /// Rollback blockchain to specific height
@@ -413,21 +441,10 @@ pub const ChainState = struct {
             return; // Nothing to rollback
         }
 
-        // CACHE INVALIDATION: State being rebuilt from scratch
-        self.state_dirty = true;
-
-        // Remove blocks from index that will be rolled back
-        self.removeBlocksFromIndex(target_height + 1);
-
         // Delete rolled-back blocks from database to prevent duplicate TX detection
         try self.database.deleteBlocksFromHeight(target_height + 1, current_height);
-
-        // Clear all account state and supply metrics - we'll rebuild by replaying from genesis
-        try self.clearAllAccounts();
-        try self.database.resetTotalSupply();
-
-        // Replay blockchain from genesis up to target height
-        try self.replayFromGenesis(io, target_height);
+        try self.database.saveHeight(target_height);
+        try self.rebuildStateToHeight(io, target_height);
     }
 
     /// Rollback state (accounts) to specific height WITHOUT deleting blocks
@@ -438,18 +455,7 @@ pub const ChainState = struct {
             return; // Nothing to rollback
         }
 
-        // CACHE INVALIDATION: State being reverted
-        self.state_dirty = true;
-
-        // Remove blocks from index that will be rolled back
-        self.removeBlocksFromIndex(target_height + 1);
-
-        // Clear all account state and supply metrics - we'll rebuild by replaying from genesis
-        try self.clearAllAccounts();
-        try self.database.resetTotalSupply();
-
-        // Replay blockchain from genesis up to target height
-        try self.replayFromGenesis(io, target_height);
+        try self.rebuildStateToHeight(io, target_height);
 
         std.log.info("🔄 [STATE ROLLBACK] State reverted to height {} (blocks preserved)", .{target_height});
     }

@@ -183,7 +183,11 @@ pub fn initializeNode(allocator: std.mem.Allocator, io: std.Io, config: command_
     
     
     // Resolve bootstrap nodes: CLI > env var > hardcoded fallback
-    const bootstrap_nodes = try bootstrap.resolveBootstrapNodes(allocator, config.bootstrap_nodes);
+    const bootstrap_nodes = try bootstrap.resolveBootstrapNodes(
+        allocator,
+        config.bootstrap_nodes,
+        config.bootstrap_nodes_configured,
+    );
     defer bootstrap.freeList(allocator, bootstrap_nodes);
 
     // Set bootstrap nodes for auto-reconnect (NetworkManager will copy them)

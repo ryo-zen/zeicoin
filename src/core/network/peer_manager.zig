@@ -91,6 +91,9 @@ pub const Peer = struct {
     received_blocks: std.AutoHashMap([32]u8, types.Block), // hash -> block
     received_blocks_by_height: std.AutoHashMap(u32, types.Block), // height -> block
 
+    // Serialize outbound encoding + stream writes. WireConnection uses a shared
+    // send buffer, so concurrent sendMessage() calls can corrupt or drop frames.
+    send_mutex: std.Thread.Mutex,
     response_mutex: std.Thread.Mutex, // Protects response queues and block caches
 
     // libp2p identity of the remote peer (owned; null until Noise handshake completes)
@@ -146,6 +149,7 @@ pub const Peer = struct {
             .chain_work_response = null,
             .received_blocks = std.AutoHashMap([32]u8, types.Block).init(allocator),
             .received_blocks_by_height = std.AutoHashMap(u32, types.Block).init(allocator),
+            .send_mutex = std.Thread.Mutex{},
             .response_mutex = std.Thread.Mutex{},
             .peer_id = null,
             .yamux_stream = null,
@@ -184,6 +188,9 @@ pub const Peer = struct {
 
     /// Send a message to this peer
     pub fn sendMessage(self: *Self, msg_type: protocol.MessageType, msg: anytype) ![]const u8 {
+        self.send_mutex.lock();
+        defer self.send_mutex.unlock();
+
         const result = try self.connection.sendMessage(msg_type, msg);
 
         // If we have a TCP send callback, use it to actually send the data
@@ -201,6 +208,9 @@ pub const Peer = struct {
 
     /// Set TCP send callback
     pub fn setTcpSendCallback(self: *Self, send_fn: ?*const fn (ctx: ?*anyopaque, data: []const u8) anyerror!void, ctx: ?*anyopaque) void {
+        self.send_mutex.lock();
+        defer self.send_mutex.unlock();
+
         self.response_mutex.lock();
         defer self.response_mutex.unlock();
         self.tcp_send_fn = send_fn;
@@ -695,6 +705,25 @@ pub const PeerManager = struct {
                 .ip4 => |b4| if (extractMappedIpv4(a6.bytes)) |mapped| std.mem.eql(u8, &mapped, &b4.bytes) else false,
             },
         };
+    }
+
+    /// Return true if we already have an active peer for the given address.
+    /// connecting/handshaking peers count as active so maintenance doesn't redial
+    /// while an outbound attempt is already in flight.
+    pub fn hasActivePeerAtAddress(self: *Self, address: net.IpAddress) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (self.peers.items) |peer| {
+            if (!sameIpIgnoringPort(peer.address, address)) continue;
+
+            switch (peer.state) {
+                .connected, .connecting, .handshaking => return true,
+                else => {},
+            }
+        }
+
+        return false;
     }
 
     /// Add a new peer connection.

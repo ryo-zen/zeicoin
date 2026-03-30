@@ -67,6 +67,13 @@ pub const ReorgExecutor = struct {
 
         const blocks_to_revert = old_tip_height - fork_height;
         const blocks_to_apply = new_tip_height - fork_height;
+        var original_blocks = try self.backupExistingChainSegment(io, fork_height + 1, old_tip_height);
+        defer {
+            for (original_blocks.items) |*block| {
+                block.deinit(self.allocator);
+            }
+            original_blocks.deinit();
+        }
 
         // Save state snapshot before making changes
         try state_root.saveStateSnapshot(self.allocator, self.db, fork_height);
@@ -77,9 +84,8 @@ pub const ReorgExecutor = struct {
             self.revertStateToHeight(io, fork_height) catch |err| {
                 std.log.err("❌ [REORG] Failed to revert state: {}", .{err});
 
-                // Attempt rollback
-                state_root.loadStateSnapshot(self.allocator, self.db, fork_height) catch |rollback_err| {
-                    std.log.err("💥 [REORG] CRITICAL: Rollback failed: {}", .{rollback_err});
+                self.restoreOriginalChain(io, old_tip_height, original_blocks.items, fork_height) catch |restore_err| {
+                    std.log.err("💥 [REORG] CRITICAL: Failed to restore original chain after revert failure: {}", .{restore_err});
                 };
 
                 return ReorgResult{
@@ -99,13 +105,32 @@ pub const ReorgExecutor = struct {
         for (new_blocks) |new_block| {
             const expected_height = fork_height + 1 + applied;
 
-            // Apply the block first - this executes all transactions and updates account states
+            // State roots commit to the account state before this block executes.
+            if (!std.mem.eql(u8, &new_block.header.state_root, &[_]u8{0} ** 32)) {
+                const current_state_root = try self.chain_state.calculateStateRoot();
+                if (!std.mem.eql(u8, &new_block.header.state_root, &current_state_root)) {
+                    std.log.err("❌ [REORG] Pre-state root mismatch at height {}", .{expected_height});
+                    std.log.err("   Expected: {x}", .{&new_block.header.state_root});
+                    std.log.err("   Actual:   {x}", .{&current_state_root});
+
+                    try self.restoreOriginalChain(io, old_tip_height, original_blocks.items, fork_height);
+
+                    return ReorgResult{
+                        .success = false,
+                        .blocks_reverted = blocks_to_revert,
+                        .blocks_applied = applied,
+                        .fork_height = fork_height,
+                        .error_message = "State root verification failed before applying block",
+                    };
+                }
+            }
+
+            // Apply the block after verifying its parent state commitment.
             self.applyBlock(io, &new_block, expected_height) catch |err| {
                 std.log.err("❌ [REORG] Failed to apply block at height {}: {}", .{expected_height, err});
 
-                // Rollback to fork point - state will be restored, old blocks still exist
-                state_root.loadStateSnapshot(self.allocator, self.db, fork_height) catch |rollback_err| {
-                    std.log.err("💥 [REORG] CRITICAL: Rollback failed: {}", .{rollback_err});
+                self.restoreOriginalChain(io, old_tip_height, original_blocks.items, fork_height) catch |restore_err| {
+                    std.log.err("💥 [REORG] CRITICAL: Failed to restore original chain after apply failure: {}", .{restore_err});
                 };
 
                 return ReorgResult{
@@ -117,39 +142,13 @@ pub const ReorgExecutor = struct {
                 };
             };
 
-            // CRITICAL FIX: Verify state root AFTER applying block transactions
-            // The block's state root represents the state AFTER executing its transactions
-            // So we must apply the block first, then verify the resulting state matches
-            if (!std.mem.eql(u8, &new_block.header.state_root, &[_]u8{0} ** 32)) {
-                const actual_state_root = try state_root.calculateStateRoot(self.allocator, self.db);
-                if (!std.mem.eql(u8, &new_block.header.state_root, &actual_state_root)) {
-                    std.log.err("❌ [REORG] State root mismatch at height {}", .{expected_height});
-                    std.log.err("   Expected: {x}", .{&new_block.header.state_root});
-                    std.log.err("   Actual:   {x}", .{&actual_state_root});
-
-                    // Rollback to fork point - state will be restored, old blocks still exist
-                    try state_root.loadStateSnapshot(self.allocator, self.db, fork_height);
-
-                    return ReorgResult{
-                        .success = false,
-                        .blocks_reverted = blocks_to_revert,
-                        .blocks_applied = applied + 1, // We did apply this block before detecting mismatch
-                        .fork_height = fork_height,
-                        .error_message = "State root verification failed after applying block",
-                    };
-                }
-            }
-
             applied += 1;
         }
 
         // Phase 3: SUCCESS - Now it's safe to delete old blocks that were replaced
         if (blocks_to_revert > 0) {
-            std.log.warn("🗑️  [REORG] Deleting {} replaced blocks from height {} to {}", .{blocks_to_revert, fork_height + 1, old_tip_height});
-            try self.db.deleteBlocksFromHeight(fork_height + 1, old_tip_height);
-
-            // CRITICAL FIX: Update database height to new tip after deleting old blocks
-            // Without this, the database height stays at old_tip_height, causing inconsistency
+            // Replacement blocks were already written in-place at their target heights.
+            // Deleting the old height range here would remove the newly applied chain.
             try self.db.saveHeight(new_tip_height);
             std.log.warn("📊 [REORG] Database height updated from {} to {}", .{old_tip_height, new_tip_height});
         }
@@ -214,6 +213,50 @@ pub const ReorgExecutor = struct {
         // Update block index
         try self.chain_state.indexBlock(height, block.header.hash());
 
+        // Mirror normal block application so post-block state matches the block's state root.
+        const coinbase_maturity = types.getCoinbaseMaturity();
+        if (height >= coinbase_maturity) {
+            try self.chain_state.matureCoinbaseRewards(io, height - coinbase_maturity);
+        }
+
         std.log.debug("⏩ Applied block at height {}", .{height});
+    }
+
+    fn backupExistingChainSegment(self: *Self, io: std.Io, start_height: u32, end_height: u32) !std.array_list.Managed(Block) {
+        var blocks = std.array_list.Managed(Block).init(self.allocator);
+        errdefer {
+            for (blocks.items) |*block| {
+                block.deinit(self.allocator);
+            }
+            blocks.deinit();
+        }
+
+        if (start_height > end_height) return blocks;
+
+        var height = start_height;
+        while (height <= end_height) : (height += 1) {
+            const block = try self.db.getBlock(io, height);
+            try blocks.append(block);
+        }
+
+        return blocks;
+    }
+
+    fn restoreOriginalChain(self: *Self, io: std.Io, old_tip_height: u32, original_blocks: []const Block, fork_height: u32) !void {
+        std.log.warn("⏪ [REORG] Restoring original canonical chain to height {}", .{old_tip_height});
+
+        for (original_blocks, 0..) |block, i| {
+            const height = fork_height + 1 + @as(u32, @intCast(i));
+            try self.db.saveBlock(io, height, block);
+        }
+
+        const current_db_height = try self.db.getHeight();
+        if (current_db_height > old_tip_height) {
+            try self.db.deleteBlocksFromHeight(old_tip_height + 1, current_db_height);
+        }
+        try self.db.saveHeight(old_tip_height);
+
+        try self.chain_state.rebuildStateToHeight(io, old_tip_height);
+        std.log.warn("✅ [REORG] Original chain restored after failed reorganization", .{});
     }
 };

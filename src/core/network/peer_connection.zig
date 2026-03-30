@@ -79,7 +79,10 @@ pub const PeerConnection = struct {
     /// Handles the full connection lifecycle including handshake, message processing, and cleanup
     pub fn run(self: *Self, io: std.Io) !void {
         self.running = true;
-        defer self.running = false;
+        defer {
+            self.running = false;
+            self.peer.state = .disconnected;
+        }
 
         std.log.info("Peer {} connected ({})", .{ self.peer.id, self.peer.address });
 
@@ -179,8 +182,6 @@ pub const PeerConnection = struct {
                 self.sendPing() catch {};
             }
         }
-
-        self.peer.state = .disconnected;
     }
 
     /// Send handshake message

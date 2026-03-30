@@ -56,7 +56,7 @@ const SYNC_CONFIG = struct {
 
     /// Peer selection timeout (seconds)
     const PEER_SELECTION_TIMEOUT: i64 = 10;
-    
+
     /// Maximum sync duration before timeout (seconds)
     const SYNC_TIMEOUT: i64 = 120;
 };
@@ -91,6 +91,9 @@ pub const SyncManager = struct {
 
     /// Timestamp when sync session started (for timeout detection)
     sync_start_time: i64,
+
+    /// Monotonic session id used to fence off stale polling loops from older sync attempts.
+    sync_generation: u64,
 
     /// Fork cooldown tracking to prevent immediate retry loops
     fork_cooldowns: std.AutoHashMap(u32, i64),
@@ -129,6 +132,7 @@ pub const SyncManager = struct {
             .failed_peers = std.array_list.Managed(*Peer).init(allocator),
             .last_state_save = 0,
             .sync_start_time = 0,
+            .sync_generation = 0,
             .fork_cooldowns = std.AutoHashMap(u32, i64).init(allocator),
             .last_sync_retry_check = 0,
         };
@@ -151,7 +155,7 @@ pub const SyncManager = struct {
     pub fn startSync(self: *Self, io: std.Io, peer: *Peer, target_height: u32, force_reorg: bool) !void {
         log.info("INITIATING BLOCKCHAIN SYNCHRONIZATION", .{});
         log.info("Session parameters:", .{});
-        log.info("   Target peer: Peer {} ({any})", .{peer.id, peer.address});
+        log.info("   Target peer: Peer {} ({any})", .{ peer.id, peer.address });
         log.info("   Target height: {}", .{target_height});
         log.info("   Force reorg: {}", .{force_reorg});
         log.info("   Current state: {}", .{self.sync_state});
@@ -159,6 +163,7 @@ pub const SyncManager = struct {
 
         const was_mining = self.blockchain.mining_state.active.load(.acquire);
         var did_pause_mining = false;
+        var session_generation: u64 = 0;
 
         // Track whether mining should resume (will be set to false if fork detection fails)
         var should_resume_mining = was_mining;
@@ -199,17 +204,22 @@ pub const SyncManager = struct {
             log.info("Suggestion: Wait for current sync to complete or call stopSync()", .{});
             return;
         }
-        
+
         // Transition to analyzing state to prevent concurrent initiations
+        self.sync_generation += 1;
+        session_generation = self.sync_generation;
         self.sync_state = .analyzing;
+        self.sync_start_time = util.getTime();
         self.state_mutex.unlock();
-        
+
         errdefer {
             self.state_mutex.lock();
-            self.sync_state = .failed;
+            if (self.sync_generation == session_generation) {
+                self.sync_state = .failed;
+            }
             self.state_mutex.unlock();
         }
-        
+
         log.debug("STEP 1 PASSED: Sync state allows new session", .{});
 
         // Validate sync requirements
@@ -252,6 +262,12 @@ pub const SyncManager = struct {
         if (target_height > 0) {
             log.debug("STEP 2.5: Checking for competing chains...", .{});
             const is_competing = self.detectCompetingChain(io, peer) catch |err| {
+                if (err == error.PeerDisconnected) {
+                    log.warn("⚠️ [FORK DETECT] Peer disconnected during fork detection, aborting this sync attempt", .{});
+                    self.setState(.idle);
+                    return;
+                }
+
                 log.err("❌ [FORK DETECT] Failed to detect competing chain: {}", .{err});
                 log.err("⚠️  [FORK DETECT] Fork detection failed - keeping mining paused", .{});
 
@@ -280,6 +296,12 @@ pub const SyncManager = struct {
                     current_height,
                     target_height,
                 ) catch |err| {
+                    if (err == error.PeerDisconnected) {
+                        log.warn("⚠️ [REORG] Peer disconnected while finding fork point, aborting this sync attempt", .{});
+                        self.setState(.idle);
+                        return;
+                    }
+
                     log.err("❌ [REORG] Failed to find fork point: {}", .{err});
                     log.err("⚠️  [REORG] Fork detection failed - will retry after cooldown", .{});
 
@@ -305,6 +327,12 @@ pub const SyncManager = struct {
                     target_height,
                     fork_point,
                 ) catch |err| {
+                    if (err == error.PeerDisconnected) {
+                        log.warn("⚠️ [REORG] Peer disconnected during chain-work comparison, aborting this sync attempt", .{});
+                        self.setState(.idle);
+                        return;
+                    }
+
                     log.err("❌ [REORG] Failed to compare chain work: {}", .{err});
                     log.err("⚠️  [REORG] Work comparison failed - will retry after cooldown", .{});
 
@@ -450,29 +478,35 @@ pub const SyncManager = struct {
         // Without this loop, blocks are cached but never retrieved or processed
         log.info("🔄 [SYNC POLL] Starting sync polling loop (polls every 5 seconds)", .{});
 
-        while (self.isActive()) {
+        while (self.isSessionActive(session_generation)) {
             // Sleep for 5 seconds between polls
             self.blockchain.io.sleep(std.Io.Duration.fromSeconds(5), std.Io.Clock.awake) catch |sleep_err| {
                 log.warn("Sync poll sleep failed: {}", .{sleep_err});
             };
 
+            if (!self.isSessionActive(session_generation)) break;
+
             // Check for global timeout
             const elapsed = util.getTime() - self.sync_start_time;
             if (elapsed > SYNC_CONFIG.SYNC_TIMEOUT) {
                 log.warn("🚨 [SYNC TIMEOUT] Synchronization timed out after {} seconds", .{elapsed});
-                self.setState(.failed);
+                _ = self.setStateIfCurrent(session_generation, .failed);
                 break;
             }
 
             // Poll for new blocks and handle timeouts
             self.handleTimeouts() catch |err| {
                 log.err("❌ [SYNC POLL] Error during timeout handling: {}", .{err});
-                self.setState(.failed);
+                _ = self.setStateIfCurrent(session_generation, .failed);
                 break;
             };
 
+            if (!self.isSessionCurrent(session_generation)) break;
+
             // Update our state from batch sync
-            self.setState(self.batch_sync.getSyncState());
+            _ = self.setStateIfCurrent(session_generation, self.batch_sync.getSyncState());
+
+            if (!self.isSessionCurrent(session_generation)) break;
 
             // Handle sync failure
             if (self.getSyncState() == .failed) {
@@ -490,6 +524,7 @@ pub const SyncManager = struct {
             }
         }
 
+        self.clearSyncStartTimeIfCurrent(session_generation);
         log.info("🏁 [SYNC POLL] Polling loop ended - Final state: {}", .{self.getSyncState()});
     }
 
@@ -584,6 +619,7 @@ pub const SyncManager = struct {
         // Update sync state
         const old_state = self.getSyncState();
         self.setState(.complete);
+        self.sync_start_time = 0;
         log.debug("[SYNC] State transition: {} -> {}", .{ old_state, self.getSyncState() });
 
         // Clear failed peers list on successful completion
@@ -607,11 +643,41 @@ pub const SyncManager = struct {
         self.sync_state = state;
     }
 
+    fn setStateIfCurrent(self: *Self, session_generation: u64, state: SyncState) bool {
+        self.state_mutex.lock();
+        defer self.state_mutex.unlock();
+
+        if (self.sync_generation != session_generation) return false;
+        self.sync_state = state;
+        return true;
+    }
+
     /// Check if sync is active in a thread-safe manner
     pub fn isActive(self: *Self) bool {
         self.state_mutex.lock();
         defer self.state_mutex.unlock();
         return self.sync_state.isActive();
+    }
+
+    fn isSessionActive(self: *Self, session_generation: u64) bool {
+        self.state_mutex.lock();
+        defer self.state_mutex.unlock();
+        return self.sync_generation == session_generation and self.sync_state.isActive();
+    }
+
+    fn isSessionCurrent(self: *Self, session_generation: u64) bool {
+        self.state_mutex.lock();
+        defer self.state_mutex.unlock();
+        return self.sync_generation == session_generation;
+    }
+
+    fn clearSyncStartTimeIfCurrent(self: *Self, session_generation: u64) void {
+        self.state_mutex.lock();
+        defer self.state_mutex.unlock();
+
+        if (self.sync_generation == session_generation and !self.sync_state.isActive()) {
+            self.sync_start_time = 0;
+        }
     }
 
     /// Get detailed sync status for monitoring and debugging
@@ -646,10 +712,10 @@ pub const SyncManager = struct {
             if (elapsed_time > SYNC_CONFIG.SYNC_TIMEOUT) {
                 log.warn("🚨 [SYNC TIMEOUT] Synchronization timed out after {} seconds", .{elapsed_time});
                 log.warn("🔄 [SYNC TIMEOUT] Resetting sync state to idle", .{});
-                
+
                 // CRITICAL: Reset batch sync protocol state as well
                 self.batch_sync.failSync("Synchronization session timeout");
-                
+
                 self.setState(.idle);
                 self.sync_start_time = 0;
                 log.info("✅ [SYNC TIMEOUT] Sync state reset - ready for new sync attempts", .{});
@@ -779,7 +845,7 @@ pub const SyncManager = struct {
     /// Triggered when a peer announces a new block or height updates
     pub fn handlePeerSync(self: *Self, io: std.Io, peer: *Peer) !void {
         const our_height = try getBlockchainHeight();
-        
+
         // Only run sync/fork checks when peer is strictly ahead.
         // Equal-height checks are handled by explicit fork-resolution paths.
         if (peer.height > our_height and peer.height > 0) {
@@ -829,7 +895,7 @@ pub const SyncManager = struct {
                 log.debug("🔄 [SYNC MANAGER] Recovery skipped - sync state is {}", .{self.getSyncState()});
                 return;
             }
-            
+
             // TODO: We need an Io instance here. For background recovery thread, creating a temporary one.
             var threaded = std.Io.Threaded.init(self.allocator, .{ .environ = .empty });
             defer threaded.deinit();
@@ -855,7 +921,7 @@ pub const SyncManager = struct {
 
         // Validate parameters
         if (start_height > end_height) {
-            log.err("❌ [SYNC RANGE] Invalid range: start {} > end {}", .{start_height, end_height});
+            log.err("❌ [SYNC RANGE] Invalid range: start {} > end {}", .{ start_height, end_height });
             return error.InvalidBlockRange;
         }
 
@@ -879,7 +945,7 @@ pub const SyncManager = struct {
         // Use batch sync with custom start height
         self.batch_sync.syncFromHeight(peer, start_height, end_height) catch |err| {
             log.err("❌ [SYNC RANGE] Failed to start batch sync: {}", .{err});
-            log.err("   Start: {}, End: {}", .{start_height, end_height});
+            log.err("   Start: {}, End: {}", .{ start_height, end_height });
             log.err("   Peer: {}", .{peer});
             return err;
         };
@@ -1021,7 +1087,7 @@ pub const SyncManager = struct {
             const batch_end = @min(batch_start + 49, peer_height);
             const batch_size = batch_end - batch_start + 1;
 
-            log.info("   Fetching batch: blocks {} to {} ({} blocks)", .{batch_start, batch_end, batch_size});
+            log.info("   Fetching batch: blocks {} to {} ({} blocks)", .{ batch_start, batch_end, batch_size });
 
             const batch_blocks = try sequential.requestBlockRange(self.allocator, peer, batch_start, batch_size);
             defer batch_blocks.deinit();
@@ -1146,7 +1212,7 @@ pub const SyncManager = struct {
     fn getNextAvailablePeer() ?*Peer {
         if (g_blockchain) |blockchain| {
             const network_mgr = blockchain.network_coordinator.getNetworkManager() orelse return null;
-            
+
             // Use getBestPeerForSync which is now thread-safe and returns an addRef'd peer
             if (network_mgr.peer_manager.getBestPeerForSync()) |peer| {
                 // Check if this peer is in our failed list
@@ -1333,12 +1399,12 @@ pub const SyncManager = struct {
     /// Verify block hash consensus with connected peers (optional additional security)
     pub fn verifyBlockConsensus(blockchain: *ZeiCoin, block: Block, height: u32) !bool {
         const mode = types.CONSENSUS.mode;
-        
+
         // Skip if consensus is disabled
         if (mode == .disabled) {
             return true;
         }
-        
+
         log.info("🔍 [CONSENSUS CHECK] Verifying block consensus at height {} (mode: {s})", .{ height, @tagName(mode) });
 
         // Get network coordinator to access peers
@@ -1366,17 +1432,17 @@ pub const SyncManager = struct {
         const block_hash = block.hash();
         log.info("📊 [CONSENSUS CHECK] Checking with {} peers for block at height {}", .{ connected_peers.items.len, height });
         log.info("📊 [CONSENSUS CHECK] Our block hash: {x}", .{block_hash[0..8]});
-        
+
         // Query peers for their block hash at this height
         var responses: u32 = 0;
         var agreements: u32 = 0;
-        
+
         // Simple implementation: Query each peer synchronously
         // Future improvement: Query peers in parallel with timeout
         for (connected_peers.items) |peer| {
             // TODO: Send GetBlockHashMessage to peer and wait for response
             // For now, simulate response (will be implemented with proper message passing)
-            
+
             // Temporary: assume peer agrees if it has sufficient height
             if (peer.height >= height) {
                 responses += 1;
@@ -1385,14 +1451,14 @@ pub const SyncManager = struct {
                 agreements += 1;
             }
         }
-        
+
         log.info("📊 [CONSENSUS CHECK] Received {}/{} responses, {}/{} agreements", .{
             responses,
             connected_peers.items.len,
             agreements,
             responses,
         });
-        
+
         // Check minimum peer responses
         if (responses < types.CONSENSUS.min_peer_responses) {
             const msg = "Insufficient peer responses for consensus";
@@ -1404,16 +1470,16 @@ pub const SyncManager = struct {
                 return true;
             }
         }
-        
+
         // Calculate consensus percentage
         const consensus_ratio = if (responses > 0) @as(f32, @floatFromInt(agreements)) / @as(f32, @floatFromInt(responses)) else 0.0;
         const meets_threshold = consensus_ratio >= types.CONSENSUS.threshold;
-        
+
         log.info("📊 [CONSENSUS CHECK] Consensus ratio: {d:.1}% (threshold: {d:.1}%)", .{
             consensus_ratio * 100,
             types.CONSENSUS.threshold * 100,
         });
-        
+
         if (!meets_threshold) {
             const msg = "Block consensus threshold not met";
             if (mode == .enforced) {
@@ -1424,7 +1490,7 @@ pub const SyncManager = struct {
                 return true;
             }
         }
-        
+
         log.info("✅ [CONSENSUS CHECK] Block consensus verified", .{});
         return true;
     }

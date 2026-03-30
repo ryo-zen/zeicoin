@@ -99,13 +99,17 @@ pub fn hardcodedNodes(allocator: std.mem.Allocator) ![]BootstrapAddr {
 
 /// Main entry point for initialization.zig.
 /// If from_cli is non-empty (set from --bootstrap or ZEICOIN_BOOTSTRAP by command_line.zig),
-/// returns a clone of it. Otherwise returns the hardcoded fallback list.
+/// returns a clone of it. If bootstrap was explicitly configured but the list is
+/// empty, returns an empty list so nodes can opt out of the hardcoded fallback.
+/// Otherwise returns the hardcoded fallback list.
 /// Caller must call freeList on the result.
 pub fn resolveBootstrapNodes(
     allocator: std.mem.Allocator,
     from_cli: []const BootstrapAddr,
+    was_configured: bool,
 ) ![]BootstrapAddr {
     if (from_cli.len > 0) return cloneList(allocator, from_cli);
+    if (was_configured) return allocator.dupe(BootstrapAddr, &.{});
     return hardcodedNodes(allocator);
 }
 
