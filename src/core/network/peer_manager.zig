@@ -338,6 +338,21 @@ pub const Peer = struct {
         return null;
     }
 
+    /// Clear all cached received blocks so a sync session can request a fresh range.
+    pub fn clearReceivedBlocks(self: *Self) void {
+        self.response_mutex.lock();
+        defer self.response_mutex.unlock();
+
+        var block_it = self.received_blocks.iterator();
+        while (block_it.next()) |entry| {
+            var mutable_block = entry.value_ptr.*;
+            mutable_block.deinit(self.allocator);
+        }
+
+        self.received_blocks.clearRetainingCapacity();
+        self.received_blocks_by_height.clearRetainingCapacity();
+    }
+
     /// Increment reference count
     pub fn addRef(self: *Self) void {
         _ = self.ref_count.fetchAdd(1, .acq_rel);

@@ -6,20 +6,23 @@
 
 ## Current State
 
-**Date:** 2026-03-29
+**Date:** 2026-03-30
 **Branch:** `libp2p-integration`
-**Active initiative:** ZEI-60 Docker validation + ZEI-61 batch sync fork bug
+**Active initiative:** ZEI-60 Docker restart/reconnect validation + ZEI-62 miner reorg bug
 
-**Last worked on:** 2026-03-29 — Completed ZEI-60 Docker validation infrastructure. Updated `docker-compose.yml` (static IPs, multiaddr bootstrap), `init-node.sh` (multiaddr-aware), `Dockerfile` (local Zig tarball, libpq include fix), and created `test_libp2p_zen_server.sh`. Test script passes (PASS) — peers connect, mine, sync, and survive bootstrap restart. During testing, discovered two consensus bugs: ZEI-61 (batch sync stalls on fork) and ZEI-62 (miners don't reorg to longer chain).
+**Last worked on:** 2026-03-30 — Implemented ZEI-61 recovery in `src/core/sync/protocol/batch_sync.zig` and `src/core/network/peer_manager.zig`. Batch sync now clears stale peer block cache and restarts from current tip after `InvalidBlock` / `InvalidPreviousHash` continuity failures. `zig build check` passes. Docker regression no longer stalls on fork: `zeicoin-node-1` advanced 6 → 15 → 18 before the script failed later on bootstrap reconnect.
 
-**Next step:** Fix ZEI-61 — batch sync chain continuity validation. The fix is in `src/core/sync/protocol/batch_sync.zig:processSequentialBlocks()` (~line 858). When a block's `previous_hash` doesn't match the prior block, the sync should abort cleanly and re-initiate from current tip instead of retrying the same invalid block. After fixing, also need to clear the sync peer's stale block cache so fresh blocks are requested. Then re-run Docker test to verify sync node converges.
+**Next step:** Investigate the Docker restart/reconnect failure after `docker restart zeicoin-miner-1` (likely related to `.izumi/issues/open/reconnect_backoff_spiral.md`). Start from `tmp/zen-server-docker-20260330-111925/` and `docker/scripts/test_libp2p_zen_server.sh`, then rerun the script after a reconnect fix. After that, return to ZEI-62 miner reorg behavior.
 
-**In flight:** ZEI-61 investigation complete, tickets filed, fix not yet started. Docker containers are down (test script cleanup trap). The `TEST_MODE` mining fix (min_batch_size=0 for empty blocks) is uncommitted.
+**In flight:** ZEI-61 code changes are uncommitted in `src/core/sync/protocol/batch_sync.zig` and `src/core/network/peer_manager.zig`. Docker logs from the latest regression run are saved in `tmp/zen-server-docker-20260330-111925/`. Containers are down (script cleanup trap). The `TEST_MODE` mining fix (min_batch_size=0 for empty blocks) is still uncommitted.
 
 ---
 
 ## Decisions Made This Session
 
+- **ZEI-61 restart is deferred, not immediate** — `processSequentialBlocks()` now queues a restart request and `retrievePendingBlocks()` performs the reset/restart after it exits its active-batch iteration. This avoids mutating the batch tracker mid-loop.
+- **Continuity mismatches purge peer block cache** — `Peer.clearReceivedBlocks()` clears stale `received_blocks*` entries before re-requesting the range, preventing the same bad block from being replayed forever.
+- **Continuity errors mapped narrowly** — only `error.InvalidBlock` and `error.InvalidPreviousHash` trigger the restart-from-tip path; other apply failures still hard-fail the sync.
 - **Dockerfile uses local Zig tarball** — `COPY .docker-cache/zig-nightly.tar.xz` instead of `wget` from squirl.dev (URL was broken). Test script auto-caches from `~/Downloads/` or `~/zig-latest-nightly/`.
 - **C_INCLUDE_PATH for libpq** — Ubuntu 24.04 puts `libpq-fe.h` in `/usr/include/postgresql/`, added `ENV C_INCLUDE_PATH=/usr/include/postgresql` to Dockerfile.
 - **TEST_MODE mines empty blocks** — Changed `min_batch_size` from 1 to 0 in TEST_MODE so Docker miners produce coinbase-only blocks without waiting for transactions (`src/core/miner/manager.zig:88`).
@@ -74,7 +77,7 @@ Full details: `docs/LIBP2P_INTEGRATION_PLAN.md`
 
 | Ticket | Bug | Severity | Status |
 |--------|-----|----------|--------|
-| ZEI-61 | Batch sync stalls on chain fork (previous_hash mismatch → infinite retry) | High | Todo — fix next |
+| ZEI-61 | Batch sync stalls on chain fork (previous_hash mismatch → infinite retry) | High | Patched locally — node-1 converges in Docker; full script still blocked later by reconnect failure |
 | ZEI-62 | Miners don't reorg to longer chain (orphaned blocks never trigger reorg eval) | High | Todo — after ZEI-61 |
 
 ---
