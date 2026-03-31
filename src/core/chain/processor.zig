@@ -37,7 +37,7 @@ pub const ChainProcessor = struct {
             .chain_state = chain_state,
             .chain_validator = chain_validator,
             .mempool_manager = mempool_manager,
-            .reorg_executor = ReorgExecutor.init(allocator, chain_state, database),
+            .reorg_executor = ReorgExecutor.init(allocator, chain_state, &chain_validator.real_validator, database),
             .reorg_in_progress = std.atomic.Value(bool).init(false),
             .orphan_pool = OrphanPool.init(allocator, OrphanPool.MAX_ORPHANS_DEFAULT),
         };

@@ -4,6 +4,7 @@
 // Core sync components
 pub const manager = @import("manager.zig");
 pub const state = @import("state.zig");
+pub const fork_detector = @import("fork_detector.zig");
 
 // Protocol implementations
 pub const protocol = @import("protocol/lib.zig");

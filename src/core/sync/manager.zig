@@ -326,7 +326,11 @@ pub const SyncManager = struct {
                         return;
                     }
 
-                    log.err("❌ [REORG] Failed to fetch competing chain: {}", .{err});
+                    if (err == error.InvalidCompetingBlock) {
+                        log.warn("🛡️ [REORG] Competing chain rejected - block failed consensus validation (PoW/signatures/difficulty)", .{});
+                    } else {
+                        log.err("❌ [REORG] Failed to fetch competing chain: {}", .{err});
+                    }
                     log.err("⚠️  [REORG] Competing chain fetch failed - will retry after cooldown", .{});
 
                     // Add extended cooldown to prevent rapid retry loops
@@ -1099,6 +1103,13 @@ pub const SyncManager = struct {
 
             const batch_blocks = try sequential.requestBlockRange(self.allocator, peer, batch_start, batch_size);
             defer batch_blocks.deinit();
+
+            if (g_blockchain) |blockchain| {
+                blockchain.chain_validator.validateReorgBranch(batch_blocks.items, batch_start) catch |err| {
+                    log.warn("❌ [REORG] Competing batch {}-{} failed validation before work comparison: {}", .{ batch_start, batch_end, err });
+                    return error.InvalidCompetingBlock;
+                };
+            }
 
             for (batch_blocks.items) |block| {
                 const block_copy = try block.clone(self.allocator);

@@ -261,12 +261,12 @@ pub const ChainValidator = struct {
             log.warn("   📊 Required difficulty: {} (base_bytes={}, threshold=0x{X})", .{ required_difficulty.toU64(), required_difficulty.base_bytes, required_difficulty.threshold });
             log.warn("   📦 Block claimed difficulty: {} (base_bytes={}, threshold=0x{X})", .{ claimed_difficulty.toU64(), claimed_difficulty.base_bytes, claimed_difficulty.threshold });
             log.warn("   🔍 Block height: {}, timestamp: {}", .{ expected_height, block.header.timestamp });
-            
+
             // Log detailed calculation chain for debugging
             self.logDifficultyCalculationChain(expected_height) catch |err| {
                 log.warn("   ⚠️ Failed to log difficulty calculation chain: {}", .{err});
             };
-            
+
             return false;
         }
 
@@ -412,12 +412,12 @@ pub const ChainValidator = struct {
             log.debug("   📊 Required difficulty: {} (base_bytes={}, threshold=0x{X})", .{ required_difficulty.toU64(), required_difficulty.base_bytes, required_difficulty.threshold });
             log.debug("   📦 Sync block claimed difficulty: {} (base_bytes={}, threshold=0x{X})", .{ claimed_difficulty.toU64(), claimed_difficulty.base_bytes, claimed_difficulty.threshold });
             log.debug("   🔍 Block height: {}, timestamp: {}", .{ expected_height, block.header.timestamp });
-            
+
             // Log detailed calculation chain for sync debugging
             self.logDifficultyCalculationChain(expected_height) catch |err| {
                 log.debug("   ⚠️ Failed to log sync difficulty calculation chain: {}", .{err});
             };
-            
+
             return false;
         }
 
@@ -535,6 +535,16 @@ pub const ChainValidator = struct {
     }
 
     /// Validate a block during reorganization (skip chain linkage)
+    pub fn validateReorgBranch(self: *Self, blocks: []const Block, start_height: u32) !void {
+        for (blocks, 0..) |block, i| {
+            const expected_height = start_height + @as(u32, @intCast(i));
+            if (!try self.validateReorgBlock(block, expected_height)) {
+                return error.InvalidCompetingBlock;
+            }
+        }
+    }
+
+    /// Validate a block during reorganization (skip chain linkage)
     pub fn validateReorgBlock(self: *Self, block: Block, expected_height: u32) !bool {
         // Special validation for genesis block
         if (expected_height == 0) {
@@ -543,6 +553,12 @@ pub const ChainValidator = struct {
                 return false;
             }
             return true;
+        }
+
+        const zero_state_root = std.mem.zeroes(Hash);
+        if (std.mem.eql(u8, &block.header.state_root, &zero_state_root)) {
+            log.warn("❌ Reorg block at height {} has invalid all-zero state root", .{expected_height});
+            return false;
         }
 
         // Check basic block structure
@@ -577,12 +593,12 @@ pub const ChainValidator = struct {
             log.warn("   📊 Required difficulty: {} (base_bytes={}, threshold=0x{X})", .{ required_difficulty.toU64(), required_difficulty.base_bytes, required_difficulty.threshold });
             log.warn("   📦 Reorg block claimed difficulty: {} (base_bytes={}, threshold=0x{X})", .{ claimed_difficulty.toU64(), claimed_difficulty.base_bytes, claimed_difficulty.threshold });
             log.warn("   🔍 Block height: {}, timestamp: {}", .{ expected_height, block.header.timestamp });
-            
+
             // Log detailed calculation chain for reorg debugging
             self.logDifficultyCalculationChain(expected_height) catch |err| {
                 log.warn("   ⚠️ Failed to log reorg difficulty calculation chain: {}", .{err});
             };
-            
+
             return false;
         }
 
@@ -657,22 +673,22 @@ pub const ChainValidator = struct {
     /// ENHANCED: Log detailed difficulty calculation chain for debugging mismatches
     fn logDifficultyCalculationChain(self: *Self, height: u32) !void {
         log.warn("   🔗 DIFFICULTY CALCULATION CHAIN DEBUG:", .{});
-        
+
         const current_height = try self.chain_state.getHeight();
         log.warn("   📊 Current blockchain height: {}", .{current_height});
         log.warn("   🎯 Target block height: {}", .{height});
-        
+
         // Check if we're in adjustment period
         const lookback_blocks = types.ZenMining.DIFFICULTY_ADJUSTMENT_PERIOD;
         const target_block_time = types.ZenMining.TARGET_BLOCK_TIME;
-        
+
         if (height < lookback_blocks) {
             log.warn("   ⚡ Using initial difficulty (height {} < adjustment period {})", .{ height, lookback_blocks });
             const initial_difficulty = types.ZenMining.initialDifficultyTarget();
             log.warn("   📈 Initial difficulty: {} (base_bytes={}, threshold=0x{X})", .{ initial_difficulty.toU64(), initial_difficulty.base_bytes, initial_difficulty.threshold });
             return;
         }
-        
+
         if (height % lookback_blocks != 0) {
             log.warn("   ↔️ Not adjustment block (height {} % {} = {})", .{ height, lookback_blocks, height % lookback_blocks });
             if (height > 0) {
@@ -683,53 +699,53 @@ pub const ChainValidator = struct {
             }
             return;
         }
-        
+
         log.warn("   🎯 ADJUSTMENT BLOCK - Calculating new difficulty:", .{});
-        
+
         // Get timestamps for calculation
         const old_block_height: u32 = @intCast(height - lookback_blocks);
         const new_block_height: u32 = @intCast(height - 1);
-        
+
         var old_block = try self.getBlockByHeight(old_block_height);
         defer old_block.deinit(self.allocator);
         var new_block = try self.getBlockByHeight(new_block_height);
         defer new_block.deinit(self.allocator);
-        
+
         const oldest_timestamp = old_block.header.timestamp;
         const newest_timestamp = new_block.header.timestamp;
         const actual_time_raw = newest_timestamp - oldest_timestamp;
         const target_time = lookback_blocks * target_block_time;
-        
+
         log.warn("   📅 Timestamp analysis:", .{});
         log.warn("     🕐 Block {} timestamp: {}", .{ old_block_height, oldest_timestamp });
         log.warn("     🕐 Block {} timestamp: {}", .{ new_block_height, newest_timestamp });
         log.warn("     ⏱️ Raw time difference: {} seconds", .{actual_time_raw});
         log.warn("     🎯 Target time ({} blocks × {} seconds): {} seconds", .{ lookback_blocks, target_block_time, target_time });
-        
+
         // Apply bounds checking
-        const bounded_actual_time = if (actual_time_raw == 0) 
-            1 
-        else if (actual_time_raw > target_time * 4) 
-            target_time * 2 
-        else 
+        const bounded_actual_time = if (actual_time_raw == 0)
+            1
+        else if (actual_time_raw > target_time * 4)
+            target_time * 2
+        else
             actual_time_raw;
-            
+
         if (bounded_actual_time != actual_time_raw) {
             log.warn("     ⚠️ Time bounded: {} → {} seconds", .{ actual_time_raw, bounded_actual_time });
         }
-        
+
         // Calculate adjustment factor using fixed-point arithmetic
         const FIXED_POINT_MULTIPLIER: u64 = 1_000_000;
         const adjustment_factor_fixed = (target_time * FIXED_POINT_MULTIPLIER) / bounded_actual_time;
         const adjustment_factor_display = @as(f64, @floatFromInt(adjustment_factor_fixed)) / @as(f64, @floatFromInt(FIXED_POINT_MULTIPLIER));
-        
+
         log.warn("   🧮 Adjustment calculation:", .{});
         log.warn("     📐 Fixed-point factor: {} (= {d:.6})", .{ adjustment_factor_fixed, adjustment_factor_display });
-        
+
         // Get current difficulty and show adjustment
         const current_difficulty = new_block.header.getDifficultyTarget();
         log.warn("     📊 Current difficulty: {} (base_bytes={}, threshold=0x{X})", .{ current_difficulty.toU64(), current_difficulty.base_bytes, current_difficulty.threshold });
-        
+
         const new_difficulty = current_difficulty.adjustFixed(adjustment_factor_fixed, FIXED_POINT_MULTIPLIER, types.CURRENT_NETWORK);
         log.warn("     📈 Calculated new difficulty: {} (base_bytes={}, threshold=0x{X})", .{ new_difficulty.toU64(), new_difficulty.base_bytes, new_difficulty.threshold });
     }

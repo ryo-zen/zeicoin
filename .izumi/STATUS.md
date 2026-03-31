@@ -6,20 +6,23 @@
 
 ## Current State
 
-**Date:** 2026-03-30
+**Date:** 2026-03-31
 **Branch:** `libp2p-integration`
 **Active initiative:** `ZEI-70` reorg safety and recovery hardening after the canonical replay/state fix
 
-**Last worked on:** 2026-03-30 — Committed `ZEI-18` hardening + Izumi cleanup as `d0d683e`. Worktree is clean.
+**Last worked on:** 2026-03-31 — Landed `ZEI-68`; competing reorg branches are now validated before work comparison and before rollback-state mutation, with a forged-higher-work regression added. Validation passed with `zig build check`, `zig build test`, `zig build test-libp2p`, `./docker/scripts/test_libp2p_zen_server.sh`, and `./docker/scripts/verify_deep_reorg.sh`.
 
-**Next step:** Pick the next `ZEI-70` follow-on — `ZEI-68` (validate competing reorg branch before work comparison) is the recommended next target, then `ZEI-69` (metadata/continuity parity).
+**Next step:** Move to `ZEI-69` (metadata/continuity parity): pass the known `fork_height` into the reorg executor and recompute canonical metadata like `chain_work` on reorg-applied blocks.
 
-**In flight:** Nothing uncommitted. `ZEI-71` is open for the `account_count` metadata drift investigation.
+**In flight:** `ZEI-71` remains open for the `account_count` metadata drift investigation. No other reorg work is intentionally left half-finished beyond the open `ZEI-70` follow-ons.
 
 ---
 
 ## Decisions Made This Session
 
+- **`ZEI-68` now rejects forged competing branches before they can influence either reorg selection or rollback flow** — sync batch fetch uses a shared `validateReorgBranch()` helper before blocks are counted for work, and `executeReorg()` performs the same consensus validation before any snapshot/rollback mutation starts.
+- **Non-genesis all-zero `header.state_root` is now an explicit reorg-validation failure** — the old reorg path no longer has an implicit “skip the pre-state check” escape hatch, and the new regression test proves a higher-work forged branch with zero roots is rejected while canonical state stays unchanged.
+- **The canonical rerun gate remains the underlying commands, not a wrapper script** — current green validation for this landing is `zig build check`, `zig build test`, `zig build test-libp2p`, `./docker/scripts/test_libp2p_zen_server.sh`, and `./docker/scripts/verify_deep_reorg.sh`.
 - **`ZEI-71` now tracks the `account_count` metadata concern** — the snapshot/recovery work exposed that direct and batched account-write paths do not maintain `meta:account_count` symmetrically, so the issue is now captured for focused investigation instead of being left as tribal knowledge.
 - **`ZEI-18` is now functionally complete** — snapshots are no longer just stored markers; rollback/reorg restore can use exact or nearest anchored snapshots, and the required Zig + Docker reorg gates passed on 2026-03-30.
 - **Snapshot restore must be one atomic RocksDB batch** — account deletion, account rewrite, metadata rewrite, and recovery height updates now get staged together instead of wiping accounts and restoring them in separate commits.

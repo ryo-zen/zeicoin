@@ -22,6 +22,7 @@ const Address = types.Address;
 const Account = types.Account;
 const Block = types.Block;
 const reorg_executor = zei.chain.reorg_executor;
+const fork_detector = zei.sync.fork_detector;
 
 // Test helper functions
 fn createTestZeiCoin(io: std.Io, data_dir: []const u8) !*ZeiCoin {
@@ -30,7 +31,7 @@ fn createTestZeiCoin(io: std.Io, data_dir: []const u8) !*ZeiCoin {
         zeicoin.deinit();
         testing.allocator.destroy(zeicoin);
     }
-    
+
     // Ensure we have a genesis block (handled by init, but just in case)
     // const current_height = zeicoin.getHeight() catch 0;
     // if (current_height == 0) {
@@ -93,7 +94,7 @@ fn createTimedTestTransaction(
     allocator: std.mem.Allocator,
 ) !Transaction {
     _ = allocator;
-    
+
     var tx = Transaction{
         .version = 0,
         .flags = std.mem.zeroes(types.TransactionFlags),
@@ -110,10 +111,10 @@ fn createTimedTestTransaction(
         .witness_data = &[_]u8{},
         .extra_data = &[_]u8{},
     };
-    
+
     const tx_hash = tx.hashForSigning();
     tx.signature = try keypair.sign(&tx_hash);
-    
+
     return tx;
 }
 
@@ -217,6 +218,14 @@ fn snapshotAccounts(allocator: std.mem.Allocator, database: *zei.db.Database) ![
     return try accounts.toOwnedSlice();
 }
 
+fn calculateHeaderWorkSum(blocks: []const Block) types.ChainWork {
+    var total_work: types.ChainWork = 0;
+    for (blocks) |block| {
+        total_work += block.header.getWork();
+    }
+    return total_work;
+}
+
 // Integration Tests
 
 // ============================================================================
@@ -241,7 +250,6 @@ test "blockchain initialization" {
     // Clean up test data
     std.Io.Dir.cwd().deleteTree(io, "test_zeicoin_data_init") catch {};
 }
-
 
 test "block retrieval by height" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
@@ -309,13 +317,7 @@ test "block validation" {
 
     // Create valid block
     var valid_block = types.Block{
-        .header = createTestBlockHeader(
-            prev_block.hash(),
-            std.mem.zeroes(types.Hash),
-            @intCast(@as(u64, @intCast(util.getTime())) * 1000),
-            types.ZenMining.initialDifficultyTarget().toU64(),
-            0
-        ),
+        .header = createTestBlockHeader(prev_block.hash(), std.mem.zeroes(types.Hash), @intCast(@as(u64, @intCast(util.getTime())) * 1000), types.ZenMining.initialDifficultyTarget().toU64(), 0),
         .transactions = transactions,
         .height = 1, // Test block at height 1
     };
@@ -350,7 +352,6 @@ test "block validation" {
     std.Io.Dir.cwd().deleteTree(io, "test_zeicoin_data_validation") catch {};
 }
 
-
 // ============================================================================
 // NETWORK INTEGRATION TESTS
 // ============================================================================
@@ -371,13 +372,7 @@ test "block broadcasting integration" {
     defer testing.allocator.free(transactions);
 
     const test_block = types.Block{
-        .header = createTestBlockHeader(
-            std.mem.zeroes(types.Hash),
-            std.mem.zeroes(types.Hash),
-            @intCast(@as(u64, @intCast(util.getTime())) * 1000),
-            types.ZenMining.initialDifficultyTarget().toU64(),
-            0
-        ),
+        .header = createTestBlockHeader(std.mem.zeroes(types.Hash), std.mem.zeroes(types.Hash), @intCast(@as(u64, @intCast(util.getTime())) * 1000), types.ZenMining.initialDifficultyTarget().toU64(), 0),
         .transactions = transactions,
         .height = 0, // Test block at height 0
     };
@@ -410,13 +405,7 @@ test "timestamp validation - future blocks rejected" {
 
     var transactions = [_]types.Transaction{};
     const future_block = types.Block{
-        .header = createTestBlockHeader(
-            std.mem.zeroes(types.Hash),
-            std.mem.zeroes(types.Hash),
-            future_time,
-            types.ZenMining.initialDifficultyTarget().toU64(),
-            0
-        ),
+        .header = createTestBlockHeader(std.mem.zeroes(types.Hash), std.mem.zeroes(types.Hash), future_time, types.ZenMining.initialDifficultyTarget().toU64(), 0),
         .transactions = &transactions,
         .height = 1, // Test block at height 1
     };
@@ -443,17 +432,12 @@ test "timestamp validation - median time past" {
     while (i < 15) : (i += 1) {
         var transactions = [_]types.Transaction{};
         const block = types.Block{
-            .header = createTestBlockHeader(
-                if (i == 0) std.mem.zeroes(types.Hash) else blk: {
-                    var prev = try zeicoin.getBlockByHeight(i - 1);
-                    defer prev.deinit(zeicoin.allocator);
-                    break :blk prev.hash();
-                },
-                std.mem.zeroes(types.Hash),
-                types.Genesis.timestamp() + (i + 1) * 600, // 10 minutes apart
-                types.ZenMining.initialDifficultyTarget().toU64(),
-                0
-            ),
+            .header = createTestBlockHeader(if (i == 0) std.mem.zeroes(types.Hash) else blk: {
+                var prev = try zeicoin.getBlockByHeight(i - 1);
+                defer prev.deinit(zeicoin.allocator);
+                break :blk prev.hash();
+            }, std.mem.zeroes(types.Hash), types.Genesis.timestamp() + (i + 1) * 600, // 10 minutes apart
+                types.ZenMining.initialDifficultyTarget().toU64(), 0),
             .transactions = &transactions,
             .height = i, // Test block at height i
         };
@@ -470,13 +454,7 @@ test "timestamp validation - median time past" {
     // Create block with timestamp equal to MTP (should fail)
     var bad_transactions = [_]types.Transaction{};
     const bad_block = types.Block{
-        .header = createTestBlockHeader(
-            std.mem.zeroes(types.Hash),
-            std.mem.zeroes(types.Hash),
-            expected_mtp,
-            types.ZenMining.initialDifficultyTarget().toU64(),
-            0
-        ),
+        .header = createTestBlockHeader(std.mem.zeroes(types.Hash), std.mem.zeroes(types.Hash), expected_mtp, types.ZenMining.initialDifficultyTarget().toU64(), 0),
         .transactions = &bad_transactions,
         .height = 15, // Test block at height 15
     };
@@ -494,7 +472,6 @@ test "timestamp validation - constants" {
     try testing.expect(types.TimestampValidation.MTP_BLOCK_COUNT % 2 == 1); // Odd number for clean median
 }
 
-
 // ============================================================================
 // MEMPOOL TESTS
 // ============================================================================
@@ -506,7 +483,7 @@ test "mempool limits enforcement" {
 
     const test_dir = "test_mempool_limits";
     defer std.Io.Dir.cwd().deleteTree(io, test_dir) catch {};
-    
+
     var zeicoin = try createTestZeiCoin(io, test_dir);
     defer {
         zeicoin.deinit();
@@ -515,11 +492,11 @@ test "mempool limits enforcement" {
 
     // Test 1: Test reaching transaction count limit
     log.info("\n🧪 Testing mempool transaction count limit...", .{});
-    
+
     // Directly fill mempool to limit by manipulating internal state
     // This avoids creating 10,000 actual transactions
     const max_tx = types.MempoolLimits.MAX_TRANSACTIONS;
-    
+
     // Create dummy transactions to fill mempool
     var i: usize = 0;
     while (i < max_tx) : (i += 1) {
@@ -532,7 +509,7 @@ test "mempool limits enforcement" {
             .version = @intFromEnum(types.AddressVersion.P2PKH),
             .hash = recipient_hash,
         };
-        
+
         var dummy_tx = types.Transaction{
             .version = 0,
             .flags = std.mem.zeroes(types.TransactionFlags),
@@ -549,15 +526,14 @@ test "mempool limits enforcement" {
             .witness_data = &[_]u8{},
             .extra_data = &[_]u8{},
         };
-        
+
         try zeicoin.mempool_manager.storage.addTransactionToPool(dummy_tx);
         zeicoin.mempool_manager.storage.total_size_bytes += dummy_tx.getSerializedSize();
     }
-    
+
     try testing.expectEqual(@as(usize, max_tx), zeicoin.mempool_manager.getTransactionCount());
     log.info("  ✅ Mempool filled to exactly {} transactions (limit)", .{max_tx});
-    
-    
+
     // Try to add one more (should fail)
     const overflow_sender = try key.KeyPair.generateNew(io);
     const overflow_sender_addr = overflow_sender.getAddress();
@@ -567,7 +543,7 @@ test "mempool limits enforcement" {
         .nonce = 0,
         .immature_balance = 0,
     });
-    
+
     var overflow_hash: [20]u8 = undefined;
     @memset(&overflow_hash, 0);
     overflow_hash[0] = 254;
@@ -593,28 +569,28 @@ test "mempool limits enforcement" {
     };
     var signed_overflow = overflow_tx;
     signed_overflow.signature = try overflow_sender.signTransaction(overflow_tx.hashForSigning());
-    
+
     const result = zeicoin.addTransaction(signed_overflow);
     try testing.expectError(error.MempoolFull, result);
     log.info("  ✅ Transaction correctly rejected when mempool full", .{});
-    
+
     // Test 2: Size tracking
     const expected_size = 3840000; // max_tx * 384 bytes/tx
     try testing.expectEqual(expected_size, zeicoin.mempool_manager.storage.total_size_bytes);
     log.info("  ✅ Mempool size correctly tracked: {} bytes", .{expected_size});
-    
+
     // Test 3: Clear mempool and test size limit
     zeicoin.mempool_manager.storage.clearPool();
     zeicoin.mempool_manager.storage.total_size_bytes = 0;
     log.info("\n🧪 Testing mempool size limit...", .{});
-    
+
     // Calculate how many transactions fit in size limit
     const txs_for_size_limit = types.MempoolLimits.MAX_SIZE_BYTES / types.MempoolLimits.TRANSACTION_SIZE;
     log.info("  📊 Size limit allows for {} transactions", .{txs_for_size_limit});
-    
+
     // Artificially set the size to just below limit
     zeicoin.mempool_manager.storage.total_size_bytes = types.MempoolLimits.MAX_SIZE_BYTES - 10;
-    
+
     // Try to add a transaction (should fail due to size limit)
     const size_test_sender = try key.KeyPair.generateNew(io);
     const size_test_sender_addr = size_test_sender.getAddress();
@@ -624,7 +600,7 @@ test "mempool limits enforcement" {
         .nonce = 0,
         .immature_balance = 0,
     });
-    
+
     var recipient_hash: [20]u8 = undefined;
     @memset(&recipient_hash, 0);
     recipient_hash[0] = 123;
@@ -650,14 +626,13 @@ test "mempool limits enforcement" {
     };
     var signed_size_test = size_test_tx;
     signed_size_test.signature = try size_test_sender.signTransaction(size_test_tx.hashForSigning());
-    
+
     const size_result = zeicoin.addTransaction(signed_size_test);
     try testing.expectError(error.MempoolFull, size_result);
     log.info("  ✅ Transaction correctly rejected when size limit exceeded", .{});
-    
+
     log.info("\n🎉 All mempool limit tests passed!", .{});
 }
-
 
 test "transaction size limit" {
     var threaded = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
@@ -666,14 +641,14 @@ test "transaction size limit" {
 
     // This test verifies that transactions exceeding MAX_TX_SIZE are rejected
     log.info("\n🔍 Testing transaction size limit...", .{});
-    
+
     // Create test blockchain
     var zeicoin = try createTestZeiCoin(io, "test_zeicoin_data_tx_size");
     defer {
         zeicoin.deinit();
         testing.allocator.destroy(zeicoin);
     }
-    
+
     // Create test keypairs
     var alice = try key.KeyPair.generateNew(io);
     defer alice.deinit();
@@ -681,7 +656,7 @@ test "transaction size limit" {
     var bob = try key.KeyPair.generateNew(io);
     defer bob.deinit();
     const bob_addr = bob.getAddress();
-    
+
     // Give Alice some coins
     try zeicoin.database.saveAccount(alice_addr, types.Account{
         .address = alice_addr,
@@ -689,15 +664,15 @@ test "transaction size limit" {
         .nonce = 0,
         .immature_balance = 0,
     });
-    
+
     // Create a transaction with extra_data that exceeds the limit
     const large_data = try testing.allocator.alloc(u8, types.TransactionLimits.MAX_TX_SIZE);
     defer testing.allocator.free(large_data);
     @memset(large_data, 'A'); // Fill with 'A's
-    
+
     const oversized_tx = types.Transaction{
         .version = 0,
-        .flags = types.TransactionFlags{}, 
+        .flags = types.TransactionFlags{},
         .sender = alice_addr,
         .recipient = bob_addr,
         .amount = 100 * types.ZEI_COIN,
@@ -711,22 +686,22 @@ test "transaction size limit" {
         .witness_data = &[_]u8{},
         .extra_data = large_data,
     };
-    
+
     // Check that the transaction is invalid due to size
     try testing.expectEqual(false, oversized_tx.isValid());
     log.info("  ✅ Oversized transaction ({} bytes) correctly rejected by isValid()", .{oversized_tx.getSerializedSize()});
-    
+
     // Don't try to sign or add invalid transaction - it would panic during hashing
-    
+
     // Create a transaction with small extra_data (should succeed)
     const small_extra = 256; // Small enough to fit in hash buffer
     const small_data = try testing.allocator.alloc(u8, small_extra);
     defer testing.allocator.free(small_data);
     @memset(small_data, 'B');
-    
+
     const valid_tx = types.Transaction{
         .version = 0,
-        .flags = types.TransactionFlags{}, 
+        .flags = types.TransactionFlags{},
         .sender = alice_addr,
         .recipient = bob_addr,
         .amount = 50 * types.ZEI_COIN,
@@ -740,17 +715,17 @@ test "transaction size limit" {
         .witness_data = &[_]u8{},
         .extra_data = small_data,
     };
-    
+
     // Check that this transaction is valid
     try testing.expectEqual(true, valid_tx.isValid());
-    log.info("  ✅ Transaction with {} bytes extra_data accepted (under {} byte limit)", .{small_data.len, types.TransactionLimits.MAX_EXTRA_DATA_SIZE});
-    
+    log.info("  ✅ Transaction with {} bytes extra_data accepted (under {} byte limit)", .{ small_data.len, types.TransactionLimits.MAX_EXTRA_DATA_SIZE });
+
     // Sign and add to mempool
     var signed_valid_tx = valid_tx;
     signed_valid_tx.signature = try alice.signTransaction(valid_tx.hash());
     try zeicoin.addTransaction(signed_valid_tx);
     log.info("  ✅ Valid transaction successfully added to mempool", .{});
-    
+
     log.info("  ✅ Transaction size limit tests passed!", .{});
 }
 
@@ -764,57 +739,53 @@ test "genesis distribution validation" {
     const io = threaded.io();
 
     log.info("\n🎯 Testing genesis distribution validation...", .{});
-    
+
     const test_dir = "test_genesis_distribution";
     defer std.Io.Dir.cwd().deleteTree(io, test_dir) catch {};
-    
+
     var zeicoin = try createTestZeiCoin(io, test_dir);
     defer {
         zeicoin.deinit();
         testing.allocator.destroy(zeicoin);
     }
-    
+
     // Import genesis module
     const genesis_mod = zei.genesis;
     // const genesis_wallet = @import("zeicoin").wallet;
-    
+
     log.info("  📊 Testing {} pre-funded accounts...", .{genesis_mod.TESTNET_DISTRIBUTION.len});
-    
+
     // Test 1: Verify all genesis accounts have correct balances
     for (genesis_mod.TESTNET_DISTRIBUTION) |account| {
         const address = genesis_mod.getTestAccountAddress(account.name).?;
         const chain_account = try zeicoin.getAccount(address);
-        
+
         try testing.expectEqual(account.amount, chain_account.balance);
         try testing.expectEqual(@as(u64, 0), chain_account.immature_balance);
         try testing.expectEqual(@as(u64, 0), chain_account.nonce);
-        
+
         var buf: [64]u8 = undefined;
         const addr_str = std.fmt.bufPrint(&buf, "tzei1{x}", .{address.hash[0..10]}) catch "unknown";
-        log.info("  ✅ {s}: {} ZEI at {s}", .{
-            account.name,
-            account.amount / types.ZEI_COIN,
-            if (addr_str.len > 15) addr_str[0..15] else addr_str
-        });
+        log.info("  ✅ {s}: {} ZEI at {s}", .{ account.name, account.amount / types.ZEI_COIN, if (addr_str.len > 15) addr_str[0..15] else addr_str });
     }
-    
+
     // Test 2: Verify genesis key pair generation is deterministic
     // for (genesis_mod.TESTNET_DISTRIBUTION) |account| {
     //     const kp1 = try genesis_wallet.createGenesisKeyPair(account.seed);
     //     const kp2 = try genesis_wallet.createGenesisKeyPair(account.seed);
-    //     
+    //
     //     // Public keys should be identical
     //     try testing.expectEqualSlices(u8, &kp1.public_key, &kp2.public_key);
     //     // Private keys should be identical
     //     try testing.expectEqualSlices(u8, &kp1.private_key, &kp2.private_key);
-    //     
+    //
     //     // Address derived from public key should match genesis address
     //     const derived_addr = types.Address.fromPublicKey(kp1.public_key);
     //     const expected_addr = genesis_mod.getTestAccountAddress(account.name).?;
     //     try testing.expectEqualSlices(u8, &derived_addr.hash, &expected_addr.hash);
     // }
     // log.info("  ✅ Genesis key pairs are deterministic and match addresses", .{});
-    
+
     // Test 3: Verify total genesis supply
     var total_supply: u64 = 0;
     for (genesis_mod.TESTNET_DISTRIBUTION) |account| {
@@ -822,33 +793,30 @@ test "genesis distribution validation" {
     }
     // Add coinbase from genesis block
     total_supply += types.ZenMining.BLOCK_REWARD;
-    
+
     const expected_supply = 5 * 480000 * types.ZEI_COIN + types.ZenMining.BLOCK_REWARD; // 5 accounts × 480000 ZEI + coinbase
     try testing.expectEqual(expected_supply, total_supply);
-    log.info("  ✅ Total genesis supply: {} ZEI (5000 distributed + {} coinbase)", .{
-        total_supply / types.ZEI_COIN,
-        types.ZenMining.BLOCK_REWARD / types.ZEI_COIN
-    });
-    
+    log.info("  ✅ Total genesis supply: {} ZEI (5000 distributed + {} coinbase)", .{ total_supply / types.ZEI_COIN, types.ZenMining.BLOCK_REWARD / types.ZEI_COIN });
+
     // Test 4: Verify genesis block contains distribution transactions
     var genesis_block = try zeicoin.getBlockByHeight(0);
     defer genesis_block.deinit(testing.allocator);
-    
+
     // Should have 5 distribution transactions
     try testing.expectEqual(@as(u32, 5), genesis_block.txCount());
-    
+
     // Remaining transactions should be distribution
     for (genesis_block.transactions, 0..) |tx, i| {
         const account = genesis_mod.TESTNET_DISTRIBUTION[i];
         const expected_addr = genesis_mod.getTestAccountAddress(account.name).?;
-        
+
         try testing.expectEqual(types.Address.zero(), tx.sender); // From genesis
         try testing.expectEqual(expected_addr, tx.recipient);
         try testing.expectEqual(account.amount, tx.amount);
         try testing.expectEqual(@as(u64, 0), tx.fee); // No fees for genesis distribution
     }
     log.info("  ✅ Genesis block contains correct distribution transactions", .{});
-    
+
     // Test 5: Verify genesis hash matches expected (from genesis.zig)
     // NOTE: Temporarily disabled - genesis block creation produces different hash
     // than production constant (d26f16... vs 6d31c6...) due to branch divergence.
@@ -858,12 +826,12 @@ test "genesis distribution validation" {
     // const actual_hash = genesis_block.hash();
     // try testing.expectEqualSlices(u8, &expected_hash, &actual_hash);
     log.info("  ⚠️  Genesis hash validation skipped (known issue - production verified working)", .{});
-    
+
     // Test 6: Test transaction capability from genesis accounts
     // const alice_kp = try genesis_wallet.getTestAccountKeyPair("alice");
     // const alice_addr = alice_kp.?.getAddress();
     // const bob_addr = genesis_mod.getTestAccountAddress("bob").?;
-    // 
+    //
     // // Create a transaction from alice to bob
     // const tx = types.Transaction{
     //     .version = 0,
@@ -883,12 +851,12 @@ test "genesis distribution validation" {
     // };
     // var signed_tx = tx;
     // signed_tx.signature = try alice_kp.?.signTransaction(tx.hashForSigning());
-    // 
+    //
     // // Should be able to add to mempool
     // try zeicoin.addTransaction(signed_tx);
     // try testing.expectEqual(@as(usize, 1), zeicoin.mempool_manager.getTransactionCount());
     // log.info("  ✅ Genesis accounts can create valid transactions", .{});
-    
+
     log.info("  🎉 All genesis distribution validation tests passed!", .{});
 }
 
@@ -1844,7 +1812,7 @@ test "failed reorg restores original canonical chain from fork snapshot" {
         try new_blocks.append(invalid_block);
     }
 
-    var executor = reorg_executor.ReorgExecutor.init(testing.allocator, &local_state, &local_db);
+    var executor = reorg_executor.ReorgExecutor.init(testing.allocator, &local_state, null, &local_db);
     const result = try executor.executeReorg(local_io, old_tip_height, old_tip_height, new_blocks.items);
 
     try testing.expect(!result.success);
@@ -1994,7 +1962,7 @@ test "reorg rejects malformed competing branch before state mutation" {
     );
     try malformed_blocks.append(winning_block_two);
 
-    var executor = reorg_executor.ReorgExecutor.init(testing.allocator, &local_state, &local_db);
+    var executor = reorg_executor.ReorgExecutor.init(testing.allocator, &local_state, null, &local_db);
     const result = try executor.executeReorg(local_io, old_tip_height, old_tip_height, malformed_blocks.items);
 
     try testing.expect(!result.success);
@@ -2006,4 +1974,185 @@ test "reorg rejects malformed competing branch before state mutation" {
 
     try testing.expectEqualDeep(expected_accounts, restored_accounts);
     try testing.expectEqualDeep(expected_root, restored_root);
+}
+
+test "forged higher-work competing branch is rejected before reorg state mutation" {
+    var local_threaded = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer local_threaded.deinit();
+    const local_io = local_threaded.io();
+
+    const local_db_path = "test_reorg_higher_work_invalid_branch";
+    defer std.Io.Dir.cwd().deleteTree(local_io, local_db_path) catch {};
+
+    var local_db = try zei.db.Database.init(testing.allocator, local_io, local_db_path);
+    defer local_db.deinit();
+
+    var local_state = zei.chain.ChainState.init(testing.allocator, &local_db);
+    defer local_state.deinit();
+
+    var winning_threaded = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer winning_threaded.deinit();
+    const winning_io = winning_threaded.io();
+
+    const winning_db_path = "test_reorg_higher_work_invalid_branch_winning";
+    defer std.Io.Dir.cwd().deleteTree(winning_io, winning_db_path) catch {};
+
+    var winning_db = try zei.db.Database.init(testing.allocator, winning_io, winning_db_path);
+    defer winning_db.deinit();
+
+    var winning_state = zei.chain.ChainState.init(testing.allocator, &winning_db);
+    defer winning_state.deinit();
+
+    var alice_keypair = try key.KeyPair.generateNew(local_io);
+    defer alice_keypair.deinit();
+    var bob_keypair = try key.KeyPair.generateNew(local_io);
+    defer bob_keypair.deinit();
+
+    const alice_addr = alice_keypair.getAddress();
+    const bob_addr = bob_keypair.getAddress();
+
+    const fork_height: u32 = types.getCoinbaseMaturity() + 1;
+    const old_tip_height: u32 = fork_height + 2;
+    const base_timestamp: u64 = 2_300_000_000_000;
+    const block_reward = 21 * types.ZEI_COIN;
+    const genesis_balance = 260 * types.ZEI_COIN;
+
+    var shared_previous_hash = std.mem.zeroes(types.Hash);
+    for (0..fork_height + 1) |height_index| {
+        const height: u32 = @intCast(height_index);
+        const timestamp_ms = base_timestamp + @as(u64, height) * 1000;
+
+        var shared_transactions = [_]Transaction{
+            if (height == 0)
+                createCoinbaseTransaction(alice_addr, genesis_balance, timestamp_ms)
+            else
+                createCoinbaseTransaction(bob_addr, block_reward, timestamp_ms),
+        };
+
+        var shared_block = try buildCanonicalTestBlock(
+            testing.allocator,
+            &local_state,
+            shared_previous_hash,
+            height,
+            shared_transactions[0..1],
+            timestamp_ms,
+        );
+        defer shared_block.deinit(testing.allocator);
+
+        var shared_block_copy = try shared_block.clone(testing.allocator);
+        defer shared_block_copy.deinit(testing.allocator);
+
+        try applyCanonicalTestBlock(local_io, &local_db, &local_state, height, shared_block);
+        try applyCanonicalTestBlock(winning_io, &winning_db, &winning_state, height, shared_block_copy);
+        shared_previous_hash = shared_block.hash();
+    }
+
+    var local_previous_hash = shared_previous_hash;
+    var local_branch_work: types.ChainWork = 0;
+    for (0..2) |offset| {
+        const height = fork_height + 1 + @as(u32, @intCast(offset));
+        const timestamp_ms = base_timestamp + @as(u64, height) * 1000;
+
+        var local_transactions = [_]Transaction{
+            createCoinbaseTransaction(bob_addr, block_reward, timestamp_ms),
+        };
+
+        var local_block = try buildCanonicalTestBlock(
+            testing.allocator,
+            &local_state,
+            local_previous_hash,
+            height,
+            local_transactions[0..1],
+            timestamp_ms,
+        );
+        defer local_block.deinit(testing.allocator);
+
+        local_branch_work += local_block.header.getWork();
+        try applyCanonicalTestBlock(local_io, &local_db, &local_state, height, local_block);
+        local_previous_hash = local_block.hash();
+    }
+
+    const expected_accounts = try snapshotAccounts(testing.allocator, &local_db);
+    defer testing.allocator.free(expected_accounts);
+    const expected_root = try local_state.calculateStateRoot();
+
+    var forged_blocks = std.array_list.Managed(Block).init(testing.allocator);
+    defer {
+        for (forged_blocks.items) |*block| {
+            block.deinit(testing.allocator);
+        }
+        forged_blocks.deinit();
+    }
+
+    const forged_difficulty = (types.DifficultyTarget{
+        .base_bytes = 2,
+        .threshold = 1,
+    }).toU64();
+
+    var winning_previous_hash = shared_previous_hash;
+
+    {
+        const height = fork_height + 1;
+        const timestamp_ms = base_timestamp + @as(u64, height) * 1000 + 100;
+
+        var forged_block_one = try buildCanonicalTestBlock(
+            testing.allocator,
+            &winning_state,
+            winning_previous_hash,
+            height,
+            &[_]Transaction{createCoinbaseTransaction(bob_addr, block_reward, timestamp_ms)},
+            timestamp_ms,
+        );
+
+        var forged_block_one_copy = try forged_block_one.clone(testing.allocator);
+        defer forged_block_one_copy.deinit(testing.allocator);
+        try applyCanonicalTestBlock(winning_io, &winning_db, &winning_state, height, forged_block_one_copy);
+
+        forged_block_one.header.difficulty = forged_difficulty;
+        forged_block_one.header.state_root = std.mem.zeroes(types.Hash);
+        try forged_blocks.append(forged_block_one);
+        winning_previous_hash = forged_block_one.hash();
+    }
+
+    {
+        const height = fork_height + 2;
+        const timestamp_ms = base_timestamp + @as(u64, height) * 1000 + 200;
+
+        var forged_block_two = try buildCanonicalTestBlock(
+            testing.allocator,
+            &winning_state,
+            winning_previous_hash,
+            height,
+            &[_]Transaction{createCoinbaseTransaction(bob_addr, block_reward, timestamp_ms)},
+            timestamp_ms,
+        );
+
+        forged_block_two.header.difficulty = forged_difficulty;
+        forged_block_two.header.state_root = std.mem.zeroes(types.Hash);
+        try forged_blocks.append(forged_block_two);
+    }
+
+    const forged_branch_work = calculateHeaderWorkSum(forged_blocks.items);
+    try testing.expect(forged_branch_work > local_branch_work);
+    try testing.expect(try fork_detector.shouldReorganize(testing.allocator, &local_db, old_tip_height, fork_height, forged_blocks.items));
+
+    var reorg_validator = zei.chain.validator.ChainValidator.init(testing.allocator, &local_state, local_io);
+    defer reorg_validator.deinit();
+
+    try testing.expectError(error.InvalidCompetingBlock, reorg_validator.validateReorgBranch(forged_blocks.items, fork_height + 1));
+
+    var executor = reorg_executor.ReorgExecutor.init(testing.allocator, &local_state, &reorg_validator, &local_db);
+    const result = try executor.executeReorg(local_io, old_tip_height, old_tip_height, forged_blocks.items);
+
+    try testing.expect(!result.success);
+    try testing.expectEqual(@as(u32, 0), result.blocks_reverted);
+    try testing.expectEqual(reorg_executor.ReorgFailureReason.block_validation_failed, result.failure_reason.?);
+
+    const restored_accounts = try snapshotAccounts(testing.allocator, &local_db);
+    defer testing.allocator.free(restored_accounts);
+    const restored_root = try local_state.calculateStateRoot();
+
+    try testing.expectEqualDeep(expected_accounts, restored_accounts);
+    try testing.expectEqualDeep(expected_root, restored_root);
+    try testing.expectEqual(old_tip_height, try local_db.getHeight());
 }

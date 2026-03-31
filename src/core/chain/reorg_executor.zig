@@ -1,6 +1,7 @@
 const std = @import("std");
 const types = @import("../types/types.zig");
 const ChainState = @import("./state.zig").ChainState;
+const ChainValidator = @import("./validator.zig").ChainValidator;
 const Database = @import("../storage/db.zig").Database;
 const state_root = @import("./state_root.zig");
 
@@ -10,6 +11,7 @@ const Hash = types.Hash;
 pub const ReorgFailureReason = enum {
     new_chain_shorter,
     invalid_competing_branch,
+    block_validation_failed,
     revert_state_failed,
     pre_state_root_mismatch,
     apply_block_failed,
@@ -18,6 +20,7 @@ pub const ReorgFailureReason = enum {
         return switch (self) {
             .new_chain_shorter => "New chain is shorter than current chain",
             .invalid_competing_branch => "Competing branch failed local continuity/height validation",
+            .block_validation_failed => "Competing block failed consensus validation (PoW, signatures, or difficulty)",
             .revert_state_failed => "Failed to revert state",
             .pre_state_root_mismatch => "State root verification failed before applying block",
             .apply_block_failed => "Failed to apply new blocks",
@@ -39,14 +42,16 @@ pub const ReorgResult = struct {
 pub const ReorgExecutor = struct {
     allocator: std.mem.Allocator,
     chain_state: *ChainState,
+    validator: ?*ChainValidator,
     db: *Database,
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, chain_state: *ChainState, db: *Database) Self {
+    pub fn init(allocator: std.mem.Allocator, chain_state: *ChainState, validator: ?*ChainValidator, db: *Database) Self {
         return .{
             .allocator = allocator,
             .chain_state = chain_state,
+            .validator = validator,
             .db = db,
         };
     }
@@ -66,7 +71,7 @@ pub const ReorgExecutor = struct {
         new_tip_height: u32,
         new_blocks: []const Block,
     ) !ReorgResult {
-        std.log.warn("🔄 [REORG] Starting reorganization: old height {} → new height {}", .{old_tip_height, new_tip_height});
+        std.log.warn("🔄 [REORG] Starting reorganization: old height {} → new height {}", .{ old_tip_height, new_tip_height });
 
         // Validation: new chain must be longer or equal (with higher hash)
         if (new_tip_height < old_tip_height) {
@@ -97,6 +102,17 @@ pub const ReorgExecutor = struct {
             };
         }
 
+        self.validateCompetingBlocks(fork_height + 1, new_blocks) catch |err| {
+            std.log.warn("❌ [REORG] Competing branch failed consensus validation before state mutation: {}", .{err});
+            return ReorgResult{
+                .success = false,
+                .blocks_reverted = 0,
+                .blocks_applied = 0,
+                .fork_height = fork_height,
+                .failure_reason = .block_validation_failed,
+            };
+        };
+
         var original_blocks = try self.backupExistingChainSegment(io, fork_height + 1, old_tip_height);
         defer {
             for (original_blocks.items) |*block| {
@@ -111,7 +127,7 @@ pub const ReorgExecutor = struct {
 
         // Phase 1: Revert STATE only (not blocks yet - safer to keep blocks until we verify new chain)
         if (blocks_to_revert > 0) {
-            std.log.warn("⏪ [REORG] Reverting state (accounts) from height {} to {}", .{old_tip_height, fork_height});
+            std.log.warn("⏪ [REORG] Reverting state (accounts) from height {} to {}", .{ old_tip_height, fork_height });
             self.revertStateToHeight(io, fork_height) catch |err| {
                 std.log.err("❌ [REORG] Failed to revert state: {}", .{err});
 
@@ -134,36 +150,34 @@ pub const ReorgExecutor = struct {
         try self.chain_state.saveExactStateSnapshotAtHeight(io, fork_height);
 
         // Phase 2: Apply new blocks from fork point forward
-        std.log.warn("⏩ [REORG] Applying {} new blocks from height {} to {}", .{blocks_to_apply, fork_height + 1, new_tip_height});
+        std.log.warn("⏩ [REORG] Applying {} new blocks from height {} to {}", .{ blocks_to_apply, fork_height + 1, new_tip_height });
 
         var applied: u32 = 0;
         for (new_blocks) |new_block| {
             const expected_height = fork_height + 1 + applied;
 
             // State roots commit to the account state before this block executes.
-            if (!std.mem.eql(u8, &new_block.header.state_root, &[_]u8{0} ** 32)) {
-                const current_state_root = try self.chain_state.calculateStateRoot();
-                if (!std.mem.eql(u8, &new_block.header.state_root, &current_state_root)) {
-                    std.log.warn("❌ [REORG] Pre-state root mismatch at height {}", .{expected_height});
-                    std.log.warn("   Expected: {x}", .{&new_block.header.state_root});
-                    std.log.warn("   Actual:   {x}", .{&current_state_root});
-                    self.logPreStateDiagnostics(expected_height, &new_block, current_state_root);
+            const current_state_root = try self.chain_state.calculateStateRoot();
+            if (!std.mem.eql(u8, &new_block.header.state_root, &current_state_root)) {
+                std.log.warn("❌ [REORG] Pre-state root mismatch at height {}", .{expected_height});
+                std.log.warn("   Expected: {x}", .{&new_block.header.state_root});
+                std.log.warn("   Actual:   {x}", .{&current_state_root});
+                self.logPreStateDiagnostics(expected_height, &new_block, current_state_root);
 
-                    try self.restoreOriginalChain(io, old_tip_height, original_blocks.items, fork_height);
+                try self.restoreOriginalChain(io, old_tip_height, original_blocks.items, fork_height);
 
-                    return ReorgResult{
-                        .success = false,
-                        .blocks_reverted = blocks_to_revert,
-                        .blocks_applied = applied,
-                        .fork_height = fork_height,
-                        .failure_reason = .pre_state_root_mismatch,
-                    };
-                }
+                return ReorgResult{
+                    .success = false,
+                    .blocks_reverted = blocks_to_revert,
+                    .blocks_applied = applied,
+                    .fork_height = fork_height,
+                    .failure_reason = .pre_state_root_mismatch,
+                };
             }
 
             // Apply the block after verifying its parent state commitment.
             self.applyBlock(io, &new_block, expected_height) catch |err| {
-                std.log.warn("❌ [REORG] Failed to apply block at height {}: {}", .{expected_height, err});
+                std.log.warn("❌ [REORG] Failed to apply block at height {}: {}", .{ expected_height, err });
 
                 self.restoreOriginalChain(io, old_tip_height, original_blocks.items, fork_height) catch |restore_err| {
                     std.log.err("💥 [REORG] CRITICAL: Failed to restore original chain after apply failure: {}", .{restore_err});
@@ -181,12 +195,12 @@ pub const ReorgExecutor = struct {
             applied += 1;
         }
 
-        // Phase 3: SUCCESS - Now it's safe to delete old blocks that were replaced
+        // Phase 3: SUCCESS - Now it's safe to finalize the new canonical height
         if (blocks_to_revert > 0) {
             // Replacement blocks were already written in-place at their target heights.
             // Deleting the old height range here would remove the newly applied chain.
             try self.db.saveHeight(new_tip_height);
-            std.log.warn("📊 [REORG] Database height updated from {} to {}", .{old_tip_height, new_tip_height});
+            std.log.warn("📊 [REORG] Database height updated from {} to {}", .{ old_tip_height, new_tip_height });
         }
 
         // Once the new branch wins, the old tip snapshot no longer anchors the canonical chain.
@@ -194,7 +208,7 @@ pub const ReorgExecutor = struct {
             try state_root.deleteStateSnapshot(self.allocator, self.db, old_tip_height);
         }
 
-        std.log.warn("✅ [REORG] Reorganization complete: reverted {}, applied {}", .{blocks_to_revert, blocks_to_apply});
+        std.log.warn("✅ [REORG] Reorganization complete: reverted {}, applied {}", .{ blocks_to_revert, blocks_to_apply });
 
         return ReorgResult{
             .success = true,
@@ -246,6 +260,12 @@ pub const ReorgExecutor = struct {
         return true;
     }
 
+    fn validateCompetingBlocks(self: *Self, start_height: u32, new_blocks: []const Block) !void {
+        if (self.validator) |validator| {
+            try validator.validateReorgBranch(new_blocks, start_height);
+        }
+    }
+
     /// Revert state (accounts) back to a specific height WITHOUT deleting blocks
     /// This is safer because if the reorg fails, the old blocks are still available
     fn revertStateToHeight(self: *Self, io: std.Io, target_height: u32) !void {
@@ -257,7 +277,7 @@ pub const ReorgExecutor = struct {
         }
         try self.chain_state.rollbackStateWithoutDeletingBlocks(io, target_height);
 
-        std.log.debug("⏪ Reverted state from height {} to {}", .{current_height, target_height});
+        std.log.debug("⏪ Reverted state from height {} to {}", .{ current_height, target_height });
     }
 
     /// Apply a single block to the chain
