@@ -10,11 +10,11 @@
 **Branch:** `libp2p-integration`
 **Active initiative:** `ZEI-70` reorg safety and recovery hardening after the canonical replay/state fix
 
-**Last worked on:** 2026-03-30 — Finished `ZEI-18`, cleaned up Izumi (`ZEI-18`/`ZEI-60` closed, `ZEI-70`/`ZEI-69` refreshed), and opened `ZEI-71` to investigate possible RocksDB `account_count` metadata drift.
+**Last worked on:** 2026-03-30 — Committed `ZEI-18` hardening + Izumi cleanup as `d0d683e`. Worktree is clean.
 
-**Next step:** Commit the finished `ZEI-18` + Izumi cleanup work, then pick the next `ZEI-70` follow-on; `ZEI-71` is available for the side investigation into `account_count` metadata drift.
+**Next step:** Pick the next `ZEI-70` follow-on — `ZEI-68` (validate competing reorg branch before work comparison) is the recommended next target, then `ZEI-69` (metadata/continuity parity).
 
-**In flight:** `ZEI-18` code is complete but still uncommitted in `src/core/storage/db.zig`, `src/core/chain/state_root.zig`, `src/core/chain/state.zig`, `src/core/chain/reorg_executor.zig`, `src/core/node.zig`, `src/core/miner/core.zig`, `src/core/chain/processor.zig`, `src/lib.zig`, `src/tests.zig`, `.izumi/STATUS.md`, and the related Izumi ticket files. `ZEI-71` is open for the new `account_count` investigation.
+**In flight:** Nothing uncommitted. `ZEI-71` is open for the `account_count` metadata drift investigation.
 
 ---
 
