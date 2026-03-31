@@ -106,9 +106,7 @@ pub const ChainProcessor = struct {
 
         block_with_work.chain_work = prev_chain_work + block_work;
 
-        log.debug("⚡ [CHAIN WORK] Block #{} work: {}, cumulative: {}", .{
-            height, block_work, block_with_work.chain_work
-        });
+        log.debug("⚡ [CHAIN WORK] Block #{} work: {}, cumulative: {}", .{ height, block_work, block_with_work.chain_work });
 
         // Save block to database with chain work
         try self.database.saveBlock(io, height, block_with_work);
@@ -154,7 +152,7 @@ pub const ChainProcessor = struct {
     /// Accept a block after validation (used in reorganization and sync)
     pub fn acceptBlock(self: *ChainProcessor, io: std.Io, block: types.Block) !void {
         const block_hash = block.hash();
-        
+
         // CRITICAL FIX: Check if block hash already exists anywhere in the chain
         if (self.chain_state.getBlockHeight(block_hash)) |existing_height| {
             log.info("🔄 [SYNC DEDUP] Block with hash {x} already exists at height {}, skipping processing to prevent double-spend", .{ block_hash[0..8], existing_height });
@@ -164,19 +162,19 @@ pub const ChainProcessor = struct {
         try self.rejectIfReorgInProgress("block acceptance", block.height);
 
         const current_height = try self.database.getHeight();
-        
+
         // CRITICAL: Verify this block builds on our current chain tip
         // The block's previous_hash must match our current tip's hash
         if (current_height > 0) {
             var current_tip = try self.database.getBlock(io, current_height);
             defer current_tip.deinit(self.allocator);
             const current_tip_hash = current_tip.hash();
-            
+
             if (!std.mem.eql(u8, &block.header.previous_hash, &current_tip_hash)) {
                 log.warn("⚠️ [FORK DETECTED] Block doesn't connect to our chain tip", .{});
                 log.warn("   📊 Our tip at height {}: {x}", .{ current_height, current_tip_hash });
-                log.warn("   📦 Block's previous_hash: {x}", .{ &block.header.previous_hash });
-                log.warn("   🔀 Block hash: {x}", .{ &block_hash });
+                log.warn("   📦 Block's previous_hash: {x}", .{&block.header.previous_hash});
+                log.warn("   🔀 Block hash: {x}", .{&block_hash});
                 log.warn("   📏 Block height: {}", .{block.height});
 
                 // Block doesn't connect to our chain - store as orphan
@@ -198,8 +196,8 @@ pub const ChainProcessor = struct {
             const genesis_hash = genesis.getCanonicalGenesisHash();
             if (!std.mem.eql(u8, &block.header.previous_hash, &genesis_hash)) {
                 log.warn("❌ [BLOCK REJECT] Block at height 1 must reference genesis", .{});
-                log.warn("   📊 Genesis hash: {x}", .{ &genesis_hash });
-                log.warn("   📦 Block's previous_hash: {x}", .{ &block.header.previous_hash });
+                log.warn("   📊 Genesis hash: {x}", .{&genesis_hash});
+                log.warn("   📦 Block's previous_hash: {x}", .{&block.header.previous_hash});
                 return error.InvalidPreviousHash;
             }
         }
@@ -232,9 +230,7 @@ pub const ChainProcessor = struct {
 
         block_with_work.chain_work = prev_chain_work + block_work;
 
-        log.debug("⚡ [CHAIN WORK] Block #{} work: {}, cumulative: {}", .{
-            target_height, block_work, block_with_work.chain_work
-        });
+        log.debug("⚡ [CHAIN WORK] Block #{} work: {}, cumulative: {}", .{ target_height, block_work, block_with_work.chain_work });
 
         // Save to database with chain work
         try self.database.saveBlock(io, target_height, block_with_work);
@@ -358,7 +354,7 @@ pub const ChainProcessor = struct {
 
     /// Execute bulk chain reorganization
     /// Called by sync manager when a competing longer chain is detected
-    pub fn executeBulkReorg(self: *ChainProcessor, io: std.Io, new_blocks: []const types.Block) !void {
+    pub fn executeBulkReorg(self: *ChainProcessor, io: std.Io, fork_height: u32, new_blocks: []const types.Block) !void {
         if (self.reorg_in_progress.swap(true, .acq_rel)) {
             log.warn("🔒 [REORG GUARD] Reorganization already in progress, rejecting overlapping request", .{});
             return error.ReorgInProgress;
@@ -366,13 +362,13 @@ pub const ChainProcessor = struct {
         defer self.reorg_in_progress.store(false, .release);
 
         const current_height = try self.database.getHeight();
-        const new_tip_height = if (new_blocks.len > 0) new_blocks[new_blocks.len - 1].height else current_height;
+        const new_tip_height = if (new_blocks.len > 0) new_blocks[new_blocks.len - 1].height else fork_height;
 
-        log.warn("🔄 [BULK REORG] Starting reorganization: height {} → {}", .{current_height, new_tip_height});
+        log.warn("🔄 [BULK REORG] Starting reorganization: height {} → {}", .{ current_height, new_tip_height });
         log.warn("   📦 Blocks to process: {}", .{new_blocks.len});
 
         // Execute the reorganization
-        const result = try self.reorg_executor.executeReorg(io, current_height, new_tip_height, new_blocks);
+        const result = try self.reorg_executor.executeReorg(io, current_height, fork_height, new_tip_height, new_blocks);
 
         if (result.success) {
             log.warn("✅ [BULK REORG] Chain reorganization successful!", .{});

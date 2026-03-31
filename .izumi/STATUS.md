@@ -10,26 +10,45 @@
 **Branch:** `libp2p-integration`
 **Active initiative:** `ZEI-70` reorg safety and recovery hardening after the canonical replay/state fix
 
-**Last worked on:** 2026-03-31 — Landed `ZEI-68` in `dec6ca4` (`fix: validate competing reorg branches early`). Competing branches are now validated before work comparison and before rollback-state mutation, with a forged-higher-work regression added. Validation passed with `zig build check`, `zig build test`, `zig build test-libp2p`, `./docker/scripts/test_libp2p_zen_server.sh`, and `./docker/scripts/verify_deep_reorg.sh`.
-
-**Next step:** Start `ZEI-69` — pass the known `fork_height` into the reorg executor and recompute canonical metadata like `chain_work` on reorg-applied blocks.
-
-**In flight:** `ZEI-71` remains open for the `account_count` metadata drift investigation. No other reorg work is intentionally left half-finished.
+**Last worked on:** 2026-03-31 — Completed `ZEI-69` by threading known `fork_height` through the bulk reorg path, recomputing canonical `chain_work` on reorg-applied blocks, closing `ZEI-68` and `ZEI-69`, and validating with Zig plus both Docker reorg/libp2p scripts.
+**Next step:** Start `ZEI-71` to investigate `account_count` metadata drift.
+**In flight:** `ZEI-71` remains open; `docs/REORG_EXECUTION_FLOW.md` now documents the live reorg path for follow-on work.
 
 ---
 
-## libp2p Integration — Phase Summary
+## Project Summary
 
-| Phase | Ticket | What | Status |
-|-------|--------|------|--------|
-| 1 | ZEI-39 | Protocol adapter (`LibP2pWireConnection`) | **Done** ✅ |
-| 2 | ZEI-31/35/36 | Bootstrap config → multiaddr | **Done** ✅ |
-| 3 | ZEI-40/41 | peer_manager → libp2p Host | **Done** ✅ |
-| 4 | ZEI-58 | Wire identify handler | **Done** ✅ |
-| 5 | ZEI-59 | Connection pool (dedup dials) | **Done** ✅ |
-| 6 | ZEI-49 | Fix inproc writeVecAll OOM bug | **Done** ✅ |
-| 7 | ZEI-60 | Docker validation | **Done** ✅ (infra + test pass, revealed ZEI-61/62) |
-| 8 | ZEI-54 | Real-network integration test | Pending - after the current reorg/mainnet hardening queue |
-| 9 | ZEI-20 | Kademlia DHT | Post-MVP |
+| State | Summary |
+|-------|---------|
+| Done | Core libp2p integration is in place: protocol adapter, bootstrap multiaddr handling, peer-manager host wiring, identify handler, connection-pool dedup, and Docker validation. |
+| Done | Reorg hardening landed through `ZEI-68`, including early competing-branch validation before work comparison and before canonical-state mutation. |
+| Done | Current validation is green across Zig tests, isolated libp2p tests, Docker libp2p smoke, and Docker deep reorg recovery. |
+| In play | `ZEI-70` remains the umbrella for the reorg/replay/state-root hardening queue. |
+| In play | `ZEI-71` tracks the `account_count` metadata drift investigation. |
+| In play | The branch is functionally at “local libp2p + Docker-verified reorg recovery works; remaining work is correctness hardening and follow-on network features.” |
+| Needs next | `ZEI-71` — investigate `account_count` metadata drift after the reorg/state-root hardening series. |
+| Needs next | Reorg follow-ons after that: `ZEI-21`, `ZEI-52`, `ZEI-64`, `ZEI-65`, `ZEI-66`. |
+| Needs next | Broader networking follow-ons later: `ZEI-54` real-network integration test, then `ZEI-20` Kademlia DHT. |
+
+---
+
+## Safety Notes
+
+- Read `docs/REORG_CONSENSUS_SAFETY_PROFILE.md` before touching reorg, replay, rollback, or `state_root` semantics.
+- `ChainState.processBlockTransactions()` is the canonical block-state apply path.
+- `ChainState.calculateStateRoot()` is the canonical reorg pre-state check.
+- Non-genesis all-zero `header.state_root` is invalid.
+
+---
+
+## Validation
+
+- `zig build check`
+- `zig build test`
+- `zig build test-libp2p`
+- `./docker/scripts/test_libp2p_zen_server.sh`
+- `./docker/scripts/verify_deep_reorg.sh`
+
+---
 
 Full details: `docs/LIBP2P_INTEGRATION_PLAN.md`

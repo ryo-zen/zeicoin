@@ -68,6 +68,7 @@ pub const ReorgExecutor = struct {
         self: *Self,
         io: std.Io,
         old_tip_height: u32,
+        fork_height: u32,
         new_tip_height: u32,
         new_blocks: []const Block,
     ) !ReorgResult {
@@ -79,14 +80,27 @@ pub const ReorgExecutor = struct {
                 .success = false,
                 .blocks_reverted = 0,
                 .blocks_applied = 0,
-                .fork_height = 0,
+                .fork_height = fork_height,
                 .failure_reason = .new_chain_shorter,
             };
         }
 
-        // Find the fork point (common ancestor)
-        const fork_height = try self.findForkPoint(old_tip_height, new_blocks);
-        std.log.info("🔍 [REORG] Fork point found at height {}", .{fork_height});
+        if (fork_height > old_tip_height or fork_height > new_tip_height) {
+            std.log.warn("❌ [REORG] Invalid fork height {} for old tip {} and new tip {}", .{
+                fork_height,
+                old_tip_height,
+                new_tip_height,
+            });
+            return ReorgResult{
+                .success = false,
+                .blocks_reverted = 0,
+                .blocks_applied = 0,
+                .fork_height = fork_height,
+                .failure_reason = .invalid_competing_branch,
+            };
+        }
+
+        std.log.info("🔍 [REORG] Using known fork point at height {}", .{fork_height});
 
         const blocks_to_revert = old_tip_height - fork_height;
         const blocks_to_apply = new_tip_height - fork_height;
@@ -218,20 +232,11 @@ pub const ReorgExecutor = struct {
         };
     }
 
-    /// Find the fork point (common ancestor) between current chain and new chain
-    fn findForkPoint(self: *Self, current_height: u32, new_blocks: []const Block) !u32 {
-        // Start from the beginning of the new chain
-        // Find where our chain and their chain first match
-
-        if (new_blocks.len == 0) return current_height;
-
-        // Get the first block's previous hash
-        const first_new_block = new_blocks[0];
-
-        return self.chain_state.getBlockHeight(first_new_block.header.previous_hash) orelse 0;
-    }
-
     fn validateCompetingBranch(self: *Self, fork_height: u32, new_tip_height: u32, new_blocks: []const Block) bool {
+        if (new_tip_height < fork_height) {
+            return false;
+        }
+
         const expected_blocks = new_tip_height - fork_height;
         if (new_blocks.len != expected_blocks) {
             return false;
@@ -286,14 +291,31 @@ pub const ReorgExecutor = struct {
         // Force processing = true because we might be reapplying blocks that exist in DB
         try self.chain_state.processBlockTransactions(io, block.transactions, height, true);
 
+        const canonical_block = try self.recomputeCanonicalBlockMetadata(io, block, height);
+
         // Save block to database
-        try self.db.saveBlock(io, height, block.*);
+        try self.db.saveBlock(io, height, canonical_block);
 
         // Update block index
         try self.chain_state.indexBlock(height, block.header.hash());
         try self.chain_state.maybeSavePeriodicStateSnapshot(io, height, block.hash());
 
         std.log.debug("⏩ Applied block at height {}", .{height});
+    }
+
+    fn recomputeCanonicalBlockMetadata(self: *Self, io: std.Io, block: *const Block, height: u32) !Block {
+        var canonical_block = block.*;
+        canonical_block.height = height;
+
+        const block_work = canonical_block.header.getWork();
+        const prev_chain_work = if (height > 0) blk: {
+            var prev_block = try self.db.getBlock(io, height - 1);
+            defer prev_block.deinit(self.allocator);
+            break :blk prev_block.chain_work;
+        } else 0;
+
+        canonical_block.chain_work = prev_chain_work + block_work;
+        return canonical_block;
     }
 
     fn logPreStateDiagnostics(self: *Self, expected_height: u32, block: *const Block, current_state_root: Hash) void {

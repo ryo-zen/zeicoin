@@ -187,7 +187,19 @@ fn applyCanonicalTestBlock(
     block: Block,
 ) !void {
     try chain_state.processBlockTransactions(io, block.transactions, height, false);
-    try database.saveBlock(io, height, block);
+
+    var canonical_block = block;
+    canonical_block.height = height;
+
+    const prev_chain_work = if (height > 0) blk: {
+        var prev_block = try database.getBlock(io, height - 1);
+        defer prev_block.deinit(testing.allocator);
+        break :blk prev_block.chain_work;
+    } else 0;
+
+    canonical_block.chain_work = prev_chain_work + canonical_block.header.getWork();
+
+    try database.saveBlock(io, height, canonical_block);
     try chain_state.indexBlock(height, block.hash());
 }
 
@@ -1813,7 +1825,7 @@ test "failed reorg restores original canonical chain from fork snapshot" {
     }
 
     var executor = reorg_executor.ReorgExecutor.init(testing.allocator, &local_state, null, &local_db);
-    const result = try executor.executeReorg(local_io, old_tip_height, old_tip_height, new_blocks.items);
+    const result = try executor.executeReorg(local_io, old_tip_height, fork_height, old_tip_height, new_blocks.items);
 
     try testing.expect(!result.success);
     try testing.expectEqual(reorg_executor.ReorgFailureReason.apply_block_failed, result.failure_reason.?);
@@ -1963,7 +1975,7 @@ test "reorg rejects malformed competing branch before state mutation" {
     try malformed_blocks.append(winning_block_two);
 
     var executor = reorg_executor.ReorgExecutor.init(testing.allocator, &local_state, null, &local_db);
-    const result = try executor.executeReorg(local_io, old_tip_height, old_tip_height, malformed_blocks.items);
+    const result = try executor.executeReorg(local_io, old_tip_height, fork_height, old_tip_height, malformed_blocks.items);
 
     try testing.expect(!result.success);
     try testing.expectEqual(reorg_executor.ReorgFailureReason.invalid_competing_branch, result.failure_reason.?);
@@ -2142,7 +2154,7 @@ test "forged higher-work competing branch is rejected before reorg state mutatio
     try testing.expectError(error.InvalidCompetingBlock, reorg_validator.validateReorgBranch(forged_blocks.items, fork_height + 1));
 
     var executor = reorg_executor.ReorgExecutor.init(testing.allocator, &local_state, &reorg_validator, &local_db);
-    const result = try executor.executeReorg(local_io, old_tip_height, old_tip_height, forged_blocks.items);
+    const result = try executor.executeReorg(local_io, old_tip_height, fork_height, old_tip_height, forged_blocks.items);
 
     try testing.expect(!result.success);
     try testing.expectEqual(@as(u32, 0), result.blocks_reverted);
@@ -2155,4 +2167,153 @@ test "forged higher-work competing branch is rejected before reorg state mutatio
     try testing.expectEqualDeep(expected_accounts, restored_accounts);
     try testing.expectEqualDeep(expected_root, restored_root);
     try testing.expectEqual(old_tip_height, try local_db.getHeight());
+}
+
+test "successful reorg recomputes canonical chain_work for replacement blocks" {
+    var local_threaded = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer local_threaded.deinit();
+    const local_io = local_threaded.io();
+
+    const local_db_path = "test_reorg_recomputes_chain_work_local";
+    defer std.Io.Dir.cwd().deleteTree(local_io, local_db_path) catch {};
+
+    var local_db = try zei.db.Database.init(testing.allocator, local_io, local_db_path);
+    defer local_db.deinit();
+
+    var local_state = zei.chain.ChainState.init(testing.allocator, &local_db);
+    defer local_state.deinit();
+
+    var winning_threaded = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer winning_threaded.deinit();
+    const winning_io = winning_threaded.io();
+
+    const winning_db_path = "test_reorg_recomputes_chain_work_winning";
+    defer std.Io.Dir.cwd().deleteTree(winning_io, winning_db_path) catch {};
+
+    var winning_db = try zei.db.Database.init(testing.allocator, winning_io, winning_db_path);
+    defer winning_db.deinit();
+
+    var winning_state = zei.chain.ChainState.init(testing.allocator, &winning_db);
+    defer winning_state.deinit();
+
+    var alice_keypair = try key.KeyPair.generateNew(local_io);
+    defer alice_keypair.deinit();
+    var bob_keypair = try key.KeyPair.generateNew(local_io);
+    defer bob_keypair.deinit();
+    var carol_keypair = try key.KeyPair.generateNew(local_io);
+    defer carol_keypair.deinit();
+
+    const alice_addr = alice_keypair.getAddress();
+    const bob_addr = bob_keypair.getAddress();
+    const carol_addr = carol_keypair.getAddress();
+
+    const fork_height: u32 = 2;
+    const old_tip_height: u32 = fork_height + 2;
+    const base_timestamp: u64 = 2_400_000_000_000;
+    const block_reward = 19 * types.ZEI_COIN;
+    const genesis_balance = 230 * types.ZEI_COIN;
+
+    var shared_previous_hash = std.mem.zeroes(types.Hash);
+    for (0..fork_height + 1) |height_index| {
+        const height: u32 = @intCast(height_index);
+        const timestamp_ms = base_timestamp + @as(u64, height) * 1000;
+
+        var shared_transactions = [_]Transaction{
+            if (height == 0)
+                createCoinbaseTransaction(alice_addr, genesis_balance, timestamp_ms)
+            else
+                createCoinbaseTransaction(bob_addr, block_reward, timestamp_ms),
+        };
+
+        var shared_block = try buildCanonicalTestBlock(
+            testing.allocator,
+            &local_state,
+            shared_previous_hash,
+            height,
+            shared_transactions[0..1],
+            timestamp_ms,
+        );
+        defer shared_block.deinit(testing.allocator);
+
+        var shared_block_copy = try shared_block.clone(testing.allocator);
+        defer shared_block_copy.deinit(testing.allocator);
+
+        try applyCanonicalTestBlock(local_io, &local_db, &local_state, height, shared_block);
+        try applyCanonicalTestBlock(winning_io, &winning_db, &winning_state, height, shared_block_copy);
+        shared_previous_hash = shared_block.hash();
+    }
+
+    var local_previous_hash = shared_previous_hash;
+    for (0..2) |offset| {
+        const height = fork_height + 1 + @as(u32, @intCast(offset));
+        const timestamp_ms = base_timestamp + @as(u64, height) * 1000;
+
+        var local_block = try buildCanonicalTestBlock(
+            testing.allocator,
+            &local_state,
+            local_previous_hash,
+            height,
+            &[_]Transaction{createCoinbaseTransaction(bob_addr, block_reward, timestamp_ms)},
+            timestamp_ms,
+        );
+        defer local_block.deinit(testing.allocator);
+
+        try applyCanonicalTestBlock(local_io, &local_db, &local_state, height, local_block);
+        local_previous_hash = local_block.hash();
+    }
+
+    var replacement_blocks = std.array_list.Managed(Block).init(testing.allocator);
+    defer {
+        for (replacement_blocks.items) |*block| {
+            block.deinit(testing.allocator);
+        }
+        replacement_blocks.deinit();
+    }
+
+    var winning_previous_hash = shared_previous_hash;
+    for (0..2) |offset| {
+        const height = fork_height + 1 + @as(u32, @intCast(offset));
+        const timestamp_ms = base_timestamp + @as(u64, height) * 1000 + 100;
+
+        var winning_block = try buildCanonicalTestBlock(
+            testing.allocator,
+            &winning_state,
+            winning_previous_hash,
+            height,
+            &[_]Transaction{createCoinbaseTransaction(carol_addr, block_reward, timestamp_ms)},
+            timestamp_ms,
+        );
+
+        var winning_block_copy = try winning_block.clone(testing.allocator);
+        defer winning_block_copy.deinit(testing.allocator);
+        try applyCanonicalTestBlock(winning_io, &winning_db, &winning_state, height, winning_block_copy);
+
+        winning_previous_hash = winning_block.hash();
+        winning_block.chain_work = 1_000_000 + @as(types.ChainWork, @intCast(offset));
+        try replacement_blocks.append(winning_block);
+    }
+
+    var fork_block = try local_db.getBlock(local_io, fork_height);
+    defer fork_block.deinit(testing.allocator);
+    var expected_chain_work = fork_block.chain_work;
+
+    var executor = reorg_executor.ReorgExecutor.init(testing.allocator, &local_state, null, &local_db);
+    const result = try executor.executeReorg(local_io, old_tip_height, fork_height, old_tip_height, replacement_blocks.items);
+
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(u32, 2), result.blocks_reverted);
+    try testing.expectEqual(@as(u32, 2), result.blocks_applied);
+    try testing.expectEqual(fork_height, result.fork_height);
+
+    for (replacement_blocks.items, 0..) |replacement_block, i| {
+        const height = fork_height + 1 + @as(u32, @intCast(i));
+        expected_chain_work += replacement_block.header.getWork();
+
+        var stored_block = try local_db.getBlock(local_io, height);
+        defer stored_block.deinit(testing.allocator);
+
+        try testing.expectEqualDeep(replacement_block.hash(), stored_block.hash());
+        try testing.expectEqual(expected_chain_work, stored_block.chain_work);
+        try testing.expect(stored_block.chain_work != replacement_block.chain_work);
+    }
 }
