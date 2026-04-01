@@ -6,12 +6,12 @@
 
 ## Current State
 
-**Date:** 2026-03-31
+**Date:** 2026-04-01
 **Branch:** `libp2p-integration`
 **Active initiative:** `ZEI-72` initial testnet rollout readiness, with `ZEI-70` still carrying the reorg hardening queue
 
-**Last worked on:** 2026-03-31 — Created `ZEI-72` to track the first testnet blocker set, explicitly scoped rollout to a resettable network with no backward-compatibility layer, and narrowed `ZEI-66` to corruption signaling plus fail-closed resync handling.
-**Next step:** Start `ZEI-71` under `ZEI-72` to classify `account_count` drift as rollout-blocking or observability-only.
+**Last worked on:** 2026-04-01 — Finished `ZEI-64`, verified the deep Docker reorg test passes cleanly, and added `ZEI-74` to track the misleading `zig build test` failure footer that still appears on successful runs.
+**Next step:** Start `ZEI-21` under `ZEI-72` to wire orphaned transactions back into the mempool after successful reorgs.
 **In flight:** `ZEI-72` now overlays the rollout queue; `ZEI-66` issue notes are updated but the code path is not implemented yet.
 
 ---
@@ -25,10 +25,11 @@
 | Done | Current validation is green across Zig tests, isolated libp2p tests, Docker libp2p smoke, and Docker deep reorg recovery. |
 | In play | `ZEI-70` remains the umbrella for the reorg/replay/state-root hardening queue. |
 | In play | `ZEI-72` is the overlay tracker for the first resettable testnet rollout blocker set. |
-| In play | `ZEI-71` tracks the `account_count` metadata drift investigation. |
 | In play | The branch is functionally at “Docker-verified libp2p + Docker-verified reorg recovery works; remaining work is rollout gating, correctness hardening, and real-network validation.” |
-| Needs next | `ZEI-71` — investigate `account_count` metadata drift and decide whether it is a rollout blocker or observability-only. |
-| Needs next | First-testnet blockers after that: `ZEI-64`, `ZEI-21`, `ZEI-66`, `ZEI-52`, `ZEI-54`. |
+| Done | `ZEI-71` landed: `account_count` now tracks unique persisted accounts across direct writes, batch commits, rollback/reset, and explicit restore metadata; impact was classified as observability-only. |
+| Done | `ZEI-64` landed: `executeReorg()` no longer rejects shorter competing branches solely on height, and a regression test now covers the shorter-but-heavier winner case. |
+| Needs next | First-testnet blockers now queued as: `ZEI-21`, `ZEI-66`, `ZEI-52`, `ZEI-54`. |
+| Deferred | `ZEI-74` tracks the misleading `zig build test` footer; treat it as developer-experience cleanup unless exit codes show a real failure. |
 | Deferred | `ZEI-20` Kademlia DHT and mainnet-only compatibility/infrastructure work are explicitly out of scope for the first testnet rollout. |
 
 ---
@@ -39,6 +40,8 @@
 - Backward compatibility and mixed-version coexistence are intentionally out of scope for this rollout.
 - `ZEI-20` Kademlia DHT is not a blocker for the first testnet; current peer exchange is sufficient.
 - Open libp2p integration tickets that conflict with the current branch status should be audited separately, but the only explicit libp2p rollout gate in the current blocker set is `ZEI-54`.
+- `account_count` metadata is currently used for observability/status only; it is not part of consensus or recovery gating.
+- Height is not a valid standalone reorg winner criterion; the cumulative-work decision in `fork_detector.shouldReorganize()` remains authoritative.
 
 ---
 

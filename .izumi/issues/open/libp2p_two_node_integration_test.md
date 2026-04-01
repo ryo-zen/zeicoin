@@ -1,20 +1,24 @@
 ---
 id: libp2p_two_node_integration_test
 key: ZEI-54
-title: "Run two-node libp2p integration test across a real network link"
+title: Run two-node libp2p integration test across a real network link
 type: Task
-status: Backlog
+status: Todo
 priority: Medium
 assignee: null
-labels: ["libp2p", "integration", "testing"]
+labels:
+- libp2p
+- integration
+- testing
 sprint: null
 story_points: 2
 due_date: null
 parent_id: null
-rank: null
+rank: 1774927673826.0
 comments: []
 created_at: 2026-03-21T00:00:00+00:00
-updated_at: 2026-03-21T00:00:00+00:00
+updated_at: 2026-04-01T07:49:27.870138745+00:00
+closed_at: null
 ---
 
 ## Summary

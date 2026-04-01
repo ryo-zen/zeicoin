@@ -3,21 +3,22 @@ id: reorg_restore_failure_detection
 key: ZEI-66
 title: Surface chain corruption when reorg restore fails
 type: Bug
-status: Backlog
+status: Todo
 priority: Medium
 assignee: null
 labels:
-  - consensus
-  - reorg
-  - observability
+- consensus
+- reorg
+- observability
 sprint: null
 story_points: null
 due_date: null
 parent_id: reorg_safety_and_recovery_hardening
-rank: null
+rank: 1774927672826.0
 comments: []
 created_at: 2026-03-30T00:00:00+00:00
-updated_at: 2026-03-31T14:26:52+11:00
+updated_at: 2026-03-31T09:19:15.006661284+00:00
+closed_at: null
 ---
 
 ## Summary

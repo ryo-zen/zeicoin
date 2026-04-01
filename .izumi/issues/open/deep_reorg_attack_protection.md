@@ -3,22 +3,23 @@ id: deep_reorg_attack_protection
 key: ZEI-52
 title: Implement deep reorg attack protection to defend against 51% hashrate attacks
 type: Story
-status: Backlog
+status: Todo
 priority: High
 assignee: null
 labels:
-  - consensus
-  - security
-  - reorg
-  - mainnet-blocking
+- consensus
+- security
+- reorg
+- mainnet-blocking
 sprint: null
 story_points: null
 due_date: null
 parent_id: reorg_safety_and_recovery_hardening
-rank: null
+rank: 1774927671826.0
 comments: []
 created_at: 2026-03-21T00:00:00+00:00
-updated_at: 2026-03-30T07:10:22+00:00
+updated_at: 2026-03-31T09:19:13.504100994+00:00
+closed_at: null
 ---
 
 ## Summary

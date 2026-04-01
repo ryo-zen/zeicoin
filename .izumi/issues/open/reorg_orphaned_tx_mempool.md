@@ -3,7 +3,7 @@ id: reorg_orphaned_tx_mempool
 key: ZEI-21
 title: Wire mempool reorg handler so orphaned transactions are restored after chain reorg
 type: Bug
-status: Backlog
+status: Todo
 priority: High
 assignee: null
 labels:
@@ -15,10 +15,11 @@ sprint: null
 story_points: null
 due_date: null
 parent_id: reorg_safety_and_recovery_hardening
-rank: null
+rank: 1774927662826.0
 comments: []
 created_at: 2026-03-11T00:00:00+00:00
-updated_at: 2026-03-30T07:10:22+00:00
+updated_at: 2026-03-31T09:52:36.939900189+00:00
+closed_at: null
 ---
 
 ## Summary
