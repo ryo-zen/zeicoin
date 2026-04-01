@@ -9,7 +9,6 @@ const Block = types.Block;
 const Hash = types.Hash;
 
 pub const ReorgFailureReason = enum {
-    new_chain_shorter,
     invalid_competing_branch,
     block_validation_failed,
     revert_state_failed,
@@ -18,7 +17,6 @@ pub const ReorgFailureReason = enum {
 
     pub fn description(self: ReorgFailureReason) []const u8 {
         return switch (self) {
-            .new_chain_shorter => "New chain is shorter than current chain",
             .invalid_competing_branch => "Competing branch failed local continuity/height validation",
             .block_validation_failed => "Competing block failed consensus validation (PoW, signatures, or difficulty)",
             .revert_state_failed => "Failed to revert state",
@@ -73,17 +71,6 @@ pub const ReorgExecutor = struct {
         new_blocks: []const Block,
     ) !ReorgResult {
         std.log.warn("🔄 [REORG] Starting reorganization: old height {} → new height {}", .{ old_tip_height, new_tip_height });
-
-        // Validation: new chain must be longer or equal (with higher hash)
-        if (new_tip_height < old_tip_height) {
-            return ReorgResult{
-                .success = false,
-                .blocks_reverted = 0,
-                .blocks_applied = 0,
-                .fork_height = fork_height,
-                .failure_reason = .new_chain_shorter,
-            };
-        }
 
         if (fork_height > old_tip_height or fork_height > new_tip_height) {
             std.log.warn("❌ [REORG] Invalid fork height {} for old tip {} and new tip {}", .{

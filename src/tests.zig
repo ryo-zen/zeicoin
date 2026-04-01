@@ -1024,6 +1024,95 @@ test "WriteBatch atomic commit - all-or-nothing guarantee" {
     log.info("✅ ATOMIC COMMIT TEST PASSED: WriteBatch provides all-or-nothing guarantee\n", .{});
 }
 
+test "account_count tracks unique accounts across direct writes, batches, and reset" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const test_db_path = "test_account_count_db";
+    defer std.Io.Dir.cwd().deleteTree(io, test_db_path) catch {};
+
+    var db = try zei.db.Database.init(testing.allocator, io, test_db_path);
+    defer db.deinit();
+
+    var alice_keypair = try key.KeyPair.generateNew(io);
+    defer alice_keypair.deinit();
+    var bob_keypair = try key.KeyPair.generateNew(io);
+    defer bob_keypair.deinit();
+    var carol_keypair = try key.KeyPair.generateNew(io);
+    defer carol_keypair.deinit();
+
+    const alice_addr = alice_keypair.getAddress();
+    const bob_addr = bob_keypair.getAddress();
+    const carol_addr = carol_keypair.getAddress();
+
+    const alice_initial = types.Account{
+        .address = alice_addr,
+        .balance = 1000 * types.ZEI_COIN,
+        .nonce = 0,
+        .immature_balance = 0,
+    };
+    const bob_initial = types.Account{
+        .address = bob_addr,
+        .balance = 500 * types.ZEI_COIN,
+        .nonce = 0,
+        .immature_balance = 0,
+    };
+    const carol_initial = types.Account{
+        .address = carol_addr,
+        .balance = 250 * types.ZEI_COIN,
+        .nonce = 0,
+        .immature_balance = 0,
+    };
+
+    try testing.expectEqual(@as(u32, 0), try db.getAccountCount());
+
+    try db.saveAccount(alice_addr, alice_initial);
+    try testing.expectEqual(@as(u32, 1), try db.getAccountCount());
+
+    var alice_updated = alice_initial;
+    alice_updated.balance += 10 * types.ZEI_COIN;
+    alice_updated.nonce = 1;
+    try db.saveAccount(alice_addr, alice_updated);
+    try testing.expectEqual(@as(u32, 1), try db.getAccountCount());
+
+    try db.saveAccount(bob_addr, bob_initial);
+    try testing.expectEqual(@as(u32, 2), try db.getAccountCount());
+
+    {
+        var batch = db.createWriteBatch();
+        defer batch.deinit();
+
+        var bob_updated = bob_initial;
+        bob_updated.balance += 5 * types.ZEI_COIN;
+
+        var carol_updated = carol_initial;
+        carol_updated.balance += 10 * types.ZEI_COIN;
+
+        try batch.saveAccount(bob_addr, bob_updated);
+        try batch.saveAccount(carol_addr, carol_initial);
+        try batch.saveAccount(carol_addr, carol_updated);
+        try batch.commit();
+    }
+
+    try testing.expectEqual(@as(u32, 3), try db.getAccountCount());
+
+    try db.deleteAllAccounts();
+    try testing.expectEqual(@as(u32, 0), try db.getAccountCount());
+
+    {
+        var restore_batch = db.createWriteBatch();
+        defer restore_batch.deinit();
+
+        try restore_batch.saveAccount(alice_addr, alice_initial);
+        try restore_batch.saveAccount(bob_addr, bob_initial);
+        restore_batch.saveAccountCount(2);
+        try restore_batch.commit();
+    }
+
+    try testing.expectEqual(@as(u32, 2), try db.getAccountCount());
+}
+
 // Note: Full integration test with ChainProcessor.processBlockTransactions()
 // would require complex setup (ChainValidator, MempoolManager, etc.).
 // The WriteBatch test above validates the core atomic commit mechanism.
@@ -2315,5 +2404,166 @@ test "successful reorg recomputes canonical chain_work for replacement blocks" {
         try testing.expectEqualDeep(replacement_block.hash(), stored_block.hash());
         try testing.expectEqual(expected_chain_work, stored_block.chain_work);
         try testing.expect(stored_block.chain_work != replacement_block.chain_work);
+    }
+}
+
+test "reorg accepts shorter competing branch when cumulative work is higher" {
+    var local_threaded = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer local_threaded.deinit();
+    const local_io = local_threaded.io();
+
+    const local_db_path = "test_reorg_shorter_higher_work_local";
+    defer std.Io.Dir.cwd().deleteTree(local_io, local_db_path) catch {};
+
+    var local_db = try zei.db.Database.init(testing.allocator, local_io, local_db_path);
+    defer local_db.deinit();
+
+    var local_state = zei.chain.ChainState.init(testing.allocator, &local_db);
+    defer local_state.deinit();
+
+    var winning_threaded = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer winning_threaded.deinit();
+    const winning_io = winning_threaded.io();
+
+    const winning_db_path = "test_reorg_shorter_higher_work_winning";
+    defer std.Io.Dir.cwd().deleteTree(winning_io, winning_db_path) catch {};
+
+    var winning_db = try zei.db.Database.init(testing.allocator, winning_io, winning_db_path);
+    defer winning_db.deinit();
+
+    var winning_state = zei.chain.ChainState.init(testing.allocator, &winning_db);
+    defer winning_state.deinit();
+
+    var alice_keypair = try key.KeyPair.generateNew(local_io);
+    defer alice_keypair.deinit();
+    var bob_keypair = try key.KeyPair.generateNew(local_io);
+    defer bob_keypair.deinit();
+    var carol_keypair = try key.KeyPair.generateNew(local_io);
+    defer carol_keypair.deinit();
+
+    const alice_addr = alice_keypair.getAddress();
+    const bob_addr = bob_keypair.getAddress();
+    const carol_addr = carol_keypair.getAddress();
+
+    const fork_height: u32 = types.getCoinbaseMaturity() + 1;
+    const old_tip_height: u32 = fork_height + 3;
+    const new_tip_height: u32 = fork_height + 2;
+    const base_timestamp: u64 = 2_500_000_000_000;
+    const block_reward = 21 * types.ZEI_COIN;
+    const genesis_balance = 260 * types.ZEI_COIN;
+    const heavier_difficulty = (types.DifficultyTarget{
+        .base_bytes = 2,
+        .threshold = 1,
+    }).toU64();
+
+    var shared_previous_hash = std.mem.zeroes(types.Hash);
+    for (0..fork_height + 1) |height_index| {
+        const height: u32 = @intCast(height_index);
+        const timestamp_ms = base_timestamp + @as(u64, height) * 1000;
+
+        var shared_transactions = [_]Transaction{
+            if (height == 0)
+                createCoinbaseTransaction(alice_addr, genesis_balance, timestamp_ms)
+            else
+                createCoinbaseTransaction(bob_addr, block_reward, timestamp_ms),
+        };
+
+        var shared_block = try buildCanonicalTestBlock(
+            testing.allocator,
+            &local_state,
+            shared_previous_hash,
+            height,
+            shared_transactions[0..1],
+            timestamp_ms,
+        );
+        defer shared_block.deinit(testing.allocator);
+
+        var shared_block_copy = try shared_block.clone(testing.allocator);
+        defer shared_block_copy.deinit(testing.allocator);
+
+        try applyCanonicalTestBlock(local_io, &local_db, &local_state, height, shared_block);
+        try applyCanonicalTestBlock(winning_io, &winning_db, &winning_state, height, shared_block_copy);
+        shared_previous_hash = shared_block.hash();
+    }
+
+    var local_previous_hash = shared_previous_hash;
+    var local_branch_work: types.ChainWork = 0;
+    for (0..3) |offset| {
+        const height = fork_height + 1 + @as(u32, @intCast(offset));
+        const timestamp_ms = base_timestamp + @as(u64, height) * 1000;
+
+        var local_block = try buildCanonicalTestBlock(
+            testing.allocator,
+            &local_state,
+            local_previous_hash,
+            height,
+            &[_]Transaction{createCoinbaseTransaction(bob_addr, block_reward, timestamp_ms)},
+            timestamp_ms,
+        );
+        defer local_block.deinit(testing.allocator);
+
+        local_branch_work += local_block.header.getWork();
+        try applyCanonicalTestBlock(local_io, &local_db, &local_state, height, local_block);
+        local_previous_hash = local_block.hash();
+    }
+
+    var replacement_blocks = std.array_list.Managed(Block).init(testing.allocator);
+    defer {
+        for (replacement_blocks.items) |*block| {
+            block.deinit(testing.allocator);
+        }
+        replacement_blocks.deinit();
+    }
+
+    var winning_previous_hash = shared_previous_hash;
+    for (0..2) |offset| {
+        const height = fork_height + 1 + @as(u32, @intCast(offset));
+        const timestamp_ms = base_timestamp + @as(u64, height) * 1000 + 100;
+
+        var winning_block = try buildCanonicalTestBlock(
+            testing.allocator,
+            &winning_state,
+            winning_previous_hash,
+            height,
+            &[_]Transaction{createCoinbaseTransaction(carol_addr, block_reward, timestamp_ms)},
+            timestamp_ms,
+        );
+
+        winning_block.header.difficulty = heavier_difficulty;
+
+        var winning_block_copy = try winning_block.clone(testing.allocator);
+        defer winning_block_copy.deinit(testing.allocator);
+        try applyCanonicalTestBlock(winning_io, &winning_db, &winning_state, height, winning_block_copy);
+
+        winning_previous_hash = winning_block.hash();
+        try replacement_blocks.append(winning_block);
+    }
+
+    const peer_branch_work = calculateHeaderWorkSum(replacement_blocks.items);
+    try testing.expect(peer_branch_work > local_branch_work);
+    try testing.expect(try fork_detector.shouldReorganize(
+        testing.allocator,
+        &local_db,
+        old_tip_height,
+        fork_height,
+        replacement_blocks.items,
+    ));
+
+    var executor = reorg_executor.ReorgExecutor.init(testing.allocator, &local_state, null, &local_db);
+    const result = try executor.executeReorg(local_io, old_tip_height, fork_height, new_tip_height, replacement_blocks.items);
+
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(u32, 3), result.blocks_reverted);
+    try testing.expectEqual(@as(u32, 2), result.blocks_applied);
+    try testing.expectEqual(fork_height, result.fork_height);
+    try testing.expectEqual(new_tip_height, try local_db.getHeight());
+
+    for (replacement_blocks.items, 0..) |replacement_block, i| {
+        const height = fork_height + 1 + @as(u32, @intCast(i));
+        var stored_block = try local_db.getBlock(local_io, height);
+        defer stored_block.deinit(testing.allocator);
+
+        try testing.expectEqualDeep(replacement_block.hash(), stored_block.hash());
+        try testing.expectEqual(replacement_block.header.getWork(), stored_block.header.getWork());
     }
 }

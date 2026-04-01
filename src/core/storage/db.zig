@@ -336,13 +336,16 @@ pub const Database = struct {
     pub fn saveAccount(self: *Database, address: Address, account: Account) !void {
         const key = try self.makeAccountKey(address);
         defer self.allocator.free(key);
+        const is_new_account = try self.keyExists(key) == false;
 
         var aw: std.Io.Writer.Allocating = .init(self.allocator);
         defer aw.deinit();
         serialize.serialize(&aw.writer, account) catch return DatabaseError.SerializationFailed;
         try self.writeRawValue(key, aw.written());
 
-        try self.incrementAccountCount();
+        if (is_new_account) {
+            try self.incrementAccountCount();
+        }
     }
 
     pub fn getAccount(self: *Database, address: Address) !Account {
@@ -382,6 +385,32 @@ pub const Database = struct {
     fn incrementAccountCount(self: *Database) !void {
         const count = (try self.getAccountCount()) + 1;
         try self.saveAccountCount(count);
+    }
+
+    fn keyExists(self: *Database, key: []const u8) !bool {
+        var err: ?[*:0]u8 = null;
+        var val_len: usize = 0;
+        const val_ptr = c.rocksdb_get(
+            self.db,
+            self.read_options,
+            key.ptr,
+            key.len,
+            &val_len,
+            @ptrCast(&err),
+        );
+
+        if (err != null) {
+            log.info("RocksDB key existence check error: {s}", .{err.?});
+            c.rocksdb_free(@constCast(@ptrCast(err)));
+            return DatabaseError.LoadFailed;
+        }
+
+        if (val_ptr == null) {
+            return false;
+        }
+
+        c.rocksdb_free(val_ptr);
+        return true;
     }
 
     pub fn saveAccountCount(self: *Database, count: u32) !void {
@@ -829,12 +858,18 @@ pub const Database = struct {
         return WriteBatch{
             .batch = c.rocksdb_writebatch_create(),
             .db = self,
+            .new_account_count_delta = 0,
+            .account_count_overridden = false,
+            .touched_accounts = .{},
         };
     }
 
     pub const WriteBatch = struct {
         batch: ?*c.rocksdb_writebatch_t,
         db: *Database,
+        new_account_count_delta: u32,
+        account_count_overridden: bool,
+        touched_accounts: std.AutoHashMapUnmanaged(Address, void),
 
         pub fn saveBlock(self: *WriteBatch, height: u32, block: Block) !void {
             const key = try self.db.makeBlockKey(height);
@@ -857,6 +892,14 @@ pub const Database = struct {
         pub fn saveAccount(self: *WriteBatch, address: Address, account: Account) !void {
             const key = try self.db.makeAccountKey(address);
             defer self.db.allocator.free(key);
+
+            const account_entry = try self.touched_accounts.getOrPut(self.db.allocator, address);
+            if (!account_entry.found_existing and !self.account_count_overridden) {
+                const is_existing_account = try self.db.keyExists(key);
+                if (!is_existing_account) {
+                    self.new_account_count_delta += 1;
+                }
+            }
 
             var aw: std.Io.Writer.Allocating = .init(self.db.allocator);
             defer aw.deinit();
@@ -897,6 +940,11 @@ pub const Database = struct {
         }
 
         pub fn commit(self: *WriteBatch) !void {
+            if (!self.account_count_overridden and self.new_account_count_delta > 0) {
+                const updated_count = (try self.db.getAccountCount()) + self.new_account_count_delta;
+                self.saveAccountCount(updated_count);
+            }
+
             var err: ?[*:0]u8 = null;
             c.rocksdb_write(
                 self.db.db,
@@ -941,6 +989,7 @@ pub const Database = struct {
         }
 
         pub fn saveAccountCount(self: *WriteBatch, count: u32) void {
+            self.account_count_overridden = true;
             var buffer: [@sizeOf(u32)]u8 = undefined;
             std.mem.writeInt(u32, &buffer, count, .little);
 
@@ -967,6 +1016,7 @@ pub const Database = struct {
         }
 
         pub fn deinit(self: *WriteBatch) void {
+            self.touched_accounts.deinit(self.db.allocator);
             if (self.batch) |batch| {
                 c.rocksdb_writebatch_destroy(batch);
             }
