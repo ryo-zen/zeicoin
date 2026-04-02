@@ -35,6 +35,23 @@ const Hash = types.Hash;
 const Peer = net.Peer;
 const Allocator = std.mem.Allocator;
 
+const ChainRelation = enum {
+    identical,
+    prefix_compatible,
+    divergent,
+};
+
+const ChainComparison = struct {
+    relation: ChainRelation,
+    fork_point: u32,
+};
+
+const ReorgDepthDecision = struct {
+    depth: u32,
+    exceeds_alert: bool,
+    exceeds_max: bool,
+};
+
 // Module-level blockchain reference for dependency injection functions
 pub var g_blockchain: ?*ZeiCoin = null;
 const SyncState = protocol.SyncState;
@@ -261,7 +278,7 @@ pub const SyncManager = struct {
         // CRITICAL: We check for divergence even if heights are equal, as we might be on a fork.
         if (target_height > 0) {
             log.debug("STEP 2.5: Checking for competing chains...", .{});
-            const is_competing = self.detectCompetingChain(io, peer) catch |err| {
+            const chain_comparison = self.detectCompetingChain(io, peer) catch |err| {
                 if (err == error.PeerDisconnected) {
                     log.warn("⚠️ [FORK DETECT] Peer disconnected during fork detection, aborting this sync attempt", .{});
                     self.setState(.idle);
@@ -281,42 +298,27 @@ pub const SyncManager = struct {
                 return error.ForkDetectionFailed;
             };
 
-            if (is_competing) {
+            if (chain_comparison.relation == .divergent) {
                 const fork_detector = @import("fork_detector.zig");
+                const fork_point = chain_comparison.fork_point;
 
                 log.warn("🔥 [COMPETING CHAIN] Peer has divergent chain!", .{});
                 log.warn("   Our height: {}", .{current_height});
                 log.warn("   Peer height: {}", .{target_height});
 
-                // Find fork point for reorg decision
-                const fork_point = fork_detector.findForkPoint(
-                    self.allocator,
-                    g_blockchain.?.database,
-                    peer,
-                    current_height,
-                    target_height,
-                ) catch |err| {
-                    if (err == error.PeerDisconnected) {
-                        log.warn("⚠️ [REORG] Peer disconnected while finding fork point, aborting this sync attempt", .{});
-                        self.setState(.idle);
-                        return;
-                    }
-
-                    log.err("❌ [REORG] Failed to find fork point: {}", .{err});
-                    log.err("⚠️  [REORG] Fork detection failed - will retry after cooldown", .{});
-
-                    // Add extended cooldown to prevent rapid retry loops
+                const depth_decision = evaluateReorgDepthPolicy(current_height, fork_point);
+                if (depth_decision.exceeds_alert) {
+                    try self.logDeepReorgAlert(io, depth_decision.depth, fork_point, current_height, target_height);
+                }
+                if (depth_decision.exceeds_max) {
+                    log.err("🛡️ [REORG POLICY] Rejecting competing chain because reorg depth {} exceeds configured maximum {}", .{
+                        depth_decision.depth,
+                        types.REORG.max_depth,
+                    });
                     self.addForkCooldown(current_height, 60) catch {};
-
-                    // Keep mining paused to prevent fork from worsening
-                    should_resume_mining = false;
-
-                    // Set sync to failed state
-                    self.setState(.failed);
-
-                    // Return error
-                    return error.ForkDetectionFailed;
-                };
+                    self.setState(.idle);
+                    return;
+                }
 
                 log.info("📥 [REORG] Fetching competing chain blocks for local work verification...", .{});
                 var competing_blocks = self.fetchCompetingChainBlocks(peer, fork_point, target_height) catch |err| {
@@ -379,14 +381,12 @@ pub const SyncManager = struct {
                 if (should_reorg) {
                     log.warn("🔄 [REORG DECISION] Peer chain has more locally verified work - reorganizing!", .{});
                     try self.executeBulkReorg(io, fork_point, competing_blocks.items);
-                    self.setState(.idle); // executeBulkReorg finishes sync
+                    if (self.getSyncState() != .quarantined) {
+                        self.setState(.idle);
+                    }
                     return;
                 } else {
-                    // PREFIX CASE: If fork_point == our tip, we're a prefix of peer's chain
-                    // This means NO divergence - just sync forward normally
-                    const is_prefix = (fork_point == current_height);
-
-                    if (is_prefix) {
+                    if (chain_comparison.relation == .prefix_compatible) {
                         log.info("ℹ️  [REORG DECISION] Chain is prefix - continuing with normal sync", .{});
                         // Fall through to normal sync below
                     } else {
@@ -981,8 +981,9 @@ pub const SyncManager = struct {
         log.info("⏳ [SYNC RANGE] Waiting for blocks to arrive...", .{});
     }
 
-    /// Detect if peer has a competing chain using fork point detection
-    fn detectCompetingChain(self: *Self, io: std.Io, peer: *Peer) !bool {
+    /// Detect if peer has a competing chain using fork point detection.
+    /// Returns the discovered fork point so callers can reuse it.
+    fn detectCompetingChain(self: *Self, io: std.Io, peer: *Peer) !ChainComparison {
         _ = io;
         const fork_detector = @import("fork_detector.zig");
 
@@ -992,7 +993,10 @@ pub const SyncManager = struct {
         // Early return if we're at genesis
         if (current_height == 0) {
             log.debug("✅ [CHAIN DETECT] We're at genesis, accepting peer's chain", .{});
-            return false;
+            return .{
+                .relation = .prefix_compatible,
+                .fork_point = 0,
+            };
         }
 
         log.info("🔍 [FORK DETECT] Starting fork point detection", .{});
@@ -1017,13 +1021,19 @@ pub const SyncManager = struct {
         // If fork point is at current height, chains are the same
         if (fork_point == current_height and fork_point == peer_height) {
             log.debug("✅ [FORK DETECT] Chains are identical", .{});
-            return false;
+            return .{
+                .relation = .identical,
+                .fork_point = fork_point,
+            };
         }
 
         // Prefix cases are normal extensions, not competing chains.
         if (fork_point == current_height or fork_point == peer_height) {
             log.debug("✅ [FORK DETECT] Chains are prefix-compatible", .{});
-            return false;
+            return .{
+                .relation = .prefix_compatible,
+                .fork_point = fork_point,
+            };
         }
 
         // True divergence: both chains have blocks after the common fork point.
@@ -1031,11 +1041,52 @@ pub const SyncManager = struct {
             log.warn("🔥 [FORK DETECT] Chains diverged at height {}!", .{fork_point});
             log.warn("   Our blocks after fork: {}", .{current_height - fork_point});
             log.warn("   Peer blocks after fork: {}", .{peer_height - fork_point});
-            return true;
+            return .{
+                .relation = .divergent,
+                .fork_point = fork_point,
+            };
         }
 
         log.debug("✅ [FORK DETECT] Chains are compatible", .{});
-        return false;
+        return .{
+            .relation = .prefix_compatible,
+            .fork_point = fork_point,
+        };
+    }
+
+    fn evaluateReorgDepthPolicy(current_height: u32, fork_point: u32) ReorgDepthDecision {
+        const depth = current_height - fork_point;
+        return .{
+            .depth = depth,
+            .exceeds_alert = depth > types.REORG.alert_depth,
+            .exceeds_max = depth > types.REORG.max_depth,
+        };
+    }
+
+    fn logDeepReorgAlert(
+        self: *Self,
+        io: std.Io,
+        depth: u32,
+        fork_point: u32,
+        current_height: u32,
+        target_height: u32,
+    ) !void {
+        log.warn("⚠️ [REORG ALERT] Deep reorg candidate detected: depth={}, fork_height={}, current_tip={}, new_tip={}", .{
+            depth,
+            fork_point,
+            current_height,
+            target_height,
+        });
+
+        var logged: u32 = 0;
+        var height = current_height;
+        while (height > fork_point and logged < 8) : (logged += 1) {
+            var block = try self.blockchain.database.getBlock(io, height);
+            defer block.deinit(self.allocator);
+            const orphaned_hash = block.hash();
+            log.warn("   orphaned_hash[{}] height {}: {x}", .{ logged, height, orphaned_hash[0..8] });
+            height -= 1;
+        }
     }
 
     /// Legacy fork detection (checks only block 1) - fallback
@@ -1123,7 +1174,7 @@ pub const SyncManager = struct {
     }
 
     /// Execute bulk reorganization to switch to peer's longer chain
-    fn executeBulkReorg(_: *Self, io: std.Io, fork_point: u32, new_blocks: []const Block) !void {
+    fn executeBulkReorg(self: *Self, io: std.Io, fork_point: u32, new_blocks: []const Block) !void {
         const peer_height = if (new_blocks.len > 0) new_blocks[new_blocks.len - 1].height else fork_point;
 
         log.warn("🔄 [BULK REORG] ========================================", .{});
@@ -1135,6 +1186,20 @@ pub const SyncManager = struct {
         log.warn("   Target height: {}", .{peer_height});
         log.warn("   Prefetched competing blocks: {}", .{new_blocks.len});
 
+        const depth_decision = evaluateReorgDepthPolicy(current_height, fork_point);
+        if (depth_decision.exceeds_alert) {
+            try self.logDeepReorgAlert(io, depth_decision.depth, fork_point, current_height, peer_height);
+        }
+        if (depth_decision.exceeds_max) {
+            log.err("🛡️ [REORG POLICY] Rejecting bulk reorg because reorg depth {} exceeds configured maximum {}", .{
+                depth_decision.depth,
+                types.REORG.max_depth,
+            });
+            self.addForkCooldown(current_height, 60) catch {};
+            self.setState(.idle);
+            return;
+        }
+
         // Execute reorganization via chain processor
         log.warn("🔄 [BULK REORG] Executing chain reorganization...", .{});
 
@@ -1143,6 +1208,11 @@ pub const SyncManager = struct {
                 error.ReorgInProgress => {
                     log.info("🔒 [BULK REORG] Another reorganization is already active, deferring this request", .{});
                     return;
+                },
+                error.ChainQuarantined => {
+                    self.setState(.quarantined);
+                    log.err("💥 [BULK REORG] Reorg recovery could not prove canonical restoration; sync is quarantined until manual recovery/resync", .{});
+                    return error.ChainQuarantined;
                 },
                 else => return err,
             };
@@ -1437,6 +1507,7 @@ pub const SyncManager = struct {
     /// Verify block hash consensus with connected peers (optional additional security)
     pub fn verifyBlockConsensus(blockchain: *ZeiCoin, block: Block, height: u32) !bool {
         const mode = types.CONSENSUS.mode;
+        const fork_detector = @import("fork_detector.zig");
 
         // Skip if consensus is disabled
         if (mode == .disabled) {
@@ -1464,7 +1535,6 @@ pub const SyncManager = struct {
 
         if (connected_peers.items.len == 0) {
             log.info("⚠️ [CONSENSUS CHECK] No connected peers for consensus verification", .{});
-            return true; // Can't verify consensus without peers
         }
 
         const block_hash = block.hash();
@@ -1476,17 +1546,20 @@ pub const SyncManager = struct {
         var agreements: u32 = 0;
 
         // Simple implementation: Query each peer synchronously
-        // Future improvement: Query peers in parallel with timeout
         for (connected_peers.items) |peer| {
-            // TODO: Send GetBlockHashMessage to peer and wait for response
-            // For now, simulate response (will be implemented with proper message passing)
+            if (peer.height < height) continue;
 
-            // Temporary: assume peer agrees if it has sufficient height
-            if (peer.height >= height) {
-                responses += 1;
-                // In real implementation, we'd compare the received hash
-                // For now, simulate agreement
+            const peer_hash = fork_detector.requestBlockHashAtHeight(peer, height) catch |err| {
+                log.info("⚠️ [CONSENSUS CHECK] Peer {} did not confirm height {}: {}", .{ peer.id, height, err });
+                continue;
+            };
+
+            responses += 1;
+            if (std.mem.eql(u8, &peer_hash, &block_hash)) {
                 agreements += 1;
+            } else {
+                log.info("⚠️ [CONSENSUS CHECK] Peer {} disagrees on block hash at height {}", .{ peer.id, height });
+                log.info("   Peer hash: {x}", .{peer_hash[0..8]});
             }
         }
 
@@ -1611,4 +1684,42 @@ pub fn test_syncManager() !void {
 
     try SyncManager.runTests(allocator);
     log.info("✅ [SYNC MANAGER] All tests passed successfully", .{});
+}
+
+test "reorg depth policy rejects depths above configured maximum" {
+    const testing = std.testing;
+
+    const original_max = types.REORG.max_depth;
+    const original_alert = types.REORG.alert_depth;
+    defer {
+        types.REORG.max_depth = original_max;
+        types.REORG.alert_depth = original_alert;
+    }
+
+    types.REORG.max_depth = 5;
+    types.REORG.alert_depth = 3;
+
+    const decision = SyncManager.evaluateReorgDepthPolicy(20, 14);
+    try testing.expectEqual(@as(u32, 6), decision.depth);
+    try testing.expect(decision.exceeds_alert);
+    try testing.expect(decision.exceeds_max);
+}
+
+test "reorg depth policy alerts without rejecting within bounded maximum" {
+    const testing = std.testing;
+
+    const original_max = types.REORG.max_depth;
+    const original_alert = types.REORG.alert_depth;
+    defer {
+        types.REORG.max_depth = original_max;
+        types.REORG.alert_depth = original_alert;
+    }
+
+    types.REORG.max_depth = 20;
+    types.REORG.alert_depth = 3;
+
+    const decision = SyncManager.evaluateReorgDepthPolicy(20, 16);
+    try testing.expectEqual(@as(u32, 4), decision.depth);
+    try testing.expect(decision.exceeds_alert);
+    try testing.expect(!decision.exceeds_max);
 }

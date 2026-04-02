@@ -58,7 +58,7 @@ pub const ConsensusMode = enum {
 
 pub const CONSENSUS = struct {
     // Current consensus mode - can be changed via environment variable
-    pub var mode: ConsensusMode = .optional; // Default to optional for gradual rollout
+    pub var mode: ConsensusMode = .enforced; // Default to enforced for public testnet rollout
 
     // Minimum percentage of peers that must agree (0.5 = 50%, 0.67 = 67%, etc)
     pub var threshold: f32 = 0.5; // Simple majority by default
@@ -67,10 +67,19 @@ pub const CONSENSUS = struct {
     pub const PEER_RESPONSE_TIMEOUT: i64 = 5;
 
     // Minimum number of peer responses required (0 = no minimum)
-    pub var min_peer_responses: u32 = 0; // Start with no minimum
+    pub var min_peer_responses: u32 = 1; // Require at least one peer response by default
 
     // Whether to query peers during normal operation or only during sync
     pub var check_during_normal_operation: bool = false; // Only during sync initially
+};
+
+pub const REORG = struct {
+    pub var max_depth: u32 = switch (CURRENT_NETWORK) {
+        .testnet => 20,
+        .mainnet => 100,
+    };
+
+    pub var alert_depth: u32 = 3;
 };
 
 // Block versioning - for protocol upgrades

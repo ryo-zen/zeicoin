@@ -423,6 +423,7 @@ pub const BatchSyncProtocol = struct {
         applying, // Applying validated blocks to blockchain
         complete, // Synchronization completed successfully
         failed, // Synchronization failed (can be retried)
+        quarantined, // Canonical recovery could not be proven; manual recovery required
 
         /// Check if sync is actively running
         pub fn isActive(self: SyncState) bool {

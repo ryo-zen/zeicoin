@@ -37,7 +37,7 @@ fn loadConsensusConfig() void {
         } else if (std.mem.eql(u8, mode_str, "enforced")) {
             types.CONSENSUS.mode = .enforced;
         } else {
-            std.log.warn("Invalid consensus mode: {s}, using default 'optional'", .{mode_str});
+            std.log.warn("Invalid consensus mode: {s}, using default 'enforced'", .{mode_str});
         }
     } else |_| {}
     
@@ -63,7 +63,7 @@ fn loadConsensusConfig() void {
         if (std.fmt.parseInt(u32, min_str, 10)) |min_peers| {
             types.CONSENSUS.min_peer_responses = min_peers;
         } else |_| {
-            std.log.warn("Invalid minimum peers: {s}, using default 0", .{min_str});
+            std.log.warn("Invalid minimum peers: {s}, using default 1", .{min_str});
         }
     } else |_| {}
     
@@ -73,12 +73,43 @@ fn loadConsensusConfig() void {
         
         types.CONSENSUS.check_during_normal_operation = std.mem.eql(u8, check_str, "true");
     } else |_| {}
+
+    if (util.getEnvVarOwned(std.heap.page_allocator, "ZEICOIN_MAX_REORG_DEPTH")) |depth_str| {
+        defer std.heap.page_allocator.free(depth_str);
+
+        if (std.fmt.parseInt(u32, depth_str, 10)) |depth| {
+            types.REORG.max_depth = depth;
+        } else |_| {
+            std.log.warn("Invalid max reorg depth: {s}, using default {}", .{ depth_str, types.REORG.max_depth });
+        }
+    } else |_| {}
+
+    if (util.getEnvVarOwned(std.heap.page_allocator, "ZEICOIN_REORG_ALERT_DEPTH")) |alert_str| {
+        defer std.heap.page_allocator.free(alert_str);
+
+        if (std.fmt.parseInt(u32, alert_str, 10)) |depth| {
+            types.REORG.alert_depth = depth;
+        } else |_| {
+            std.log.warn("Invalid reorg alert depth: {s}, using default {}", .{ alert_str, types.REORG.alert_depth });
+        }
+    } else |_| {}
+
+    if (types.REORG.alert_depth > types.REORG.max_depth) {
+        std.log.warn("Reorg alert depth {} exceeds max depth {}; clamping alert depth", .{
+            types.REORG.alert_depth,
+            types.REORG.max_depth,
+        });
+        types.REORG.alert_depth = types.REORG.max_depth;
+    }
     
     std.log.info("📊 Consensus Configuration:", .{});
     std.log.info("  Mode: {s}", .{@tagName(types.CONSENSUS.mode)});
     std.log.info("  Threshold: {d:.0}%", .{types.CONSENSUS.threshold * 100});
     std.log.info("  Min peer responses: {}", .{types.CONSENSUS.min_peer_responses});
     std.log.info("  Check during normal: {}", .{types.CONSENSUS.check_during_normal_operation});
+    std.log.info("📊 Reorg Policy:", .{});
+    std.log.info("  Max reorg depth: {}", .{types.REORG.max_depth});
+    std.log.info("  Alert depth: {}", .{types.REORG.alert_depth});
 }
 
 

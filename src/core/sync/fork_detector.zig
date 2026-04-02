@@ -60,7 +60,7 @@ pub fn findForkPoint(
 }
 
 /// Request block hash at specific height from peer
-fn requestBlockHashAtHeight(peer: *Peer, height: u32) !types.BlockHash {
+pub fn requestBlockHashAtHeight(peer: *Peer, height: u32) !types.BlockHash {
     const msg_types = @import("../network/protocol/messages/message_types.zig");
 
     // Retry configuration

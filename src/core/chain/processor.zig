@@ -2,6 +2,7 @@
 // Handles block processing, application, and chain updates
 
 const std = @import("std");
+const builtin = @import("builtin");
 const log = std.log.scoped(.chain);
 const types = @import("../types/types.zig");
 const db = @import("../storage/db.zig");
@@ -21,6 +22,7 @@ pub const ChainProcessor = struct {
     mempool_manager: ?*@import("../mempool/manager.zig").MempoolManager,
     reorg_executor: ReorgExecutor,
     reorg_in_progress: std.atomic.Value(bool),
+    chain_quarantined: std.atomic.Value(bool),
     orphan_pool: OrphanPool,
     network_callback: ?*const fn (block: types.Block) void = null,
 
@@ -37,8 +39,9 @@ pub const ChainProcessor = struct {
             .chain_state = chain_state,
             .chain_validator = chain_validator,
             .mempool_manager = mempool_manager,
-            .reorg_executor = ReorgExecutor.init(allocator, chain_state, &chain_validator.real_validator, database),
+            .reorg_executor = ReorgExecutor.init(allocator, chain_state, &chain_validator.real_validator, database, mempool_manager),
             .reorg_in_progress = std.atomic.Value(bool).init(false),
+            .chain_quarantined = std.atomic.Value(bool).init(false),
             .orphan_pool = OrphanPool.init(allocator, OrphanPool.MAX_ORPHANS_DEFAULT),
         };
     }
@@ -53,10 +56,30 @@ pub const ChainProcessor = struct {
 
     pub fn setMempoolManager(self: *ChainProcessor, mempool_manager: *@import("../mempool/manager.zig").MempoolManager) void {
         self.mempool_manager = mempool_manager;
+        self.reorg_executor.setMempoolManager(mempool_manager);
     }
 
     pub fn isReorgInProgress(self: *const ChainProcessor) bool {
         return self.reorg_in_progress.load(.acquire);
+    }
+
+    pub fn isChainQuarantined(self: *const ChainProcessor) bool {
+        return self.chain_quarantined.load(.acquire);
+    }
+
+    fn quarantineChain(self: *ChainProcessor) void {
+        self.chain_quarantined.store(true, .release);
+    }
+
+    fn rejectIfChainQuarantined(self: *const ChainProcessor, operation: []const u8) !void {
+        if (!self.isChainQuarantined()) return;
+
+        if (builtin.is_test and self.reorg_executor.force_restore_failure_for_testing) {
+            log.warn("🛑 [CHAIN QUARANTINE] Rejecting {s} because canonical recovery could not be proven", .{operation});
+        } else {
+            log.err("🛑 [CHAIN QUARANTINE] Rejecting {s} because canonical recovery could not be proven", .{operation});
+        }
+        return error.ChainQuarantined;
     }
 
     fn rejectIfReorgInProgress(self: *const ChainProcessor, operation: []const u8, block_height: ?u32) !void {
@@ -74,6 +97,7 @@ pub const ChainProcessor = struct {
     /// Apply a valid block to the blockchain
     pub fn addBlockToChain(self: *ChainProcessor, io: std.Io, block: types.Block, height: u32) !void {
         // SAFETY: Basic validation - these should not be null in normal operation
+        try self.rejectIfChainQuarantined("sync block application");
 
         // Check if block already exists to prevent double-processing during sync replay
         if (self.database.blockExistsByHeight(height)) {
@@ -130,6 +154,7 @@ pub const ChainProcessor = struct {
         // Get the current height - this is the height for the new block
         const block_height = try self.database.getHeight();
 
+        try self.rejectIfChainQuarantined("block application");
         try self.rejectIfReorgInProgress("block application", block_height);
 
         // Process all transactions in the block
@@ -152,6 +177,7 @@ pub const ChainProcessor = struct {
     /// Accept a block after validation (used in reorganization and sync)
     pub fn acceptBlock(self: *ChainProcessor, io: std.Io, block: types.Block) !void {
         const block_hash = block.hash();
+        try self.rejectIfChainQuarantined("block acceptance");
 
         // CRITICAL FIX: Check if block hash already exists anywhere in the chain
         if (self.chain_state.getBlockHeight(block_hash)) |existing_height| {
@@ -355,6 +381,8 @@ pub const ChainProcessor = struct {
     /// Execute bulk chain reorganization
     /// Called by sync manager when a competing longer chain is detected
     pub fn executeBulkReorg(self: *ChainProcessor, io: std.Io, fork_height: u32, new_blocks: []const types.Block) !void {
+        try self.rejectIfChainQuarantined("reorganization");
+
         if (self.reorg_in_progress.swap(true, .acq_rel)) {
             log.warn("🔒 [REORG GUARD] Reorganization already in progress, rejecting overlapping request", .{});
             return error.ReorgInProgress;
@@ -379,10 +407,28 @@ pub const ChainProcessor = struct {
             // Clear orphan pool after successful reorg
             self.orphan_pool.clear();
         } else {
-            log.err("❌ [BULK REORG] Chain reorganization failed!", .{});
-            if (result.failure_reason) |reason| {
-                log.err("   💬 Error: {s}", .{reason.description()});
+            if (builtin.is_test and self.reorg_executor.force_restore_failure_for_testing) {
+                log.warn("❌ [BULK REORG] Chain reorganization failed!", .{});
+            } else {
+                log.err("❌ [BULK REORG] Chain reorganization failed!", .{});
             }
+            if (result.failure_reason) |reason| {
+                if (builtin.is_test and self.reorg_executor.force_restore_failure_for_testing) {
+                    log.warn("   💬 Error: {s}", .{reason.description()});
+                } else {
+                    log.err("   💬 Error: {s}", .{reason.description()});
+                }
+            }
+            if (result.chain_corrupted) {
+                self.quarantineChain();
+                if (builtin.is_test and self.reorg_executor.force_restore_failure_for_testing) {
+                    log.warn("💥 [BULK REORG] Canonical chain recovery could not be proven; quarantining node until manual recovery/resync", .{});
+                } else {
+                    log.err("💥 [BULK REORG] Canonical chain recovery could not be proven; quarantining node until manual recovery/resync", .{});
+                }
+                return error.ChainQuarantined;
+            }
+
             return error.ReorgFailed;
         }
     }

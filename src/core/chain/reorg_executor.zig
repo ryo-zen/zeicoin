@@ -3,6 +3,7 @@ const types = @import("../types/types.zig");
 const ChainState = @import("./state.zig").ChainState;
 const ChainValidator = @import("./validator.zig").ChainValidator;
 const Database = @import("../storage/db.zig").Database;
+const MempoolManager = @import("../mempool/manager.zig").MempoolManager;
 const state_root = @import("./state_root.zig");
 
 const Block = types.Block;
@@ -33,6 +34,7 @@ pub const ReorgResult = struct {
     blocks_applied: u32,
     fork_height: u32,
     failure_reason: ?ReorgFailureReason = null,
+    chain_corrupted: bool = false,
 };
 
 /// Simple State-Based Reorganization Executor
@@ -42,26 +44,39 @@ pub const ReorgExecutor = struct {
     chain_state: *ChainState,
     validator: ?*ChainValidator,
     db: *Database,
+    mempool_manager: ?*MempoolManager,
+    force_restore_failure_for_testing: bool,
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, chain_state: *ChainState, validator: ?*ChainValidator, db: *Database) Self {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        chain_state: *ChainState,
+        validator: ?*ChainValidator,
+        db: *Database,
+        mempool_manager: ?*MempoolManager,
+    ) Self {
         return .{
             .allocator = allocator,
             .chain_state = chain_state,
             .validator = validator,
             .db = db,
+            .mempool_manager = mempool_manager,
+            .force_restore_failure_for_testing = false,
         };
+    }
+
+    pub fn setMempoolManager(self: *Self, mempool_manager: ?*MempoolManager) void {
+        self.mempool_manager = mempool_manager;
+    }
+
+    pub fn forceRestoreFailureForTesting(self: *Self, enabled: bool) void {
+        self.force_restore_failure_for_testing = enabled;
     }
 
     /// Execute a reorganization from old_tip to new_tip
     /// This is the main entry point for reorganization
     ///
-    /// NOTE: Orphaned transactions are handled by MempoolManager:
-    /// - Before calling this, call mempool.handleReorganization(orphaned_blocks)
-    /// - This backs up transactions from reverted blocks
-    /// - After reorg succeeds, transactions are restored to mempool
-    /// - Invalid transactions are automatically discarded
     pub fn executeReorg(
         self: *Self,
         io: std.Io,
@@ -122,6 +137,20 @@ pub const ReorgExecutor = struct {
             original_blocks.deinit();
         }
 
+        var clear_staged_orphans_on_exit = false;
+        defer {
+            if (clear_staged_orphans_on_exit) {
+                if (self.mempool_manager) |mempool| {
+                    mempool.clearStagedOrphanedTransactions();
+                }
+            }
+        }
+
+        if (self.mempool_manager) |mempool| {
+            try mempool.stageOrphanedTransactions(original_blocks.items);
+            clear_staged_orphans_on_exit = true;
+        }
+
         // Save the exact canonical tip before mutating state so failure recovery can
         // restore the original chain directly instead of reconstructing it indirectly.
         try self.chain_state.saveExactStateSnapshotAtHeight(io, old_tip_height);
@@ -131,10 +160,7 @@ pub const ReorgExecutor = struct {
             std.log.warn("⏪ [REORG] Reverting state (accounts) from height {} to {}", .{ old_tip_height, fork_height });
             self.revertStateToHeight(io, fork_height) catch |err| {
                 std.log.err("❌ [REORG] Failed to revert state: {}", .{err});
-
-                self.restoreOriginalChain(io, old_tip_height, original_blocks.items, fork_height) catch |restore_err| {
-                    std.log.err("💥 [REORG] CRITICAL: Failed to restore original chain after revert failure: {}", .{restore_err});
-                };
+                const restored = self.attemptRestoreOriginalChain(io, old_tip_height, original_blocks.items, fork_height, "revert failure");
 
                 return ReorgResult{
                     .success = false,
@@ -142,6 +168,7 @@ pub const ReorgExecutor = struct {
                     .blocks_applied = 0,
                     .fork_height = fork_height,
                     .failure_reason = .revert_state_failed,
+                    .chain_corrupted = !restored,
                 };
             };
         }
@@ -164,8 +191,7 @@ pub const ReorgExecutor = struct {
                 std.log.warn("   Expected: {x}", .{&new_block.header.state_root});
                 std.log.warn("   Actual:   {x}", .{&current_state_root});
                 self.logPreStateDiagnostics(expected_height, &new_block, current_state_root);
-
-                try self.restoreOriginalChain(io, old_tip_height, original_blocks.items, fork_height);
+                const restored = self.attemptRestoreOriginalChain(io, old_tip_height, original_blocks.items, fork_height, "pre-state root mismatch");
 
                 return ReorgResult{
                     .success = false,
@@ -173,16 +199,14 @@ pub const ReorgExecutor = struct {
                     .blocks_applied = applied,
                     .fork_height = fork_height,
                     .failure_reason = .pre_state_root_mismatch,
+                    .chain_corrupted = !restored,
                 };
             }
 
             // Apply the block after verifying its parent state commitment.
             self.applyBlock(io, &new_block, expected_height) catch |err| {
                 std.log.warn("❌ [REORG] Failed to apply block at height {}: {}", .{ expected_height, err });
-
-                self.restoreOriginalChain(io, old_tip_height, original_blocks.items, fork_height) catch |restore_err| {
-                    std.log.err("💥 [REORG] CRITICAL: Failed to restore original chain after apply failure: {}", .{restore_err});
-                };
+                const restored = self.attemptRestoreOriginalChain(io, old_tip_height, original_blocks.items, fork_height, "replacement block apply failure");
 
                 return ReorgResult{
                     .success = false,
@@ -190,6 +214,7 @@ pub const ReorgExecutor = struct {
                     .blocks_applied = applied,
                     .fork_height = fork_height,
                     .failure_reason = .apply_block_failed,
+                    .chain_corrupted = !restored,
                 };
             };
 
@@ -202,6 +227,14 @@ pub const ReorgExecutor = struct {
             // Deleting the old height range here would remove the newly applied chain.
             try self.db.saveHeight(new_tip_height);
             std.log.warn("📊 [REORG] Database height updated from {} to {}", .{ old_tip_height, new_tip_height });
+        }
+
+        if (self.mempool_manager) |mempool| {
+            const winning_branch_hashes = try collectTransactionHashes(self.allocator, new_blocks);
+            defer self.allocator.free(winning_branch_hashes);
+
+            mempool.restoreStagedOrphanedTransactions(winning_branch_hashes);
+            clear_staged_orphans_on_exit = false;
         }
 
         // Once the new branch wins, the old tip snapshot no longer anchors the canonical chain.
@@ -337,7 +370,51 @@ pub const ReorgExecutor = struct {
         return blocks;
     }
 
+    fn collectTransactionHashes(allocator: std.mem.Allocator, blocks: []const Block) ![]Hash {
+        var tx_count: usize = 0;
+        for (blocks) |block| {
+            tx_count += block.transactions.len;
+        }
+
+        const hashes = try allocator.alloc(Hash, tx_count);
+        errdefer allocator.free(hashes);
+
+        var index: usize = 0;
+        for (blocks) |block| {
+            for (block.transactions) |tx| {
+                hashes[index] = tx.hash();
+                index += 1;
+            }
+        }
+
+        return hashes;
+    }
+
+    fn attemptRestoreOriginalChain(
+        self: *Self,
+        io: std.Io,
+        old_tip_height: u32,
+        original_blocks: []const Block,
+        fork_height: u32,
+        context: []const u8,
+    ) bool {
+        self.restoreOriginalChain(io, old_tip_height, original_blocks, fork_height) catch |restore_err| {
+            if (self.force_restore_failure_for_testing) {
+                std.log.warn("💥 [REORG] CRITICAL: Failed to restore original chain after {s}: {}", .{ context, restore_err });
+            } else {
+                std.log.err("💥 [REORG] CRITICAL: Failed to restore original chain after {s}: {}", .{ context, restore_err });
+            }
+            return false;
+        };
+
+        return true;
+    }
+
     fn restoreOriginalChain(self: *Self, io: std.Io, old_tip_height: u32, original_blocks: []const Block, fork_height: u32) !void {
+        if (self.force_restore_failure_for_testing) {
+            return error.InjectedRestoreFailure;
+        }
+
         std.log.warn("⏪ [REORG] Restoring original canonical chain to height {}", .{old_tip_height});
 
         const recovery_tip_hash = if (original_blocks.len > 0)
