@@ -10,9 +10,9 @@
 **Branch:** `libp2p-integration`
 **Active initiative:** `ZEI-72` initial testnet rollout readiness, with `ZEI-70` still carrying the reorg hardening queue
 
-**Last worked on:** 2026-04-02 — Finished `ZEI-52` by adding `docker/scripts/verify_reorg_depth_rejection.sh`, proving the over-depth rejection scenario in Docker, and adding a defense-in-depth depth-policy check in `SyncManager.executeBulkReorg()`.
+**Last worked on:** 2026-04-02 — Closed `ZEI-74` by switching `zig build test` onto the default Zig test runner in `simple` mode and moving the empty library-root runner to a separate `zig build test-lib` step, which removes both the misleading trailing `failed command: ... --listen=-` footer and the confusing leading `All 0 tests passed.` line from successful default test runs; the earlier `tests/` shell harness repairs remain in place.
 **Next step:** Continue the first-testnet rollout queue from `ZEI-21` / `ZEI-54` now that `ZEI-52` is closed.
-**In flight:** `ZEI-72` now overlays the rollout queue; `ZEI-52` is done, including the Docker rejection proof. The new proof script builds fresh Docker images, partitions the two-miner topology, freezes both sides into a passive-vs-passive setup, and verifies the honest miner keeps its original verification-height hash when the attacker branch is deeper than `ZEICOIN_MAX_REORG_DEPTH`. `ZEI-74` still causes the misleading `zig build test` footer that prints a fake failed-command line even when the exit code is 0.
+**In flight:** `ZEI-72` now overlays the rollout queue; `ZEI-52` is done, including the Docker rejection proof.
 
 ---
 
@@ -29,7 +29,6 @@
 | Done | `ZEI-71` landed: `account_count` now tracks unique persisted accounts across direct writes, batch commits, rollback/reset, and explicit restore metadata; impact was classified as observability-only. |
 | Done | `ZEI-64` landed: `executeReorg()` no longer rejects shorter competing branches solely on height, and a regression test now covers the shorter-but-heavier winner case. |
 | Needs next | First-testnet blockers now queued as: `ZEI-21`, `ZEI-54` with `ZEI-52` and `ZEI-66` done. |
-| Deferred | `ZEI-74` tracks the misleading `zig build test` footer; treat it as developer-experience cleanup unless exit codes show a real failure. |
 | Deferred | `ZEI-20` Kademlia DHT and mainnet-only compatibility/infrastructure work are explicitly out of scope for the first testnet rollout. |
 
 ---
@@ -50,6 +49,8 @@
 - `ZEI-52` confirmation guidance now lives in `docs/CONFIRMATION_FINALITY_GUIDANCE.md`; long-term hardcoded finality checkpoints were split into new follow-up ticket `ZEI-75`.
 - The final `ZEI-52` Docker proof uses the same stable two-miner flow as the existing reorg scripts: partition, verify divergence, freeze the honest chain, let the attacker overtake, freeze the attacker, then reconnect as passive peers so the rejection path is deterministic.
 - The final Docker debugging run exposed a second path into bulk reorg execution, so `SyncManager.executeBulkReorg()` now reapplies the same depth-policy alert/reject guard as the earlier admission check before delegating to `ChainProcessor`.
+- The shell tests under `tests/` need deterministic local-node setup: edge-case coverage should disable bootstrap and bound dead-host probes with `timeout`, and the libp2p handshake smoke must use `/ip4/.../tcp/...` bootstrap addresses plus distinct client/RPC ports.
+- `zig build test` now uses Zig's default `compiler/test_runner.zig` in `simple` mode for both library and integration test compile steps; the empty library-root runner was moved off the default `test` step into `zig build test-lib`, which keeps successful runs user-readable and removes both the bogus `failed command: ... --listen=-` footer and the misleading `All 0 tests passed.` prelude.
 
 ---
 
@@ -70,6 +71,10 @@
 - `./docker/scripts/test_libp2p_zen_server.sh`
 - `./docker/scripts/verify_deep_reorg.sh`
 - `./docker/scripts/verify_reorg_depth_rejection.sh`
+- `bash tests/test_cli_smoke.sh`
+- `bash tests/test_cli_functions.sh`
+- `bash tests/test_cli_edge_cases.sh`
+- `bash tests/test_peer_handshake.sh`
 
 ---
 

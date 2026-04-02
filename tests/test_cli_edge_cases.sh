@@ -138,7 +138,7 @@ rm -f zeicoin_data_testnet/wallets/this_is_exactly_63_characters_long_wallet_nam
 echo -e "${BLUE}🚀 Starting ZeiCoin server...${NC}"
 pkill -f zen_server 2>/dev/null || true
 sleep 1
-ZEICOIN_SERVER=127.0.0.1 timeout 300s ./zig-out/bin/zen_server > server_edge_test.log 2>&1 &
+ZEICOIN_BOOTSTRAP="" ZEICOIN_SERVER=127.0.0.1 ZEICOIN_BIND_IP=127.0.0.1 timeout 300s ./zig-out/bin/zen_server > server_edge_test.log 2>&1 &
 SERVER_PID=$!
 
 # Give server time to start
@@ -562,12 +562,14 @@ run_test "no command (shows help)" \
 
 # Test environment variable override
 echo -ne "${BLUE}Testing: wrong server IP override...${NC} "
-output=$(ZEICOIN_SERVER=192.168.255.255 ./zig-out/bin/zeicoin status 2>&1)
-if echo "$output" | grep -q "Connection timeout\\|Cannot connect\\|refused"; then
+status=0
+output=$(timeout 5s env ZEICOIN_SERVER=192.168.255.255 ./zig-out/bin/zeicoin status 2>&1) || status=$?
+if [[ $status -eq 124 ]] || echo "$output" | grep -q "Connection timeout\\|Cannot connect\\|refused"; then
     echo -e "${GREEN}✅ PASSED${NC}"
     ((TESTS_PASSED++))
 else
     echo -e "${RED}❌ FAILED${NC} - Wrong error"
+    echo "Exit status: $status"
     echo "Output: $output"
     ((TESTS_FAILED++))
 fi

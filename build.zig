@@ -24,6 +24,11 @@ pub fn build(b: *std.Build) !void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
     const use_evented = b.option(bool, "evented", "Use io_uring/Evented backend for libp2p testnode (experimental, Linux only)") orelse false;
+    const zig_lib_dir = b.graph.zig_lib_directory.path orelse @panic("zig lib directory unavailable");
+    const default_test_runner = std.Build.Step.Compile.TestRunner{
+        .path = .{ .cwd_relative = b.pathJoin(&.{ zig_lib_dir, "compiler", "test_runner.zig" }) },
+        .mode = .simple,
+    };
 
     // **************************************************************
     // *            HANDLE DEPENDENCY MODULES                       *
@@ -448,12 +453,14 @@ pub fn build(b: *std.Build) !void {
     // Test the library which includes all modules
     const lib_unit_tests = b.addTest(.{
         .root_module = test_module,
+        .test_runner = default_test_runner,
     });
 
-    const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
-
     const test_step = b.step("test", "Run all unit tests");
-    test_step.dependOn(&run_lib_unit_tests.step);
+
+    const lib_unit_test_step = b.step("test-lib", "Run library-root unit tests");
+    const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
+    lib_unit_test_step.dependOn(&run_lib_unit_tests.step);
 
     // **************************************************************
     // *              LIBP2P ISOLATED TESTS                         *
@@ -468,6 +475,7 @@ pub fn build(b: *std.Build) !void {
         const libp2p_tests = b.addTest(.{
             .name = "libp2p_tests",
             .root_module = libp2p_test_module,
+            .test_runner = default_test_runner,
         });
         const run_libp2p_tests = b.addRunArtifact(libp2p_tests);
         const libp2p_test_step = b.step("test-libp2p", "Run isolated libp2p migration tests");
@@ -486,6 +494,7 @@ pub fn build(b: *std.Build) !void {
 
         const integration_tests = b.addTest(.{
             .root_module = tests_module,
+            .test_runner = default_test_runner,
         });
         integration_tests.root_module.linkSystemLibrary("rocksdb", .{});
 

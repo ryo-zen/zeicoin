@@ -3,7 +3,7 @@ id: investigate_misleading_zig_build_test_failure_footer
 key: ZEI-74
 title: Investigate misleading zig build test failure footer on successful runs
 type: Task
-status: Backlog
+status: Done
 priority: Low
 assignee: null
 labels:
@@ -14,11 +14,11 @@ sprint: null
 story_points: null
 due_date: null
 parent_id: null
-rank: null
+rank: 1775027637729.0
 comments: []
 created_at: 2026-04-01T07:13:36Z
-updated_at: 2026-04-01T07:13:36Z
-closed_at: null
+updated_at: 2026-04-02T07:45:10.817580178+00:00
+closed_at: 2026-04-02T07:45:10.817579379+00:00
 ---
 
 ## Summary
