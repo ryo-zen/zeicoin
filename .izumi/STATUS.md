@@ -6,13 +6,13 @@
 
 ## Current State
 
-**Date:** 2026-04-01
+**Date:** 2026-04-02
 **Branch:** `libp2p-integration`
 **Active initiative:** `ZEI-72` initial testnet rollout readiness, with `ZEI-70` still carrying the reorg hardening queue
 
-**Last worked on:** 2026-04-01 — Finished `ZEI-64`, verified the deep Docker reorg test passes cleanly, and added `ZEI-74` to track the misleading `zig build test` failure footer that still appears on successful runs.
-**Next step:** Start `ZEI-21` under `ZEI-72` to wire orphaned transactions back into the mempool after successful reorgs.
-**In flight:** `ZEI-72` now overlays the rollout queue; `ZEI-66` issue notes are updated but the code path is not implemented yet.
+**Last worked on:** 2026-04-02 — Finished `ZEI-52` by adding `docker/scripts/verify_reorg_depth_rejection.sh`, proving the over-depth rejection scenario in Docker, and adding a defense-in-depth depth-policy check in `SyncManager.executeBulkReorg()`.
+**Next step:** Continue the first-testnet rollout queue from `ZEI-21` / `ZEI-54` now that `ZEI-52` is closed.
+**In flight:** `ZEI-72` now overlays the rollout queue; `ZEI-52` is done, including the Docker rejection proof. The new proof script builds fresh Docker images, partitions the two-miner topology, freezes both sides into a passive-vs-passive setup, and verifies the honest miner keeps its original verification-height hash when the attacker branch is deeper than `ZEICOIN_MAX_REORG_DEPTH`. `ZEI-74` still causes the misleading `zig build test` footer that prints a fake failed-command line even when the exit code is 0.
 
 ---
 
@@ -28,7 +28,7 @@
 | In play | The branch is functionally at “Docker-verified libp2p + Docker-verified reorg recovery works; remaining work is rollout gating, correctness hardening, and real-network validation.” |
 | Done | `ZEI-71` landed: `account_count` now tracks unique persisted accounts across direct writes, batch commits, rollback/reset, and explicit restore metadata; impact was classified as observability-only. |
 | Done | `ZEI-64` landed: `executeReorg()` no longer rejects shorter competing branches solely on height, and a regression test now covers the shorter-but-heavier winner case. |
-| Needs next | First-testnet blockers now queued as: `ZEI-21`, `ZEI-66`, `ZEI-52`, `ZEI-54`. |
+| Needs next | First-testnet blockers now queued as: `ZEI-21`, `ZEI-54` with `ZEI-52` and `ZEI-66` done. |
 | Deferred | `ZEI-74` tracks the misleading `zig build test` footer; treat it as developer-experience cleanup unless exit codes show a real failure. |
 | Deferred | `ZEI-20` Kademlia DHT and mainnet-only compatibility/infrastructure work are explicitly out of scope for the first testnet rollout. |
 
@@ -42,6 +42,14 @@
 - Open libp2p integration tickets that conflict with the current branch status should be audited separately, but the only explicit libp2p rollout gate in the current blocker set is `ZEI-54`.
 - `account_count` metadata is currently used for observability/status only; it is not part of consensus or recovery gating.
 - Height is not a valid standalone reorg winner criterion; the cumulative-work decision in `fork_detector.shouldReorganize()` remains authoritative.
+- Reorg orphaned-transaction handling now stages reverted non-coinbase transactions before rollback and restores them only after the winning branch is fully applied; confirmation on the winning branch, duplicate mempool presence, and post-reorg validation failures all cause silent discard instead of reinsertion.
+- `ZEI-52` should be implemented in two bounded slices: first the depth cap plus alerting, then the real peer-hash quorum and stricter consensus defaults. The ticket note saying "before `findForkPoint`" is stale for the current architecture because the actual reorg depth is only known after the fork point is discovered.
+- `ZEI-66` uses fail-closed quarantine rather than another retryable sync failure: `ReorgExecutor` now marks `chain_corrupted` when restore cannot be proven, `ChainProcessor` quarantines further chain mutation attempts, and `SyncManager` has a `.quarantined` state to block automatic sync retries.
+- The pre-`ZEI-52` architecture cleanup removed duplicate fork-point discovery in `SyncManager` and replaced the peer-consensus `agreements += 1` stub with the same `GetBlockHash` request/wait helper used by `fork_detector`, so future reorg policy work should build on that shared path rather than adding another peer-hash mechanism.
+- The first `ZEI-52` implementation slice now lives in `SyncManager`: deep-reorg admission policy is enforced before competing-branch fetch or canonical mutation, alert logging is emitted for deep candidates, and consensus defaults are now `.enforced` with `min_peer_responses = 1`.
+- `ZEI-52` confirmation guidance now lives in `docs/CONFIRMATION_FINALITY_GUIDANCE.md`; long-term hardcoded finality checkpoints were split into new follow-up ticket `ZEI-75`.
+- The final `ZEI-52` Docker proof uses the same stable two-miner flow as the existing reorg scripts: partition, verify divergence, freeze the honest chain, let the attacker overtake, freeze the attacker, then reconnect as passive peers so the rejection path is deterministic.
+- The final Docker debugging run exposed a second path into bulk reorg execution, so `SyncManager.executeBulkReorg()` now reapplies the same depth-policy alert/reject guard as the earlier admission check before delegating to `ChainProcessor`.
 
 ---
 
@@ -61,6 +69,7 @@
 - `zig build test-libp2p`
 - `./docker/scripts/test_libp2p_zen_server.sh`
 - `./docker/scripts/verify_deep_reorg.sh`
+- `./docker/scripts/verify_reorg_depth_rejection.sh`
 
 ---
 
