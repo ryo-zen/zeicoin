@@ -780,26 +780,10 @@ pub const ServerHandlers = struct {
 
     /// Find a block by its hash in our blockchain
     fn findBlockByHash(self: *Self, io: std.Io, block_hash: [32]u8) !?types.Block {
-        // Get current chain height
-        const current_height = try self.blockchain.database.getHeight();
-
-        // Search through blocks (from recent to old for better cache locality)
-        // Must check current_height down to 0 (inclusive), avoiding unsigned underflow
-        var height: u32 = current_height;
-        while (true) {
-            var block = try self.blockchain.database.getBlock(io, height);
-            const hash = block.hash();
-            if (std.mem.eql(u8, &hash, &block_hash)) {
-                return block;
-            }
-            block.deinit(self.blockchain.allocator);
-
-            // Break before decrementing to avoid underflow at height 0
-            if (height == 0) break;
-            height -= 1;
-        }
-
-        return null;
+        return self.blockchain.database.getBlockByHash(io, block_hash) catch |err| switch (err) {
+            error.NotFound => return null,
+            else => return err,
+        };
     }
 
     fn onPeerDisconnected(self: *Self, peer: *network.Peer, err: anyerror) !void {

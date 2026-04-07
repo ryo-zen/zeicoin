@@ -699,43 +699,48 @@ pub const Database = struct {
         return true;
     }
 
-    pub fn getBlockByHash(self: *Database, io: std.Io, hash: [32]u8) !Block {
-        _ = io;
+    /// Iterate all stored blocks, calling visitor for each. Visitor receives an owned
+    /// block and must either consume it (return non-null) or let the defer free it.
+    fn scanBlocks(self: *Database, comptime T: type, visitor: anytype) !T {
         const it = c.rocksdb_create_iterator(self.db, self.read_options);
         defer c.rocksdb_iter_destroy(it);
 
-        const prefix = BLOCK_PREFIX;
-        c.rocksdb_iter_seek(it, prefix.ptr, prefix.len);
+        c.rocksdb_iter_seek(it, BLOCK_PREFIX.ptr, BLOCK_PREFIX.len);
 
         while (c.rocksdb_iter_valid(it) == 1) {
             var key_len: usize = 0;
             const key_ptr = c.rocksdb_iter_key(it, &key_len);
-            const key = key_ptr[0..key_len];
-
-            if (!std.mem.startsWith(u8, key, prefix)) {
-                break;
-            }
+            if (!std.mem.startsWith(u8, key_ptr[0..key_len], BLOCK_PREFIX)) break;
 
             var val_len: usize = 0;
             const val_ptr = c.rocksdb_iter_value(it, &val_len);
-            const data = val_ptr[0..val_len];
+            var reader = std.Io.Reader.fixed(val_ptr[0..val_len]);
 
-            var reader = std.Io.Reader.fixed(data);
             var block = serialize.deserialize(&reader, Block, self.allocator) catch {
                 c.rocksdb_iter_next(it);
                 continue;
             };
-            errdefer block.deinit(self.allocator);
 
-            if (std.mem.eql(u8, &block.hash(), &hash)) {
-                return block;
+            if (visitor.check(&block)) |result| {
+                return result;
             }
-
             block.deinit(self.allocator);
             c.rocksdb_iter_next(it);
         }
 
         return DatabaseError.NotFound;
+    }
+
+    pub fn getBlockByHash(self: *Database, io: std.Io, hash: [32]u8) !Block {
+        _ = io;
+        const Visitor = struct {
+            target: [32]u8,
+            fn check(ctx: *const @This(), block: *Block) ?Block {
+                if (std.mem.eql(u8, &block.hash(), &ctx.target)) return block.*;
+                return null;
+            }
+        };
+        return self.scanBlocks(Block, &Visitor{ .target = hash });
     }
 
     pub fn getTransactionByHash(self: *Database, io: std.Io, hash: [32]u8) !types.Transaction {
@@ -745,49 +750,27 @@ pub const Database = struct {
 
     pub fn getTransactionWithHeightByHash(self: *Database, io: std.Io, hash: [32]u8) !TransactionWithHeight {
         _ = io;
-        const it = c.rocksdb_create_iterator(self.db, self.read_options);
-        defer c.rocksdb_iter_destroy(it);
-
-        const prefix = BLOCK_PREFIX;
-        c.rocksdb_iter_seek(it, prefix.ptr, prefix.len);
-
-        while (c.rocksdb_iter_valid(it) == 1) {
-            var key_len: usize = 0;
-            const key_ptr = c.rocksdb_iter_key(it, &key_len);
-            const key = key_ptr[0..key_len];
-
-            if (!std.mem.startsWith(u8, key, prefix)) {
-                break;
-            }
-
-            var val_len: usize = 0;
-            const val_ptr = c.rocksdb_iter_value(it, &val_len);
-            const data = val_ptr[0..val_len];
-
-            var reader = std.Io.Reader.fixed(data);
-            var block = serialize.deserialize(&reader, Block, self.allocator) catch {
-                c.rocksdb_iter_next(it);
-                continue;
-            };
-            defer block.deinit(self.allocator);
-
-            for (block.transactions) |tx| {
-                if (std.mem.eql(u8, &tx.hash(), &hash)) {
-                    var aw: std.Io.Writer.Allocating = .init(self.allocator);
-                    defer aw.deinit();
-                    try serialize.serialize(&aw.writer, tx);
-                    var tx_reader = std.Io.Reader.fixed(aw.written());
-                    return .{
-                        .transaction = try serialize.deserialize(&tx_reader, types.Transaction, self.allocator),
-                        .block_height = block.height,
-                    };
+        const Visitor = struct {
+            target: [32]u8,
+            alloc: std.mem.Allocator,
+            fn check(ctx: *const @This(), block: *Block) ?TransactionWithHeight {
+                for (block.transactions) |tx| {
+                    if (std.mem.eql(u8, &tx.hash(), &ctx.target)) {
+                        // Clone the transaction so it outlives the block
+                        var aw: std.Io.Writer.Allocating = .init(ctx.alloc);
+                        defer aw.deinit();
+                        serialize.serialize(&aw.writer, tx) catch return null;
+                        var tx_reader = std.Io.Reader.fixed(aw.written());
+                        return .{
+                            .transaction = serialize.deserialize(&tx_reader, types.Transaction, ctx.alloc) catch return null,
+                            .block_height = block.height,
+                        };
+                    }
                 }
+                return null;
             }
-
-            c.rocksdb_iter_next(it);
-        }
-
-        return DatabaseError.NotFound;
+        };
+        return self.scanBlocks(TransactionWithHeight, &Visitor{ .target = hash, .alloc = self.allocator });
     }
 
     pub fn hasBlock(self: *Database, io: std.Io, hash: [32]u8) bool {

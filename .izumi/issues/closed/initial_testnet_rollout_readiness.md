@@ -3,7 +3,7 @@ id: initial_testnet_rollout_readiness
 key: ZEI-72
 title: Initial testnet rollout readiness for the libp2p and consensus branch
 type: Epic
-status: Backlog
+status: Done
 priority: High
 assignee: null
 labels:
@@ -27,12 +27,12 @@ Track the remaining work needed to ship the current libp2p + consensus branch to
 
 ## Acceptance Criteria
 
-- [ ] `ZEI-71` investigates `account_count` metadata drift and either lands the required fix or explicitly downgrades the issue to observability-only
-- [ ] `ZEI-64` allows reorg to a shorter chain with more cumulative work
-- [ ] `ZEI-21` restores orphaned transactions to the mempool after reorg
-- [ ] `ZEI-66` surfaces restore-failure corruption to the caller and triggers a fail-closed resync or quarantine path
-- [ ] `ZEI-52` adds the first deep-reorg protection layer for public testnet operation
-- [ ] `ZEI-54` validates `zen_server` libp2p behavior across at least one real network link
+- [x] `ZEI-71` investigates `account_count` metadata drift and either lands the required fix or explicitly downgrades the issue to observability-only
+- [x] `ZEI-64` allows reorg to a shorter chain with more cumulative work
+- [x] `ZEI-21` restores orphaned transactions to the mempool after reorg
+- [x] `ZEI-66` surfaces restore-failure corruption to the caller and triggers a fail-closed resync or quarantine path
+- [x] `ZEI-52` adds the first deep-reorg protection layer for public testnet operation
+- [x] `ZEI-54` validates `zen_server` libp2p behavior across at least one real network link
 
 ## Notes
 

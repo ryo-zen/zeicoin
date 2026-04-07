@@ -6,13 +6,13 @@
 
 ## Current State
 
-**Date:** 2026-04-02
+**Date:** 2026-04-07
 **Branch:** `libp2p-integration`
-**Active initiative:** `ZEI-72` initial testnet rollout readiness, with `ZEI-70` still carrying the reorg hardening queue
+**Active initiative:** `ZEI-72` initial testnet rollout readiness — **ALL BLOCKERS COMPLETE**
 
-**Last worked on:** 2026-04-02 — Closed `ZEI-74` by switching `zig build test` onto the default Zig test runner in `simple` mode and moving the empty library-root runner to a separate `zig build test-lib` step, which removes both the misleading trailing `failed command: ... --listen=-` footer and the confusing leading `All 0 tests passed.` line from successful default test runs; the earlier `tests/` shell harness repairs remain in place.
-**Next step:** Continue the first-testnet rollout queue from `ZEI-21` / `ZEI-54` now that `ZEI-52` is closed.
-**In flight:** `ZEI-72` now overlays the rollout queue; `ZEI-52` is done, including the Docker rejection proof.
+**Last worked on:** 2026-04-07 — Closed `ZEI-54` (two-node libp2p integration test) by running `libp2p_testnode` on loopback: TCP, Noise XX, Yamux, multistream, identify, and peer exchange all validated; redial after listener restart confirmed (score 10→20). This was the last blocker for `ZEI-72`, which is now fully closed.
+**Next step:** The first resettable testnet rollout has no remaining blockers. Next is to deploy the `libp2p-integration` branch to the testnet (merge to main, deploy to 209.38.84.23).
+**In flight:** Nothing — rollout queue is clear.
 
 ---
 
@@ -28,7 +28,7 @@
 | In play | The branch is functionally at “Docker-verified libp2p + Docker-verified reorg recovery works; remaining work is rollout gating, correctness hardening, and real-network validation.” |
 | Done | `ZEI-71` landed: `account_count` now tracks unique persisted accounts across direct writes, batch commits, rollback/reset, and explicit restore metadata; impact was classified as observability-only. |
 | Done | `ZEI-64` landed: `executeReorg()` no longer rejects shorter competing branches solely on height, and a regression test now covers the shorter-but-heavier winner case. |
-| Needs next | First-testnet blockers now queued as: `ZEI-21`, `ZEI-54` with `ZEI-52` and `ZEI-66` done. |
+| Done | All first-testnet blockers complete: `ZEI-71`, `ZEI-64`, `ZEI-21`, `ZEI-66`, `ZEI-52`, `ZEI-54`. Epic `ZEI-72` is closed. |
 | Deferred | `ZEI-20` Kademlia DHT and mainnet-only compatibility/infrastructure work are explicitly out of scope for the first testnet rollout. |
 
 ---

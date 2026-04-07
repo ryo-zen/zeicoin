@@ -112,18 +112,8 @@ pub const MempoolManager = struct {
     /// Add transaction from local source (CLI, RPC, etc.)
     pub fn addTransaction(self: *Self, transaction: Transaction) !void {
         const tx_hash = transaction.hash();
-        const amount_zei = @as(f64, @floatFromInt(transaction.amount)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-        const fee_zei = @as(f64, @floatFromInt(transaction.fee)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-        
-        // Convert addresses to bech32 for display
-        const sender_bech32 = transaction.sender.toBech32(self.allocator, types.CURRENT_NETWORK) catch "invalid";
-        defer if (!std.mem.eql(u8, sender_bech32, "invalid")) self.allocator.free(sender_bech32);
-        
-        const recipient_bech32 = transaction.recipient.toBech32(self.allocator, types.CURRENT_NETWORK) catch "invalid";
-        defer if (!std.mem.eql(u8, recipient_bech32, "invalid")) self.allocator.free(recipient_bech32);
-        
-        log.info("🔄 [TX LIFECYCLE] Received transaction {x} from {s} → {s}: {d:.8} ZEI (fee: {d:.8}, nonce: {})", .{
-            tx_hash[0..8], sender_bech32, recipient_bech32, amount_zei, fee_zei, transaction.nonce
+        log.info("[TX] Received {x} amount={} fee={} nonce={}", .{
+            tx_hash[0..8], transaction.amount, transaction.fee, transaction.nonce,
         });
         
         const result = try self.network_handler.processLocalTransaction(transaction);
