@@ -10,6 +10,8 @@ pub const miner = @import("core/miner/main.zig");
 pub const chain = struct {
     pub const ChainState = @import("core/chain/state.zig").ChainState;
     pub const ChainProcessor = @import("core/chain/processor.zig").ChainProcessor;
+    pub const reorg_executor = @import("core/chain/reorg_executor.zig");
+    pub const state_root = @import("core/chain/state_root.zig");
     pub const validator = @import("core/chain/validator.zig");
 };
 
@@ -26,6 +28,8 @@ pub const mempool = struct {
 // Network components
 pub const peer = @import("core/network/peer.zig");
 pub const server = @import("core/server/server.zig");
+pub const libp2p_wire = @import("core/network/libp2p_wire.zig");
+pub const bootstrap = @import("core/network/bootstrap.zig");
 pub const protocol = struct {
     pub const message_envelope = @import("core/network/protocol/message_envelope.zig");
     pub const protocol = @import("core/network/protocol/protocol.zig");

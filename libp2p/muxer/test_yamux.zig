@@ -982,7 +982,7 @@ test "yamux keepalive timeout closes unresponsive session" {
         YamuxError.GoAway, YamuxError.SessionClosed => {},
         else => return err,
     };
-    if (!session.testSessionIsClosed()) return error.TestUnexpectedResult;
+    if (!session.isClosed()) return error.TestUnexpectedResult;
     try responder_future.await(io);
 }
 
@@ -1048,6 +1048,6 @@ test "yamux error go away closes streams and rejects new ones" {
         YamuxError.GoAway, YamuxError.SessionClosed => {},
         else => return err,
     };
-    if (!session.testSessionIsClosed()) return error.TestUnexpectedResult;
+    if (!session.isClosed()) return error.TestUnexpectedResult;
     try responder_future.await(io);
 }

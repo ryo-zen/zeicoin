@@ -102,29 +102,28 @@ pub const OrphanPool = struct {
         log.debug("   Parent needed: {x}", .{parent_hash});
     }
 
-    /// Get all orphan blocks that have this parent hash
-    /// Returns ownership of the blocks (caller must deinit them)
-    pub fn getOrphansByParent(self: *OrphanPool, parent_hash: [32]u8) ?[]Block {
-        const entry = self.orphans_by_parent.getEntry(parent_hash) orelse return null;
+    /// Get all orphan blocks that have this parent hash.
+    /// Ownership of the returned list moves to the caller.
+    pub fn getOrphansByParent(self: *OrphanPool, parent_hash: [32]u8) ?std.array_list.Managed(Block) {
+        const entry = self.orphans_by_parent.fetchRemove(parent_hash) orelse return null;
+        var owned_list = entry.value;
 
-        const blocks = entry.value_ptr.items;
-        if (blocks.len == 0) return null;
+        if (owned_list.items.len == 0) {
+            owned_list.deinit();
+            return null;
+        }
 
         // Remove from tracking maps
-        for (blocks) |block| {
+        for (owned_list.items) |block| {
             const block_hash = block.hash();
             _ = self.orphans_by_hash.remove(block_hash);
             self.total_orphans -= 1;
             self.stats.orphans_processed += 1;
         }
 
-        // Remove the entry and return the blocks
-        const owned_list = entry.value_ptr.*;
-        _ = self.orphans_by_parent.remove(parent_hash);
+        log.info("[ORPHAN] Found {} orphan(s) ready for processing", .{owned_list.items.len});
 
-        log.info("[ORPHAN] Found {} orphan(s) ready for processing", .{blocks.len});
-
-        return owned_list.items;
+        return owned_list;
     }
 
     /// Check if we have any orphans waiting for this parent

@@ -113,6 +113,11 @@ const BatchRequest = struct {
     }
 };
 
+const RestartRequest = struct {
+    peer: *Peer,
+    target_height: u32,
+};
+
 /// Batch tracking manager
 /// Coordinates multiple concurrent batch requests and handles timeouts
 const BatchTracker = struct {
@@ -402,6 +407,9 @@ pub const BatchSyncProtocol = struct {
     /// Failed peers list for peer rotation
     failed_peers: std.array_list.Managed(*Peer),
 
+    /// Deferred restart request used when a fork-continuity mismatch is detected
+    restart_request: ?RestartRequest,
+
     /// Dependency injection context for blockchain operations
     context: BatchSyncContext,
 
@@ -415,6 +423,7 @@ pub const BatchSyncProtocol = struct {
         applying, // Applying validated blocks to blockchain
         complete, // Synchronization completed successfully
         failed, // Synchronization failed (can be retried)
+        quarantined, // Canonical recovery could not be proven; manual recovery required
 
         /// Check if sync is actively running
         pub fn isActive(self: SyncState) bool {
@@ -445,6 +454,7 @@ pub const BatchSyncProtocol = struct {
             .pending_queue = PendingQueue.init(allocator),
             .metrics = SyncMetrics.init(),
             .failed_peers = std.array_list.Managed(*Peer).init(allocator),
+            .restart_request = null,
             .context = context,
         };
     }
@@ -842,6 +852,10 @@ pub const BatchSyncProtocol = struct {
         // Process any sequential blocks that are now available
         log.info("🔍 [BATCH RECEIVE] STEP 5: Processing sequential blocks...", .{});
         try self.processSequentialBlocks();
+        if (self.restart_request != null) {
+            log.warn("🔄 [BATCH RECEIVE] Sequential processing requested a sync restart", .{});
+            return;
+        }
         log.info("✅ [BATCH RECEIVE] STEP 5 COMPLETED: Sequential processing done", .{});
 
         // Continue batch pipeline if sync not complete
@@ -872,6 +886,16 @@ pub const BatchSyncProtocol = struct {
                 // Clean up the block
                 var owned_block = block;
                 owned_block.deinit(self.allocator);
+
+                if (self.isChainContinuityError(err)) {
+                    const peer = self.sync_peer orelse {
+                        self.failSync("Chain continuity error without sync peer");
+                        return err;
+                    };
+
+                    self.requestRestartFromCurrentTip(peer, self.target_height, next_expected, err);
+                    return;
+                }
 
                 // Fail the sync on block application error
                 self.failSync("Block application failed");
@@ -1032,7 +1056,14 @@ pub const BatchSyncProtocol = struct {
                 // Pass blocks to batch processing.
                 try self.handleBatchBlocks(batch_blocks.items, start_height);
                 blocks_retrieved += batch_size;
+
+                if (self.restart_request != null) break;
             }
+        }
+
+        if (self.restart_request != null) {
+            try self.performPendingRestart();
+            return;
         }
 
         if (blocks_retrieved > 0) {
@@ -1114,6 +1145,7 @@ pub const BatchSyncProtocol = struct {
 
         self.sync_state = .failed;
         self.sync_peer = null;
+        self.restart_request = null;
 
         // Clean up active state but preserve failed peers for future attempts
         self.batch_tracker.active_batches.clearRetainingCapacity();
@@ -1134,6 +1166,7 @@ pub const BatchSyncProtocol = struct {
         self.sync_peer = null;
         self.target_height = 0;
         self.start_height = 0;
+        self.restart_request = null;
 
         // Clean up active batches
         const active_count = self.batch_tracker.active_batches.count();
@@ -1151,6 +1184,43 @@ pub const BatchSyncProtocol = struct {
         }
 
         log.info("✅ [BATCH SYNC RESET] State reset complete - ready for new sync", .{});
+    }
+
+    fn isChainContinuityError(self: *const Self, err: anyerror) bool {
+        _ = self;
+        return switch (err) {
+            error.InvalidBlock,
+            error.InvalidPreviousHash,
+            => true,
+            else => false,
+        };
+    }
+
+    fn requestRestartFromCurrentTip(self: *Self, peer: *Peer, target_height: u32, failed_height: u32, err: anyerror) void {
+        if (self.restart_request != null) return;
+
+        log.warn("🔄 [BATCH SYNC] Chain continuity mismatch at height {}: {}", .{ failed_height, err });
+        log.warn("🧹 [BATCH SYNC] Clearing peer {} block cache before requesting a fresh range", .{peer.id});
+        peer.clearReceivedBlocks();
+
+        self.sync_state = .failed;
+        self.restart_request = .{
+            .peer = peer,
+            .target_height = target_height,
+        };
+    }
+
+    fn performPendingRestart(self: *Self) !void {
+        const restart = self.restart_request orelse return;
+        const current_height = try self.context.getHeight();
+
+        log.warn("🔄 [BATCH SYNC] Restarting from current tip {} toward target {}", .{
+            current_height,
+            restart.target_height,
+        });
+
+        self.resetSyncState();
+        try self.startSync(restart.peer, restart.target_height);
     }
 
     /// Get current sync state

@@ -3,7 +3,7 @@ id: libp2p_bootstrap_env_parse
 key: ZEI-35
 title: Parse multiaddr format from ZEICOIN_BOOTSTRAP env var
 type: Subtask
-status: Backlog
+status: Done
 priority: High
 assignee: null
 labels:

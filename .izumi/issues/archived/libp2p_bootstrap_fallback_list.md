@@ -3,7 +3,7 @@ id: libp2p_bootstrap_fallback_list
 key: ZEI-36
 title: Add hardcoded fallback bootstrap multiaddr list to binary
 type: Subtask
-status: Backlog
+status: Done
 priority: Medium
 assignee: null
 labels:

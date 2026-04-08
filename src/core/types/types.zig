@@ -58,7 +58,7 @@ pub const ConsensusMode = enum {
 
 pub const CONSENSUS = struct {
     // Current consensus mode - can be changed via environment variable
-    pub var mode: ConsensusMode = .optional; // Default to optional for gradual rollout
+    pub var mode: ConsensusMode = .enforced; // Default to enforced for public testnet rollout
 
     // Minimum percentage of peers that must agree (0.5 = 50%, 0.67 = 67%, etc)
     pub var threshold: f32 = 0.5; // Simple majority by default
@@ -67,10 +67,19 @@ pub const CONSENSUS = struct {
     pub const PEER_RESPONSE_TIMEOUT: i64 = 5;
 
     // Minimum number of peer responses required (0 = no minimum)
-    pub var min_peer_responses: u32 = 0; // Start with no minimum
+    pub var min_peer_responses: u32 = 1; // Require at least one peer response by default
 
     // Whether to query peers during normal operation or only during sync
     pub var check_during_normal_operation: bool = false; // Only during sync initially
+};
+
+pub const REORG = struct {
+    pub var max_depth: u32 = switch (CURRENT_NETWORK) {
+        .testnet => 20,
+        .mainnet => 100,
+    };
+
+    pub var alert_depth: u32 = 3;
 };
 
 // Block versioning - for protocol upgrades
@@ -96,61 +105,6 @@ pub fn getCoinbaseMaturity() u32 {
 
 // Keep const for backward compatibility (calls function)
 pub const COINBASE_MATURITY: u32 = 100; // Default production value
-
-// Bootstrap node configuration structure
-pub const BootstrapConfig = struct {
-    network: []const u8,
-    nodes: [][]const u8,
-};
-
-// Load bootstrap nodes from JSON configuration
-pub fn loadBootstrapNodes(allocator: std.mem.Allocator, io: std.Io) ![][]const u8 {
-    const config_path = "config/bootstrap_testnet.json";
-
-    // Read the JSON file
-    const dir = std.Io.Dir.cwd();
-    const file = dir.openFile(io, config_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => {
-            // Fallback to hardcoded nodes if config file not found
-            const fallback_nodes = [_][]const u8{
-                "209.38.84.23:10801",
-            };
-            var result = try allocator.alloc([]const u8, fallback_nodes.len);
-            for (fallback_nodes, 0..) |node, i| {
-                result[i] = try allocator.dupe(u8, node);
-            }
-            return result;
-        },
-        else => return err,
-    };
-    defer file.close(io);
-
-    var buf: [4096]u8 = undefined;
-    const bytes_read = try file.readStreaming(io, &[_][]u8{&buf});
-    const contents = buf[0..bytes_read];
-
-    // Parse JSON
-    const parsed = try std.json.parseFromSlice(BootstrapConfig, allocator, contents, .{});
-    defer parsed.deinit();
-
-    const config = parsed.value;
-
-    // Copy nodes to owned memory
-    var result = try allocator.alloc([]const u8, config.nodes.len);
-    for (config.nodes, 0..) |node, i| {
-        result[i] = try allocator.dupe(u8, node);
-    }
-
-    return result;
-}
-
-// Free bootstrap nodes memory
-pub fn freeBootstrapNodes(allocator: std.mem.Allocator, nodes: [][]const u8) void {
-    for (nodes) |node| {
-        allocator.free(node);
-    }
-    allocator.free(nodes);
-}
 
 // Network ports - ZeiCoin zen networking
 pub const NETWORK_PORTS = struct {

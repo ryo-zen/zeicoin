@@ -89,6 +89,7 @@ fuzz/network_message_fuzz.zig
 /deployment
 /monitoring
 /tests_dev
+/tmp
 
 # === Test Outputs ===
 /test_broadcast_integration

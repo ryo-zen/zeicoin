@@ -9,17 +9,18 @@ echo "==================================="
 echo "Waiting for seed node to be available..."
 sleep 5
 
-# Extract first bootstrap node for connectivity check
-FIRST_BOOTSTRAP=$(echo $ZEICOIN_BOOTSTRAP | cut -d',' -f1)
-BOOTSTRAP_HOST=$(echo $FIRST_BOOTSTRAP | cut -d':' -f1)
-BOOTSTRAP_PORT=$(echo $FIRST_BOOTSTRAP | cut -d':' -f2)
+# Extract first bootstrap multiaddr for connectivity check
+# Format: /ip4/<ip>/tcp/<port>[/p2p/<peer-id>]
+FIRST_BOOTSTRAP=$(echo "$ZEICOIN_BOOTSTRAP" | cut -d',' -f1)
+BOOTSTRAP_HOST=$(echo "$FIRST_BOOTSTRAP" | sed -E 's|/ip4/([^/]+)/tcp/.*|\1|')
+BOOTSTRAP_PORT=$(echo "$FIRST_BOOTSTRAP" | sed -E 's|.*/tcp/([0-9]+).*|\1|')
 
 echo "Checking connectivity to $BOOTSTRAP_HOST:$BOOTSTRAP_PORT..."
 max_attempts=${MAX_CONNECT_ATTEMPTS:-30}
 attempt=0
 
 while [ $attempt -lt $max_attempts ]; do
-    if nc -z $BOOTSTRAP_HOST $BOOTSTRAP_PORT 2>/dev/null; then
+    if nc -z "$BOOTSTRAP_HOST" "$BOOTSTRAP_PORT" 2>/dev/null; then
         echo "Successfully connected to bootstrap node!"
         break
     fi
@@ -38,19 +39,16 @@ echo "Bind IP: ${ZEICOIN_BIND_IP}"
 echo "Network: ${ZEICOIN_NETWORK}"
 echo "Bootstrap: ${ZEICOIN_BOOTSTRAP}"
 
-# Check if mining is enabled
+# Create miner wallet if mining is enabled
 if [ "$ZEICOIN_MINE_ENABLED" = "true" ]; then
     echo "Mining: Enabled (wallet: ${ZEICOIN_MINER_WALLET})"
 
-    # Determine data directory based on network
     DATA_DIR="zeicoin_data_testnet"
-
-    # Create miner wallet if it doesn't exist
     WALLET_FILE="${DATA_DIR}/wallets/${ZEICOIN_MINER_WALLET}.wallet"
     if [ ! -f "$WALLET_FILE" ]; then
         echo "Creating miner wallet: ${ZEICOIN_MINER_WALLET}..."
         if [ -n "$ZEICOIN_WALLET_PASSWORD" ]; then
-            echo -e "${ZEICOIN_WALLET_PASSWORD}\n${ZEICOIN_WALLET_PASSWORD}" | ./zig-out/bin/zeicoin wallet create ${ZEICOIN_MINER_WALLET} || true
+            echo -e "${ZEICOIN_WALLET_PASSWORD}\n${ZEICOIN_WALLET_PASSWORD}" | ./zig-out/bin/zeicoin wallet create "${ZEICOIN_MINER_WALLET}" || true
         fi
     fi
 else
@@ -59,42 +57,9 @@ fi
 
 echo "==================================="
 
-# Resolve hostnames to IPs in bootstrap list
-# ZeiCoin only accepts IP addresses, not hostnames
-BOOTSTRAP_IPS=""
-IFS=',' read -ra NODES <<< "$ZEICOIN_BOOTSTRAP"
-for node in "${NODES[@]}"; do
-    host=$(echo $node | cut -d':' -f1)
-    port=$(echo $node | cut -d':' -f2)
-
-    # Resolve hostname to IP
-    ip=$(getent hosts $host | awk '{ print $1 }' | head -1)
-
-    if [ -n "$ip" ]; then
-        if [ -z "$BOOTSTRAP_IPS" ]; then
-            BOOTSTRAP_IPS="$ip:$port"
-        else
-            BOOTSTRAP_IPS="$BOOTSTRAP_IPS,$ip:$port"
-        fi
-        echo "Resolved $host to $ip"
-    else
-        echo "WARNING: Could not resolve $host"
-    fi
-done
-
-echo "Bootstrap IPs: $BOOTSTRAP_IPS"
-
-# Start the server with resolved IPs and optional mining
+# Start the server — zen_server reads ZEICOIN_BOOTSTRAP from the environment directly
 if [ "$ZEICOIN_MINE_ENABLED" = "true" ]; then
-    if [ -n "$BOOTSTRAP_IPS" ]; then
-        exec ./zig-out/bin/zen_server --bootstrap "$BOOTSTRAP_IPS" --mine "$ZEICOIN_MINER_WALLET"
-    else
-        exec ./zig-out/bin/zen_server --mine "$ZEICOIN_MINER_WALLET"
-    fi
+    exec ./zig-out/bin/zen_server --mine "$ZEICOIN_MINER_WALLET"
 else
-    if [ -n "$BOOTSTRAP_IPS" ]; then
-        exec ./zig-out/bin/zen_server --bootstrap "$BOOTSTRAP_IPS"
-    else
-        exec ./zig-out/bin/zen_server
-    fi
+    exec ./zig-out/bin/zen_server
 fi

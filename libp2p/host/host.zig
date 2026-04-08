@@ -15,10 +15,12 @@ const yamux = @import("../muxer/yamux.zig");
 const ms = @import("../protocol/multistream.zig");
 const peer_id_mod = @import("../peer/peer_id.zig");
 const handler_registry_mod = @import("handler_registry.zig");
+const identify_mod = @import("../protocol/identify.zig");
 
 const Multiaddr = @import("../multiaddr/multiaddr.zig").Multiaddr;
 const IdentityKey = peer_id_mod.IdentityKey;
 const PeerId = peer_id_mod.PeerId;
+const ConnInfo = handler_registry_mod.ConnInfo;
 
 pub const HandlerRegistry = handler_registry_mod.HandlerRegistry;
 pub const Handler = handler_registry_mod.Handler;
@@ -290,11 +292,11 @@ fn upgradeInbound(
 // ── dispatchStream ────────────────────────────────────────────────────────────
 // Concurrent target: Multistream responder negotiation + handler call for one stream.
 
-fn dispatchStream(stream: yamux.Stream, registry: *HandlerRegistry) void {
+fn dispatchStream(stream: yamux.Stream, registry: *HandlerRegistry, conn_info: ConnInfo) void {
     const log = std.log.scoped(.host);
     var s = stream;
     defer s.deinit();
-    registry.dispatch(&s) catch |err| {
+    registry.dispatch(&s, conn_info) catch |err| {
         log.warn("stream dispatch failed: {s}", .{@errorName(err)});
     };
 }
@@ -320,15 +322,24 @@ fn handleInbound(
         alloc.destroy(uc);
     }
 
+    // Build per-connection info from the upgrade result.
+    const remote_addr: ?std.Io.net.IpAddress = if (uc.tcp_conn.remote_multiaddr) |*ma|
+        ma.getTcpAddress()
+    else
+        null;
+    const conn_info = ConnInfo{
+        .remote_peer_id = &uc.remote_peer_id,
+        .remote_addr = remote_addr,
+    };
+
     var stream_group: std.Io.Group = .init;
     defer {
-        stream_group.cancel(io);
         stream_group.await(io) catch {};
     }
 
     while (true) {
         var stream = uc.session.acceptStream() catch break;
-        stream_group.concurrent(io, dispatchStream, .{ stream, registry }) catch {
+        stream_group.concurrent(io, dispatchStream, .{ stream, registry, conn_info }) catch {
             stream.deinit();
         };
     }
@@ -345,6 +356,12 @@ pub const Host = struct {
     // Outbound sessions created via dial(). Inbound sessions are owned by
     // their handleInbound concurrent task and not tracked here.
     sessions: std.array_list.Managed(*UpgradedConn),
+    // Protects sessions list for concurrent dial() calls.
+    sessions_mutex: std.Thread.Mutex,
+    // Our listen address — set in listen(), used in identify responses.
+    listen_addr: ?Multiaddr,
+    // Set during shutdown so serve() exits after the next accepted connection.
+    stopping: std.atomic.Value(bool),
 
     const Self = @This();
 
@@ -357,10 +374,14 @@ pub const Host = struct {
             .transport = tcp.TcpTransport.init(allocator),
             .listener = null,
             .sessions = std.array_list.Managed(*UpgradedConn).init(allocator),
+            .sessions_mutex = .{},
+            .listen_addr = null,
+            .stopping = std.atomic.Value(bool).init(false),
         };
     }
 
     pub fn deinit(self: *Self) void {
+        self.stopping.store(true, .release);
         for (self.sessions.items) |uc| {
             uc.deinit();
             self.allocator.destroy(uc);
@@ -369,6 +390,7 @@ pub const Host = struct {
         self.registry.deinit();
         self.transport.deinit(); // closes listener
         self.identity.deinit();
+        if (self.listen_addr) |*la| la.deinit();
     }
 
     // Register a handler for an application protocol (e.g. "/zeicoin/sync/1.0.0").
@@ -377,11 +399,45 @@ pub const Host = struct {
     }
 
     // Bind to addr. Must be called before serve().
+    // Also stores the listen address and registers the identify inbound handler.
     pub fn listen(self: *Self, io: std.Io, addr: *const Multiaddr) !void {
+        self.stopping.store(false, .release);
+
+        // Store a copy of our listen address for identify responses.
+        if (self.listen_addr) |*la| la.deinit();
+        self.listen_addr = try Multiaddr.create(self.allocator, addr.getStringAddress());
+
+        // Register identify responder — must be registered before serve() starts.
+        if (!self.registry.has(identify_mod.PROTOCOL_ID)) {
+            try self.registry.register(identify_mod.PROTOCOL_ID, .{
+                .func = identifyInboundHandler,
+                .userdata = self,
+            });
+        }
+
         self.listener = try self.transport.listen(io, addr);
     }
 
+    // Ask serve() to stop accepting new connections, then poke the listener so a
+    // blocking accept() wakes up and notices the shutdown flag.
+    pub fn requestStop(self: *Self, io: std.Io) !void {
+        self.stopping.store(true, .release);
+        if (self.listener == null) return;
+
+        const wake_addr = self.getWakeupAddress() orelse return;
+        var stream = wake_addr.connect(io, .{ .mode = .stream }) catch |err| switch (err) {
+            error.ConnectionRefused,
+            error.NetworkUnreachable,
+            error.HostUnreachable,
+            => return,
+            else => return err,
+        };
+        defer stream.close(io);
+    }
+
     // Dial addr, run the full upgrade stack, and return the Yamux session.
+    // If a live session to the same remote PeerId already exists, the new
+    // connection is closed and the existing session is returned (dedup).
     // The returned *Session is stable for the lifetime of this Host.
     pub fn dial(self: *Self, io: std.Io, addr: *const Multiaddr) !*yamux.Session {
         const conn = try self.transport.dial(io, addr);
@@ -390,8 +446,45 @@ pub const Host = struct {
             uc.deinit();
             self.allocator.destroy(uc);
         }
+
+        self.sessions_mutex.lock();
+        defer self.sessions_mutex.unlock();
+
+        // Evict stale (closed) sessions.
+        var i: usize = 0;
+        while (i < self.sessions.items.len) {
+            if (self.sessions.items[i].session.isClosed()) {
+                const dead = self.sessions.swapRemove(i);
+                dead.deinit();
+                self.allocator.destroy(dead);
+            } else {
+                i += 1;
+            }
+        }
+
+        // Return the existing session if we already have one for this PeerId.
+        for (self.sessions.items) |existing| {
+            if (existing.remote_peer_id.equals(&uc.remote_peer_id)) {
+                uc.deinit();
+                self.allocator.destroy(uc);
+                return &existing.session;
+            }
+        }
+
         try self.sessions.append(uc);
         return &uc.session;
+    }
+
+    // Return the remote PeerId for an outbound session created by dial().
+    // The returned pointer is valid while the session is alive (i.e. while this Host is alive).
+    // Returns null if the session is not found in the outbound session list.
+    pub fn peerIdForSession(self: *Self, session: *const yamux.Session) ?*const PeerId {
+        self.sessions_mutex.lock();
+        defer self.sessions_mutex.unlock();
+        for (self.sessions.items) |uc| {
+            if (&uc.session == session) return &uc.remote_peer_id;
+        }
+        return null;
     }
 
     // Open a Yamux stream on session and negotiate protocol via Multistream.
@@ -407,6 +500,75 @@ pub const Host = struct {
         return stream;
     }
 
+    // Identify responder: called when a remote opens a /ipfs/id/1.0.0 stream.
+    // Sends our IdentifyInfo (public key, listen addr, protocols, agent) then closes.
+    fn identifyInboundHandler(stream: *yamux.Stream, conn_info: ConnInfo, userdata: ?*anyopaque) anyerror!void {
+        const host = @as(*Host, @ptrCast(@alignCast(userdata.?)));
+
+        // listen_addrs: one entry if we have a listen address.
+        var la_bytes_buf: [1][]const u8 = undefined;
+        var la_slice: []const []const u8 = &[_][]const u8{};
+        if (host.listen_addr) |*la| {
+            la_bytes_buf[0] = la.getBytesAddress();
+            la_slice = la_bytes_buf[0..1];
+        }
+
+        // observed_addr: the multiaddr bytes of the remote's TCP address.
+        // Build it on the stack; if unavailable leave empty (optional field).
+        var observed_ma: ?Multiaddr = null;
+        defer if (observed_ma) |*ma| ma.deinit();
+        if (conn_info.remote_addr) |ra| {
+            observed_ma = blk: {
+                const ma_str = switch (ra) {
+                    .ip4 => |a| try std.fmt.allocPrint(
+                        host.allocator,
+                        "/ip4/{}.{}.{}.{}/tcp/{}",
+                        .{
+                            a.bytes[0], a.bytes[1], a.bytes[2], a.bytes[3], a.port,
+                        },
+                    ),
+                    .ip6 => null,
+                };
+                defer if (ma_str) |s| host.allocator.free(s);
+                break :blk if (ma_str) |s| try Multiaddr.create(host.allocator, s) else null;
+            };
+        }
+        const observed_bytes = if (observed_ma) |*ma| ma.getBytesAddress() else &[_]u8{};
+
+        const encoded = try identify_mod.encodeIdentify(
+            host.allocator,
+            "/zeicoin/testnet/1.0.0",
+            "zeicoin/0.1.0",
+            host.identity.peer_id.getBytes(),
+            la_slice,
+            observed_bytes,
+            host.registry.protocol_ids.items,
+        );
+        defer host.allocator.free(encoded);
+
+        try stream.writeAll(encoded);
+        try stream.close();
+    }
+
+    // Identify initiator: open a /ipfs/id/1.0.0 stream on session and read
+    // the remote's IdentifyInfo. Caller owns the returned IdentifyInfo.
+    pub fn identifyPeer(self: *Self, io: std.Io, session: *yamux.Session) !identify_mod.IdentifyInfo {
+        var stream = try self.newStream(io, session, identify_mod.PROTOCOL_ID);
+        defer stream.deinit();
+
+        var buf = std.array_list.Managed(u8).init(self.allocator);
+        defer buf.deinit();
+
+        var tmp: [4096]u8 = undefined;
+        while (true) {
+            const n = stream.readSome(&tmp) catch break;
+            if (n == 0) break;
+            try buf.appendSlice(tmp[0..n]);
+        }
+
+        return identify_mod.decodeIdentify(self.allocator, buf.items);
+    }
+
     // Accept and upgrade inbound connections, dispatching streams to registered
     // handlers. Runs until cancelled (io cancellation) or the listener closes.
     // Intended to run as a concurrent task via io.concurrent().
@@ -414,11 +576,12 @@ pub const Host = struct {
         const listener = self.listener orelse return error.NotListening;
         var group: std.Io.Group = .init;
         defer {
-            group.cancel(io);
             group.await(io) catch {};
         }
         while (true) {
             try std.Io.checkCancel(io);
+            if (self.stopping.load(.acquire)) break;
+
             var conn = listener.accept(io) catch |err| switch (err) {
                 error.Canceled, error.SocketNotListening => break,
                 else => {
@@ -426,6 +589,10 @@ pub const Host = struct {
                     continue;
                 },
             };
+            if (self.stopping.load(.acquire)) {
+                conn.deinit();
+                break;
+            }
             group.concurrent(io, handleInbound, .{
                 conn,
                 &self.registry,
@@ -436,6 +603,17 @@ pub const Host = struct {
                 conn.deinit();
             };
         }
+    }
+
+    fn getWakeupAddress(self: *const Self) ?std.Io.net.IpAddress {
+        const listen_addr = self.listen_addr orelse return null;
+        return switch (listen_addr.getTcpAddress() orelse return null) {
+            .ip4 => |addr| if (std.mem.eql(u8, &addr.bytes, &[_]u8{ 0, 0, 0, 0 }))
+                .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = addr.port } }
+            else
+                .{ .ip4 = addr },
+            .ip6 => |addr| .{ .ip6 = addr },
+        };
     }
 };
 
@@ -454,7 +632,7 @@ test "host: dial and newStream echo" {
     try server.listen(io, &listen_addr);
 
     const EchoHandler = struct {
-        fn handle(stream: *yamux.Stream, _: ?*anyopaque) anyerror!void {
+        fn handle(stream: *yamux.Stream, _: ConnInfo, _: ?*anyopaque) anyerror!void {
             var buf: [4]u8 = undefined;
             var n: usize = 0;
             while (n < buf.len) {
@@ -509,7 +687,7 @@ test "host: unregistered protocol returns error" {
     try server.listen(io, &listen_addr);
 
     const DummyHandler = struct {
-        fn handle(_: *yamux.Stream, _: ?*anyopaque) anyerror!void {}
+        fn handle(_: *yamux.Stream, _: ConnInfo, _: ?*anyopaque) anyerror!void {}
     };
     try server.setStreamHandler("/known/1.0.0", .{ .func = DummyHandler.handle });
 
@@ -543,7 +721,7 @@ test "host: multiple concurrent streams on one session" {
     try server.listen(io, &listen_addr);
 
     const EchoHandler = struct {
-        fn handle(stream: *yamux.Stream, _: ?*anyopaque) anyerror!void {
+        fn handle(stream: *yamux.Stream, _: ConnInfo, _: ?*anyopaque) anyerror!void {
             var buf: [4]u8 = undefined;
             var n: usize = 0;
             while (n < buf.len) {
@@ -622,12 +800,12 @@ test "host: multiple protocols dispatch to correct handler" {
 
     // Each handler writes a distinct marker byte so the client can tell them apart.
     const HandlerA = struct {
-        fn handle(stream: *yamux.Stream, _: ?*anyopaque) anyerror!void {
+        fn handle(stream: *yamux.Stream, _: ConnInfo, _: ?*anyopaque) anyerror!void {
             try stream.writeAll("A");
         }
     };
     const HandlerB = struct {
-        fn handle(stream: *yamux.Stream, _: ?*anyopaque) anyerror!void {
+        fn handle(stream: *yamux.Stream, _: ConnInfo, _: ?*anyopaque) anyerror!void {
             try stream.writeAll("B");
         }
     };
@@ -677,12 +855,12 @@ test "host: handler error does not kill the session" {
     try server.listen(io, &listen_addr);
 
     const FailHandler = struct {
-        fn handle(_: *yamux.Stream, _: ?*anyopaque) anyerror!void {
+        fn handle(_: *yamux.Stream, _: ConnInfo, _: ?*anyopaque) anyerror!void {
             return error.IntentionalFailure;
         }
     };
     const EchoHandler = struct {
-        fn handle(stream: *yamux.Stream, _: ?*anyopaque) anyerror!void {
+        fn handle(stream: *yamux.Stream, _: ConnInfo, _: ?*anyopaque) anyerror!void {
             var buf: [2]u8 = undefined;
             var n: usize = 0;
             while (n < buf.len) {
@@ -744,7 +922,7 @@ test "host: large payload integrity" {
 
     // Handler reads exactly payload_size bytes and echoes them back in 64 KiB chunks.
     const LargeEchoHandler = struct {
-        fn handle(stream: *yamux.Stream, userdata: ?*anyopaque) anyerror!void {
+        fn handle(stream: *yamux.Stream, _: ConnInfo, userdata: ?*anyopaque) anyerror!void {
             const size: usize = @as(*const usize, @ptrCast(@alignCast(userdata.?))).*;
             var buf: [65536]u8 = undefined;
             var done: usize = 0;
@@ -797,4 +975,73 @@ test "host: large payload integrity" {
 
     try std.testing.expectEqual(payload_size, total);
     try std.testing.expectEqualSlices(u8, payload, received[0..total]);
+}
+
+test "host: identify round-trip" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var server = Host.init(alloc, try IdentityKey.generate(alloc, io));
+    defer server.deinit();
+
+    var listen_addr = try Multiaddr.create(alloc, "/ip4/127.0.0.1/tcp/19806");
+    defer listen_addr.deinit();
+    try server.listen(io, &listen_addr);
+
+    var serve_future = try io.concurrent(Host.serve, .{ &server, io });
+    defer {
+        _ = serve_future.cancel(io) catch {};
+        serve_future.await(io) catch {};
+    }
+
+    var client = Host.init(alloc, try IdentityKey.generate(alloc, io));
+    defer client.deinit();
+
+    var dial_addr = try Multiaddr.create(alloc, "/ip4/127.0.0.1/tcp/19806");
+    defer dial_addr.deinit();
+    const session = try client.dial(io, &dial_addr);
+
+    var info = try client.identifyPeer(io, session);
+    defer info.deinit(alloc);
+
+    try std.testing.expectEqualStrings("/zeicoin/testnet/1.0.0", info.protocol_version);
+    try std.testing.expectEqualStrings("zeicoin/0.1.0", info.agent_version);
+    // server's peer ID bytes are encoded as the public_key field
+    try std.testing.expectEqualSlices(u8, server.identity.peer_id.getBytes(), info.public_key);
+    // server reported its listen address
+    try std.testing.expectEqual(@as(usize, 1), info.listen_addrs.items.len);
+    // identify protocol itself is in the registered protocols list
+    var found_identify = false;
+    for (info.protocols.items) |p| {
+        if (std.mem.eql(u8, p, identify_mod.PROTOCOL_ID)) {
+            found_identify = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_identify);
+}
+
+test "host: requestStop wakes serve accept loop" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var server = Host.init(alloc, try IdentityKey.generate(alloc, io));
+    defer server.deinit();
+
+    var listen_addr = try Multiaddr.create(alloc, "/ip4/127.0.0.1/tcp/19807");
+    defer listen_addr.deinit();
+    try server.listen(io, &listen_addr);
+
+    var serve_future = try io.concurrent(Host.serve, .{ &server, io });
+    var serve_done = false;
+    defer {
+        if (!serve_done) {
+            _ = serve_future.cancel(io) catch {};
+            serve_future.await(io) catch {};
+        }
+    }
+
+    try server.requestStop(io);
+    try serve_future.await(io);
+    serve_done = true;
 }

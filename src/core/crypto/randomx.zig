@@ -162,7 +162,7 @@ pub const RandomXContext = struct {
 
 // Check if hash meets difficulty target (configurable leading zeros) - Legacy function
 pub fn hashMeetsDifficulty(hash: [32]u8, difficulty_bytes: u8) bool {
-    if (difficulty_bytes == 0 or difficulty_bytes > 32) return false;
+    if (difficulty_bytes > 32) return false;
 
     // Check if first N bytes are zero
     for (0..difficulty_bytes) |i| {
@@ -201,6 +201,7 @@ test "RandomX integration" {
     var easy_hash: [32]u8 = .{0} ** 32;
     easy_hash[0] = 0x00;
     easy_hash[1] = 0xFF;
+    try std.testing.expect(hashMeetsDifficulty(easy_hash, 0));
     try std.testing.expect(hashMeetsDifficulty(easy_hash, 1));
     try std.testing.expect(!hashMeetsDifficulty(easy_hash, 2));
 

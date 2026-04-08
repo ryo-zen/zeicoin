@@ -283,6 +283,14 @@ pub const ServerHandlers = struct {
             }
         }
 
+        if (self.blockchain.chain_processor.isReorgInProgress()) {
+            std.log.info("🔒 [REORG GUARD] Deferring block {} while reorganization is active; block remains cached on peer {}", .{
+                block.height,
+                peer.id,
+            });
+            return;
+        }
+
         // Check if parent block exists (orphan detection)
         const parent_hash = block.header.previous_hash;
 
@@ -300,9 +308,14 @@ pub const ServerHandlers = struct {
                 std.log.info("🔍 [ORPHAN] Block parent not found!", .{});
                 std.log.debug("   Missing parent: {x}", .{&parent_hash});
 
+                // Network-decoded messages are deinitialized when the handler returns,
+                // so the orphan pool must take ownership of its own deep copy.
+                var orphan_block = try block.clone(self.blockchain.allocator);
+
                 // Add to orphan pool
-                self.blockchain.chain_processor.orphan_pool.addOrphan(block) catch |err| {
+                self.blockchain.chain_processor.orphan_pool.addOrphan(orphan_block) catch |err| {
                     std.log.warn("Failed to add orphan block: {}", .{err});
+                    orphan_block.deinit(self.blockchain.allocator);
                     return;
                 };
 
@@ -321,7 +334,21 @@ pub const ServerHandlers = struct {
         }
 
         // Process block normally
-        try self.blockchain.chain_processor.acceptBlock(io, block);
+        self.blockchain.chain_processor.acceptBlock(io, block) catch |err| switch (err) {
+            error.ReorgInProgress => {
+                std.log.info("🔒 [REORG GUARD] Deferred block {} while reorganization is active; block remains cached on peer {}", .{
+                    block.height,
+                    peer.id,
+                });
+                return;
+            },
+            else => return err,
+        };
+
+        if (self.blockchain.chain_processor.isReorgInProgress()) {
+            std.log.info("🔒 [REORG GUARD] Skipping orphan follow-up after block {} because reorganization started", .{block.height});
+            return;
+        }
 
         // After successfully processing, check for orphans that can now be processed
         try self.processOrphanChain(io, block_hash);
@@ -340,6 +367,11 @@ pub const ServerHandlers = struct {
 
     /// Process any orphan blocks that can now be applied
     fn processOrphanChain(self: *Self, io: std.Io, parent_hash: [32]u8) !void {
+        if (self.blockchain.chain_processor.isReorgInProgress()) {
+            std.log.info("🔒 [REORG GUARD] Skipping orphan chain processing while reorganization is active", .{});
+            return;
+        }
+
         var current_hash = parent_hash;
         var processed_count: usize = 0;
 
@@ -351,20 +383,31 @@ pub const ServerHandlers = struct {
             const orphans_opt = self.blockchain.chain_processor.orphan_pool.getOrphansByParent(current_hash);
             if (orphans_opt == null) break;
 
-            const orphans = orphans_opt.?;
-            defer self.blockchain.allocator.free(orphans);
+            var orphans = orphans_opt.?;
+            defer {
+                for (orphans.items) |*orphan_block| {
+                    orphan_block.deinit(self.blockchain.allocator);
+                }
+                orphans.deinit();
+            }
 
-            std.log.info("   Found {} orphan(s) ready to process", .{orphans.len});
+            std.log.info("   Found {} orphan(s) ready to process", .{orphans.items.len});
 
             // Process each orphan
-            for (orphans) |orphan_block| {
+            for (orphans.items) |orphan_block| {
                 std.log.info("   Processing orphan at height {}", .{orphan_block.height});
 
                 // Process directly through acceptBlock to avoid recursion issues
                 const orphan_hash = orphan_block.hash();
-                self.blockchain.chain_processor.acceptBlock(io, orphan_block) catch |err| {
-                    std.log.warn("   ❌ Orphan block processing failed: {}", .{err});
-                    continue;
+                self.blockchain.chain_processor.acceptBlock(io, orphan_block) catch |err| switch (err) {
+                    error.ReorgInProgress => {
+                        std.log.info("   🔒 [REORG GUARD] Deferring orphan block at height {} while reorganization is active", .{orphan_block.height});
+                        return;
+                    },
+                    else => {
+                        std.log.warn("   ❌ Orphan block processing failed: {}", .{err});
+                        continue;
+                    },
                 };
 
                 processed_count += 1;
@@ -737,26 +780,10 @@ pub const ServerHandlers = struct {
 
     /// Find a block by its hash in our blockchain
     fn findBlockByHash(self: *Self, io: std.Io, block_hash: [32]u8) !?types.Block {
-        // Get current chain height
-        const current_height = try self.blockchain.database.getHeight();
-
-        // Search through blocks (from recent to old for better cache locality)
-        // Must check current_height down to 0 (inclusive), avoiding unsigned underflow
-        var height: u32 = current_height;
-        while (true) {
-            var block = try self.blockchain.database.getBlock(io, height);
-            const hash = block.hash();
-            if (std.mem.eql(u8, &hash, &block_hash)) {
-                return block;
-            }
-            block.deinit(self.blockchain.allocator);
-
-            // Break before decrementing to avoid underflow at height 0
-            if (height == 0) break;
-            height -= 1;
-        }
-
-        return null;
+        return self.blockchain.database.getBlockByHash(io, block_hash) catch |err| switch (err) {
+            error.NotFound => return null,
+            else => return err,
+        };
     }
 
     fn onPeerDisconnected(self: *Self, peer: *network.Peer, err: anyerror) !void {

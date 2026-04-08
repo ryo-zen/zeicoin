@@ -9,7 +9,6 @@ SERVICES=(
     "zeicoin-mining.service"
     "zeicoin-transaction-api.service"
     "zeicoin-indexer.timer"
-    "zeicoin-error-monitor.service"
 )
 
 ZEICOIN_HOME="${ZEICOIN_HOME:-/root/zeicoin}"
@@ -163,10 +162,8 @@ case "$1" in
             JOURNAL_UNITS=(-u zeicoin-transaction-api)
         elif [ "$2" == "indexer" ]; then
             JOURNAL_UNITS=(-u zeicoin-indexer)
-        elif [ "$2" == "monitor" ]; then
-            JOURNAL_UNITS=(-u zeicoin-error-monitor)
         else
-            JOURNAL_UNITS=(-u zeicoin-mining -u zeicoin-transaction-api -u zeicoin-indexer -u zeicoin-error-monitor)
+            JOURNAL_UNITS=(-u zeicoin-mining -u zeicoin-transaction-api -u zeicoin-indexer)
         fi
 
         echo "📜 ZeiCoin Service Logs (Ctrl+C to exit):"
@@ -210,7 +207,6 @@ case "$1" in
         echo "  • zeicoin-mining.service       - Blockchain server with mining"
         echo "  • zeicoin-transaction-api      - HTTP REST API (port 8080)"
         echo "  • zeicoin-indexer.timer        - PostgreSQL indexer (every 30s)"
-        echo "  • zeicoin-error-monitor.service - Journal error monitor"
         exit 1
         ;;
 esac

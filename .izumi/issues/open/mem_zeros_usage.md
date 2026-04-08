@@ -13,10 +13,11 @@ sprint: null
 story_points: null
 due_date: null
 parent_id: null
-rank: null
+rank: 1773129741517.0
 comments: []
 created_at: 2026-01-26T00:00:00+00:00
-updated_at: 2026-03-10T00:00:00+00:00
+updated_at: 2026-04-01T05:27:01.560140108+00:00
+closed_at: null
 ---
 
 ## Summary

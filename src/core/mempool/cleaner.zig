@@ -13,7 +13,6 @@ const MempoolStorage = @import("pool.zig").MempoolStorage;
 const TransactionValidator = @import("validator.zig").TransactionValidator;
 
 // Type aliases for clarity
-const Transaction = types.Transaction;
 const Block = types.Block;
 const Hash = types.Hash;
 
@@ -181,48 +180,6 @@ pub const MempoolCleaner = struct {
         const MAINTENANCE_INTERVAL = 300; // 5 minutes
         
         return (current_time - self.last_cleanup_time) > MAINTENANCE_INTERVAL;
-    }
-    
-    /// Backup transactions from orphaned blocks during reorganization
-    pub fn backupOrphanedTransactions(
-        self: *Self,
-        orphaned_blocks: []const Block,
-        coinbase_filter: bool
-    ) !usize {
-        var restored_count: usize = 0;
-        
-        for (orphaned_blocks) |block| {
-            for (block.transactions) |tx| {
-                // Skip coinbase transactions if filter is enabled
-                if (coinbase_filter and self.isCoinbaseTransaction(tx)) {
-                    continue;
-                }
-                
-                // Try to validate and add back to mempool
-                if (self.validator.validateTransaction(tx) catch false) {
-                    self.storage.addTransactionToPool(tx) catch {
-                        // If we can't add it back (e.g., limits), just continue
-                        continue;
-                    };
-                    restored_count += 1;
-                } else {
-                    log.info("❌ Orphaned transaction no longer valid - discarded", .{});
-                }
-            }
-        }
-        
-        if (restored_count > 0) {
-            log.info("🔄 Restored {} orphaned transactions to mempool", .{restored_count});
-        }
-        
-        return restored_count;
-    }
-    
-    /// Check if transaction is a coinbase transaction
-    fn isCoinbaseTransaction(self: *Self, tx: Transaction) bool {
-        _ = self;
-        // Coinbase transactions have zero sender address and nonce
-        return tx.sender.isZero() and tx.nonce == 0;
     }
     
     /// Get cleanup statistics

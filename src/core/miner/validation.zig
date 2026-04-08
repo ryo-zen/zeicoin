@@ -20,9 +20,11 @@ pub fn validateBlockPoW(ctx: MiningContext, block: types.Block) !bool {
     randomx_validation_mutex.lock();
     defer randomx_validation_mutex.unlock();
     
-    // Early exit: Check if block claims correct difficulty before expensive RandomX validation
+    // Early exit: only reject structurally impossible targets. TEST_MODE uses
+    // `base_bytes = 0`, which is valid and still requires full RandomX hashing
+    // plus threshold validation below.
     const difficulty_target = block.header.getDifficultyTarget();
-    if (difficulty_target.base_bytes == 0 or difficulty_target.base_bytes > 32) {
+    if (difficulty_target.base_bytes > 32) {
         log.warn("❌ Invalid difficulty target: {} bytes", .{difficulty_target.base_bytes});
         return false;
     }

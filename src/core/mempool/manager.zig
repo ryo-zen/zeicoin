@@ -42,6 +42,7 @@ pub const MempoolManager = struct {
     limits: MempoolLimits,
     network_handler: NetworkHandler,
     cleaner: MempoolCleaner,
+    staged_orphaned_transactions: std.array_list.Managed(Transaction),
     
     // I/O subsystem
     io: std.Io,
@@ -69,6 +70,7 @@ pub const MempoolManager = struct {
             .limits = MempoolLimits.init(),
             .network_handler = undefined,
             .cleaner = undefined,
+            .staged_orphaned_transactions = std.array_list.Managed(Transaction).init(allocator),
             .io = io,
             .mining_state = null,
             .allocator = allocator,
@@ -85,6 +87,8 @@ pub const MempoolManager = struct {
 
     /// Cleanup resources and free self
     pub fn deinit(self: *Self) void {
+        self.clearStagedOrphanedTransactions();
+        self.staged_orphaned_transactions.deinit();
         self.storage.deinit();
         self.validator.deinit();
         // Other components don't need cleanup
@@ -108,18 +112,8 @@ pub const MempoolManager = struct {
     /// Add transaction from local source (CLI, RPC, etc.)
     pub fn addTransaction(self: *Self, transaction: Transaction) !void {
         const tx_hash = transaction.hash();
-        const amount_zei = @as(f64, @floatFromInt(transaction.amount)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-        const fee_zei = @as(f64, @floatFromInt(transaction.fee)) / @as(f64, @floatFromInt(types.ZEI_COIN));
-        
-        // Convert addresses to bech32 for display
-        const sender_bech32 = transaction.sender.toBech32(self.allocator, types.CURRENT_NETWORK) catch "invalid";
-        defer if (!std.mem.eql(u8, sender_bech32, "invalid")) self.allocator.free(sender_bech32);
-        
-        const recipient_bech32 = transaction.recipient.toBech32(self.allocator, types.CURRENT_NETWORK) catch "invalid";
-        defer if (!std.mem.eql(u8, recipient_bech32, "invalid")) self.allocator.free(recipient_bech32);
-        
-        log.info("🔄 [TX LIFECYCLE] Received transaction {x} from {s} → {s}: {d:.8} ZEI (fee: {d:.8}, nonce: {})", .{
-            tx_hash[0..8], sender_bech32, recipient_bech32, amount_zei, fee_zei, transaction.nonce
+        log.info("[TX] Received {x} amount={} fee={} nonce={}", .{
+            tx_hash[0..8], transaction.amount, transaction.fee, transaction.nonce,
         });
         
         const result = try self.network_handler.processLocalTransaction(transaction);
@@ -268,55 +262,94 @@ pub const MempoolManager = struct {
         _ = try self.cleaner.emergencyCleanup();
     }
 
-    /// Handle chain reorganization - backup orphaned transactions
-    pub fn handleReorganization(self: *Self, orphaned_blocks: []const Block) !void {
-        _ = try self.cleaner.backupOrphanedTransactions(orphaned_blocks, true);
-    }
+    /// Stage transactions from reverted blocks so they can be reconsidered after reorg success.
+    pub fn stageOrphanedTransactions(self: *Self, orphaned_blocks: []const Block) !void {
+        self.clearStagedOrphanedTransactions();
 
-    /// Restore orphaned transactions back to mempool after reorganization
-    pub fn restoreOrphanedTransactions(self: *Self, transactions: []const Transaction) void {
-        for (transactions) |tx| {
-            if (!tx.isCoinbase()) {
-                // Validate transaction is still valid
-                if (self.validator.validateTransaction(tx) catch false) {
-                    // Deep copy transaction to transfer ownership to mempool
-                    const tx_copy = tx.dupe(self.allocator) catch |err| switch (err) {
-                        error.OutOfMemory => {
-                            log.info("⚠️  Out of memory restoring orphaned transaction - skipping", .{});
-                            continue;
-                        },
-                    };
-                    
-                    // Add to mempool with proper error handling
-                    if (self.addTransaction(tx_copy)) {
-                        log.info("🔄 Orphaned transaction restored to mempool", .{});
-                    } else |err| switch (err) {
-                        error.DuplicateTransaction => {
-                            // Transaction already in mempool, clean up our copy
-                            tx_copy.deinit(self.allocator);
-                            log.info("🔄 Orphaned transaction already in mempool - skipping", .{});
-                        },
-                        error.InsufficientBalance, error.FeeTooLow, error.InvalidNonce, error.TransactionExpired, error.InvalidTransaction => {
-                            // Transaction no longer valid, clean up our copy
-                            tx_copy.deinit(self.allocator);
-                            log.info("❌ Orphaned transaction validation failed - discarded", .{});
-                        },
-                        error.MempoolFull => {
-                            // Mempool is full, clean up our copy
-                            tx_copy.deinit(self.allocator);
-                            log.info("⚠️  Mempool full - cannot restore orphaned transaction", .{});
-                        },
-                        else => {
-                            // Unexpected error, clean up our copy and continue
-                            tx_copy.deinit(self.allocator);
-                            log.info("⚠️  Error restoring orphaned transaction - skipping", .{});
-                        },
-                    }
-                } else {
-                    log.info("❌ Orphaned transaction no longer valid - discarded", .{});
-                }
+        var staged_count: usize = 0;
+        errdefer self.clearStagedOrphanedTransactions();
+
+        for (orphaned_blocks) |block| {
+            for (block.transactions) |tx| {
+                if (tx.isCoinbase()) continue;
+
+                const tx_hash = tx.hash();
+                if (self.containsStagedTransaction(tx_hash)) continue;
+
+                var tx_copy = try tx.dupe(self.allocator);
+                errdefer tx_copy.deinit(self.allocator);
+
+                try self.staged_orphaned_transactions.append(tx_copy);
+                staged_count += 1;
             }
         }
+
+        if (staged_count > 0) {
+            log.info("🗂️ Staged {} orphaned transactions for post-reorg restore", .{staged_count});
+        }
+    }
+
+    /// Restore staged orphaned transactions after the winning branch is fully applied.
+    pub fn restoreStagedOrphanedTransactions(self: *Self, winning_branch_hashes: []const Hash) void {
+        var restored_count: usize = 0;
+
+        for (self.staged_orphaned_transactions.items) |tx| {
+            const tx_hash = tx.hash();
+            if (containsHash(winning_branch_hashes, tx_hash)) {
+                log.info("🔄 Orphaned transaction already confirmed on winning branch - skipping", .{});
+                continue;
+            }
+
+            if (self.storage.containsTransaction(tx_hash)) {
+                log.info("🔄 Orphaned transaction already present in mempool - skipping", .{});
+                continue;
+            }
+
+            const result = self.network_handler.processLocalTransaction(tx) catch |err| {
+                log.info("⚠️ Error restoring orphaned transaction - skipping: {}", .{err});
+                continue;
+            };
+
+            if (!result.accepted) {
+                switch (result.reason) {
+                    .duplicate_in_mempool => {
+                        log.info("🔄 Orphaned transaction already present in mempool - skipping", .{});
+                    },
+                    .validation_failed => {
+                        log.info("❌ Orphaned transaction no longer valid under winning chain - discarded", .{});
+                    },
+                    .mempool_limits_exceeded => {
+                        log.info("⚠️ Mempool full - cannot restore orphaned transaction", .{});
+                    },
+                    .accepted => {},
+                }
+                continue;
+            }
+
+            restored_count += 1;
+            log.info("🔄 Orphaned transaction restored to mempool", .{});
+
+            if (self.mining_state) |mining_state| {
+                mining_state.condition.broadcast();
+            }
+        }
+
+        self.clearStagedOrphanedTransactions();
+
+        if (restored_count > 0) {
+            log.info("✅ Restored {} orphaned transactions after reorg", .{restored_count});
+        }
+    }
+
+    pub fn clearStagedOrphanedTransactions(self: *Self) void {
+        for (self.staged_orphaned_transactions.items) |*tx| {
+            tx.deinit(self.allocator);
+        }
+        self.staged_orphaned_transactions.clearRetainingCapacity();
+    }
+
+    pub fn getStagedOrphanedTransactionCount(self: *Self) usize {
+        return self.staged_orphaned_transactions.items.len;
     }
 
     /// Clear all transactions from mempool
@@ -379,6 +412,26 @@ pub const MempoolManager = struct {
             stats.transactions_cleaned
         });
         log.info("", .{});
+    }
+
+    fn containsStagedTransaction(self: *Self, tx_hash: Hash) bool {
+        for (self.staged_orphaned_transactions.items) |tx| {
+            if (std.mem.eql(u8, &tx.hash(), &tx_hash)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    fn containsHash(hashes: []const Hash, target: Hash) bool {
+        for (hashes) |hash| {
+            if (std.mem.eql(u8, &hash, &target)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 };
 

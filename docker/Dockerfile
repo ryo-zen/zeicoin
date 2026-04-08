@@ -7,7 +7,6 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install ALL system dependencies
 RUN apt-get update && apt-get install -y \
-    wget \
     xz-utils \
     git \
     build-essential \
@@ -19,12 +18,15 @@ RUN apt-get update && apt-get install -y \
     netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Zig 0.16 dev
-RUN wget https://zig.squirl.dev/download/zig-x86_64-linux-0.16.0-dev.2694+74f361a5c.tar.xz && \
-    tar -xf zig-x86_64-linux-0.16.0-dev.2694+74f361a5c.tar.xz && \
-    mv zig-x86_64-linux-0.16.0-dev.2694+74f361a5c /usr/local/zig && \
-    ln -s /usr/local/zig/zig /usr/local/bin/zig && \
-    rm zig-x86_64-linux-0.16.0-dev.2694+74f361a5c.tar.xz
+# Install Zig from local tarball (prepared by test script or CI)
+COPY .docker-cache/zig-nightly.tar.xz /tmp/zig-nightly.tar.xz
+RUN set -eux; \
+    tar -xf /tmp/zig-nightly.tar.xz -C /tmp; \
+    zig_dir="$(find /tmp -maxdepth 1 -type d -name 'zig-x86_64-linux-*' | head -n1)"; \
+    test -n "$zig_dir"; \
+    mv "$zig_dir" /usr/local/zig; \
+    ln -s /usr/local/zig/zig /usr/local/bin/zig; \
+    rm -f /tmp/zig-nightly.tar.xz
 
 WORKDIR /zeicoin
 
@@ -51,13 +53,12 @@ RUN gcc -o randomx/randomx_helper randomx/randomx_helper.c randomx/wrapper.c \
     -L/usr/local/lib -lrandomx -lstdc++ -lm
 
 # Build ZeiCoin
+# Ubuntu 24.04 puts libpq headers in /usr/include/postgresql
+ENV C_INCLUDE_PATH=/usr/include/postgresql
 RUN zig build
 
-# Create data directory and config
-RUN mkdir -p /zeicoin/zeicoin_data && \
-    mkdir -p /zeicoin/config && \
-    echo '{"network": "testnet", "nodes": []}' > /zeicoin/config/bootstrap_testnet.json && \
-    echo '{"network": "mainnet", "nodes": []}' > /zeicoin/config/bootstrap_mainnet.json
+# Create data directory
+RUN mkdir -p /zeicoin/zeicoin_data
 
 # Copy scripts, fix line endings, and make executable
 RUN mkdir -p /scripts && \

@@ -227,14 +227,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
     const mining_time = util.getTime() - start_time;
 
     if (found_nonce) {
-        // Process coinbase transaction (create new coins!)
-        // Note: new_block_height was already calculated at function start
-        try ctx.blockchain.chain_state.processCoinbaseTransaction(ctx.blockchain.io, coinbase_tx, mining_address, new_block_height, null, false);
-
-        // Process regular transactions
-        for (new_block.transactions[1..]) |tx| {
-            try ctx.blockchain.chain_state.processTransaction(ctx.blockchain.io, tx, null, false);
-        }
+        try ctx.blockchain.chain_state.processBlockTransactions(ctx.blockchain.io, new_block.transactions, new_block_height, false);
 
         // Calculate cumulative chain work before saving (critical for reorganization)
         const block_work = new_block.header.getWork();
@@ -260,13 +253,7 @@ pub fn zenMineBlock(ctx: MiningContext, miner_keypair: key.KeyPair, mining_addre
 
         // CRITICAL FIX: Index the new block in memory so getBlockHash/getHash works
         try ctx.blockchain.chain_state.indexBlock(block_height, new_block.hash());
-
-        // Check for matured coinbase rewards
-        const coinbase_maturity = types.getCoinbaseMaturity();
-        if (block_height >= coinbase_maturity) {
-            const maturity_height = block_height - coinbase_maturity;
-            try ctx.blockchain.chain_state.matureCoinbaseRewards(ctx.blockchain.io, maturity_height);
-        }
+        try ctx.blockchain.chain_state.maybeSavePeriodicStateSnapshot(ctx.blockchain.io, block_height, new_block.hash());
 
         // Clean mempool of confirmed transactions
         try ctx.mempool_manager.cleanAfterBlock(new_block);

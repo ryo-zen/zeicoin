@@ -19,6 +19,7 @@ echo "⚠️  This test will take approximately $((WAIT_TIME + SYNC_WAIT_TIME)) 
 
 # 1. Start Environment
 echo "🧹 Cleaning up previous run..."
+docker rm -f zeicoin-miner-1 zeicoin-miner-2 zeicoin-node-1 >/dev/null 2>&1 || true
 docker compose down -v || true
 
 echo "📦 Starting Docker environment..."
@@ -64,15 +65,21 @@ echo "❄️  Freezing Miner 1 (Stopping mining to allow catch-up)..."
 # 1. Stop the mining container
 docker stop zeicoin-miner-1
 docker rm zeicoin-miner-1
-# 2. Start it back up as a passive node (no mining script) using the same volume
-# We need to manually construct the run command to match the network/volumes of compose
+# 2. Start it back up as a passive node using the same compose volume, IP, and env.
+# This preserves the canonical chain and keeps miner-1 reachable at the same bootstrap
+# address other nodes already know about.
 docker run -d --name zeicoin-miner-1 \
   --network docker_zeicoin-network \
+  --ip 172.33.0.10 \
   --network-alias miner-1 \
-  -v docker_miner1-data:/zeicoin/zeicoin_data \
+  -v docker_miner1-data:/zeicoin/zeicoin_data_testnet \
   -e ZEICOIN_NETWORK=testnet \
+  -e ZEICOIN_TEST_MODE=true \
   -e ZEICOIN_BIND_IP=0.0.0.0 \
-  -e ZEICOIN_SERVER=0.0.0.0 \
+  -e ZEICOIN_P2P_PORT=10801 \
+  -e ZEICOIN_API_PORT=10802 \
+  -e ZEICOIN_SERVER=127.0.0.1 \
+  -e ZEICOIN_BOOTSTRAP="" \
   docker-miner-1:latest \
   ./zig-out/bin/zen_server
 
@@ -120,6 +127,8 @@ if [ "$HASH1_NEW" != "$HASH2_NEW" ]; then
     # Check if Miner 2 is stuck in sync
     echo "--- Miner 2 Logs (Last 50 lines) ---"
     docker logs --tail 50 zeicoin-miner-2
+    docker rm -f zeicoin-miner-1 >/dev/null 2>&1 || true
+    docker compose down -v >/dev/null 2>&1 || true
     exit 1
 fi
 
@@ -128,4 +137,5 @@ echo "🎉 DEEP REORG TEST PASSED!"
 
 # Cleanup
 echo "🧹 Cleaning up..."
+docker rm -f zeicoin-miner-1 >/dev/null 2>&1 || true
 docker compose down -v

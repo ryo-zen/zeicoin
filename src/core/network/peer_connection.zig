@@ -3,6 +3,8 @@
 
 const std = @import("std");
 const net = std.Io.net;
+const libp2p = @import("libp2p");
+const yamux = libp2p.yamux;
 const protocol = @import("protocol/protocol.zig");
 const message_types = @import("protocol/messages/message_types.zig");
 const message_envelope = @import("protocol/message_envelope.zig");
@@ -16,10 +18,9 @@ const Peer = peer_manager.Peer;
 pub const PeerConnection = struct {
     allocator: std.mem.Allocator,
     peer: *Peer,
-    stream: net.Stream,
+    stream: yamux.Stream,
     message_handler: MessageHandler,
     running: bool,
-    current_io: ?std.Io,
 
     const Self = @This();
 
@@ -27,31 +28,30 @@ pub const PeerConnection = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         peer: *Peer,
-        stream: net.Stream,
+        stream: yamux.Stream,
         handler: MessageHandler,
     ) Self {
         // Increment peer reference count to ensure it stays alive during connection lifetime
         peer.addRef();
-        
+
         return .{
             .allocator = allocator,
             .peer = peer,
             .stream = stream,
             .message_handler = handler,
             .running = false,
-            .current_io = null,
         };
     }
 
     /// Clean up peer connection resources
     pub fn deinit(self: *Self, io: std.Io) void {
+        _ = io;
         self.running = false;
-        self.current_io = null;
         // Clear the callback BEFORE closing the stream
         self.peer.setTcpSendCallback(null, null);
         // Only close if PeerManager hasn't already closed it (timeout wakeup)
-        if (self.peer.stream != null) {
-            self.stream.close(io);
+        if (self.peer.yamux_stream != null) {
+            self.stream.close() catch {};
         }
 
         // Free user_agent allocated by this connection's allocator.
@@ -79,23 +79,28 @@ pub const PeerConnection = struct {
     /// Handles the full connection lifecycle including handshake, message processing, and cleanup
     pub fn run(self: *Self, io: std.Io) !void {
         self.running = true;
-        self.current_io = io;
         defer {
             self.running = false;
-            self.current_io = null;
+            self.peer.state = .disconnected;
         }
 
         std.log.info("Peer {} connected ({})", .{ self.peer.id, self.peer.address });
 
-        // Set up TCP send callback for this peer
-        self.peer.setTcpSendCallback(tcpSendCallback, self);
+        // Register yamux stream on peer so PeerManager can close it on timeout to wake readSome.
+        self.peer.yamux_stream = &self.stream;
+        self.peer.yamux_session = self.stream.session;
+        defer self.peer.yamux_stream = null;
+        defer self.peer.yamux_session = null;
+
+        // Set up send callback for this peer
+        self.peer.setTcpSendCallback(yamuxSendCallback, self);
 
         // Send handshake
         try self.sendHandshake(io);
         self.peer.state = .handshaking;
 
         // Blocking read loop — zero CPU while idle.
-        // PeerManager.cleanupTimedOut() closes the stream to wake a blocked reader on timeout.
+        // PeerManager.cleanupTimedOut() calls stream.close() to wake a blocked readSome on timeout.
         var buffer: [4096]u8 = undefined;
 
         while (self.running) {
@@ -103,9 +108,8 @@ pub const PeerConnection = struct {
                 break;
             }
 
-            // Blocking read — suspends thread until data arrives or stream is closed
-            var dest = [1][]u8{&buffer};
-            const bytes_read = io.vtable.netRead(io.userdata, self.stream.socket.handle, &dest) catch |err| {
+            // Blocking read — suspends goroutine until data arrives or stream is closed
+            const bytes_read = self.stream.readSome(&buffer) catch |err| {
                 if (self.running and !self.peer.is_shutting_down.load(.acquire)) {
                     std.log.err("Read error from peer {}: {}", .{ self.peer.id, err });
                 }
@@ -117,7 +121,7 @@ pub const PeerConnection = struct {
                 const peer_id = self.peer.id;
                 const is_localhost = switch (self.peer.address) {
                     .ip4 => |ip4| ip4.bytes[0] == 127 and ip4.bytes[1] == 0 and ip4.bytes[2] == 0 and ip4.bytes[3] == 1,
-                    .ip6 => |ip6| std.mem.eql(u8, &ip6.bytes, &[_]u8{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1}),
+                    .ip6 => |ip6| std.mem.eql(u8, &ip6.bytes, &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }),
                 };
                 if (!is_localhost) {
                     std.log.info("Peer {} disconnected (connection closed)", .{peer_id});
@@ -178,8 +182,6 @@ pub const PeerConnection = struct {
                 self.sendPing() catch {};
             }
         }
-
-        self.peer.state = .disconnected;
     }
 
     /// Send handshake message
@@ -287,14 +289,14 @@ pub const PeerConnection = struct {
 
         // Update peer info
         std.log.info("🔧 [HANDSHAKE] Updating peer {d} info:", .{peer_id});
-        std.log.info("   📊 Setting height: {d} -> {d}", .{self.peer.height, handshake.start_height});
+        std.log.info("   📊 Setting height: {d} -> {d}", .{ self.peer.height, handshake.start_height });
         std.log.info("   🔧 Setting version: {d}", .{handshake.version});
         std.log.info("   🔧 Setting services: 0x{x}", .{handshake.services});
         self.peer.version = handshake.version;
         self.peer.services = handshake.services;
         self.peer.height = handshake.start_height;
         self.peer.best_block_hash = handshake.best_block_hash;
-        std.log.info("   ✅ Peer {d} height now set to: {d}", .{peer_id, self.peer.height});
+        std.log.info("   ✅ Peer {d} height now set to: {d}", .{ peer_id, self.peer.height });
 
         // Free old user_agent if exists
         if (self.peer.user_agent.len > 0) {
@@ -386,7 +388,8 @@ pub const PeerConnection = struct {
 
     fn handleBlocks(self: *Self, blocks: void) !void {
         _ = blocks; // blocks message type has no payload (void)
-                        std.log.debug("Received blocks message from peer {}", .{self.peer.id});    }
+        std.log.debug("Received blocks message from peer {}", .{self.peer.id});
+    }
 
     fn handleGetPeers(self: *Self, io: std.Io, get_peers: message_types.GetPeersMessage) !void {
         try self.message_handler.onGetPeers(io, self.peer, get_peers);
@@ -491,17 +494,10 @@ pub const MessageHandler = struct {
     onPeerDisconnected: ?*const fn (peer: *Peer, err: anyerror) anyerror!void = null,
 };
 
-/// TCP send callback function
-/// Handles actual TCP data transmission for peer connections
-fn tcpSendCallback(ctx: ?*anyopaque, data: []const u8) anyerror!void {
+/// Yamux send callback — writes framed bytes to the yamux stream.
+fn yamuxSendCallback(ctx: ?*anyopaque, data: []const u8) anyerror!void {
     const self = @as(*PeerConnection, @ptrCast(@alignCast(ctx.?)));
-    // Check if connection is still running (safer than accessing peer memory)
-    if (!self.running or self.current_io == null) {
-        return error.PeerShuttingDown;
-    }
-    const peer_id = self.peer.id; // Cache the ID
-    std.log.debug("Peer {} writing {} bytes to TCP stream", .{ peer_id, data.len });
-    const io = self.current_io.?;
-    var writer = self.stream.writer(io, &[_]u8{});
-    try writer.interface.writeAll(data);
+    if (!self.running) return error.PeerShuttingDown;
+    std.log.debug("Peer {} writing {} bytes to yamux stream", .{ self.peer.id, data.len });
+    try self.stream.writeAll(data);
 }

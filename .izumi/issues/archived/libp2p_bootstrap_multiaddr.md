@@ -3,7 +3,7 @@ id: libp2p_bootstrap_multiaddr
 key: ZEI-31
 title: Migrate bootstrap configuration to multiaddr format
 type: Story
-status: Backlog
+status: Done
 priority: High
 assignee: null
 labels:
