@@ -421,7 +421,17 @@ fn callReadByte(reader: anytype, io: std.Io) !u8 {
     if (comptime hasMethodWithIo(@TypeOf(reader.*), "readByte")) {
         return try reader.readByte(io);
     }
-    return try reader.readByte();
+    if (comptime @hasDecl(@TypeOf(reader.*), "readByte")) {
+        return try reader.readByte();
+    }
+
+    var one: [1]u8 = undefined;
+    const amt = if (comptime hasMethodWithIo(@TypeOf(reader.*), "readSome"))
+        try reader.readSome(io, &one)
+    else
+        try reader.readSome(&one);
+    if (amt == 0) return error.EndOfStream;
+    return one[0];
 }
 
 fn readNoEof(reader: anytype, io: std.Io, dest: []u8) !void {

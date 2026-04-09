@@ -122,6 +122,28 @@ pub const RoutingTable = struct {
         return self.buckets[bucket_index].items.len;
     }
 
+    pub fn nonEmptyBucketIndices(self: *const Self, allocator: std.mem.Allocator) !std.array_list.Managed(usize) {
+        var out = std.array_list.Managed(usize).init(allocator);
+        errdefer out.deinit();
+
+        for (self.buckets, 0..) |bucket, bucket_index| {
+            if (bucket.items.len == 0) continue;
+            try out.append(bucket_index);
+        }
+
+        return out;
+    }
+
+    pub fn allocRefreshPeerIdForBucket(
+        self: *const Self,
+        allocator: std.mem.Allocator,
+        prefix: []const u8,
+        bucket_index: usize,
+        start_counter: usize,
+    ) ![]u8 {
+        return try allocPeerIdForBucket(allocator, self, prefix, bucket_index, start_counter);
+    }
+
     pub fn bucketIndexForPeer(self: *const Self, peer_id: []const u8) !usize {
         if (std.mem.eql(u8, peer_id, self.local_peer_id)) return error.CannotInsertSelf;
         return bucketIndexForHashedKey(self.local_key, hashKey(peer_id));

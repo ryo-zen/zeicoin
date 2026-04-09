@@ -3,7 +3,7 @@ id: dht_bootstrap_refresh
 key: ZEI-84
 title: Implement DHT bootstrap self-lookup and periodic refresh
 type: Subtask
-status: Backlog
+status: InProgress
 priority: Medium
 assignee: null
 labels:
@@ -17,7 +17,7 @@ parent_id: kademlia_dht
 rank: null
 comments: []
 created_at: 2026-04-09T00:00:00+00:00
-updated_at: 2026-04-09T11:01:53+10:00
+updated_at: 2026-04-09T13:43:00+10:00
 ---
 
 ## Summary
@@ -41,3 +41,4 @@ Implement the DHT bootstrap procedure and periodic routing table maintenance. On
 - Depends on ZEI-83 (FIND_NODE)
 - Spec: "generate a random peer ID for every non-empty routing table's k-bucket" — not all 256 buckets, only non-empty ones
 - Spec reference: bootstrap process section in `reference/libp2p-specs/kad-dht/README.md`
+- Current implementation boundary: `ZEI-84` extends `libp2p/dht/query.zig` with `bootstrapOnce` and `refreshLoop`, uses only non-empty routing-table buckets for refresh targets, always includes self-lookup, and enforces a per-run timeout at refresh-step boundaries; broader Docker proof remains with `ZEI-87`

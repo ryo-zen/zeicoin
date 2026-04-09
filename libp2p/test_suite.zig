@@ -3,6 +3,7 @@
 
 test {
     _ = @import("dht/message.zig");
+    _ = @import("dht/query.zig");
     _ = @import("dht/routing_table.zig");
     _ = @import("multiaddr/multiaddr.zig");
     _ = @import("peer/address_book.zig");

@@ -10,9 +10,9 @@
 **Branch:** `libp2p-integration`
 **Active initiative:** Post-rollout testnet validation and hardening
 
-**Last worked on:** 2026-04-09 — Landed the core `ZEI-82` Kad wire layer: added `libp2p/dht/message.zig` with manual protobuf encode/decode for Kad `Message`/`Peer`/`Record`, unsigned-varint frame helpers for `/kad/1.0.0`, and round-trip/unknown-field/frame tests; `zig build test-libp2p` is green.
-**Next step:** Build `ZEI-83` `FIND_NODE` on top of the new Kad codec and `ZEI-81` routing-table APIs, including the inbound `/kad/1.0.0` request loop.
-**In flight:** `libp2p/dht/message.zig`, `libp2p/api.zig`, `libp2p/test_suite.zig`, and the `ZEI-82` ticket/status updates are local; `zig build check` still fails in pre-existing `src/core/network/peer.zig`.
+**Last worked on:** 2026-04-09 — Implemented the core `ZEI-84` bootstrap layer locally: `libp2p/dht/query.zig` now has startup self-lookup, periodic refresh over non-empty buckets, and timeout-bounded bootstrap runs; `libp2p/dht/routing_table.zig` now exposes non-empty bucket enumeration + refresh-target generation; `zig build test-libp2p` is green.
+**Next step:** Commit the local `ZEI-83` + `ZEI-84` changes, then decide whether to wire a focused Docker proof now or defer full DHT Docker validation to `ZEI-87`.
+**In flight:** `libp2p/dht/query.zig`, `libp2p/dht/message.zig`, `libp2p/dht/routing_table.zig`, `libp2p/api.zig`, `libp2p/test_suite.zig`, and the `ZEI-83`/`ZEI-84` ticket + status updates are local; `zig build check` still fails in pre-existing `src/core/network/peer.zig`.
 
 ---
 
@@ -50,6 +50,8 @@
 - `ZEI-93` was intentionally implemented as the smallest Kad unblocker rather than full identify parity: unknown well-formed protobuf fields now skip generically for wire types `0/1/2/5`, malformed frames still fail closed, and signed peer record parsing remains a separate follow-up if a concrete consumer appears.
 - `ZEI-81` is intentionally a pure data-structure slice: the routing table owns bucket admission, recency ordering, SHA-256 + XOR distance, closest-peer selection, and a two-step ping-and-replace workflow, but it performs no network I/O and requires callers to pass an explicit Kad mode (`client` vs `server`) for admission decisions.
 - `ZEI-82` is intentionally a wire-layer slice: `libp2p/dht/message.zig` owns Kad protobuf structs, unknown-field-safe decode, and uvarint frame read/write helpers for `/kad/1.0.0`, while inbound stream loops and `FIND_NODE` request handling remain with `ZEI-83`.
+- `ZEI-83` now lives in `libp2p/dht/query.zig`: the service registers `/kad/1.0.0` only in server mode, handles repeated inbound Kad RPCs on one stream, performs iterative `FIND_NODE` lookups with bounded `alpha`, learns discovered peers into both the peerbook and routing table, emits transport multiaddrs in Kad `Peer` records, and drops the local peer from discovered candidates before continuing the lookup.
+- `ZEI-84` now extends the same query service: bootstrap runs do self-lookup first, then one generated lookup target per non-empty bucket, refresh scheduling is configurable, timeout is enforced per run before starting the next lookup, and the current implementation is unit-tested but not yet proven in Docker as a standalone DHT refresh harness.
 - `ZEI-20` Notes still mention `zen_server` integration as unfinished, but archived `ZEI-11` and `ZEI-33` show that prerequisite is already complete; future DHT planning should treat libp2p host integration as done and focus on Kademlia-specific gaps.
 - Open libp2p integration tickets that conflict with the current branch status should be audited separately, but the only explicit libp2p rollout gate in the current blocker set is `ZEI-54`.
 - `account_count` metadata is currently used for observability/status only; it is not part of consensus or recovery gating.

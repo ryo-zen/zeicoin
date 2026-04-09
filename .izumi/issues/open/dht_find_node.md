@@ -3,7 +3,7 @@ id: dht_find_node
 key: ZEI-83
 title: Implement FIND_NODE handler and iterative lookup client
 type: Subtask
-status: Backlog
+status: InProgress
 priority: High
 assignee: null
 labels:
@@ -17,7 +17,7 @@ parent_id: kademlia_dht
 rank: null
 comments: []
 created_at: 2026-04-09T00:00:00+00:00
-updated_at: 2026-04-09T11:01:53+10:00
+updated_at: 2026-04-09T13:33:54+10:00
 ---
 
 ## Summary
@@ -45,3 +45,4 @@ Implement FIND_NODE server handler and iterative lookup client in `libp2p/dht/qu
 - This is step 3 in the implementation order from ZEI-20
 - Spec reference: peer routing algorithm in `reference/libp2p-specs/kad-dht/README.md`
 - "Implementations may diverge from this base algorithm as long as they adhere to the wire format and make progress towards the target key"
+- Current implementation boundary: `ZEI-83` owns `libp2p/dht/query.zig`, the inbound `/kad/1.0.0` request loop, `FIND_NODE` request/response handling, iterative lookup with bounded `alpha`, and Kad-learned peerbook/routing-table updates; bootstrap refresh stays with `ZEI-84`

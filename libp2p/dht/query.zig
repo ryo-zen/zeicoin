@@ -1,0 +1,958 @@
+const std = @import("std");
+const libp2p = @import("../api.zig");
+const routing_table_mod = @import("routing_table.zig");
+const kad = @import("message.zig");
+const address_book_mod = @import("../peer/address_book.zig");
+
+const Multiaddr = libp2p.Multiaddr;
+const Host = libp2p.Host;
+const PeerId = libp2p.PeerId;
+const AddressBook = libp2p.AddressBook;
+const ConnInfo = libp2p.ConnInfo;
+const yamux = libp2p.yamux;
+
+pub const alpha_default: usize = 10;
+pub const bucket_size: usize = routing_table_mod.bucket_size;
+pub const refresh_interval_default_ms: u64 = 10 * 60 * 1000;
+pub const query_timeout_default_ms: u64 = 10 * 1000;
+
+pub const BootstrapRunResult = struct {
+    lookups_started: usize = 0,
+    timed_out: bool = false,
+};
+
+pub const PeerInfo = struct {
+    peer_id: []u8,
+    addrs: std.array_list.Managed([]u8),
+    connection: routing_table_mod.ConnectionType,
+
+    pub fn init(allocator: std.mem.Allocator) PeerInfo {
+        return .{
+            .peer_id = &.{},
+            .addrs = std.array_list.Managed([]u8).init(allocator),
+            .connection = .not_connected,
+        };
+    }
+
+    pub fn deinit(self: *PeerInfo, allocator: std.mem.Allocator) void {
+        if (self.peer_id.len > 0) allocator.free(self.peer_id);
+        address_book_mod.freeOwnedSlices(allocator, &self.addrs);
+    }
+
+    pub fn clone(self: *const PeerInfo, allocator: std.mem.Allocator) !PeerInfo {
+        var out = PeerInfo.init(allocator);
+        errdefer out.deinit(allocator);
+        out.peer_id = try allocator.dupe(u8, self.peer_id);
+        out.connection = self.connection;
+        for (self.addrs.items) |addr| try out.addrs.append(try allocator.dupe(u8, addr));
+        return out;
+    }
+};
+
+pub const LookupResult = struct {
+    peers: std.array_list.Managed(PeerInfo),
+
+    pub fn deinit(self: *LookupResult, allocator: std.mem.Allocator) void {
+        for (self.peers.items) |*peer| peer.deinit(allocator);
+        self.peers.deinit();
+    }
+};
+
+const Candidate = struct {
+    peer: PeerInfo,
+    distance: [32]u8,
+    queried: bool,
+    responded: bool,
+
+    fn deinit(self: *Candidate, allocator: std.mem.Allocator) void {
+        self.peer.deinit(allocator);
+    }
+};
+
+const CandidateDistance = struct {
+    fn lessThan(_: void, lhs: Candidate, rhs: Candidate) bool {
+        return std.mem.order(u8, &lhs.distance, &rhs.distance) == .lt;
+    }
+};
+
+pub const QueryService = struct {
+    allocator: std.mem.Allocator,
+    host: *Host,
+    routing_table: *routing_table_mod.RoutingTable,
+    address_book: *AddressBook,
+    mode: routing_table_mod.KadMode,
+    alpha: usize,
+    refresh_interval_ms: u64,
+    query_timeout_ms: u64,
+    lookup_override: ?*const fn (service: *Self, io: std.Io, target_peer_id: []const u8, userdata: ?*anyopaque) anyerror!LookupResult,
+    lookup_override_userdata: ?*anyopaque,
+    clock_ms_fn: *const fn (userdata: ?*anyopaque) u64,
+    clock_userdata: ?*anyopaque,
+
+    const Self = @This();
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        host: *Host,
+        routing_table: *routing_table_mod.RoutingTable,
+        address_book: *AddressBook,
+        mode: routing_table_mod.KadMode,
+    ) Self {
+        return .{
+            .allocator = allocator,
+            .host = host,
+            .routing_table = routing_table,
+            .address_book = address_book,
+            .mode = mode,
+            .alpha = alpha_default,
+            .refresh_interval_ms = refresh_interval_default_ms,
+            .query_timeout_ms = query_timeout_default_ms,
+            .lookup_override = null,
+            .lookup_override_userdata = null,
+            .clock_ms_fn = defaultClockMs,
+            .clock_userdata = null,
+        };
+    }
+
+    pub fn register(self: *Self) !void {
+        if (self.mode != .server) return;
+        if (self.host.registry.has(kad.PROTOCOL_ID)) return;
+        try self.host.setStreamHandler(kad.PROTOCOL_ID, .{
+            .func = inboundHandler,
+            .userdata = self,
+        });
+    }
+
+    pub fn sendFindNode(
+        self: *Self,
+        io: std.Io,
+        peer: *const PeerInfo,
+        target_peer_id: []const u8,
+    ) !kad.Message {
+        const session = try self.dialPeer(io, peer);
+        var stream = try self.host.newStream(io, session, kad.PROTOCOL_ID);
+        defer stream.deinit();
+
+        var request = kad.Message.init(self.allocator);
+        defer request.deinit(self.allocator);
+        request.type = .FIND_NODE;
+        request.key = try self.allocator.dupe(u8, target_peer_id);
+
+        try kad.sendRequest(self.allocator, io, &stream, &request);
+        const response = kad.readResponse(self.allocator, io, &stream) catch |err| {
+            stream.close() catch {};
+            return err;
+        };
+        try stream.close();
+        return response;
+    }
+
+    pub fn iterativeFindNode(
+        self: *Self,
+        io: std.Io,
+        target_peer_id: []const u8,
+    ) !LookupResult {
+        var candidates = std.array_list.Managed(Candidate).init(self.allocator);
+        defer {
+            for (candidates.items) |*candidate| candidate.deinit(self.allocator);
+            candidates.deinit();
+        }
+
+        var seeds = try self.routing_table.closestPeers(self.allocator, target_peer_id, bucket_size);
+        defer {
+            for (seeds.items) |*snapshot| snapshot.deinit(self.allocator);
+            seeds.deinit();
+        }
+        for (seeds.items) |*snapshot| {
+            var info = try peerInfoFromSnapshot(self.allocator, snapshot);
+            errdefer info.deinit(self.allocator);
+            try insertOrMergeCandidate(self.allocator, &candidates, target_peer_id, info);
+        }
+
+        while (true) {
+            if (candidates.items.len == 0) break;
+            if (topClosestResponded(candidates.items)) break;
+
+            var batch = std.array_list.Managed(usize).init(self.allocator);
+            defer batch.deinit();
+
+            for (candidates.items, 0..) |*candidate, index| {
+                if (candidate.queried) continue;
+                candidate.queried = true;
+                try batch.append(index);
+                if (batch.items.len == self.alpha) break;
+            }
+
+            if (batch.items.len == 0) break;
+
+            const Task = struct {
+                service: *Self,
+                peer: PeerInfo,
+                target_peer_id: []u8,
+                io: std.Io,
+
+                fn run(task: *@This()) anyerror!kad.Message {
+                    defer task.peer.deinit(task.service.allocator);
+                    defer task.service.allocator.free(task.target_peer_id);
+                    return try task.service.sendFindNode(task.io, &task.peer, task.target_peer_id);
+                }
+            };
+
+            var tasks = try self.allocator.alloc(Task, batch.items.len);
+            defer self.allocator.free(tasks);
+            var futures = try self.allocator.alloc(@TypeOf(try io.concurrent(Task.run, .{&tasks[0]})), batch.items.len);
+            defer self.allocator.free(futures);
+
+            for (batch.items, 0..) |candidate_index, batch_index| {
+                tasks[batch_index] = .{
+                    .service = self,
+                    .peer = try candidates.items[candidate_index].peer.clone(self.allocator),
+                    .target_peer_id = try self.allocator.dupe(u8, target_peer_id),
+                    .io = io,
+                };
+                futures[batch_index] = try io.concurrent(Task.run, .{&tasks[batch_index]});
+            }
+
+            for (batch.items, 0..) |candidate_index, batch_index| {
+                var response = futures[batch_index].await(io) catch continue;
+                defer response.deinit(self.allocator);
+
+                candidates.items[candidate_index].responded = true;
+                try self.upsertRoutingPeer(
+                    candidates.items[candidate_index].peer.peer_id,
+                    candidates.items[candidate_index].peer.addrs.items,
+                    candidates.items[candidate_index].peer.connection,
+                );
+
+                for (response.closer_peers.items) |*wire_peer| {
+                    var peer = try peerInfoFromWire(self.allocator, wire_peer);
+                    errdefer peer.deinit(self.allocator);
+                    if (std.mem.eql(u8, peer.peer_id, self.host.identity.peer_id.toString())) {
+                        peer.deinit(self.allocator);
+                        continue;
+                    }
+                    try self.learnDiscoveredPeer(&peer);
+                    try insertOrMergeCandidate(self.allocator, &candidates, target_peer_id, peer);
+                }
+            }
+        }
+
+        var out = LookupResult{
+            .peers = std.array_list.Managed(PeerInfo).init(self.allocator),
+        };
+        errdefer out.deinit(self.allocator);
+
+        const limit = @min(bucket_size, candidates.items.len);
+        for (candidates.items[0..limit]) |*candidate| {
+            try out.peers.append(try candidate.peer.clone(self.allocator));
+        }
+
+        return out;
+    }
+
+    pub fn bootstrapOnce(self: *Self, io: std.Io) !BootstrapRunResult {
+        const start_ms = self.clock_ms_fn(self.clock_userdata);
+        var result = BootstrapRunResult{};
+
+        try self.performBootstrapLookup(io, self.host.identity.peer_id.getBytes(), &result);
+        if (self.clock_ms_fn(self.clock_userdata) - start_ms >= self.query_timeout_ms) {
+            result.timed_out = true;
+            return result;
+        }
+
+        var buckets = try self.routing_table.nonEmptyBucketIndices(self.allocator);
+        defer buckets.deinit();
+
+        for (buckets.items, 0..) |bucket_index, ordinal| {
+            if (self.clock_ms_fn(self.clock_userdata) - start_ms >= self.query_timeout_ms) {
+                result.timed_out = true;
+                break;
+            }
+
+            const prefix = try std.fmt.allocPrint(self.allocator, "kad-refresh-{x}-{d}", .{
+                start_ms,
+                bucket_index,
+            });
+            defer self.allocator.free(prefix);
+
+            const refresh_peer_id = try self.routing_table.allocRefreshPeerIdForBucket(
+                self.allocator,
+                prefix,
+                bucket_index,
+                ordinal,
+            );
+            defer self.allocator.free(refresh_peer_id);
+
+            try self.performBootstrapLookup(io, refresh_peer_id, &result);
+
+            if (self.clock_ms_fn(self.clock_userdata) - start_ms >= self.query_timeout_ms) {
+                result.timed_out = true;
+                break;
+            }
+        }
+
+        return result;
+    }
+
+    pub fn refreshLoop(self: *Self, io: std.Io, stop: *const std.atomic.Value(bool)) !void {
+        _ = try self.bootstrapOnce(io);
+
+        while (!stop.load(.acquire)) {
+            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(@intCast(self.refresh_interval_ms)), .awake) catch |err| switch (err) {
+                error.Canceled => return,
+                else => return err,
+            };
+            if (stop.load(.acquire)) break;
+            _ = self.bootstrapOnce(io) catch {};
+        }
+    }
+
+    fn inboundHandler(stream: *yamux.Stream, conn_info: ConnInfo, userdata: ?*anyopaque) anyerror!void {
+        const self: *Self = @ptrCast(@alignCast(userdata.?));
+        if (self.mode != .server) return error.NotServerMode;
+
+        defer stream.close() catch {};
+
+        if (conn_info.remote_peer_id) |remote_peer_id| {
+            if (conn_info.remote_addr) |remote_addr| {
+                const observed = try formatIpAddressAsMultiaddr(self.allocator, remote_addr);
+                defer self.allocator.free(observed);
+                try self.address_book.learnKadPeer(remote_peer_id.toString(), &[_][]const u8{observed}, nowMs());
+                try self.upsertRoutingPeer(remote_peer_id.toString(), &[_][]const u8{observed}, .connected);
+            }
+        }
+
+        while (true) {
+            var request = kad.readMessageFrame(self.allocator, stream.session.session_io, stream) catch |err| switch (err) {
+                error.EndOfStream => return,
+                else => return err,
+            };
+            defer request.deinit(self.allocator);
+
+            var response = try self.handleRequest(&request);
+            defer if (response) |*msg| msg.deinit(self.allocator);
+
+            if (response) |*msg| {
+                try kad.writeMessageFrame(self.allocator, stream.session.session_io, stream, msg);
+            }
+        }
+    }
+
+    fn handleRequest(self: *Self, request: *const kad.Message) !?kad.Message {
+        switch (request.type) {
+            .FIND_NODE => return try self.handleFindNode(request),
+            .PING => {
+                var response = kad.Message.init(self.allocator);
+                response.type = .PING;
+                if (request.key.len > 0) response.key = try self.allocator.dupe(u8, request.key);
+                return response;
+            },
+            else => return error.UnsupportedKadMessageType,
+        }
+    }
+
+    fn handleFindNode(self: *Self, request: *const kad.Message) !kad.Message {
+        var response = kad.Message.init(self.allocator);
+        errdefer response.deinit(self.allocator);
+
+        response.type = .FIND_NODE;
+        response.key = try self.allocator.dupe(u8, request.key);
+
+        var closest = try self.routing_table.closestPeers(self.allocator, request.key, bucket_size);
+        defer {
+            for (closest.items) |*snapshot| snapshot.deinit(self.allocator);
+            closest.deinit();
+        }
+
+        for (closest.items) |*snapshot| {
+            var peer = try wirePeerFromSnapshot(self.allocator, snapshot);
+            errdefer peer.deinit(self.allocator);
+            try response.closer_peers.append(peer);
+        }
+
+        return response;
+    }
+
+    fn dialPeer(self: *Self, io: std.Io, peer: *const PeerInfo) !*yamux.Session {
+        var last_err: ?anyerror = null;
+        for (peer.addrs.items) |addr_text| {
+            var multiaddr = Multiaddr.create(self.allocator, addr_text) catch |err| {
+                last_err = err;
+                continue;
+            };
+            defer multiaddr.deinit();
+
+            const session = self.host.dial(io, &multiaddr) catch |err| {
+                last_err = err;
+                continue;
+            };
+            return session;
+        }
+        return last_err orelse error.NoDialableAddress;
+    }
+
+    fn learnDiscoveredPeer(self: *Self, peer: *const PeerInfo) !void {
+        try self.address_book.learnKadPeer(peer.peer_id, peer.addrs.items, nowMs());
+        try self.upsertRoutingPeer(peer.peer_id, peer.addrs.items, peer.connection);
+    }
+
+    fn performBootstrapLookup(self: *Self, io: std.Io, target_peer_id: []const u8, result: *BootstrapRunResult) !void {
+        result.lookups_started += 1;
+        var lookup = try self.runLookup(io, target_peer_id);
+        defer lookup.deinit(self.allocator);
+    }
+
+    fn runLookup(self: *Self, io: std.Io, target_peer_id: []const u8) !LookupResult {
+        if (self.lookup_override) |override| {
+            return try override(self, io, target_peer_id, self.lookup_override_userdata);
+        }
+        return try self.iterativeFindNode(io, target_peer_id);
+    }
+
+    fn upsertRoutingPeer(
+        self: *Self,
+        peer_id: []const u8,
+        addrs: []const []const u8,
+        connection: routing_table_mod.ConnectionType,
+    ) !void {
+        const result = try self.routing_table.insertOrUpdate(
+            peer_id,
+            addrs,
+            .server,
+            connection,
+            nowMs(),
+        );
+        switch (result) {
+            .pending_eviction => |pending| try self.routing_table.keepIncumbent(pending.bucket_index, pending.incumbent_peer_id),
+            else => {},
+        }
+    }
+};
+
+fn defaultClockMs(_: ?*anyopaque) u64 {
+    return nowMs();
+}
+
+fn topClosestResponded(candidates: []const Candidate) bool {
+    const limit = @min(bucket_size, candidates.len);
+    if (limit == 0) return false;
+    for (candidates[0..limit]) |candidate| {
+        if (!candidate.responded) return false;
+    }
+    return true;
+}
+
+fn insertOrMergeCandidate(
+    allocator: std.mem.Allocator,
+    candidates: *std.array_list.Managed(Candidate),
+    target_peer_id: []const u8,
+    peer_in: PeerInfo,
+) !void {
+    var peer = peer_in;
+    errdefer peer.deinit(allocator);
+
+    for (candidates.items) |*candidate| {
+        if (!std.mem.eql(u8, candidate.peer.peer_id, peer.peer_id)) continue;
+        try mergePeerAddrs(allocator, &candidate.peer.addrs, peer.addrs.items);
+        if (@intFromEnum(peer.connection) > @intFromEnum(candidate.peer.connection)) {
+            candidate.peer.connection = peer.connection;
+        }
+        var owned = peer;
+        owned.deinit(allocator);
+        return;
+    }
+
+    try candidates.append(.{
+        .peer = peer,
+        .distance = routing_table_mod.xorDistance(
+            routing_table_mod.hashKey(target_peer_id),
+            routing_table_mod.hashKey(peer.peer_id),
+        ),
+        .queried = false,
+        .responded = false,
+    });
+    std.sort.block(Candidate, candidates.items, {}, CandidateDistance.lessThan);
+}
+
+fn mergePeerAddrs(
+    allocator: std.mem.Allocator,
+    owned: *std.array_list.Managed([]u8),
+    addrs: []const []const u8,
+) !void {
+    for (addrs) |addr| {
+        for (owned.items) |existing| {
+            if (std.mem.eql(u8, existing, addr)) break;
+        } else {
+            try owned.append(try allocator.dupe(u8, addr));
+        }
+    }
+}
+
+fn peerInfoFromSnapshot(allocator: std.mem.Allocator, snapshot: *const routing_table_mod.PeerSnapshot) !PeerInfo {
+    var out = PeerInfo.init(allocator);
+    errdefer out.deinit(allocator);
+    out.peer_id = try allocator.dupe(u8, snapshot.peer_id);
+    out.connection = snapshot.connection;
+    for (snapshot.addrs.items) |addr| {
+        try out.addrs.append(try allocator.dupe(u8, address_book_mod.transportSlice(addr)));
+    }
+    return out;
+}
+
+fn peerInfoFromWire(allocator: std.mem.Allocator, peer: *const kad.Peer) !PeerInfo {
+    var out = PeerInfo.init(allocator);
+    errdefer out.deinit(allocator);
+
+    out.peer_id = try allocator.dupe(u8, peer.id);
+    out.connection = connectionFromWire(peer.connection);
+    for (peer.addrs.items) |addr_bytes| {
+        var multiaddr = try Multiaddr.createFromBytes(allocator, addr_bytes);
+        defer multiaddr.deinit();
+        try out.addrs.append(try allocator.dupe(u8, multiaddr.getStringAddress()));
+    }
+    return out;
+}
+
+fn wirePeerFromSnapshot(allocator: std.mem.Allocator, snapshot: *const routing_table_mod.PeerSnapshot) !kad.Peer {
+    var out = kad.Peer.init(allocator);
+    errdefer out.deinit(allocator);
+
+    out.id = try allocator.dupe(u8, snapshot.peer_id);
+    out.connection = connectionToWire(snapshot.connection);
+
+    for (snapshot.addrs.items) |addr_text| {
+        var multiaddr = try Multiaddr.create(allocator, address_book_mod.transportSlice(addr_text));
+        defer multiaddr.deinit();
+        try out.addrs.append(try allocator.dupe(u8, multiaddr.getBytesAddress()));
+    }
+
+    return out;
+}
+
+fn connectionToWire(connection: routing_table_mod.ConnectionType) kad.ConnectionType {
+    return switch (connection) {
+        .not_connected => .NOT_CONNECTED,
+        .connected => .CONNECTED,
+        .can_connect => .CAN_CONNECT,
+        .cannot_connect => .CANNOT_CONNECT,
+    };
+}
+
+fn connectionFromWire(connection: kad.ConnectionType) routing_table_mod.ConnectionType {
+    return switch (connection) {
+        .NOT_CONNECTED => .not_connected,
+        .CONNECTED => .connected,
+        .CAN_CONNECT => .can_connect,
+        .CANNOT_CONNECT => .cannot_connect,
+    };
+}
+
+fn formatIpAddressAsMultiaddr(allocator: std.mem.Allocator, addr: std.Io.net.IpAddress) ![]u8 {
+    return switch (addr) {
+        .ip4 => |a| std.fmt.allocPrint(
+            allocator,
+            "/ip4/{}.{}.{}.{}/tcp/{}",
+            .{ a.bytes[0], a.bytes[1], a.bytes[2], a.bytes[3], a.port },
+        ),
+        .ip6 => |a| blk: {
+            const unresolved: std.Io.net.Ip6Address.Unresolved = .{
+                .bytes = a.bytes,
+                .interface_name = null,
+            };
+            break :blk try std.fmt.allocPrint(allocator, "/ip6/{f}/tcp/{}", .{ unresolved, a.port });
+        },
+    };
+}
+
+fn nowMs() u64 {
+    const io = std.Io.Threaded.global_single_threaded.ioBasic();
+    const now_result = std.Io.Clock.real.now(io);
+    const ts = switch (@typeInfo(@TypeOf(now_result))) {
+        .error_union => now_result catch return 0,
+        else => now_result,
+    };
+    const seconds = ts.toSeconds();
+    if (seconds <= 0) return 0;
+    return @as(u64, @intCast(seconds)) * 1000;
+}
+
+fn freeLookupResult(allocator: std.mem.Allocator, result: *LookupResult) void {
+    result.deinit(allocator);
+}
+
+fn freeBookSnapshot(allocator: std.mem.Allocator, snap: *std.array_list.Managed(address_book_mod.PeerSnapshot)) void {
+    for (snap.items) |entry| {
+        allocator.free(entry.addr);
+        if (entry.peer_id) |peer_id| allocator.free(peer_id);
+    }
+    snap.deinit();
+}
+
+const BootstrapTraceCtx = struct {
+    allocator: std.mem.Allocator,
+    calls: std.array_list.Managed([]u8),
+    clock_ms: u64 = 1_000,
+    advance_per_lookup_ms: u64 = 0,
+    run_count: usize = 0,
+    stop_after_runs: ?usize = null,
+    stop_flag: ?*std.atomic.Value(bool) = null,
+
+    fn init(allocator: std.mem.Allocator) BootstrapTraceCtx {
+        return .{
+            .allocator = allocator,
+            .calls = std.array_list.Managed([]u8).init(allocator),
+        };
+    }
+
+    fn deinit(self: *BootstrapTraceCtx) void {
+        address_book_mod.freeOwnedSlices(self.allocator, &self.calls);
+    }
+};
+
+fn traceClockMs(userdata: ?*anyopaque) u64 {
+    const ctx: *BootstrapTraceCtx = @ptrCast(@alignCast(userdata.?));
+    return ctx.clock_ms;
+}
+
+fn traceLookupOverride(
+    service: *QueryService,
+    _: std.Io,
+    target_peer_id: []const u8,
+    userdata: ?*anyopaque,
+) !LookupResult {
+    const ctx: *BootstrapTraceCtx = @ptrCast(@alignCast(userdata.?));
+    try ctx.calls.append(try ctx.allocator.dupe(u8, target_peer_id));
+
+    if (std.mem.eql(u8, target_peer_id, service.host.identity.peer_id.getBytes())) {
+        ctx.run_count += 1;
+        if (ctx.stop_after_runs) |limit| {
+            if (ctx.run_count >= limit) {
+                if (ctx.stop_flag) |stop| {
+                    stop.store(true, .release);
+                }
+            }
+        }
+    }
+
+    ctx.clock_ms += ctx.advance_per_lookup_ms;
+    return .{ .peers = std.array_list.Managed(PeerInfo).init(ctx.allocator) };
+}
+
+test "kad bootstrap once runs self lookup then one lookup per non-empty bucket" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host = Host.init(allocator, try libp2p.IdentityKey.generate(allocator, io));
+    defer host.deinit();
+    var book = try AddressBook.init(allocator, host.identity.peer_id.toString());
+    defer book.deinit();
+    var table = try routing_table_mod.RoutingTable.init(allocator, host.identity.peer_id.toString());
+    defer table.deinit();
+
+    _ = try table.insertOrUpdate("peer-a", &[_][]const u8{"/ip4/127.0.0.1/tcp/23011"}, .server, .connected, 1000);
+    _ = try table.insertOrUpdate("peer-b", &[_][]const u8{"/ip4/127.0.0.1/tcp/23012"}, .server, .connected, 1000);
+    _ = try table.insertOrUpdate("peer-c", &[_][]const u8{"/ip4/127.0.0.1/tcp/23013"}, .server, .connected, 1000);
+
+    var service = QueryService.init(allocator, &host, &table, &book, .server);
+    var trace = BootstrapTraceCtx.init(allocator);
+    defer trace.deinit();
+    service.lookup_override = traceLookupOverride;
+    service.lookup_override_userdata = &trace;
+    service.clock_ms_fn = traceClockMs;
+    service.clock_userdata = &trace;
+
+    var non_empty = try table.nonEmptyBucketIndices(allocator);
+    defer non_empty.deinit();
+
+    const run = try service.bootstrapOnce(io);
+    try std.testing.expectEqual(@as(usize, 1 + non_empty.items.len), run.lookups_started);
+    try std.testing.expect(!run.timed_out);
+    try std.testing.expectEqual(@as(usize, 1 + non_empty.items.len), trace.calls.items.len);
+    try std.testing.expectEqualSlices(u8, host.identity.peer_id.getBytes(), trace.calls.items[0]);
+
+    for (trace.calls.items[1..], non_empty.items) |target_peer_id, bucket_index| {
+        try std.testing.expectEqual(bucket_index, try table.bucketIndexForPeer(target_peer_id));
+    }
+}
+
+test "kad refresh loop runs bootstrap on startup then periodically" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host = Host.init(allocator, try libp2p.IdentityKey.generate(allocator, io));
+    defer host.deinit();
+    var book = try AddressBook.init(allocator, host.identity.peer_id.toString());
+    defer book.deinit();
+    var table = try routing_table_mod.RoutingTable.init(allocator, host.identity.peer_id.toString());
+    defer table.deinit();
+    _ = try table.insertOrUpdate("peer-a", &[_][]const u8{"/ip4/127.0.0.1/tcp/23111"}, .server, .connected, 1000);
+
+    var service = QueryService.init(allocator, &host, &table, &book, .server);
+    service.refresh_interval_ms = 1;
+
+    var trace = BootstrapTraceCtx.init(allocator);
+    defer trace.deinit();
+    var stop = std.atomic.Value(bool).init(false);
+    trace.stop_after_runs = 2;
+    trace.stop_flag = &stop;
+    service.lookup_override = traceLookupOverride;
+    service.lookup_override_userdata = &trace;
+    service.clock_ms_fn = traceClockMs;
+    service.clock_userdata = &trace;
+
+    try service.refreshLoop(io, &stop);
+    try std.testing.expectEqual(@as(usize, 2), trace.run_count);
+}
+
+test "kad bootstrap once aborts when query timeout is exhausted" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host = Host.init(allocator, try libp2p.IdentityKey.generate(allocator, io));
+    defer host.deinit();
+    var book = try AddressBook.init(allocator, host.identity.peer_id.toString());
+    defer book.deinit();
+    var table = try routing_table_mod.RoutingTable.init(allocator, host.identity.peer_id.toString());
+    defer table.deinit();
+
+    _ = try table.insertOrUpdate("peer-a", &[_][]const u8{"/ip4/127.0.0.1/tcp/23211"}, .server, .connected, 1000);
+    _ = try table.insertOrUpdate("peer-b", &[_][]const u8{"/ip4/127.0.0.1/tcp/23212"}, .server, .connected, 1000);
+
+    var service = QueryService.init(allocator, &host, &table, &book, .server);
+    service.query_timeout_ms = 10;
+
+    var trace = BootstrapTraceCtx.init(allocator);
+    defer trace.deinit();
+    trace.advance_per_lookup_ms = 11;
+    service.lookup_override = traceLookupOverride;
+    service.lookup_override_userdata = &trace;
+    service.clock_ms_fn = traceClockMs;
+    service.clock_userdata = &trace;
+
+    const run = try service.bootstrapOnce(io);
+    try std.testing.expect(run.timed_out);
+    try std.testing.expectEqual(@as(usize, 1), run.lookups_started);
+    try std.testing.expectEqual(@as(usize, 1), trace.calls.items.len);
+    try std.testing.expectEqualSlices(u8, host.identity.peer_id.getBytes(), trace.calls.items[0]);
+}
+
+test "kad query service handles repeated find node requests on one stream" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var server = Host.init(allocator, try libp2p.IdentityKey.generate(allocator, io));
+    defer server.deinit();
+    var server_book = try AddressBook.init(allocator, server.identity.peer_id.toString());
+    defer server_book.deinit();
+    var server_table = try routing_table_mod.RoutingTable.init(allocator, server.identity.peer_id.toString());
+    defer server_table.deinit();
+
+    _ = try server_table.insertOrUpdate("peer-a", &[_][]const u8{"/ip4/127.0.0.1/tcp/22011"}, .server, .connected, 1000);
+    _ = try server_table.insertOrUpdate("peer-b", &[_][]const u8{"/ip4/127.0.0.1/tcp/22012"}, .server, .connected, 1000);
+    _ = try server_table.insertOrUpdate("peer-c", &[_][]const u8{"/ip4/127.0.0.1/tcp/22013"}, .server, .connected, 1000);
+
+    var service = QueryService.init(allocator, &server, &server_table, &server_book, .server);
+    try service.register();
+
+    var listen_addr = try Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/22010");
+    defer listen_addr.deinit();
+    try server.listen(io, &listen_addr);
+
+    var serve_future = try io.concurrent(Host.serve, .{ &server, io });
+    defer {
+        _ = serve_future.cancel(io) catch {};
+        serve_future.await(io) catch {};
+    }
+
+    var client = Host.init(allocator, try libp2p.IdentityKey.generate(allocator, io));
+    defer client.deinit();
+    var client_addr = try Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/22010");
+    defer client_addr.deinit();
+
+    const session = try client.dial(io, &client_addr);
+    var stream = try client.newStream(io, session, kad.PROTOCOL_ID);
+    defer stream.deinit();
+
+    var req_one = kad.Message.init(allocator);
+    defer req_one.deinit(allocator);
+    req_one.type = .FIND_NODE;
+    req_one.key = try allocator.dupe(u8, "target-one");
+
+    var req_two = kad.Message.init(allocator);
+    defer req_two.deinit(allocator);
+    req_two.type = .FIND_NODE;
+    req_two.key = try allocator.dupe(u8, "target-two");
+
+    try kad.writeMessageFrame(allocator, io, &stream, &req_one);
+    try kad.writeMessageFrame(allocator, io, &stream, &req_two);
+
+    var resp_one = try kad.readMessageFrame(allocator, io, &stream);
+    defer resp_one.deinit(allocator);
+    var resp_two = try kad.readMessageFrame(allocator, io, &stream);
+    defer resp_two.deinit(allocator);
+
+    try std.testing.expectEqual(kad.MessageType.FIND_NODE, resp_one.type);
+    try std.testing.expectEqual(kad.MessageType.FIND_NODE, resp_two.type);
+    try std.testing.expectEqualStrings("target-one", resp_one.key);
+    try std.testing.expectEqualStrings("target-two", resp_two.key);
+    try std.testing.expect(resp_one.closer_peers.items.len > 0);
+    try std.testing.expect(resp_two.closer_peers.items.len > 0);
+    try stream.close();
+}
+
+test "kad iterative find node converges and learns discovered peers" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var b = Host.init(allocator, try libp2p.IdentityKey.generate(allocator, io));
+    defer b.deinit();
+    var b_book = try AddressBook.init(allocator, b.identity.peer_id.toString());
+    defer b_book.deinit();
+    var b_table = try routing_table_mod.RoutingTable.init(allocator, b.identity.peer_id.toString());
+    defer b_table.deinit();
+    var b_service = QueryService.init(allocator, &b, &b_table, &b_book, .server);
+    try b_service.register();
+    var b_addr = try Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/22111");
+    defer b_addr.deinit();
+    try b.listen(io, &b_addr);
+    var b_future = try io.concurrent(Host.serve, .{ &b, io });
+    defer {
+        _ = b_future.cancel(io) catch {};
+        b_future.await(io) catch {};
+    }
+
+    var c = Host.init(allocator, try libp2p.IdentityKey.generate(allocator, io));
+    defer c.deinit();
+    var c_book = try AddressBook.init(allocator, c.identity.peer_id.toString());
+    defer c_book.deinit();
+    var c_table = try routing_table_mod.RoutingTable.init(allocator, c.identity.peer_id.toString());
+    defer c_table.deinit();
+    var c_service = QueryService.init(allocator, &c, &c_table, &c_book, .server);
+    try c_service.register();
+    var c_addr = try Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/22112");
+    defer c_addr.deinit();
+    try c.listen(io, &c_addr);
+    var c_future = try io.concurrent(Host.serve, .{ &c, io });
+    defer {
+        _ = c_future.cancel(io) catch {};
+        c_future.await(io) catch {};
+    }
+
+    var d = Host.init(allocator, try libp2p.IdentityKey.generate(allocator, io));
+    defer d.deinit();
+    var d_book = try AddressBook.init(allocator, d.identity.peer_id.toString());
+    defer d_book.deinit();
+    var d_table = try routing_table_mod.RoutingTable.init(allocator, d.identity.peer_id.toString());
+    defer d_table.deinit();
+    var d_service = QueryService.init(allocator, &d, &d_table, &d_book, .server);
+    try d_service.register();
+    var d_addr = try Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/22113");
+    defer d_addr.deinit();
+    try d.listen(io, &d_addr);
+    var d_future = try io.concurrent(Host.serve, .{ &d, io });
+    defer {
+        _ = d_future.cancel(io) catch {};
+        d_future.await(io) catch {};
+    }
+
+    var e = Host.init(allocator, try libp2p.IdentityKey.generate(allocator, io));
+    defer e.deinit();
+    var e_book = try AddressBook.init(allocator, e.identity.peer_id.toString());
+    defer e_book.deinit();
+    var e_table = try routing_table_mod.RoutingTable.init(allocator, e.identity.peer_id.toString());
+    defer e_table.deinit();
+    var e_service = QueryService.init(allocator, &e, &e_table, &e_book, .server);
+    try e_service.register();
+    var e_addr = try Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/22114");
+    defer e_addr.deinit();
+    try e.listen(io, &e_addr);
+    var e_future = try io.concurrent(Host.serve, .{ &e, io });
+    defer {
+        _ = e_future.cancel(io) catch {};
+        e_future.await(io) catch {};
+    }
+
+    _ = try b_table.insertOrUpdate(c.identity.peer_id.toString(), &[_][]const u8{"/ip4/127.0.0.1/tcp/22112"}, .server, .can_connect, 1000);
+    _ = try b_table.insertOrUpdate(d.identity.peer_id.toString(), &[_][]const u8{"/ip4/127.0.0.1/tcp/22113"}, .server, .connected, 1000);
+
+    _ = try c_table.insertOrUpdate(d.identity.peer_id.toString(), &[_][]const u8{"/ip4/127.0.0.1/tcp/22113"}, .server, .connected, 1000);
+    _ = try c_table.insertOrUpdate(e.identity.peer_id.toString(), &[_][]const u8{"/ip4/127.0.0.1/tcp/22114"}, .server, .connected, 1000);
+
+    _ = try d_table.insertOrUpdate(e.identity.peer_id.toString(), &[_][]const u8{"/ip4/127.0.0.1/tcp/22114"}, .server, .connected, 1000);
+
+    var client = Host.init(allocator, try libp2p.IdentityKey.generate(allocator, io));
+    defer client.deinit();
+    var client_book = try AddressBook.init(allocator, client.identity.peer_id.toString());
+    defer client_book.deinit();
+    var client_table = try routing_table_mod.RoutingTable.init(allocator, client.identity.peer_id.toString());
+    defer client_table.deinit();
+
+    _ = try client_table.insertOrUpdate(b.identity.peer_id.toString(), &[_][]const u8{"/ip4/127.0.0.1/tcp/22111"}, .server, .can_connect, 1000);
+    _ = try client_table.insertOrUpdate(c.identity.peer_id.toString(), &[_][]const u8{"/ip4/127.0.0.1/tcp/22112"}, .server, .can_connect, 1000);
+
+    var client_service = QueryService.init(allocator, &client, &client_table, &client_book, .client);
+    var result = try client_service.iterativeFindNode(io, e.identity.peer_id.getBytes());
+    defer freeLookupResult(allocator, &result);
+
+    var saw_target = false;
+    for (result.peers.items) |peer| {
+        if (std.mem.eql(u8, peer.peer_id, e.identity.peer_id.toString())) saw_target = true;
+    }
+    try std.testing.expect(saw_target);
+
+    var discovered = try client_table.getPeerSnapshot(allocator, e.identity.peer_id.toString());
+    defer if (discovered) |*snapshot| snapshot.deinit(allocator);
+    try std.testing.expect(discovered != null);
+
+    var snap = try client_book.snapshot(allocator);
+    defer freeBookSnapshot(allocator, &snap);
+    var saw_kad = false;
+    for (snap.items) |entry| {
+        if (entry.peer_id) |peer_id| {
+            if (std.mem.eql(u8, peer_id, e.identity.peer_id.toString()) and entry.source.kad) {
+                saw_kad = true;
+            }
+        }
+    }
+    try std.testing.expect(saw_kad);
+}
+
+test "kad iterative find node terminates when known peers are exhausted" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var server = Host.init(allocator, try libp2p.IdentityKey.generate(allocator, io));
+    defer server.deinit();
+    var server_book = try AddressBook.init(allocator, server.identity.peer_id.toString());
+    defer server_book.deinit();
+    var server_table = try routing_table_mod.RoutingTable.init(allocator, server.identity.peer_id.toString());
+    defer server_table.deinit();
+    var server_service = QueryService.init(allocator, &server, &server_table, &server_book, .server);
+    try server_service.register();
+
+    var listen_addr = try Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/22210");
+    defer listen_addr.deinit();
+    try server.listen(io, &listen_addr);
+
+    var serve_future = try io.concurrent(Host.serve, .{ &server, io });
+    defer {
+        _ = serve_future.cancel(io) catch {};
+        serve_future.await(io) catch {};
+    }
+
+    var client = Host.init(allocator, try libp2p.IdentityKey.generate(allocator, io));
+    defer client.deinit();
+    var client_book = try AddressBook.init(allocator, client.identity.peer_id.toString());
+    defer client_book.deinit();
+    var client_table = try routing_table_mod.RoutingTable.init(allocator, client.identity.peer_id.toString());
+    defer client_table.deinit();
+
+    _ = try client_table.insertOrUpdate(server.identity.peer_id.toString(), &[_][]const u8{"/ip4/127.0.0.1/tcp/22210"}, .server, .can_connect, 1000);
+
+    var client_service = QueryService.init(allocator, &client, &client_table, &client_book, .client);
+    var result = try client_service.iterativeFindNode(io, "unreachable-target");
+    defer freeLookupResult(allocator, &result);
+
+    try std.testing.expectEqual(@as(usize, 1), result.peers.items.len);
+    try std.testing.expectEqualStrings(server.identity.peer_id.toString(), result.peers.items[0].peer_id);
+}
