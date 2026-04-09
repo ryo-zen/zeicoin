@@ -3,23 +3,24 @@ id: reorg_safety_and_recovery_hardening
 key: ZEI-70
 title: Reorg safety and recovery hardening
 type: Epic
-status: InProgress
+status: Backlog
 priority: High
 assignee: null
 labels:
-  - consensus
-  - reorg
-  - replay
-  - state-root
-  - mainnet-blocking
+- consensus
+- reorg
+- replay
+- state-root
+- mainnet-blocking
 sprint: null
 story_points: null
 due_date: null
 parent_id: null
-rank: null
+rank: 1775693992672.0
 comments: []
 created_at: 2026-03-30T07:10:22+00:00
-updated_at: 2026-03-30T19:20:50+11:00
+updated_at: 2026-04-09T07:00:50.057766760+00:00
+closed_at: null
 ---
 
 ## Summary

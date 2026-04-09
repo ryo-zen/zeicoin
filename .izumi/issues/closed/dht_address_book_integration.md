@@ -3,7 +3,7 @@ id: dht_address_book_integration
 key: ZEI-85
 title: Integrate DHT as peer discovery source in the address book
 type: Subtask
-status: InProgress
+status: Done
 priority: Medium
 assignee: null
 labels:
@@ -14,10 +14,11 @@ sprint: null
 story_points: null
 due_date: null
 parent_id: kademlia_dht
-rank: null
+rank: 1775709873357.0
 comments: []
 created_at: 2026-04-09T00:00:00+00:00
-updated_at: 2026-04-09T14:44:00+10:00
+updated_at: 2026-04-09T07:46:50.544889334+00:00
+closed_at: 2026-04-09T07:46:50.544889029+00:00
 ---
 
 ## Summary
@@ -26,12 +27,12 @@ Wire the full Kad node into the existing peer discovery pipeline as an additiona
 
 ## Acceptance Criteria
 
-- [ ] DHT-discovered peers added to address book with appropriate source tag
-- [ ] Any time a Peer record is encountered in any RPC, store associated multiaddrs in peerbook (spec requirement)
-- [ ] DHT discovery coexists with existing peer exchange — both sources contribute
-- [ ] Server-mode nodes: advertise `/kad/1.0.0` via identify protocol, accept incoming Kademlia streams
-- [ ] Client-mode nodes: do NOT advertise `/kad/1.0.0`, do NOT accept incoming streams, but may initiate queries
-- [ ] Integration test showing peer discovery via Kad without static bootstrap after initial seed
+- [x] DHT-discovered peers added to address book with appropriate source tag
+- [x] Any time a Peer record is encountered in any RPC, store associated multiaddrs in peerbook (spec requirement)
+- [x] DHT discovery coexists with existing peer exchange — both sources contribute
+- [x] Server-mode nodes: advertise `/kad/1.0.0` via identify protocol, accept incoming Kademlia streams
+- [x] Client-mode nodes: do NOT advertise `/kad/1.0.0`, do NOT accept incoming streams, but may initiate queries
+- [x] Integration test showing peer discovery via Kad without static bootstrap after initial seed
 
 ## Notes
 

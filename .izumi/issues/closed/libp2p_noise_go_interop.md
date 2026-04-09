@@ -3,7 +3,7 @@ id: libp2p_noise_go_interop
 key: ZEI-94
 title: Fix libp2p Noise interoperability with go-libp2p
 type: Task
-status: Backlog
+status: Done
 priority: High
 assignee: null
 labels:
@@ -15,10 +15,11 @@ sprint: null
 story_points: null
 due_date: null
 parent_id: libp2p_kademlia_dht
-rank: null
+rank: 1775711759956.0
 comments: []
 created_at: 2026-04-09T15:05:00+10:00
-updated_at: 2026-04-09T15:05:00+10:00
+updated_at: 2026-04-09T07:50:26.304469883+00:00
+closed_at: 2026-04-09T07:50:26.304469133+00:00
 ---
 
 ## Summary
@@ -27,10 +28,10 @@ Fix the remaining Noise handshake mismatch between ZeiCoin and a real go-libp2p 
 
 ## Acceptance Criteria
 
-- [ ] ZeiCoin can complete a Noise handshake with a real go-libp2p host over TCP
-- [ ] The root cause of the current `AuthenticationFailed` mismatch is documented clearly
-- [ ] The Go interop harness reaches application protocol negotiation after the fix
-- [ ] `zig build test-libp2p` remains green after the compatibility fix
+- [x] ZeiCoin can complete a Noise handshake with a real go-libp2p host over TCP
+- [x] The root cause of the current `AuthenticationFailed` mismatch is documented clearly
+- [x] The Go interop harness reaches application protocol negotiation after the fix
+- [x] `zig build test-libp2p` remains green after the compatibility fix
 
 ## Notes
 

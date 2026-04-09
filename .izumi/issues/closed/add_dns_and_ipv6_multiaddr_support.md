@@ -18,8 +18,8 @@ parent_id: kademlia_dht
 rank: 1775697307709.0
 comments: []
 created_at: 2026-04-09T11:14:22+10:00
-updated_at: 2026-04-09T02:04:45.384975551+00:00
-closed_at: 2026-04-09T02:04:45.384974657+00:00
+updated_at: 2026-04-09T07:46:50.553156353+00:00
+closed_at: 2026-04-09T07:46:50.553155698+00:00
 ---
 
 ## Summary
@@ -28,12 +28,12 @@ Stop dropping valid non-IPv4 peer addresses. ZeiCoin's current peer discovery pa
 
 ## Acceptance Criteria
 
-- [ ] Peer discovery accepts dialable `/ip4`, `/ip6`, and DNS-based TCP multiaddrs instead of hard-rejecting non-IPv4 addresses
-- [ ] Multiaddr canonicalization and deduplication continue to work across supported address families
-- [ ] Identify self-observation and advertised-address learning no longer discard valid IPv6 or DNS addresses
-- [ ] Host identify responses preserve observed IPv6 addresses when available
-- [ ] Dial-candidate selection ignores only truly unusable addresses, not entire address families
-- [ ] Tests cover learning and preserving IPv6 and DNS multiaddrs through identify and peerbook paths
+- [x] Peer discovery accepts dialable `/ip4`, `/ip6`, and DNS-based TCP multiaddrs instead of hard-rejecting non-IPv4 addresses
+- [x] Multiaddr canonicalization and deduplication continue to work across supported address families
+- [x] Identify self-observation and advertised-address learning no longer discard valid IPv6 or DNS addresses
+- [x] Host identify responses preserve observed IPv6 addresses when available
+- [x] Dial-candidate selection ignores only truly unusable addresses, not entire address families
+- [x] Tests cover learning and preserving IPv6 and DNS multiaddrs through identify and peerbook paths
 
 ## Notes
 

@@ -3,7 +3,7 @@ id: dht_rpc_codec
 key: ZEI-82
 title: Implement Kademlia RPC protobuf codec for /kad/1.0.0
 type: Subtask
-status: InProgress
+status: Done
 priority: High
 assignee: null
 labels:
@@ -17,8 +17,8 @@ parent_id: kademlia_dht
 rank: 1000.0
 comments: []
 created_at: 2026-04-09T00:00:00+00:00
-updated_at: 2026-04-09T13:03:18+10:00
-closed_at: null
+updated_at: 2026-04-09T07:52:26.403560344+00:00
+closed_at: 2026-04-09T07:52:26.403559477+00:00
 ---
 
 ## Summary
@@ -27,15 +27,14 @@ Implement the Kademlia wire protocol codec in `libp2p/dht/message.zig`. Messages
 
 ## Acceptance Criteria
 
-- [ ] Full protobuf schema: `Record` (key, value, timeReceived), `Message` (type, key, record, closerPeers, providerPeers), `Message.Peer` (id, addrs, connection), `ConnectionType` enum, `MessageType` enum
-- [ ] All six MessageTypes: PUT_VALUE(0), GET_VALUE(1), ADD_PROVIDER(2), GET_PROVIDERS(3), FIND_NODE(4), PING(5)
-- [ ] Unsigned-varint length-prefix framing per multiformats unsigned-varint spec
-- [ ] Stream-per-RPC: open stream, send request, read response, close stream. Reset stream on error.
-- [ ] Stream reuse: must handle additional RPC requests on an incoming stream (spec requirement)
-- [ ] Peer info serialization: PeerId bytes + repeated multiaddr bytes + ConnectionType
-- [ ] Record serialization includes `key`, `value`, and `timeReceived`, with unknown protobuf fields ignored safely on decode
-- [ ] PING is deprecated — handle incoming PING for backward compat but never actively send
-- [ ] Unit tests for round-trip encode/decode of all message types
+- [x] Full protobuf schema: `Record` (key, value, timeReceived), `Message` (type, key, record, closerPeers, providerPeers), `Message.Peer` (id, addrs, connection), `ConnectionType` enum, `MessageType` enum
+- [x] All six MessageTypes: PUT_VALUE(0), GET_VALUE(1), ADD_PROVIDER(2), GET_PROVIDERS(3), FIND_NODE(4), PING(5)
+- [x] Unsigned-varint length-prefix framing per multiformats unsigned-varint spec
+- [x] Stream-per-RPC: open stream, send request, read response, close stream. Reset stream on error.
+- [x] Peer info serialization: PeerId bytes + repeated multiaddr bytes + ConnectionType
+- [x] Record serialization includes `key`, `value`, and `timeReceived`, with unknown protobuf fields ignored safely on decode
+- [x] PING is deprecated — handle incoming PING for backward compat but never actively send
+- [x] Unit tests for round-trip encode/decode of all message types
 
 ## Notes
 
@@ -45,3 +44,4 @@ Implement the Kademlia wire protocol codec in `libp2p/dht/message.zig`. Messages
 - `clusterLevelRaw` (field 10) is NOT USED but must be handled in the codec for compat
 - Keep the codec suitable for external interop, not just ZeiCoin-to-ZeiCoin round-trips
 - Current implementation boundary: `ZEI-82` owns protobuf/uvarint codec plus framed Kad message read/write helpers; inbound `/kad/1.0.0` handler loops and request semantics that span multiple RPCs remain with `ZEI-83`
+- Stream reuse on an inbound `/kad/1.0.0` stream is tracked and validated under `ZEI-83`, not `ZEI-82`

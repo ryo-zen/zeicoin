@@ -3,7 +3,7 @@ id: dht_provider_value_records
 key: ZEI-86
 title: Implement Kademlia value and provider record support
 type: Subtask
-status: InProgress
+status: Done
 priority: Low
 assignee: null
 labels:
@@ -14,10 +14,11 @@ sprint: null
 story_points: null
 due_date: null
 parent_id: kademlia_dht
-rank: null
+rank: 1775709881653.0
 comments: []
 created_at: 2026-04-09T00:00:00+00:00
-updated_at: 2026-04-09T14:44:00+10:00
+updated_at: 2026-04-09T07:46:50.545865660+00:00
+closed_at: 2026-04-09T07:46:50.545865402+00:00
 ---
 
 ## Summary
@@ -26,16 +27,16 @@ Implement the full Kad record layer for `/kad/1.0.0`: `PUT_VALUE`, `GET_VALUE`, 
 
 ## Acceptance Criteria
 
-- [ ] Local record store implemented for Kad values and provider records
-- [ ] `PUT_VALUE` validates and stores records before acknowledgement
-- [ ] `GET_VALUE` returns the best local record when present plus `closerPeers` from the routing table
-- [ ] Record validation/select logic is explicit so conflicting values can be rejected or ordered deterministically
-- [ ] Republish / refresh behavior implemented for locally originated records
-- [ ] Expiry / garbage-collection behavior implemented for stale values and stale provider records
-- [ ] `ADD_PROVIDER` validates the provided key and only records provider peers matching the RPC sender rules required by the spec
-- [ ] `GET_PROVIDERS` returns known provider peers plus `closerPeers`
-- [ ] Unit tests cover record store behavior, request handlers, expiry, and refresh
-- [ ] Storage behavior is documented clearly enough to support future persistence decisions
+- [x] Local record store implemented for Kad values and provider records
+- [x] `PUT_VALUE` validates and stores records before acknowledgement
+- [x] `GET_VALUE` returns the best local record when present plus `closerPeers` from the routing table
+- [x] Record validation/select logic is explicit so conflicting values can be rejected or ordered deterministically
+- [x] Republish / refresh behavior implemented for locally originated records
+- [x] Expiry / garbage-collection behavior implemented for stale values and stale provider records
+- [x] `ADD_PROVIDER` validates the provided key and only records provider peers matching the RPC sender rules required by the spec
+- [x] `GET_PROVIDERS` returns known provider peers plus `closerPeers`
+- [x] Unit tests cover record store behavior, request handlers, expiry, and refresh
+- [x] Storage behavior is documented clearly enough to support future persistence decisions
 
 ## Notes
 

@@ -3,7 +3,7 @@ id: dht_interoperability_validation
 key: ZEI-90
 title: Validate Kademlia interoperability against an external libp2p implementation
 type: Subtask
-status: InProgress
+status: Done
 priority: Medium
 assignee: null
 labels:
@@ -16,10 +16,11 @@ sprint: null
 story_points: null
 due_date: null
 parent_id: kademlia_dht
-rank: null
+rank: 1775716624264.0
 comments: []
 created_at: 2026-04-09T11:01:53+10:00
-updated_at: 2026-04-09T16:36:00+10:00
+updated_at: 2026-04-09T07:46:50.547749331+00:00
+closed_at: 2026-04-09T07:46:50.547748203+00:00
 ---
 
 ## Summary

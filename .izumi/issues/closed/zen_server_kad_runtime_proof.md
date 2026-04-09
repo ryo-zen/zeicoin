@@ -3,7 +3,7 @@ id: zen_server_kad_runtime_proof
 key: ZEI-98
 title: Validate Kad behavior in the full zen_server runtime
 type: Task
-status: Backlog
+status: Done
 priority: Low
 assignee: null
 labels:
@@ -15,10 +15,11 @@ sprint: null
 story_points: null
 due_date: null
 parent_id: kademlia_dht
-rank: null
+rank: 1775711759957.0
 comments: []
 created_at: 2026-04-09T15:05:00+10:00
-updated_at: 2026-04-09T15:05:00+10:00
+updated_at: 2026-04-09T07:46:50.560295373+00:00
+closed_at: 2026-04-09T07:46:50.560294330+00:00
 ---
 
 ## Summary
@@ -27,10 +28,10 @@ Prove that the Kad discovery path behaves correctly in the actual `zen_server` r
 
 ## Acceptance Criteria
 
-- [ ] Test plan identifies the runtime topology and validation command(s)
-- [ ] `zen_server` nodes can expose and use the Kad discovery path in a controlled test
-- [ ] Discovery and refresh behavior are observed in runtime logs or metrics
-- [ ] Any gaps between `libp2p_testnode` and `zen_server` behavior are documented explicitly
+- [x] Test plan identifies the runtime topology and validation command(s)
+- [x] `zen_server` nodes can expose and use the Kad discovery path in a controlled test
+- [x] Discovery and refresh behavior are observed in runtime logs or metrics
+- [x] Any gaps between `libp2p_testnode` and `zen_server` behavior are documented explicitly
 
 ## Notes
 

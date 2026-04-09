@@ -3,7 +3,7 @@ id: dht_bootstrap_refresh
 key: ZEI-84
 title: Implement DHT bootstrap self-lookup and periodic refresh
 type: Subtask
-status: InProgress
+status: Done
 priority: Medium
 assignee: null
 labels:
@@ -14,10 +14,11 @@ sprint: null
 story_points: null
 due_date: null
 parent_id: kademlia_dht
-rank: null
+rank: 1775706203471.0
 comments: []
 created_at: 2026-04-09T00:00:00+00:00
-updated_at: 2026-04-09T13:43:00+10:00
+updated_at: 2026-04-09T07:46:50.543807138+00:00
+closed_at: 2026-04-09T07:46:50.543806817+00:00
 ---
 
 ## Summary
@@ -26,14 +27,14 @@ Implement the DHT bootstrap procedure and periodic routing table maintenance. On
 
 ## Acceptance Criteria
 
-- [ ] Runs once on startup, then periodically (default: 10 minutes)
-- [ ] On every run: generate a random PeerId for every **non-empty** k-bucket, look it up via FIND_NODE iterative lookup
-- [ ] Include a self-lookup (own PeerId) to improve awareness of nearby nodes
-- [ ] Peers encountered during lookups are inserted into routing table as per normal rules
-- [ ] Each run is subject to QueryTimeout (default: 10 seconds) — abort run on timeout
-- [ ] Refresh interval configurable
-- [ ] Bootstrap process is usable by the full Kad node before value/provider traffic starts
-- [ ] Unit tests for bootstrap sequence, refresh scheduling, and timeout abort
+- [x] Runs once on startup, then periodically (default: 10 minutes)
+- [x] On every run: generate a random PeerId for every **non-empty** k-bucket, look it up via FIND_NODE iterative lookup
+- [x] Include a self-lookup (own PeerId) to improve awareness of nearby nodes
+- [x] Peers encountered during lookups are inserted into routing table as per normal rules
+- [x] Each run is subject to QueryTimeout (default: 10 seconds) — abort run on timeout
+- [x] Refresh interval configurable
+- [x] Bootstrap process is usable by the full Kad node before value/provider traffic starts
+- [x] Unit tests for bootstrap sequence, refresh scheduling, and timeout abort
 
 ## Notes
 
