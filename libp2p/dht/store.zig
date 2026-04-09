@@ -4,6 +4,7 @@ const kad = @import("message.zig");
 pub const max_record_age_ms: u64 = 48 * 60 * 60 * 1000;
 pub const provider_validity_ms: u64 = 48 * 60 * 60 * 1000;
 pub const republish_interval_ms: u64 = 22 * 60 * 60 * 1000;
+pub const zei_namespace = "zei";
 
 pub const RecordOrigin = enum {
     remote,
@@ -123,7 +124,7 @@ pub const Store = struct {
                 return .inserted;
             }
 
-            switch (selectRecord(record.value, entry.record.value)) {
+            switch (try selectRecord(key, record.value, entry.record.value)) {
                 .lt => return .rejected_older,
                 .eq => {
                     entry.stored_at_ms = now_ms;
@@ -342,6 +343,12 @@ fn validateRecordForStore(key: []const u8, record: *const kad.Record) !void {
     if (record.key.len == 0) return error.EmptyKadRecordKey;
     if (!std.mem.eql(u8, key, record.key)) return error.KadRecordKeyMismatch;
     if (record.value.len == 0) return error.EmptyKadRecordValue;
+    const namespace = try recordNamespace(key);
+    if (std.mem.eql(u8, namespace, zei_namespace)) {
+        _ = try parseZeiRecordVersion(record.value);
+        return;
+    }
+    return error.UnsupportedKadRecordNamespace;
 }
 
 fn makeValueEntry(
@@ -414,8 +421,33 @@ fn pruneProviderEntries(set: *ProviderSet, allocator: std.mem.Allocator, now_ms:
     }
 }
 
-fn selectRecord(incoming: []const u8, existing: []const u8) std.math.Order {
-    return std.mem.order(u8, incoming, existing);
+fn selectRecord(key: []const u8, incoming: []const u8, existing: []const u8) !std.math.Order {
+    const namespace = try recordNamespace(key);
+    if (std.mem.eql(u8, namespace, zei_namespace)) {
+        const incoming_version = try parseZeiRecordVersion(incoming);
+        const existing_version = try parseZeiRecordVersion(existing);
+        if (incoming_version < existing_version) return .lt;
+        if (incoming_version > existing_version) return .gt;
+        if (std.mem.eql(u8, incoming, existing)) return .eq;
+        return error.ConflictingKadRecordVersion;
+    }
+    return error.UnsupportedKadRecordNamespace;
+}
+
+fn recordNamespace(key: []const u8) ![]const u8 {
+    if (key.len < 4 or key[0] != '/') return error.UnsupportedKadRecordNamespace;
+    const rest = key[1..];
+    const slash_index = std.mem.indexOfScalar(u8, rest, '/') orelse return error.UnsupportedKadRecordNamespace;
+    if (slash_index == 0) return error.UnsupportedKadRecordNamespace;
+    return rest[0..slash_index];
+}
+
+fn parseZeiRecordVersion(value: []const u8) !u64 {
+    if (!std.mem.startsWith(u8, value, "seq:")) return error.InvalidZeiKadRecordValue;
+    const after_prefix = value[4..];
+    const sep_index = std.mem.indexOfScalar(u8, after_prefix, ':') orelse return error.InvalidZeiKadRecordValue;
+    if (sep_index == 0 or sep_index == after_prefix.len - 1) return error.InvalidZeiKadRecordValue;
+    return std.fmt.parseInt(u64, after_prefix[0..sep_index], 10) catch error.InvalidZeiKadRecordValue;
 }
 
 fn freeOwnedStrings(allocator: std.mem.Allocator, items: *std.array_list.Managed([]u8)) void {
@@ -429,28 +461,51 @@ test "kad store keeps the lexicographically newer record and expires old entries
 
     var first = kad.Record.init();
     defer first.deinit(std.testing.allocator);
-    first.key = try std.testing.allocator.dupe(u8, "record-key");
-    first.value = try std.testing.allocator.dupe(u8, "alpha");
+    first.key = try std.testing.allocator.dupe(u8, "/zei/record-key");
+    first.value = try std.testing.allocator.dupe(u8, "seq:1:alpha");
 
-    try std.testing.expectEqual(PutRecordResult.inserted, try store.putRecord("record-key", &first, 1_000, .remote));
+    try std.testing.expectEqual(PutRecordResult.inserted, try store.putRecord("/zei/record-key", &first, 1_000, .remote));
 
     var older = kad.Record.init();
     defer older.deinit(std.testing.allocator);
-    older.key = try std.testing.allocator.dupe(u8, "record-key");
-    older.value = try std.testing.allocator.dupe(u8, "aardvark");
-    try std.testing.expectEqual(PutRecordResult.rejected_older, try store.putRecord("record-key", &older, 2_000, .remote));
+    older.key = try std.testing.allocator.dupe(u8, "/zei/record-key");
+    older.value = try std.testing.allocator.dupe(u8, "seq:0:older");
+    try std.testing.expectEqual(PutRecordResult.rejected_older, try store.putRecord("/zei/record-key", &older, 2_000, .remote));
 
     var newer = kad.Record.init();
     defer newer.deinit(std.testing.allocator);
-    newer.key = try std.testing.allocator.dupe(u8, "record-key");
-    newer.value = try std.testing.allocator.dupe(u8, "zulu");
-    try std.testing.expectEqual(PutRecordResult.replaced, try store.putRecord("record-key", &newer, 3_000, .remote));
+    newer.key = try std.testing.allocator.dupe(u8, "/zei/record-key");
+    newer.value = try std.testing.allocator.dupe(u8, "seq:2:zulu");
+    try std.testing.expectEqual(PutRecordResult.replaced, try store.putRecord("/zei/record-key", &newer, 3_000, .remote));
 
-    var stored = (try store.getRecord(std.testing.allocator, "record-key", 3_000)).?;
+    var stored = (try store.getRecord(std.testing.allocator, "/zei/record-key", 3_000)).?;
     defer stored.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("zulu", stored.value);
+    try std.testing.expectEqualStrings("seq:2:zulu", stored.value);
 
-    try std.testing.expect((try store.getRecord(std.testing.allocator, "record-key", 3_000 + max_record_age_ms + 1)) == null);
+    try std.testing.expect((try store.getRecord(std.testing.allocator, "/zei/record-key", 3_000 + max_record_age_ms + 1)) == null);
+}
+
+test "kad store rejects unsupported namespaces and conflicting same-version zei values" {
+    var store = Store.init(std.testing.allocator);
+    defer store.deinit();
+
+    var unsupported = kad.Record.init();
+    defer unsupported.deinit(std.testing.allocator);
+    unsupported.key = try std.testing.allocator.dupe(u8, "plain-key");
+    unsupported.value = try std.testing.allocator.dupe(u8, "seq:1:value");
+    try std.testing.expectError(error.UnsupportedKadRecordNamespace, store.putRecord("plain-key", &unsupported, 1_000, .remote));
+
+    var first = kad.Record.init();
+    defer first.deinit(std.testing.allocator);
+    first.key = try std.testing.allocator.dupe(u8, "/zei/conflict");
+    first.value = try std.testing.allocator.dupe(u8, "seq:7:alpha");
+    try std.testing.expectEqual(PutRecordResult.inserted, try store.putRecord("/zei/conflict", &first, 1_000, .remote));
+
+    var conflicting = kad.Record.init();
+    defer conflicting.deinit(std.testing.allocator);
+    conflicting.key = try std.testing.allocator.dupe(u8, "/zei/conflict");
+    conflicting.value = try std.testing.allocator.dupe(u8, "seq:7:beta");
+    try std.testing.expectError(error.ConflictingKadRecordVersion, store.putRecord("/zei/conflict", &conflicting, 2_000, .remote));
 }
 
 test "kad store tracks provider expiry and local republish eligibility" {
