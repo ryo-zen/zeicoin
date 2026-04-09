@@ -7,6 +7,7 @@ const address_book_mod = @import("peer/address_book.zig");
 const noise_proto = @import("security/noise.zig");
 const yamux_proto = @import("muxer/yamux.zig");
 const handler_registry_mod = @import("host/handler_registry.zig");
+const kad_mod = @import("dht/message.zig");
 
 pub const Multiaddr = multiaddr.Multiaddr;
 pub const TcpTransport = tcp.TcpTransport;
@@ -18,6 +19,7 @@ pub const IdentityKey = peer_id.IdentityKey;
 pub const AddressBook = address_book_mod.AddressBook;
 pub const noise = noise_proto;
 pub const yamux = yamux_proto;
+pub const kad = kad_mod;
 pub const HandlerRegistry = handler_registry_mod.HandlerRegistry;
 pub const Handler = handler_registry_mod.Handler;
 pub const ConnInfo = handler_registry_mod.ConnInfo;

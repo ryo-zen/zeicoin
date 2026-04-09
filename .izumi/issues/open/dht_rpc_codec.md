@@ -3,7 +3,7 @@ id: dht_rpc_codec
 key: ZEI-82
 title: Implement Kademlia RPC protobuf codec for /kad/1.0.0
 type: Subtask
-status: Backlog
+status: InProgress
 priority: High
 assignee: null
 labels:
@@ -14,10 +14,11 @@ sprint: null
 story_points: null
 due_date: null
 parent_id: kademlia_dht
-rank: null
+rank: 1000.0
 comments: []
 created_at: 2026-04-09T00:00:00+00:00
-updated_at: 2026-04-09T11:01:53+10:00
+updated_at: 2026-04-09T13:03:18+10:00
+closed_at: null
 ---
 
 ## Summary
@@ -43,3 +44,4 @@ Implement the Kademlia wire protocol codec in `libp2p/dht/message.zig`. Messages
 - This is step 2 in the implementation order from ZEI-20
 - `clusterLevelRaw` (field 10) is NOT USED but must be handled in the codec for compat
 - Keep the codec suitable for external interop, not just ZeiCoin-to-ZeiCoin round-trips
+- Current implementation boundary: `ZEI-82` owns protobuf/uvarint codec plus framed Kad message read/write helpers; inbound `/kad/1.0.0` handler loops and request semantics that span multiple RPCs remain with `ZEI-83`
