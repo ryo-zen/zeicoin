@@ -9,6 +9,11 @@ const min_redial_ms: u64 = 30_000;
 const max_backoff_ms: u64 = 300_000;
 const peer_ttl_ms: u64 = 24 * 60 * 60 * 1000;
 
+pub const HostComponent = struct {
+    protocol: []const u8,
+    value: []const u8,
+};
+
 pub const AddressSource = struct {
     identify: bool = false,
     peer_exchange: bool = false,
@@ -198,11 +203,11 @@ pub const AddressBook = struct {
         listen_port: u16,
         now_ms: u64,
     ) !void {
-        const ip = extractIp(observed_addr) orelse return;
+        const host = extractHost(observed_addr) orelse return;
         const candidate = try std.fmt.allocPrint(
             self.allocator,
-            "/ip4/{s}/tcp/{}/p2p/{s}",
-            .{ ip, listen_port, self.self_peer_id },
+            "/{s}/{s}/tcp/{}/p2p/{s}",
+            .{ host.protocol, host.value, listen_port, self.self_peer_id },
         );
         defer self.allocator.free(candidate);
         try self.recordSelfObservation(candidate, source_peer_id, true, false, now_ms);
@@ -528,8 +533,8 @@ pub fn canonicalPeerAddr(allocator: std.mem.Allocator, addr: []const u8, peer_id
 
 pub fn isLikelyDialable(addr: []const u8) bool {
     if (addr.len == 0) return false;
-    if (!std.mem.startsWith(u8, addr, "/ip4/")) return false;
-    if (std.mem.startsWith(u8, addr, "/ip4/0.0.0.0/")) return false;
+    const host = extractHost(addr) orelse return false;
+    if (isWildcardHost(host)) return false;
     return std.mem.indexOf(u8, addr, "/tcp/") != null;
 }
 
@@ -557,12 +562,44 @@ pub fn samePeerAddress(a: []const u8, b: []const u8, a_peer: ?[]const u8, b_peer
 }
 
 pub fn extractIp(multiaddr: []const u8) ?[]const u8 {
+    const host = extractHost(multiaddr) orelse return null;
+    if (!std.mem.eql(u8, host.protocol, "ip4")) return null;
+    return host.value;
+}
+
+pub fn extractHost(multiaddr: []const u8) ?HostComponent {
     var it = std.mem.tokenizeScalar(u8, multiaddr, '/');
     while (it.next()) |part| {
-        if (!std.mem.eql(u8, part, "ip4")) continue;
-        return it.next();
+        if (std.mem.eql(u8, part, "ip4") or
+            std.mem.eql(u8, part, "ip6") or
+            std.mem.eql(u8, part, "dns") or
+            std.mem.eql(u8, part, "dns4") or
+            std.mem.eql(u8, part, "dns6") or
+            std.mem.eql(u8, part, "dnsaddr"))
+        {
+            return .{
+                .protocol = part,
+                .value = it.next() orelse return null,
+            };
+        }
     }
     return null;
+}
+
+pub fn isWildcardListenAddr(multiaddr: []const u8) bool {
+    const host = extractHost(multiaddr) orelse return false;
+    return isWildcardHost(host);
+}
+
+fn isWildcardHost(host: HostComponent) bool {
+    if (std.mem.eql(u8, host.protocol, "ip4")) {
+        return std.mem.eql(u8, host.value, "0.0.0.0");
+    }
+    if (std.mem.eql(u8, host.protocol, "ip6")) {
+        const parsed = std.Io.net.Ip6Address.parse(host.value, 0) catch return false;
+        return std.mem.eql(u8, &parsed.bytes, &[_]u8{0} ** 16);
+    }
+    return false;
 }
 
 pub fn extractListenPort(multiaddr: []const u8) ?u16 {
@@ -837,9 +874,13 @@ test "address book skips self addresses" {
 
 test "helper: isLikelyDialable" {
     try std.testing.expect(isLikelyDialable("/ip4/10.0.0.1/tcp/10801"));
+    try std.testing.expect(isLikelyDialable("/ip6/2001:db8::1/tcp/10801"));
+    try std.testing.expect(isLikelyDialable("/dns/bootstrap.example.com/tcp/10801"));
+    try std.testing.expect(isLikelyDialable("/dns6/bootstrap.example.com/tcp/10801"));
     try std.testing.expect(!isLikelyDialable("/ip4/0.0.0.0/tcp/10801"));
+    try std.testing.expect(!isLikelyDialable("/ip6/::/tcp/10801"));
     try std.testing.expect(!isLikelyDialable(""));
-    try std.testing.expect(!isLikelyDialable("/ip6/::1/tcp/10801"));
+    try std.testing.expect(!isLikelyDialable("/dns/bootstrap.example.com/udp/10801"));
 }
 
 test "helper: peerIdSlice and transportSlice" {
@@ -854,4 +895,36 @@ test "helper: peerIdSlice and transportSlice" {
 test "helper: extractIp and extractListenPort" {
     try std.testing.expectEqualStrings("172.31.0.11", extractIp("/ip4/172.31.0.11/tcp/42001").?);
     try std.testing.expectEqual(@as(?u16, 10811), extractListenPort("/ip4/0.0.0.0/tcp/10811"));
+}
+
+test "helper: extractHost supports ip6 and dns" {
+    const ip6 = extractHost("/ip6/2001:db8::1/tcp/42001").?;
+    try std.testing.expectEqualStrings("ip6", ip6.protocol);
+    try std.testing.expectEqualStrings("2001:db8::1", ip6.value);
+
+    const dns = extractHost("/dns4/bootstrap.example.com/tcp/42001").?;
+    try std.testing.expectEqualStrings("dns4", dns.protocol);
+    try std.testing.expectEqualStrings("bootstrap.example.com", dns.value);
+}
+
+test "observeSelfFromIdentify preserves ipv6 observations" {
+    const allocator = std.testing.allocator;
+    const local_peer_id = try makeTestPeerId(allocator);
+    defer allocator.free(local_peer_id);
+    const remote_peer_id = try makeTestPeerId(allocator);
+    defer allocator.free(remote_peer_id);
+
+    var book = try AddressBook.init(allocator, local_peer_id);
+    defer book.deinit();
+
+    try book.observeSelfFromIdentify("/ip6/2001:db8::99/tcp/55000", remote_peer_id, 10811, 1000);
+
+    var promoted = try book.snapshotSelfObservations(allocator);
+    defer {
+        for (promoted.items) |entry| allocator.free(entry.addr);
+        promoted.deinit();
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), promoted.items.len);
+    try std.testing.expect(std.mem.startsWith(u8, promoted.items[0].addr, "/ip6/2001:db8::99/tcp/10811/"));
 }

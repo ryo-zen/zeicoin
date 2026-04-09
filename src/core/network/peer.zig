@@ -176,12 +176,11 @@ pub const NetworkManager = struct {
         // Self is at its final heap address now — safe to take a pointer.
         self.inbound_ctx.network_manager = self;
 
-        // Build multiaddr from bind address and port
-        const ma_str = try std.fmt.allocPrint(
-            self.allocator,
-            "/ip4/{s}/tcp/{}",
-            .{ address_str, port },
-        );
+        const parsed = net.IpAddress.resolve(self.io, address_str, port) catch |err| switch (err) {
+            error.InvalidIPAddressFormat => return error.InvalidIPAddressFormat,
+            else => return err,
+        };
+        const ma_str = try formatIpAsMultiaddr(self.allocator, parsed);
         defer self.allocator.free(ma_str);
 
         var ma = try Multiaddr.create(self.allocator, ma_str);
@@ -217,12 +216,19 @@ pub const NetworkManager = struct {
             return error.TooManyConnections;
         }
 
-        // Prevent self-connections by checking if target IP is our public IP
-        const tcp_addr = ma.getTcpAddress() orelse return error.NoTcpAddress;
-        if (ip_detection.isSelfConnection(self.allocator, self.io, tcp_addr)) {
-            log.warn("🚫 Self-connection prevented: skipping connection to own public IP {}", .{tcp_addr});
-            return;
+        // Prevent self-connections when the target already resolves to a concrete IP.
+        // DNS multiaddrs are still allowed through to the transport's resolver path.
+        if (ma.getTcpAddress()) |tcp_addr| {
+            if (ip_detection.isSelfConnection(self.allocator, self.io, tcp_addr)) {
+                log.warn("🚫 Self-connection prevented: skipping connection to own public IP {}", .{tcp_addr});
+                return;
+            }
         }
+
+        const peer_addr = if (ma.getTcpAddress()) |tcp_addr|
+            tcp_addr
+        else
+            try resolveMultiaddrIpAddress(self.io, ma);
 
         // Dial — runs Noise + Yamux upgrade
         const session = try self.host.dial(self.io, ma);
@@ -235,7 +241,7 @@ pub const NetworkManager = struct {
         errdefer if (owned_pid) |*pid| pid.deinit();
 
         // Deduplicate and register peer
-        const peer = try self.peer_manager.addPeer(tcp_addr, owned_pid);
+        const peer = try self.peer_manager.addPeer(peer_addr, owned_pid);
         log.info("Dialed peer {}", .{peer.id});
 
         // Add ref for the connection thread
@@ -505,13 +511,81 @@ pub const NetworkManager = struct {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Format a net.IpAddress as a /ip4/x.x.x.x/tcp/port multiaddr string.
+/// Format a net.IpAddress as a /ip4/.../tcp/port or /ip6/.../tcp/port multiaddr string.
 /// Caller owns the returned slice.
 fn formatIpAsMultiaddr(allocator: std.mem.Allocator, addr: net.IpAddress) ![]u8 {
     return switch (addr) {
         .ip4 => |a| std.fmt.allocPrint(allocator, "/ip4/{}.{}.{}.{}/tcp/{}", .{
             a.bytes[0], a.bytes[1], a.bytes[2], a.bytes[3], a.port,
         }),
-        .ip6 => error.Ipv6NotSupported,
+        .ip6 => |a| blk: {
+            const unresolved: net.Ip6Address.Unresolved = .{
+                .bytes = a.bytes,
+                .interface_name = null,
+            };
+            break :blk try std.fmt.allocPrint(allocator, "/ip6/{f}/tcp/{}", .{ unresolved, a.port });
+        },
     };
+}
+
+const DnsResolveInfo = struct {
+    host: []const u8,
+    family: ?net.IpAddress.Family,
+};
+
+fn resolveMultiaddrIpAddress(io: std.Io, ma: *const Multiaddr) !net.IpAddress {
+    const port_text = try ma.getFirstValueForProtocol(.tcp);
+    const port = try std.fmt.parseInt(u16, port_text, 10);
+    const dns_info = try getDnsResolveInfo(ma);
+
+    const host_name = try net.HostName.init(dns_info.host);
+    var canonical_name_buffer: [net.HostName.max_len]u8 = undefined;
+    var lookup_buffer: [16]net.HostName.LookupResult = undefined;
+    var lookup_queue: std.Io.Queue(net.HostName.LookupResult) = .init(&lookup_buffer);
+    var lookup_future = io.async(net.HostName.lookup, .{ host_name, io, &lookup_queue, .{
+        .port = port,
+        .canonical_name_buffer = &canonical_name_buffer,
+        .family = dns_info.family,
+    } });
+    defer lookup_future.cancel(io) catch {};
+
+    while (lookup_queue.getOne(io)) |result| switch (result) {
+        .canonical_name => continue,
+        .address => |ip| return ip,
+    } else |err| switch (err) {
+        error.Canceled => |e| return e,
+        error.Closed => {
+            lookup_future.await(io) catch |lookup_err| return lookup_err;
+            return error.NoTcpAddress;
+        },
+    }
+
+    return error.NoTcpAddress;
+}
+
+fn getDnsResolveInfo(ma: *const Multiaddr) !DnsResolveInfo {
+    if (ma.getFirstValueForProtocol(.dns4)) |value| {
+        return .{ .host = value, .family = .ip4 };
+    } else |err| switch (err) {
+        error.ProtocolNotFound => {},
+        else => return err,
+    }
+    if (ma.getFirstValueForProtocol(.dns6)) |value| {
+        return .{ .host = value, .family = .ip6 };
+    } else |err| switch (err) {
+        error.ProtocolNotFound => {},
+        else => return err,
+    }
+    if (ma.getFirstValueForProtocol(.dns)) |value| {
+        return .{ .host = value, .family = null };
+    } else |err| switch (err) {
+        error.ProtocolNotFound => {},
+        else => return err,
+    }
+    if (ma.getFirstValueForProtocol(.dns_addr)) |value| {
+        return .{ .host = value, .family = null };
+    } else |err| switch (err) {
+        error.ProtocolNotFound => return error.NoTcpAddress,
+        else => return err,
+    }
 }

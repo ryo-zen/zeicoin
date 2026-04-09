@@ -10,9 +10,9 @@
 **Branch:** `libp2p-integration`
 **Active initiative:** Post-rollout testnet validation and hardening
 
-**Last worked on:** 2026-04-09 — Landed `ZEI-91`: the extracted libp2p peerbook now stores multiple addresses per peer with source metadata and anonymous-state migration, and `zig build test-libp2p` is green after hardening the flaky yamux keepalive timing test.
-**Next step:** Move to `ZEI-92` DNS/IPv6 multiaddr support on top of the new peerbook shape, unless `ZEI-91` needs ticket/status bookkeeping cleanup first.
-**In flight:** `libp2p/libp2p_testnode.zig` uses the extracted `libp2p/peer/address_book.zig`, `libp2p/test_suite.zig` includes peerbook coverage, and `libp2p/muxer/test_yamux.zig` has wider keepalive timing margins to avoid scheduler-jitter flakes during the full suite.
+**Last worked on:** 2026-04-09 — Landed `ZEI-92`: peer discovery/bootstrap/identify paths now preserve IPv6 and DNS TCP multiaddrs, and both `ZEI-91` and `ZEI-92` are marked done with `zig build test-libp2p` green.
+**Next step:** Start `ZEI-93` identify decode hardening, or audit the remaining Kad prerequisite tickets before beginning routing-table / FIND_NODE work.
+**In flight:** `libp2p/peer/address_book.zig`, `libp2p/transport/tcp.zig`, `libp2p/host/host.zig`, and `src/core/network/{bootstrap,peer}.zig` now carry the address-family support; this session just needs the final commit/push if not already done.
 
 ---
 
@@ -46,6 +46,7 @@
 - `AGENTS.md` now explicitly names `/home/max/zeicoin/reference/go-libp2p-kad-dht` and `/home/max/zeicoin/reference/go-libp2p` as the first fallback reference implementations when libp2p/Kad behavior is ambiguous.
 - `ZEI-91` now lives in the active local libp2p module as `libp2p/peer/address_book.zig`: peer identity is the primary grouping key when known, addresses are stored per peer with source flags (`identify`, `peer_exchange`, `bootstrap`, `kad`), and anonymous address state is migrated forward when a later observation supplies the peer ID.
 - The prior `yamux keepalive ping pong keeps session alive` failure was timing-sensitive rather than peerbook-related; the test now uses a wider keepalive/sleep budget so `zig build test-libp2p` stays stable under full-suite scheduler load.
+- `ZEI-92` widened discovery from IPv4-only assumptions to `/ip4`, `/ip6`, and DNS-based TCP multiaddrs: the peerbook no longer drops those families, the TCP transport can resolve DNS multiaddrs for dialing, identify/testnode observed-address handling preserves IPv6, and bootstrap parsing accepts non-IPv4 TCP multiaddrs.
 - `ZEI-20` Notes still mention `zen_server` integration as unfinished, but archived `ZEI-11` and `ZEI-33` show that prerequisite is already complete; future DHT planning should treat libp2p host integration as done and focus on Kademlia-specific gaps.
 - Open libp2p integration tickets that conflict with the current branch status should be audited separately, but the only explicit libp2p rollout gate in the current blocker set is `ZEI-54`.
 - `account_count` metadata is currently used for observability/status only; it is not part of consensus or recovery gating.

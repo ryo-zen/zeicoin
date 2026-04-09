@@ -518,20 +518,9 @@ pub const Host = struct {
         var observed_ma: ?Multiaddr = null;
         defer if (observed_ma) |*ma| ma.deinit();
         if (conn_info.remote_addr) |ra| {
-            observed_ma = blk: {
-                const ma_str = switch (ra) {
-                    .ip4 => |a| try std.fmt.allocPrint(
-                        host.allocator,
-                        "/ip4/{}.{}.{}.{}/tcp/{}",
-                        .{
-                            a.bytes[0], a.bytes[1], a.bytes[2], a.bytes[3], a.port,
-                        },
-                    ),
-                    .ip6 => null,
-                };
-                defer if (ma_str) |s| host.allocator.free(s);
-                break :blk if (ma_str) |s| try Multiaddr.create(host.allocator, s) else null;
-            };
+            const ma_str = try formatIpAddressAsMultiaddr(host.allocator, ra);
+            defer host.allocator.free(ma_str);
+            observed_ma = try Multiaddr.create(host.allocator, ma_str);
         }
         const observed_bytes = if (observed_ma) |*ma| ma.getBytesAddress() else &[_]u8{};
 
@@ -616,6 +605,23 @@ pub const Host = struct {
         };
     }
 };
+
+fn formatIpAddressAsMultiaddr(allocator: std.mem.Allocator, addr: std.Io.net.IpAddress) ![]u8 {
+    return switch (addr) {
+        .ip4 => |a| std.fmt.allocPrint(
+            allocator,
+            "/ip4/{}.{}.{}.{}/tcp/{}",
+            .{ a.bytes[0], a.bytes[1], a.bytes[2], a.bytes[3], a.port },
+        ),
+        .ip6 => |a| blk: {
+            const unresolved: std.Io.net.Ip6Address.Unresolved = .{
+                .bytes = a.bytes,
+                .interface_name = null,
+            };
+            break :blk try std.fmt.allocPrint(allocator, "/ip6/{f}/tcp/{}", .{ unresolved, a.port });
+        },
+    };
+}
 
 // ── tests ──────────────────────────────────────────────────────────────────────
 
@@ -1044,4 +1050,15 @@ test "host: requestStop wakes serve accept loop" {
     try server.requestStop(io);
     try serve_future.await(io);
     serve_done = true;
+}
+
+test "host helper preserves ipv6 observed address formatting" {
+    const alloc = std.testing.allocator;
+    const addr = try std.Io.net.IpAddress.resolve(std.testing.io, "2001:db8::1", 4011);
+
+    const ma = try formatIpAddressAsMultiaddr(alloc, addr);
+    defer alloc.free(ma);
+
+    try std.testing.expect(std.mem.startsWith(u8, ma, "/ip6/"));
+    try std.testing.expect(std.mem.endsWith(u8, ma, "/tcp/4011"));
 }

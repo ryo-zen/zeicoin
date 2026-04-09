@@ -3,7 +3,7 @@ id: reshape_address_book_into_peerbook
 key: ZEI-91
 title: Reshape address book into a Kad-ready peerbook
 type: Subtask
-status: Backlog
+status: Done
 priority: High
 assignee: null
 labels:
@@ -15,10 +15,11 @@ sprint: null
 story_points: null
 due_date: null
 parent_id: kademlia_dht
-rank: null
+rank: 1775697307708.0
 comments: []
 created_at: 2026-04-09T11:14:22+10:00
-updated_at: 2026-04-09T11:14:22+10:00
+updated_at: 2026-04-09T01:47:36.983610248+00:00
+closed_at: 2026-04-09T01:46:35.986988984+00:00
 ---
 
 ## Summary
@@ -27,13 +28,13 @@ Reshape `libp2p/peer/address_book.zig` from a flat address list into a real peer
 
 ## Acceptance Criteria
 
-- [ ] Peer identity becomes the primary storage key when a PeerId is known
-- [ ] A single peer entry can store repeated canonical multiaddrs rather than only one flat address
-- [ ] Address metadata preserves source information for identify, peer exchange, bootstrap config, and Kad peer records
-- [ ] Existing dial scoring, backoff, last-seen, and self-observation behavior is preserved or cleanly migrated to the new shape
-- [ ] Peerbook API exposes a clear path for “learn peer with one or more multiaddrs” so Kad handlers do not have to special-case storage
-- [ ] Snapshot or debug views remain usable for tests and operator inspection
-- [ ] `zig build test-libp2p` passes with updated peerbook tests covering multiaddr aggregation and deduplication
+- [x] Peer identity becomes the primary storage key when a PeerId is known
+- [x] A single peer entry can store repeated canonical multiaddrs rather than only one flat address
+- [x] Address metadata preserves source information for identify, peer exchange, bootstrap config, and Kad peer records
+- [x] Existing dial scoring, backoff, last-seen, and self-observation behavior is preserved or cleanly migrated to the new shape
+- [x] Peerbook API exposes a clear path for “learn peer with one or more multiaddrs” so Kad handlers do not have to special-case storage
+- [x] Snapshot or debug views remain usable for tests and operator inspection
+- [x] `zig build test-libp2p` passes with updated peerbook tests covering multiaddr aggregation and deduplication
 
 ## Notes
 

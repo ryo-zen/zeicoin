@@ -570,8 +570,8 @@ fn handleResponderMuxStreamInner(
     const listen_port = parseGetPeersRequest(req_line) orelse return error.InvalidPeerRequest;
 
     if (conn.remoteMultiaddr()) |remote_ma| {
-        if (extractIp(remote_ma.toString())) |ip| {
-            const observed = try std.fmt.allocPrint(allocator, "/ip4/{s}/tcp/{}", .{ ip, listen_port });
+        if (extractHost(remote_ma.toString())) |host| {
+            const observed = try std.fmt.allocPrint(allocator, "/{s}/{s}/tcp/{}", .{ host.protocol, host.value, listen_port });
             defer allocator.free(observed);
             try address_book.learnWithPeer(observed, remote_peer_id, nowMs());
         }
@@ -693,8 +693,10 @@ const isLikelyDialable = address_book_mod.isLikelyDialable;
 const peerIdSlice = address_book_mod.peerIdSlice;
 const canonicalPeerAddr = address_book_mod.canonicalPeerAddr;
 const extractIp = address_book_mod.extractIp;
+const extractHost = address_book_mod.extractHost;
 const extractListenPort = address_book_mod.extractListenPort;
 const freeOwnedSlices = address_book_mod.freeOwnedSlices;
+const isWildcardListenAddr = address_book_mod.isWildcardListenAddr;
 
 fn buildAdvertisedListenAddrs(
     allocator: std.mem.Allocator,
@@ -716,7 +718,7 @@ fn buildAdvertisedListenAddrs(
         return out;
     }
 
-    if (std.mem.startsWith(u8, local_listen_ma, "/ip4/0.0.0.0/")) return out;
+    if (isWildcardListenAddr(local_listen_ma)) return out;
 
     const full_addr = try canonicalPeerAddr(allocator, local_listen_ma, peer_id_text);
     defer allocator.free(full_addr);

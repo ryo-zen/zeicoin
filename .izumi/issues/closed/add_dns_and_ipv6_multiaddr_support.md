@@ -3,7 +3,7 @@ id: add_dns_and_ipv6_multiaddr_support
 key: ZEI-92
 title: Add DNS and IPv6 multiaddr support to peer discovery
 type: Subtask
-status: Backlog
+status: Done
 priority: High
 assignee: null
 labels:
@@ -15,10 +15,11 @@ sprint: null
 story_points: null
 due_date: null
 parent_id: kademlia_dht
-rank: null
+rank: 1775697307709.0
 comments: []
 created_at: 2026-04-09T11:14:22+10:00
-updated_at: 2026-04-09T11:14:22+10:00
+updated_at: 2026-04-09T02:04:45.384975551+00:00
+closed_at: 2026-04-09T02:04:45.384974657+00:00
 ---
 
 ## Summary
