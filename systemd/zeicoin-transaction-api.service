@@ -1,7 +1,7 @@
 [Unit]
 Description=ZeiCoin Transaction API Service (Hybrid RPC + PostgreSQL)
-After=zeicoin-server.service postgresql.service
-Wants=postgresql.service
+After=zeicoin-mining.service postgresql.service
+Wants=zeicoin-mining.service postgresql.service
 
 [Service]
 Type=simple

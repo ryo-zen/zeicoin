@@ -14,6 +14,22 @@ SERVICES=(
 ZEICOIN_HOME="${ZEICOIN_HOME:-/root/zeicoin}"
 ZEICOIN_CLI="$ZEICOIN_HOME/zig-out/bin/zeicoin"
 
+print_service_status() {
+    local service="$1"
+    local label="${2:-$service}"
+    local status
+
+    status=$(systemctl is-active "$service" 2>/dev/null || echo "inactive")
+    echo -n "$label: "
+    if [ "$status" = "active" ]; then
+        echo "✅ Active"
+    elif [ "$status" = "activating" ]; then
+        echo "🔄 Starting..."
+    else
+        echo "❌ Inactive"
+    fi
+}
+
 is_port_listening() {
     local port="$1"
     if command -v ss >/dev/null 2>&1; then
@@ -58,15 +74,7 @@ case "$1" in
         echo "📊 ZeiCoin Services Status:"
         echo "================================"
         for service in "${SERVICES[@]}"; do
-            echo -n "$service: "
-            STATUS=$(systemctl is-active "$service" 2>/dev/null || echo "inactive")
-            if [ "$STATUS" = "active" ]; then
-                echo "✅ Active"
-            elif [ "$STATUS" = "activating" ]; then
-                echo "🔄 Starting..."
-            else
-                echo "❌ Inactive"
-            fi
+            print_service_status "$service"
         done
         echo ""
         echo "📈 Running Processes:"
@@ -199,7 +207,7 @@ case "$1" in
         echo "  stop            - Stop all ZeiCoin services"
         echo "  restart         - Restart all services"
         echo "  status          - Show comprehensive service status"
-        echo "  logs [service]  - Follow service logs (mining|api|indexer|monitor|all)"
+        echo "  logs [service]  - Follow service logs (mining|api|indexer|all)"
         echo "  enable          - Enable automatic startup on boot"
         echo "  disable         - Disable automatic startup"
         echo ""

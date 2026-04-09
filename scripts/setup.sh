@@ -204,25 +204,24 @@ fi
 # Setup .env configuration
 echo "⚙️  Configuring environment..."
 if [ -f ".env.testnet" ]; then
-    echo "📋 Copying .env.testnet to .env for server configuration..."
-    cp .env.testnet .env
+    echo "📋 Using existing .env.testnet for server configuration..."
     echo "✅ Environment configuration ready!"
 elif [ -f ".env.example" ]; then
-    echo "📋 Copying .env.example to .env..."
-    cp .env.example .env
-    echo "⚠️  Please edit .env with your specific configuration"
+    echo "📋 Copying .env.example to .env.testnet..."
+    cp .env.example .env.testnet
+    echo "⚠️  Please edit .env.testnet with your specific configuration"
 else
     echo "⚠️  No .env.testnet or .env.example found - manual configuration needed"
 fi
 
-# Ensure test mode is enabled in .env for systemd service
-if [ -f ".env" ] && [ -n "$MINER_NAME" ]; then
-    echo "🔧 Ensuring test mode is enabled in .env for systemd service..."
+# Ensure test mode is enabled in .env.testnet for systemd service
+if [ -f ".env.testnet" ] && [ -n "$MINER_NAME" ]; then
+    echo "🔧 Ensuring test mode is enabled in .env.testnet for systemd service..."
     # Make sure ZEICOIN_TEST_MODE=1 is set (should already be there from .env.testnet)
-    if ! grep -q "ZEICOIN_TEST_MODE=1" .env; then
-        echo "" >> .env
-        echo "# Test mode for systemd service (no password required)" >> .env
-        echo "ZEICOIN_TEST_MODE=1" >> .env
+    if ! grep -q "ZEICOIN_TEST_MODE=1" .env.testnet; then
+        echo "" >> .env.testnet
+        echo "# Test mode for systemd service (no password required)" >> .env.testnet
+        echo "ZEICOIN_TEST_MODE=1" >> .env.testnet
     fi
     echo "✅ Test mode configured for systemd service"
 fi
@@ -286,7 +285,8 @@ Type=simple
 User=root
 Group=root
 WorkingDirectory=$CURRENT_DIR
-EnvironmentFile=$CURRENT_DIR/.env
+EnvironmentFile=$CURRENT_DIR/.env.testnet
+EnvironmentFile=-$CURRENT_DIR/.env.local
 Environment="ZEICOIN_SERVER=127.0.0.1"
 Environment="ZEICOIN_BIND_IP=0.0.0.0"
 Environment="ZEICOIN_MINE_ENABLED=true"
