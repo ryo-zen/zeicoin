@@ -878,11 +878,11 @@ test "yamux keepalive ping pong keeps session alive" {
     var initiator_conn = conn_pair.initiator;
     defer initiator_conn.deinit();
 
-    // sleep(400ms) > first_ping(30ms) + timeout(300ms) = 330ms: session would die
-    // without keepalive.  300ms gives enough margin over scheduling jitter.
+    // Keep the sleep comfortably beyond the no-keepalive timeout budget so the
+    // assertion survives scheduler jitter during the full libp2p suite.
     const opts = SessionOptions{
-        .keepalive_interval_ms = 30,
-        .keepalive_timeout_ms = 300,
+        .keepalive_interval_ms = 50,
+        .keepalive_timeout_ms = 500,
     };
 
     const ResponderCtx = struct {
@@ -902,7 +902,7 @@ test "yamux keepalive ping pong keeps session alive" {
             defer session.deinit();
             try session.start();
 
-            try ctx.io.sleep(std.Io.Duration.fromMilliseconds(400), .awake);
+            try ctx.io.sleep(std.Io.Duration.fromMilliseconds(700), .awake);
 
             var accept_future = try session.acceptStreamConcurrent();
             var stream = try accept_future.await(ctx.io);
@@ -932,7 +932,7 @@ test "yamux keepalive ping pong keeps session alive" {
     defer session.deinit();
     try session.start();
 
-    try io.sleep(std.Io.Duration.fromMilliseconds(400), .awake);
+    try io.sleep(std.Io.Duration.fromMilliseconds(700), .awake);
 
     var open_future = try session.openStreamConcurrent();
     var stream = try open_future.await(io);

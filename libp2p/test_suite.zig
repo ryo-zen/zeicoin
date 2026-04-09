@@ -3,6 +3,7 @@
 
 test {
     _ = @import("multiaddr/multiaddr.zig");
+    _ = @import("peer/address_book.zig");
     _ = @import("peer/peer_id.zig");
     _ = @import("protocol/identify.zig");
     _ = @import("security/noise.zig");
