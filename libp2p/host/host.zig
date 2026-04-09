@@ -311,13 +311,16 @@ fn handleInbound(
     io: std.Io,
     alloc: std.mem.Allocator,
     identity: *const IdentityKey,
+    inbound_sessions: *std.atomic.Value(usize),
 ) void {
     const log = std.log.scoped(.host);
     const uc = upgradeInbound(alloc, io, conn, identity) catch |err| {
         log.warn("inbound upgrade failed: {s}", .{@errorName(err)});
         return;
     };
+    _ = inbound_sessions.fetchAdd(1, .acq_rel);
     defer {
+        _ = inbound_sessions.fetchSub(1, .acq_rel);
         uc.deinit();
         alloc.destroy(uc);
     }
@@ -358,6 +361,7 @@ pub const Host = struct {
     sessions: std.array_list.Managed(*UpgradedConn),
     // Protects sessions list for concurrent dial() calls.
     sessions_mutex: std.Thread.Mutex,
+    inbound_sessions: std.atomic.Value(usize),
     // Our listen address — set in listen(), used in identify responses.
     listen_addr: ?Multiaddr,
     // Set during shutdown so serve() exits after the next accepted connection.
@@ -375,6 +379,7 @@ pub const Host = struct {
             .listener = null,
             .sessions = std.array_list.Managed(*UpgradedConn).init(allocator),
             .sessions_mutex = .{},
+            .inbound_sessions = std.atomic.Value(usize).init(0),
             .listen_addr = null,
             .stopping = std.atomic.Value(bool).init(false),
         };
@@ -487,6 +492,16 @@ pub const Host = struct {
         return null;
     }
 
+    pub fn liveSessionCount(self: *Self) usize {
+        var total = self.inbound_sessions.load(.acquire);
+        self.sessions_mutex.lock();
+        defer self.sessions_mutex.unlock();
+        for (self.sessions.items) |uc| {
+            if (!uc.session.isClosed()) total += 1;
+        }
+        return total;
+    }
+
     // Open a Yamux stream on session and negotiate protocol via Multistream.
     // Returns a ready-to-use stream. Caller owns it and must call stream.deinit().
     pub fn newStream(self: *Self, io: std.Io, session: *yamux.Session, protocol: []const u8) !yamux.Stream {
@@ -588,6 +603,7 @@ pub const Host = struct {
                 io,
                 self.allocator,
                 &self.identity,
+                &self.inbound_sessions,
             }) catch {
                 conn.deinit();
             };

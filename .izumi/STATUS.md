@@ -10,9 +10,9 @@
 **Branch:** `libp2p-integration`
 **Active initiative:** Post-rollout testnet validation and hardening
 
-**Last worked on:** 2026-04-09 — Implemented the core `ZEI-84` bootstrap layer locally: `libp2p/dht/query.zig` now has startup self-lookup, periodic refresh over non-empty buckets, and timeout-bounded bootstrap runs; `libp2p/dht/routing_table.zig` now exposes non-empty bucket enumeration + refresh-target generation; `zig build test-libp2p` is green.
-**Next step:** Commit the local `ZEI-83` + `ZEI-84` changes, then decide whether to wire a focused Docker proof now or defer full DHT Docker validation to `ZEI-87`.
-**In flight:** `libp2p/dht/query.zig`, `libp2p/dht/message.zig`, `libp2p/dht/routing_table.zig`, `libp2p/api.zig`, `libp2p/test_suite.zig`, and the `ZEI-83`/`ZEI-84` ticket + status updates are local; `zig build check` still fails in pre-existing `src/core/network/peer.zig`.
+**Last worked on:** 2026-04-09 — Implemented a dedicated `ZEI-87` Kad Docker smoke around `libp2p_testnode --kad`: the testnode now runs the host-based Kad query service, the libp2p Docker compose uses concrete per-container multiaddrs, `docker/scripts/test_libp2p_kad_smoke.sh` passes, and `zig build test-libp2p` is green.
+**Next step:** Decide whether to strengthen `ZEI-87` from the current dedicated `libp2p_testnode` smoke into a full `zen_server` runtime proof, or pivot to `ZEI-85` / `ZEI-86` now that Docker Kad discovery convergence is demonstrated.
+**In flight:** Local `ZEI-87` work touches `libp2p/libp2p_testnode.zig`, `libp2p/host/host.zig`, `libp2p/api.zig`, `libp2p/docker/Dockerfile.libp2p`, `libp2p/docker/docker-compose.libp2p-test.yml`, `docker/scripts/test_libp2p_kad_smoke.sh`, and the `ZEI-87` / status notes; `zig build check` still fails in pre-existing `src/core/network/peer.zig`.
 
 ---
 
@@ -52,6 +52,9 @@
 - `ZEI-82` is intentionally a wire-layer slice: `libp2p/dht/message.zig` owns Kad protobuf structs, unknown-field-safe decode, and uvarint frame read/write helpers for `/kad/1.0.0`, while inbound stream loops and `FIND_NODE` request handling remain with `ZEI-83`.
 - `ZEI-83` now lives in `libp2p/dht/query.zig`: the service registers `/kad/1.0.0` only in server mode, handles repeated inbound Kad RPCs on one stream, performs iterative `FIND_NODE` lookups with bounded `alpha`, learns discovered peers into both the peerbook and routing table, emits transport multiaddrs in Kad `Peer` records, and drops the local peer from discovered candidates before continuing the lookup.
 - `ZEI-84` now extends the same query service: bootstrap runs do self-lookup first, then one generated lookup target per non-empty bucket, refresh scheduling is configurable, timeout is enforced per run before starting the next lookup, and the current implementation is unit-tested but not yet proven in Docker as a standalone DHT refresh harness.
+- `ZEI-87` currently has a dedicated libp2p-only Docker proof rather than a full `zen_server` proof: `libp2p_testnode --kad` now hosts the Kad query service, the smoke validates 4-node Kad discovery convergence in Docker, and the post-seed check is intentionally weaker than full per-node session retention.
+- The dedicated Kad Docker compose must use concrete per-container listen multiaddrs instead of `0.0.0.0`, otherwise identify/Kad replies advertise wildcard addresses that other nodes correctly refuse to dial.
+- The dedicated Kad Docker image is built with `ReleaseSafe` because the current Zig threaded-I/O debug build hits a `BADF` assertion during peer shutdown in this smoke even though the release-safe run completes and preserves the intended proof.
 - `ZEI-20` Notes still mention `zen_server` integration as unfinished, but archived `ZEI-11` and `ZEI-33` show that prerequisite is already complete; future DHT planning should treat libp2p host integration as done and focus on Kademlia-specific gaps.
 - Open libp2p integration tickets that conflict with the current branch status should be audited separately, but the only explicit libp2p rollout gate in the current blocker set is `ZEI-54`.
 - `account_count` metadata is currently used for observability/status only; it is not part of consensus or recovery gating.

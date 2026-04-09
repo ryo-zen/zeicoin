@@ -9,15 +9,24 @@ const noise = libp2p.noise;
 const yamux = libp2p.yamux;
 const identify = libp2p.identify;
 const ms = libp2p.ms;
+const Host = libp2p.Host;
 
-const address_book_mod = @import("peer/address_book.zig");
+const address_book_mod = libp2p.address_book;
+const kad_query_mod = libp2p.kad_query;
+const routing_table_mod = libp2p.kad_routing;
 const SharedAddressBook = address_book_mod.AddressBook;
+const RoutingTable = routing_table_mod.RoutingTable;
+const QueryService = kad_query_mod.QueryService;
 
 const print = std.debug.print;
 const test_protocol = "/zeicoin/peers/1.0.0";
 const max_line_len: usize = 512;
 const max_peers_response: usize = 1024;
 const dial_loop_seconds: u64 = 5;
+const kad_refresh_interval_ms: u64 = 2_000;
+const kad_query_timeout_ms: u64 = 15_000;
+const kad_bootstrap_retry_ms: u64 = 30_000;
+const kad_status_loop_seconds: u64 = 3;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -34,7 +43,86 @@ pub fn main(init: std.process.Init) !void {
     defer args_it.deinit();
     _ = args_it.next(); // executable name
 
+    if (args_it.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--kad")) {
+            return try runKadNode(allocator, io, &args_it);
+        }
+
+        return try runPeerExchangeNode(allocator, io, arg, &args_it);
+    }
+
+    return try runPeerExchangeNode(allocator, io, "/ip4/0.0.0.0/tcp/10811", &args_it);
+}
+
+fn runKadNode(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    args_it: *std.process.Args.Iterator,
+) !void {
     const listen_ma = if (args_it.next()) |arg| arg else "/ip4/0.0.0.0/tcp/10811";
+    const bootstrap_ma = args_it.next();
+    const identity_path_arg = args_it.next();
+
+    const listen_port = extractListenPort(listen_ma) orelse return error.InvalidListenMultiaddr;
+    const identity_path = if (identity_path_arg) |path| path else try std.fmt.allocPrint(
+        allocator,
+        ".libp2p_kad_identity_{}.key",
+        .{listen_port},
+    );
+    defer if (identity_path_arg == null) allocator.free(identity_path);
+
+    var host = Host.init(allocator, try IdentityKey.loadOrCreate(allocator, io, identity_path));
+    defer host.deinit();
+
+    var address_book = try SharedAddressBook.init(allocator, host.identity.peer_id.toString());
+    defer address_book.deinit();
+
+    var routing_table = try RoutingTable.init(allocator, host.identity.peer_id.toString());
+    defer routing_table.deinit();
+
+    var listen_addr = try Multiaddr.create(allocator, listen_ma);
+    defer listen_addr.deinit();
+    try host.listen(io, &listen_addr);
+
+    var service = QueryService.init(allocator, &host, &routing_table, &address_book, .server);
+    service.refresh_interval_ms = kad_refresh_interval_ms;
+    service.query_timeout_ms = kad_query_timeout_ms;
+    try service.register();
+
+    print("libp2p_testnode kad listening on {s}\n", .{listen_ma});
+    print("libp2p kad identity peer_id={s} key_file={s}\n", .{ host.identity.peer_id.toString(), identity_path });
+
+    var serve_future = try io.concurrent(Host.serve, .{ &host, io });
+    defer {
+        _ = serve_future.cancel(io) catch {};
+        serve_future.await(io) catch {};
+    }
+
+    if (bootstrap_ma) |bootstrap| {
+        try seedKadBootstrap(allocator, io, &host, &address_book, &routing_table, bootstrap, listen_port);
+    }
+
+    var stop_refresh = std.atomic.Value(bool).init(false);
+    var refresh_future = try io.concurrent(QueryService.refreshLoop, .{ &service, io, &stop_refresh });
+    defer {
+        stop_refresh.store(true, .release);
+        _ = refresh_future.cancel(io) catch {};
+        refresh_future.await(io) catch {};
+    }
+
+    while (true) {
+        io.sleep(std.Io.Duration.fromSeconds(kad_status_loop_seconds), std.Io.Clock.awake) catch {};
+        try maintainKadSessions(allocator, io, &host, &routing_table);
+        try printKadStatus(allocator, &host, &address_book, &routing_table);
+    }
+}
+
+fn runPeerExchangeNode(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    listen_ma: []const u8,
+    args_it: *std.process.Args.Iterator,
+) !void {
     const bootstrap_ma = args_it.next();
     const identity_path_arg = args_it.next();
 
@@ -140,6 +228,173 @@ pub fn main(init: std.process.Init) !void {
             });
         }
     }
+}
+
+fn seedKadBootstrap(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    host: *Host,
+    address_book: *SharedAddressBook,
+    routing_table: *RoutingTable,
+    bootstrap_addr_text: []const u8,
+    listen_port: u16,
+) !void {
+    try address_book.learnBootstrap(bootstrap_addr_text, nowMs());
+
+    const deadline_ms = nowMs() + kad_bootstrap_retry_ms;
+    while (true) {
+        seedKadBootstrapOnce(allocator, io, host, address_book, routing_table, bootstrap_addr_text, listen_port) catch |err| {
+            if (nowMs() >= deadline_ms) return err;
+            print("kad bootstrap dial retry: {s} ({s})\n", .{ bootstrap_addr_text, @errorName(err) });
+            io.sleep(std.Io.Duration.fromSeconds(2), std.Io.Clock.awake) catch {};
+            continue;
+        };
+        return;
+    }
+}
+
+fn seedKadBootstrapOnce(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    host: *Host,
+    address_book: *SharedAddressBook,
+    routing_table: *RoutingTable,
+    bootstrap_addr_text: []const u8,
+    listen_port: u16,
+) !void {
+    var bootstrap_addr = try Multiaddr.create(allocator, bootstrap_addr_text);
+    defer bootstrap_addr.deinit();
+
+    const session = try host.dial(io, &bootstrap_addr);
+    const remote_peer_id = host.peerIdForSession(session) orelse return error.MissingRemotePeerId;
+    var identify_info = try host.identifyPeer(io, session);
+    defer identify_info.deinit(allocator);
+
+    if (identify_info.observed_addr.len > 0) {
+        try address_book.observeSelfFromIdentify(
+            identify_info.observed_addr,
+            remote_peer_id.toString(),
+            listen_port,
+            nowMs(),
+        );
+    }
+
+    var routing_addrs = std.array_list.Managed([]const u8).init(allocator);
+    defer routing_addrs.deinit();
+
+    if (identify_info.listen_addrs.items.len > 0) {
+        for (identify_info.listen_addrs.items) |addr| {
+            try address_book.learnIdentifyAddr(addr, remote_peer_id.toString(), nowMs());
+            try routing_addrs.append(addr);
+        }
+    } else {
+        try address_book.learnIdentifyAddr(bootstrap_addr_text, remote_peer_id.toString(), nowMs());
+        try routing_addrs.append(bootstrap_addr_text);
+    }
+
+    try upsertRoutingPeer(
+        routing_table,
+        remote_peer_id.toString(),
+        routing_addrs.items,
+        .connected,
+    );
+    address_book.markDialSuccess(bootstrap_addr_text, nowMs());
+    print("kad bootstrap connected: addr={s} peer_id={s} listen_addrs={d}\n", .{
+        bootstrap_addr_text,
+        remote_peer_id.toString(),
+        identify_info.listen_addrs.items.len,
+    });
+}
+
+fn upsertRoutingPeer(
+    routing_table: *RoutingTable,
+    peer_id: []const u8,
+    addrs: []const []const u8,
+    connection: routing_table_mod.ConnectionType,
+) !void {
+    const result = try routing_table.insertOrUpdate(
+        peer_id,
+        addrs,
+        .server,
+        connection,
+        nowMs(),
+    );
+    switch (result) {
+        .pending_eviction => |pending| try routing_table.keepIncumbent(pending.bucket_index, pending.incumbent_peer_id),
+        else => {},
+    }
+}
+
+fn printKadStatus(
+    allocator: std.mem.Allocator,
+    host: *Host,
+    address_book: *SharedAddressBook,
+    routing_table: *RoutingTable,
+) !void {
+    var snapshot = try address_book.snapshot(allocator);
+    defer {
+        for (snapshot.items) |entry| {
+            allocator.free(entry.addr);
+            if (entry.peer_id) |peer_id| allocator.free(peer_id);
+        }
+        snapshot.deinit();
+    }
+
+    var kad_addrs: usize = 0;
+    for (snapshot.items) |entry| {
+        if (entry.source.kad) kad_addrs += 1;
+    }
+
+    var non_empty = try routing_table.nonEmptyBucketIndices(allocator);
+    defer non_empty.deinit();
+
+    print(
+        "kad_status: peer_id={s} routing_peers={d} non_empty_buckets={d} book_entries={d} kad_addrs={d} outbound_sessions={d} live_sessions={d}\n",
+        .{
+            host.identity.peer_id.toString(),
+            routing_table.peerCount(),
+            non_empty.items.len,
+            snapshot.items.len,
+            kad_addrs,
+            hostLiveOutboundSessions(host),
+            host.liveSessionCount(),
+        },
+    );
+}
+
+fn maintainKadSessions(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    host: *Host,
+    routing_table: *RoutingTable,
+) !void {
+    var peers = try routing_table.closestPeers(allocator, host.identity.peer_id.getBytes(), routing_table_mod.bucket_size);
+    defer {
+        for (peers.items) |*peer| peer.deinit(allocator);
+        peers.deinit();
+    }
+
+    for (peers.items) |peer| {
+        if (std.mem.eql(u8, peer.peer_id, host.identity.peer_id.toString())) continue;
+        if (peer.connection == .cannot_connect) continue;
+        for (peer.addrs.items) |addr_text| {
+            var multiaddr = Multiaddr.create(allocator, address_book_mod.transportSlice(addr_text)) catch continue;
+            defer multiaddr.deinit();
+            _ = host.dial(io, &multiaddr) catch continue;
+            break;
+        }
+    }
+}
+
+fn hostLiveOutboundSessions(host: *Host) usize {
+    host.sessions_mutex.lock();
+    defer host.sessions_mutex.unlock();
+
+    var total: usize = 0;
+    for (host.sessions.items) |uc| {
+        if (!uc.session.isClosed()) total += 1;
+    }
+    return total;
 }
 
 fn acceptLoop(
