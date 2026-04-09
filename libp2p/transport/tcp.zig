@@ -18,6 +18,7 @@ pub const TcpConnection = struct {
     allocator: std.mem.Allocator,
     is_initiator: bool,
     is_closed: bool,
+    socket_closed: bool,
     bytes_read: u64,
     bytes_written: u64,
     rx_buf: [stream_buffer_size]u8 = undefined,
@@ -36,6 +37,7 @@ pub const TcpConnection = struct {
             .allocator = allocator,
             .is_initiator = is_initiator,
             .is_closed = false,
+            .socket_closed = false,
             .bytes_read = 0,
             .bytes_written = 0,
         };
@@ -55,6 +57,10 @@ pub const TcpConnection = struct {
         }
         if (!self.is_closed) {
             self.close(self.io) catch {};
+        }
+        if (!self.socket_closed) {
+            self.stream.close(self.io);
+            self.socket_closed = true;
         }
     }
 
@@ -129,7 +135,10 @@ pub const TcpConnection = struct {
         if (!self.is_closed) {
             self.flush(io) catch {};
             self.is_closed = true;
-            self.stream.close(io);
+            self.stream.shutdown(io, .both) catch |err| switch (err) {
+                error.SocketUnconnected => {},
+                else => return err,
+            };
         }
     }
 
@@ -501,6 +510,62 @@ test "TCP transport dial and accept" {
 
     try std.testing.expectEqual(@as(u64, accepted_n), accepted.bytes_read);
     try std.testing.expectEqual(@as(u64, accepted_n), accepted.bytes_written);
+}
+
+test "TCP close wakes blocked read on the same connection" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var transport = TcpTransport.init(allocator);
+    defer transport.deinit();
+
+    var listen_addr = try Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/0");
+    defer listen_addr.deinit();
+
+    const listener = try transport.listen(io, &listen_addr);
+    const actual_port = listener.server.socket.address.getPort();
+
+    const dial_str = try std.fmt.allocPrint(allocator, "/ip4/127.0.0.1/tcp/{}", .{actual_port});
+    defer allocator.free(dial_str);
+
+    var dial_addr = try Multiaddr.create(allocator, dial_str);
+    defer dial_addr.deinit();
+
+    var accept_future = try listener.acceptConcurrent(io);
+    defer _ = accept_future.cancel(io) catch {};
+
+    var dialed = try transport.dial(io, &dial_addr);
+    defer dialed.deinit();
+
+    var accepted = try accept_future.await(io);
+    defer accepted.deinit();
+
+    const ReaderCtx = struct {
+        conn: *TcpConnection,
+        io: std.Io,
+
+        fn run(ctx: *@This()) anyerror!usize {
+            var buf: [16]u8 = undefined;
+            return ctx.conn.readSome(ctx.io, &buf);
+        }
+    };
+
+    var reader_ctx = ReaderCtx{ .conn = &accepted, .io = io };
+    var read_future = try io.concurrent(ReaderCtx.run, .{&reader_ctx});
+
+    try io.sleep(std.Io.Duration.fromMilliseconds(50), .awake);
+    try accepted.close(io);
+
+    const result = read_future.await(io) catch |err| switch (err) {
+        error.ConnectionClosed,
+        error.EndOfStream,
+        error.SocketUnconnected,
+        => return,
+        else => return err,
+    };
+    try std.testing.expectEqual(@as(usize, 0), result);
 }
 
 test "transport capabilities" {

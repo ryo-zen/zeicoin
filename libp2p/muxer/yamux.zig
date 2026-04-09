@@ -191,7 +191,7 @@ pub const Session = struct {
             self.shutdown_started = true;
             self.shutdownLocked();
         }
-        self.cancelFuturesLocked();
+        self.cancelAndAwaitFuturesLocked();
 
         mutexLock(&self.streams_mu);
         var it = self.streams.iterator();
@@ -210,12 +210,16 @@ pub const Session = struct {
         self.transport.conn.close() catch {};
     }
 
-    fn cancelFuturesLocked(self: *Self) void {
+    fn cancelAndAwaitFuturesLocked(self: *Self) void {
         if (self.demux_future) |*future| {
             _ = future.cancel(self.transport.conn.io) catch {};
+            future.await(self.transport.conn.io) catch {};
+            self.demux_future = null;
         }
         if (self.keepalive_future) |*future| {
             _ = future.cancel(self.transport.conn.io) catch {};
+            future.await(self.transport.conn.io) catch {};
+            self.keepalive_future = null;
         }
     }
 

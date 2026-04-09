@@ -250,6 +250,10 @@ pub const Peer = struct {
 
     /// Check if peer timed out
     pub fn isTimedOut(self: Self) bool {
+        if (self.yamux_session) |session| {
+            return session.isClosed();
+        }
+
         const now = util.getTime();
         const timeout_result = (now - self.last_recv) > protocol.CONNECTION_TIMEOUT_SECONDS;
         return timeout_result;
@@ -994,6 +998,41 @@ pub const PeerManager = struct {
         };
     }
 };
+
+test "peer timeout ignores idle live yamux sessions" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var conn_pair = try libp2p.InProcConnection.initPair(allocator, io);
+    var initiator_conn = conn_pair.initiator;
+    defer initiator_conn.deinit();
+    var responder_conn = conn_pair.responder;
+    defer responder_conn.deinit();
+
+    var secure = libp2p.noise.SecureTransport.init(
+        allocator,
+        initiator_conn.connection(),
+        [_]u8{0x11} ** 32,
+        [_]u8{0x22} ** 32,
+    );
+    defer secure.deinit();
+
+    var session = yamux.Session.init(allocator, &secure, true);
+    defer session.deinit();
+
+    var peer = Peer.init(allocator, io, 1, .{
+        .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 10801 },
+    });
+    defer peer.deinit();
+
+    peer.last_recv = util.getTime() - @as(i64, @intCast(protocol.CONNECTION_TIMEOUT_SECONDS + 10));
+    peer.yamux_session = &session;
+
+    try std.testing.expect(!peer.isTimedOut());
+
+    session.shutdown();
+    try std.testing.expect(peer.isTimedOut());
+}
 
 fn appendDiscoveryAddress(
     list: *std.array_list.Managed(message_types.PeerAddress),
