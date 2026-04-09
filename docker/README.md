@@ -1,31 +1,33 @@
 # ZeiCoin Docker Multi-Node Testing Environment
 
-This Docker setup provides a complete 3-node ZeiCoin cluster for testing multi-node synchronization, P2P networking, and blockchain consensus on Windows.
+This Docker setup provides a complete 3-node ZeiCoin cluster for testing multi-node synchronization, P2P networking, blockchain consensus, and Kad behavior in the real `zen_server` runtime.
 
 ## Architecture
 
 ```
 zeicoin-network (Docker bridge - ISOLATED from live network)
-├── seed-node (zeicoin-seed)
+├── miner-1 (zeicoin-miner-1)
 │   ├── Ports: 10801 (P2P), 10802 (Client API), 10803 (RPC)
-│   ├── Mining: Enabled (wallet: miner)
-│   ├── Bootstrap: None (genesis node, no external connections)
-│   └── Data: Docker volume 'seed-data'
+│   ├── Mining: Enabled (wallet: miner1)
+│   ├── Bootstrap: None (seed node, no external connections)
+│   └── Data: Docker volume 'miner1-data'
 │
-├── node-1 (zeicoin-node1)
+├── miner-2 (zeicoin-miner-2)
 │   ├── Ports: 10811 (P2P), 10812 (Client API), 10813 (RPC)
-│   ├── Mining: Disabled
-│   ├── Bootstrap: seed-node:10801 (internal only)
-│   └── Data: Docker volume 'node1-data'
+│   ├── Mining: Enabled (wallet: miner2)
+│   ├── Bootstrap: miner-1 only (/ip4/172.33.0.10/tcp/10801)
+│   └── Data: Docker volume 'miner2-data'
 │
-└── node-2 (zeicoin-node2)
+└── node-1 (zeicoin-node-1)
     ├── Ports: 10821 (P2P), 10822 (Client API), 10823 (RPC)
     ├── Mining: Disabled
-    ├── Bootstrap: seed-node:10801, node-1:10801 (internal only)
-    └── Data: Docker volume 'node2-data'
+    ├── Bootstrap: miner-1 only (/ip4/172.33.0.10/tcp/10801)
+    └── Data: Docker volume 'node1-data'
 ```
 
 **Important**: This Docker setup is completely isolated from the live ZeiCoin testnet. The nodes will NOT connect to the public bootstrap nodes. This creates a private testing network for safe experimentation.
+
+For Kad runtime validation, the compose file also binds each node to its concrete Docker bridge IP so Identify/Kad advertise dialable listen addresses instead of `0.0.0.0`. It also sets `ZEICOIN_KAD_REFRESH_INTERVAL_MS=5000` so the real `zen_server` nodes emit repeatable refresh logs during the short smoke run instead of waiting for the default 10-minute interval.
 
 ## Prerequisites
 
@@ -49,7 +51,7 @@ From the project root directory:
 
 ```bash
 # Build images and start all nodes
-docker-compose up -d
+docker compose up -d
 
 # This will:
 # - Build the ZeiCoin Docker image (~5-10 minutes first time)
@@ -62,12 +64,12 @@ docker-compose up -d
 
 ```bash
 # View all nodes
-docker-compose logs -f
+docker compose logs -f
 
 # View specific node
-docker-compose logs -f seed-node
-docker-compose logs -f node-1
-docker-compose logs -f node-2
+docker compose logs -f miner-1
+docker compose logs -f miner-2
+docker compose logs -f node-1
 
 # Press Ctrl+C to exit logs
 ```
@@ -76,18 +78,53 @@ docker-compose logs -f node-2
 
 ```bash
 # Check seed node (mining)
-docker exec zeicoin-seed ./zig-out/bin/zeicoin status
+docker exec zeicoin-miner-1 env ZEICOIN_SERVER=172.33.0.10 ./zig-out/bin/zeicoin status
+
+# Check miner-2 (secondary miner)
+docker exec zeicoin-miner-2 env ZEICOIN_SERVER=172.33.0.11 ./zig-out/bin/zeicoin status
 
 # Check node-1 (syncing)
-docker exec zeicoin-node1 ./zig-out/bin/zeicoin status
-
-# Check node-2 (syncing)
-docker exec zeicoin-node2 ./zig-out/bin/zeicoin status
+docker exec zeicoin-node-1 env ZEICOIN_SERVER=172.33.0.12 ./zig-out/bin/zeicoin status
 ```
 
 Expected output:
 ```
 Height: 42 | Peers: 2 | Mempool: 0 | Mining: ✓
+```
+
+## Kad Runtime Validation
+
+Use the dedicated smoke script when you want to prove that Kad works in the full `zen_server` lifecycle rather than only in `libp2p_testnode`:
+
+```bash
+./docker/scripts/test_libp2p_zen_server.sh
+```
+
+The runtime topology used by this proof is:
+
+- `zeicoin-miner-1`: the only configured bootstrap seed
+- `zeicoin-miner-2`: miner that starts with only `miner-1` as bootstrap input
+- `zeicoin-node-1`: sync-only node that starts with only `miner-1` as bootstrap input
+
+The smoke passes only if:
+
+- all three containers log Kad runtime enablement and `kad_status: reason=refresh ...` markers from `zen_server`
+- the Kad routing layer converges on the full 3-node topology (`routing_peers=2` on every node)
+- `miner-2` and `node-1` both promote Kad-discovered peers into direct transport sessions (`Connected Peers: 2`)
+- non-seed nodes report Kad-learned addresses without repeated `ConnectionRefused` dials to ephemeral ports
+- block sync still succeeds
+- the restarted seed emits a new refresh and reconnects to both peers
+
+Current gaps versus `libp2p_testnode --kad`:
+
+- this smoke proves the full `zen_server` wiring, but it is less isolated than the dedicated Kad harness because the regular ZeiCoin protocol is active at the same time
+- it exercises repeated short-interval refreshes configured for Docker, not the default 10-minute production interval
+- it does not replace the lower-level DHT harness for provider/value semantics or the stricter post-seed session-retention checks
+
+For the narrower direct-session regression proof added in `ZEI-99`, run:
+
+```bash
+./docker/scripts/test_libp2p_zen_server_promotion.sh
 ```
 
 ## Testing Multi-Node Synchronization
@@ -98,52 +135,52 @@ All nodes should reach the same height within seconds:
 
 ```bash
 # Quick status check for all nodes
-echo "=== Seed Node ===" && docker exec zeicoin-seed ./zig-out/bin/zeicoin status
-echo "=== Node 1 ===" && docker exec zeicoin-node1 ./zig-out/bin/zeicoin status
-echo "=== Node 2 ===" && docker exec zeicoin-node2 ./zig-out/bin/zeicoin status
+echo "=== Miner 1 ===" && docker exec zeicoin-miner-1 env ZEICOIN_SERVER=172.33.0.10 ./zig-out/bin/zeicoin status
+echo "=== Miner 2 ===" && docker exec zeicoin-miner-2 env ZEICOIN_SERVER=172.33.0.11 ./zig-out/bin/zeicoin status
+echo "=== Node 1 ===" && docker exec zeicoin-node-1 env ZEICOIN_SERVER=172.33.0.12 ./zig-out/bin/zeicoin status
 ```
 
 ### Create and Test Wallets
 
 ```bash
-# Create a wallet on seed node
-docker exec -it zeicoin-seed ./zig-out/bin/zeicoin wallet create alice
+# Create a wallet on miner-1
+docker exec -it zeicoin-miner-1 env ZEICOIN_SERVER=172.33.0.10 ./zig-out/bin/zeicoin wallet create alice
 # Enter password when prompted
 
 # Get miner wallet address (to receive test coins)
-docker exec zeicoin-seed ./zig-out/bin/zeicoin address miner
+docker exec zeicoin-miner-1 env ZEICOIN_SERVER=172.33.0.10 ./zig-out/bin/zeicoin address miner1
 
 # Check miner balance (should have mining rewards)
-docker exec zeicoin-seed ./zig-out/bin/zeicoin balance miner
+docker exec zeicoin-miner-1 env ZEICOIN_SERVER=172.33.0.10 ./zig-out/bin/zeicoin balance miner1
 
 # Get alice's address
-docker exec zeicoin-seed ./zig-out/bin/zeicoin address alice
+docker exec zeicoin-miner-1 env ZEICOIN_SERVER=172.33.0.10 ./zig-out/bin/zeicoin address alice
 
-# Send coins from miner to alice
-docker exec zeicoin-seed ./zig-out/bin/zeicoin send 100 <alice-address> miner
-# Enter miner password: miner123
+# Send coins from miner-1 to alice
+docker exec zeicoin-miner-1 env ZEICOIN_SERVER=172.33.0.10 ./zig-out/bin/zeicoin send 100 <alice-address> miner1
+# Enter miner1 password: miner123
 
 # Wait for next block, then check alice's balance
-docker exec zeicoin-seed ./zig-out/bin/zeicoin balance alice
+docker exec zeicoin-miner-1 env ZEICOIN_SERVER=172.33.0.10 ./zig-out/bin/zeicoin balance alice
 ```
 
 ### Test Transaction Propagation
 
 ```bash
-# View transaction history on seed
-docker exec zeicoin-seed ./zig-out/bin/zeicoin history miner
+# View transaction history on miner-1
+docker exec zeicoin-miner-1 env ZEICOIN_SERVER=172.33.0.10 ./zig-out/bin/zeicoin history miner1
 
 # Create wallet on node-1
-docker exec -it zeicoin-node1 ./zig-out/bin/zeicoin wallet create bob
+docker exec -it zeicoin-node-1 env ZEICOIN_SERVER=172.33.0.12 ./zig-out/bin/zeicoin wallet create bob
 
 # Get bob's address
-docker exec zeicoin-node1 ./zig-out/bin/zeicoin address bob
+docker exec zeicoin-node-1 env ZEICOIN_SERVER=172.33.0.12 ./zig-out/bin/zeicoin address bob
 
 # Send from alice to bob (cross-node transaction)
-docker exec zeicoin-seed ./zig-out/bin/zeicoin send 50 <bob-address> alice
+docker exec zeicoin-miner-1 env ZEICOIN_SERVER=172.33.0.10 ./zig-out/bin/zeicoin send 50 <bob-address> alice
 
 # Verify bob received coins on node-1
-docker exec zeicoin-node1 ./zig-out/bin/zeicoin balance bob
+docker exec zeicoin-node-1 env ZEICOIN_SERVER=172.33.0.12 ./zig-out/bin/zeicoin balance bob
 ```
 
 ## Network Resilience Testing
@@ -152,39 +189,39 @@ docker exec zeicoin-node1 ./zig-out/bin/zeicoin balance bob
 
 ```bash
 # Stop node-1
-docker-compose stop node-1
+docker compose stop node-1
 
 # Watch seed node logs (should show peer disconnection)
-docker-compose logs -f seed-node
+docker compose logs -f miner-1
 
 # Restart node-1
-docker-compose start node-1
+docker compose start node-1
 
 # Watch node-1 logs (should resync)
-docker-compose logs -f node-1
+docker compose logs -f node-1
 ```
 
 ### Test Network Partition
 
 ```bash
-# Disconnect node-2 from network
-docker network disconnect zeicoin-network zeicoin-node2
+# Disconnect node-1 from network
+docker network disconnect zeicoin-network zeicoin-node-1
 
 # Wait 30 seconds, then reconnect
-docker network connect zeicoin-network zeicoin-node2
+docker network connect zeicoin-network zeicoin-node-1
 
-# Node-2 should automatically reconnect and resync
-docker-compose logs -f node-2
+# Node-1 should automatically reconnect and resync
+docker compose logs -f node-1
 ```
 
 ### Test Mining Interruption
 
 ```bash
-# Restart seed node (mining stops temporarily)
-docker-compose restart seed-node
+# Restart miner-1 (mining stops temporarily)
+docker compose restart miner-1
 
 # Watch it resume mining
-docker-compose logs -f seed-node
+docker compose logs -f miner-1
 
 # Peer nodes should maintain connection and sync new blocks
 ```

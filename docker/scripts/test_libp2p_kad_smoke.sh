@@ -4,7 +4,7 @@
 # Verifies that four libp2p testnodes running /kad/1.0.0 can:
 # - bootstrap from a single seed
 # - discover the other non-seed peers via Kad
-# - retain at least one non-seed live session after the seed stops
+# - retain direct non-seed connectivity after the seed stops
 
 set -euo pipefail
 
@@ -163,7 +163,7 @@ done
 log "Stopping the bootstrap seed to confirm non-seed sessions survive"
 docker stop libp2p-seed >/dev/null
 
-log "Waiting for the non-seed cluster to retain at least one live peer session (up to 45s)"
+log "Waiting for each non-seed node to retain at least one live non-seed session (up to 45s)"
 deadline=$((SECONDS + 45))
 while true; do
     n1_sessions="$(live_sessions libp2p-node-1)"
@@ -179,14 +179,14 @@ while true; do
         fi
     done
 
-    if (( all_running && total_sessions >= 1 )); then
+    if (( all_running && n1_sessions >= 1 && n2_sessions >= 1 && n3_sessions >= 1 )); then
         log "  node-1 live_sessions=$n1_sessions node-2 live_sessions=$n2_sessions node-3 live_sessions=$n3_sessions total=$total_sessions"
         break
     fi
 
     if (( SECONDS > deadline )); then
         log "  node-1 live_sessions=$n1_sessions node-2 live_sessions=$n2_sessions node-3 live_sessions=$n3_sessions total=$total_sessions"
-        fail "Non-seed cluster did not retain any live session after seed shutdown"
+        fail "One or more non-seed nodes lost all live peer sessions after seed shutdown"
     fi
     sleep 3
 done

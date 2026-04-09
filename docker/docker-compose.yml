@@ -8,7 +8,7 @@ x-common: &common
   networks:
     - zeicoin-network
   healthcheck:
-    test: ["CMD", "nc", "-z", "localhost", "10801"]
+    test: ["CMD-SHELL", "nc -z $$ZEICOIN_BIND_IP 10801"]
     interval: 10s
     timeout: 5s
     retries: 5
@@ -17,10 +17,9 @@ x-common: &common
 x-common-env: &common-env
   ZEICOIN_NETWORK: testnet
   ZEICOIN_TEST_MODE: "true"
-  ZEICOIN_BIND_IP: 0.0.0.0
   ZEICOIN_P2P_PORT: 10801
   ZEICOIN_API_PORT: 10802
-  ZEICOIN_SERVER: 127.0.0.1
+  ZEICOIN_KAD_REFRESH_INTERVAL_MS: "5000"
 
 services:
   miner-1:
@@ -34,6 +33,8 @@ services:
       - miner1-data:/zeicoin/zeicoin_data_testnet
     environment:
       <<: *common-env
+      ZEICOIN_BIND_IP: 172.33.0.10
+      ZEICOIN_SERVER: 172.33.0.10
       ZEICOIN_BOOTSTRAP: ""
       ZEICOIN_MINE_ENABLED: "true"
       ZEICOIN_MINER_WALLET: miner1
@@ -54,6 +55,8 @@ services:
       - miner2-data:/zeicoin/zeicoin_data_testnet
     environment:
       <<: *common-env
+      ZEICOIN_BIND_IP: 172.33.0.11
+      ZEICOIN_SERVER: 172.33.0.11
       ZEICOIN_BOOTSTRAP: "/ip4/172.33.0.10/tcp/10801"
       ZEICOIN_MINE_ENABLED: "true"
       ZEICOIN_MINER_WALLET: miner2
@@ -77,8 +80,10 @@ services:
       - node1-data:/zeicoin/zeicoin_data_testnet
     environment:
       <<: *common-env
-      ZEICOIN_BOOTSTRAP: "/ip4/172.33.0.10/tcp/10801,/ip4/172.33.0.11/tcp/10801"
-      ZEICOIN_MINE_ENABLED: "true"
+      ZEICOIN_BIND_IP: 172.33.0.12
+      ZEICOIN_SERVER: 172.33.0.12
+      ZEICOIN_BOOTSTRAP: "/ip4/172.33.0.10/tcp/10801"
+      ZEICOIN_MINE_ENABLED: "false"
     depends_on:
       miner-1:
         condition: service_healthy
