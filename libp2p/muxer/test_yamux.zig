@@ -908,9 +908,9 @@ test "yamux keepalive ping pong keeps session alive" {
             var stream = try accept_future.await(ctx.io);
             defer stream.deinit();
 
-            const req = try readAllFromStream(ctx.allocator, &stream);
-            defer ctx.allocator.free(req);
-            if (!std.mem.eql(u8, req, "alive")) return error.TestExpectedEqual;
+            var req: [5]u8 = undefined;
+            try readExact(&stream, &req);
+            try std.testing.expectEqualStrings("alive", &req);
 
             try stream.writeAll("ok");
             try stream.close();
@@ -938,8 +938,6 @@ test "yamux keepalive ping pong keeps session alive" {
     var stream = try open_future.await(io);
     defer stream.deinit();
     try stream.writeAll("alive");
-    try stream.close();
-
     try readExpectedReply(&stream, "ok");
     try responder_future.await(io);
 }

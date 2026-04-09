@@ -10,9 +10,9 @@
 **Branch:** `libp2p-integration`
 **Active initiative:** Post-rollout testnet validation and hardening
 
-**Last worked on:** 2026-04-09 — Implemented `ZEI-85` + `ZEI-86` locally: `NetworkManager` now feeds Kad into the runtime discovery/address-book path, `libp2p/dht/store.zig` backs `PUT_VALUE` / `GET_VALUE` / `ADD_PROVIDER` / `GET_PROVIDERS`, bootstrap refresh now also republishes due local Kad records, and the dedicated Kad Docker smoke still passes.
-**Next step:** Commit the local `ZEI-85` + `ZEI-86` slice, then decide whether to strengthen `ZEI-87` into a full `zen_server` runtime proof or move to external interoperability validation.
-**In flight:** Local `ZEI-85` / `ZEI-86` work touches `src/core/network/peer.zig`, `src/core/network/peer_manager.zig`, `src/core/server/initialization.zig`, `src/core/server/server_handlers.zig`, `libp2p/dht/query.zig`, new `libp2p/dht/store.zig`, `libp2p/api.zig`, `libp2p/test_suite.zig`, and `libp2p/libp2p_testnode.zig`; `zig build check`, `zig build test`, DHT-only libp2p tests, and `./docker/scripts/test_libp2p_kad_smoke.sh` are green, while the full `zig build test-libp2p` still hits the known flaky Yamux keepalive test late in the suite.
+**Last worked on:** 2026-04-09 — Fixed the flaky Yamux keepalive coverage by hardening `yamux keepalive ping pong keeps session alive` to use an exact request/reply exchange instead of EOF-dependent half-close timing; `zig build test-libp2p` is now green again after the recent Kad runtime work.
+**Next step:** Decide whether to strengthen `ZEI-87` into a full `zen_server` runtime proof or move to external interoperability validation now that the Kad runtime path and libp2p regression suite are both green.
+**In flight:** No uncommitted product work; the recent Kad runtime and record-layer commits are landed, and the full local regression set now includes `zig build check`, `zig build test`, `zig build test-libp2p`, and `./docker/scripts/test_libp2p_kad_smoke.sh`.
 
 ---
 
@@ -57,6 +57,7 @@
 - `ZEI-87` currently has a dedicated libp2p-only Docker proof rather than a full `zen_server` proof: `libp2p_testnode --kad` now hosts the Kad query service, the smoke validates 4-node Kad discovery convergence in Docker, and the post-seed check is intentionally weaker than full per-node session retention.
 - The dedicated Kad Docker compose must use concrete per-container listen multiaddrs instead of `0.0.0.0`, otherwise identify/Kad replies advertise wildcard addresses that other nodes correctly refuse to dial.
 - The dedicated Kad Docker image is built with `ReleaseSafe` because the current Zig threaded-I/O debug build hits a `BADF` assertion during peer shutdown in this smoke even though the release-safe run completes and preserves the intended proof.
+- The old late-suite Yamux keepalive flake was test-structure noise rather than a transport bug: the deterministic fix was to remove EOF/half-close dependence from `yamux keepalive ping pong keeps session alive` and assert the post-idle request/reply exchange directly instead.
 - `ZEI-20` Notes still mention `zen_server` integration as unfinished, but archived `ZEI-11` and `ZEI-33` show that prerequisite is already complete; future DHT planning should treat libp2p host integration as done and focus on Kademlia-specific gaps.
 - Open libp2p integration tickets that conflict with the current branch status should be audited separately, but the only explicit libp2p rollout gate in the current blocker set is `ZEI-54`.
 - `account_count` metadata is currently used for observability/status only; it is not part of consensus or recovery gating.
