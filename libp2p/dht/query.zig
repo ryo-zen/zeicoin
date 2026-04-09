@@ -2,6 +2,7 @@ const std = @import("std");
 const libp2p = @import("../api.zig");
 const routing_table_mod = @import("routing_table.zig");
 const kad = @import("message.zig");
+const store_mod = @import("store.zig");
 const address_book_mod = @import("../peer/address_book.zig");
 
 const Multiaddr = libp2p.Multiaddr;
@@ -15,6 +16,7 @@ pub const alpha_default: usize = 10;
 pub const bucket_size: usize = routing_table_mod.bucket_size;
 pub const refresh_interval_default_ms: u64 = 10 * 60 * 1000;
 pub const query_timeout_default_ms: u64 = 10 * 1000;
+const provider_key_max_len: usize = 80;
 
 pub const BootstrapRunResult = struct {
     lookups_started: usize = 0,
@@ -80,6 +82,7 @@ pub const QueryService = struct {
     host: *Host,
     routing_table: *routing_table_mod.RoutingTable,
     address_book: *AddressBook,
+    store: store_mod.Store,
     mode: routing_table_mod.KadMode,
     alpha: usize,
     refresh_interval_ms: u64,
@@ -90,6 +93,10 @@ pub const QueryService = struct {
     clock_userdata: ?*anyopaque,
 
     const Self = @This();
+    const RequestContext = struct {
+        remote_peer_id: ?[]const u8 = null,
+        remote_addr: ?std.Io.net.IpAddress = null,
+    };
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -103,6 +110,7 @@ pub const QueryService = struct {
             .host = host,
             .routing_table = routing_table,
             .address_book = address_book,
+            .store = store_mod.Store.init(allocator),
             .mode = mode,
             .alpha = alpha_default,
             .refresh_interval_ms = refresh_interval_default_ms,
@@ -112,6 +120,10 @@ pub const QueryService = struct {
             .clock_ms_fn = defaultClockMs,
             .clock_userdata = null,
         };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.store.deinit();
     }
 
     pub fn register(self: *Self) !void {
@@ -145,6 +157,24 @@ pub const QueryService = struct {
         };
         try stream.close();
         return response;
+    }
+
+    pub fn putValue(self: *Self, io: std.Io, key: []const u8, value: []const u8) !void {
+        var record = kad.Record.init();
+        defer record.deinit(self.allocator);
+        record.key = try self.allocator.dupe(u8, key);
+        record.value = try self.allocator.dupe(u8, value);
+
+        _ = try self.store.putRecord(key, &record, nowMs(), .local);
+        _ = try self.publishValueRecord(io, key, &record);
+    }
+
+    pub fn addSelfAsProvider(self: *Self, io: std.Io, key: []const u8) !void {
+        var provider = try self.makeSelfProviderPeer();
+        defer provider.deinit(self.allocator);
+
+        try self.store.addProvider(key, &provider, nowMs(), .local);
+        _ = try self.publishProviderRecord(io, key, &provider);
     }
 
     pub fn iterativeFindNode(
@@ -253,6 +283,7 @@ pub const QueryService = struct {
     pub fn bootstrapOnce(self: *Self, io: std.Io) !BootstrapRunResult {
         const start_ms = self.clock_ms_fn(self.clock_userdata);
         var result = BootstrapRunResult{};
+        self.store.pruneExpired(start_ms);
 
         try self.performBootstrapLookup(io, self.host.identity.peer_id.getBytes(), &result);
         if (self.clock_ms_fn(self.clock_userdata) - start_ms >= self.query_timeout_ms) {
@@ -291,6 +322,7 @@ pub const QueryService = struct {
             }
         }
 
+        try self.republishDue(io, self.clock_ms_fn(self.clock_userdata));
         return result;
     }
 
@@ -329,7 +361,10 @@ pub const QueryService = struct {
             };
             defer request.deinit(self.allocator);
 
-            var response = try self.handleRequest(&request);
+            var response = try self.handleRequest(&request, .{
+                .remote_peer_id = if (conn_info.remote_peer_id) |peer_id| peer_id.toString() else null,
+                .remote_addr = conn_info.remote_addr,
+            });
             defer if (response) |*msg| msg.deinit(self.allocator);
 
             if (response) |*msg| {
@@ -338,16 +373,20 @@ pub const QueryService = struct {
         }
     }
 
-    fn handleRequest(self: *Self, request: *const kad.Message) !?kad.Message {
+    fn handleRequest(self: *Self, request: *const kad.Message, ctx: RequestContext) !?kad.Message {
+        self.store.pruneExpired(nowMs());
         switch (request.type) {
             .FIND_NODE => return try self.handleFindNode(request),
+            .GET_VALUE => return try self.handleGetValue(request),
+            .PUT_VALUE => return try self.handlePutValue(request),
+            .ADD_PROVIDER => return try self.handleAddProvider(request, ctx),
+            .GET_PROVIDERS => return try self.handleGetProviders(request),
             .PING => {
                 var response = kad.Message.init(self.allocator);
                 response.type = .PING;
                 if (request.key.len > 0) response.key = try self.allocator.dupe(u8, request.key);
                 return response;
             },
-            else => return error.UnsupportedKadMessageType,
         }
     }
 
@@ -357,8 +396,183 @@ pub const QueryService = struct {
 
         response.type = .FIND_NODE;
         response.key = try self.allocator.dupe(u8, request.key);
+        try self.appendCloserPeers(&response, request.key);
 
-        var closest = try self.routing_table.closestPeers(self.allocator, request.key, bucket_size);
+        return response;
+    }
+
+    fn republishDue(self: *Self, io: std.Io, now_ms: u64) !void {
+        var values = try self.store.dueLocalValueRepublishes(self.allocator, now_ms);
+        defer {
+            for (values.items) |*item| item.deinit(self.allocator);
+            values.deinit();
+        }
+        for (values.items) |*item| {
+            if (try self.publishValueRecord(io, item.key, &item.record)) {
+                self.store.markValueRepublished(item.key, now_ms);
+            }
+        }
+
+        var providers = try self.store.dueLocalProviderRepublishes(self.allocator, now_ms);
+        defer {
+            for (providers.items) |*item| item.deinit(self.allocator);
+            providers.deinit();
+        }
+        for (providers.items) |*item| {
+            if (try self.publishProviderRecord(io, item.key, &item.provider)) {
+                self.store.markProviderRepublished(item.key, item.provider.id, now_ms);
+            }
+        }
+    }
+
+    fn publishValueRecord(self: *Self, io: std.Io, key: []const u8, record: *const kad.Record) !bool {
+        var lookup = try self.runLookup(io, key);
+        defer lookup.deinit(self.allocator);
+        if (lookup.peers.items.len == 0) return false;
+
+        var any_success = false;
+        for (lookup.peers.items) |*peer| {
+            self.sendPutValue(io, peer, key, record) catch continue;
+            any_success = true;
+        }
+        return any_success;
+    }
+
+    fn publishProviderRecord(self: *Self, io: std.Io, key: []const u8, provider: *const kad.Peer) !bool {
+        var lookup = try self.runLookup(io, key);
+        defer lookup.deinit(self.allocator);
+        if (lookup.peers.items.len == 0) return false;
+
+        var any_success = false;
+        for (lookup.peers.items) |*peer| {
+            self.sendAddProvider(io, peer, key, provider) catch continue;
+            any_success = true;
+        }
+        return any_success;
+    }
+
+    fn sendPutValue(
+        self: *Self,
+        io: std.Io,
+        peer: *const PeerInfo,
+        key: []const u8,
+        record: *const kad.Record,
+    ) !void {
+        const session = try self.dialPeer(io, peer);
+        var stream = try self.host.newStream(io, session, kad.PROTOCOL_ID);
+        defer stream.deinit();
+
+        var request = kad.Message.init(self.allocator);
+        defer request.deinit(self.allocator);
+        request.type = .PUT_VALUE;
+        request.key = try self.allocator.dupe(u8, key);
+        request.record = try cloneKadRecord(self.allocator, record);
+
+        try kad.sendRequest(self.allocator, io, &stream, &request);
+        var response = kad.readResponse(self.allocator, io, &stream) catch |err| {
+            stream.close() catch {};
+            return err;
+        };
+        defer response.deinit(self.allocator);
+        try stream.close();
+
+        if (response.type != .PUT_VALUE) return error.InvalidKadResponseType;
+    }
+
+    fn sendAddProvider(
+        self: *Self,
+        io: std.Io,
+        peer: *const PeerInfo,
+        key: []const u8,
+        provider: *const kad.Peer,
+    ) !void {
+        const session = try self.dialPeer(io, peer);
+        var stream = try self.host.newStream(io, session, kad.PROTOCOL_ID);
+        defer stream.deinit();
+
+        var request = kad.Message.init(self.allocator);
+        defer request.deinit(self.allocator);
+        request.type = .ADD_PROVIDER;
+        request.key = try self.allocator.dupe(u8, key);
+        try request.provider_peers.append(try cloneKadPeer(self.allocator, provider));
+
+        try kad.sendRequest(self.allocator, io, &stream, &request);
+        stream.close() catch {};
+    }
+
+    fn makeSelfProviderPeer(self: *Self) !kad.Peer {
+        var provider = kad.Peer.init(self.allocator);
+        errdefer provider.deinit(self.allocator);
+        provider.id = try self.allocator.dupe(u8, self.host.identity.peer_id.toString());
+        provider.connection = .CONNECTED;
+
+        if (self.host.listen_addr) |*listen_addr| {
+            try provider.addrs.append(try self.allocator.dupe(u8, listen_addr.getBytesAddress()));
+        } else {
+            return error.NoListenAddress;
+        }
+        return provider;
+    }
+
+    fn handleGetValue(self: *Self, request: *const kad.Message) !kad.Message {
+        if (request.key.len == 0) return error.EmptyKadRecordKey;
+
+        var response = kad.Message.init(self.allocator);
+        errdefer response.deinit(self.allocator);
+        response.type = .GET_VALUE;
+        response.key = try self.allocator.dupe(u8, request.key);
+
+        response.record = try self.store.getRecord(self.allocator, request.key, nowMs());
+        try self.appendCloserPeers(&response, request.key);
+        return response;
+    }
+
+    fn handlePutValue(self: *Self, request: *const kad.Message) !kad.Message {
+        if (request.record == null) return error.MissingKadRecord;
+        const record = &request.record.?;
+
+        const put_result = try self.store.putRecord(request.key, record, nowMs(), .remote);
+        if (put_result == .rejected_older) return error.StaleKadRecord;
+
+        var response = kad.Message.init(self.allocator);
+        errdefer response.deinit(self.allocator);
+        response.type = .PUT_VALUE;
+        response.key = try self.allocator.dupe(u8, request.key);
+        response.record = try self.store.getRecord(self.allocator, request.key, nowMs());
+        return response;
+    }
+
+    fn handleAddProvider(self: *Self, request: *const kad.Message, ctx: RequestContext) !?kad.Message {
+        if (request.key.len == 0) return error.EmptyKadProviderKey;
+        if (request.key.len > provider_key_max_len) return error.KadProviderKeyTooLarge;
+        const remote_peer_id = ctx.remote_peer_id orelse return error.UnknownKadProviderSender;
+
+        var accepted: usize = 0;
+        for (request.provider_peers.items) |*provider| {
+            if (!std.mem.eql(u8, provider.id, remote_peer_id)) continue;
+            if (provider.addrs.items.len == 0) continue;
+            try self.store.addProvider(request.key, provider, nowMs(), .remote);
+            accepted += 1;
+        }
+        if (accepted == 0) return error.NoValidKadProvider;
+        return null;
+    }
+
+    fn handleGetProviders(self: *Self, request: *const kad.Message) !kad.Message {
+        if (request.key.len == 0) return error.EmptyKadProviderKey;
+        if (request.key.len > provider_key_max_len) return error.KadProviderKeyTooLarge;
+
+        var response = kad.Message.init(self.allocator);
+        errdefer response.deinit(self.allocator);
+        response.type = .GET_PROVIDERS;
+        response.key = try self.allocator.dupe(u8, request.key);
+        response.provider_peers = try self.store.getProviders(self.allocator, request.key, nowMs());
+        try self.appendCloserPeers(&response, request.key);
+        return response;
+    }
+
+    fn appendCloserPeers(self: *Self, response: *kad.Message, key: []const u8) !void {
+        var closest = try self.routing_table.closestPeers(self.allocator, key, bucket_size);
         defer {
             for (closest.items) |*snapshot| snapshot.deinit(self.allocator);
             closest.deinit();
@@ -369,8 +583,6 @@ pub const QueryService = struct {
             errdefer peer.deinit(self.allocator);
             try response.closer_peers.append(peer);
         }
-
-        return response;
     }
 
     fn dialPeer(self: *Self, io: std.Io, peer: *const PeerInfo) !*yamux.Session {
@@ -529,6 +741,28 @@ fn wirePeerFromSnapshot(allocator: std.mem.Allocator, snapshot: *const routing_t
     return out;
 }
 
+fn cloneKadRecord(allocator: std.mem.Allocator, record: *const kad.Record) !kad.Record {
+    var out = kad.Record.init();
+    errdefer out.deinit(allocator);
+    out.key = try allocator.dupe(u8, record.key);
+    out.value = try allocator.dupe(u8, record.value);
+    if (record.time_received.len > 0) {
+        out.time_received = try allocator.dupe(u8, record.time_received);
+    }
+    return out;
+}
+
+fn cloneKadPeer(allocator: std.mem.Allocator, peer: *const kad.Peer) !kad.Peer {
+    var out = kad.Peer.init(allocator);
+    errdefer out.deinit(allocator);
+    out.id = try allocator.dupe(u8, peer.id);
+    out.connection = peer.connection;
+    for (peer.addrs.items) |addr| {
+        try out.addrs.append(try allocator.dupe(u8, addr));
+    }
+    return out;
+}
+
 fn connectionToWire(connection: routing_table_mod.ConnectionType) kad.ConnectionType {
     return switch (connection) {
         .not_connected => .NOT_CONNECTED,
@@ -654,6 +888,7 @@ test "kad bootstrap once runs self lookup then one lookup per non-empty bucket" 
     _ = try table.insertOrUpdate("peer-c", &[_][]const u8{"/ip4/127.0.0.1/tcp/23013"}, .server, .connected, 1000);
 
     var service = QueryService.init(allocator, &host, &table, &book, .server);
+    defer service.deinit();
     var trace = BootstrapTraceCtx.init(allocator);
     defer trace.deinit();
     service.lookup_override = traceLookupOverride;
@@ -688,6 +923,7 @@ test "kad refresh loop runs bootstrap on startup then periodically" {
     _ = try table.insertOrUpdate("peer-a", &[_][]const u8{"/ip4/127.0.0.1/tcp/23111"}, .server, .connected, 1000);
 
     var service = QueryService.init(allocator, &host, &table, &book, .server);
+    defer service.deinit();
     service.refresh_interval_ms = 1;
 
     var trace = BootstrapTraceCtx.init(allocator);
@@ -719,6 +955,7 @@ test "kad bootstrap once aborts when query timeout is exhausted" {
     _ = try table.insertOrUpdate("peer-b", &[_][]const u8{"/ip4/127.0.0.1/tcp/23212"}, .server, .connected, 1000);
 
     var service = QueryService.init(allocator, &host, &table, &book, .server);
+    defer service.deinit();
     service.query_timeout_ms = 10;
 
     var trace = BootstrapTraceCtx.init(allocator);
@@ -752,6 +989,7 @@ test "kad query service handles repeated find node requests on one stream" {
     _ = try server_table.insertOrUpdate("peer-c", &[_][]const u8{"/ip4/127.0.0.1/tcp/22013"}, .server, .connected, 1000);
 
     var service = QueryService.init(allocator, &server, &server_table, &server_book, .server);
+    defer service.deinit();
     try service.register();
 
     var listen_addr = try Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/22010");
@@ -811,6 +1049,7 @@ test "kad iterative find node converges and learns discovered peers" {
     var b_table = try routing_table_mod.RoutingTable.init(allocator, b.identity.peer_id.toString());
     defer b_table.deinit();
     var b_service = QueryService.init(allocator, &b, &b_table, &b_book, .server);
+    defer b_service.deinit();
     try b_service.register();
     var b_addr = try Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/22111");
     defer b_addr.deinit();
@@ -828,6 +1067,7 @@ test "kad iterative find node converges and learns discovered peers" {
     var c_table = try routing_table_mod.RoutingTable.init(allocator, c.identity.peer_id.toString());
     defer c_table.deinit();
     var c_service = QueryService.init(allocator, &c, &c_table, &c_book, .server);
+    defer c_service.deinit();
     try c_service.register();
     var c_addr = try Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/22112");
     defer c_addr.deinit();
@@ -845,6 +1085,7 @@ test "kad iterative find node converges and learns discovered peers" {
     var d_table = try routing_table_mod.RoutingTable.init(allocator, d.identity.peer_id.toString());
     defer d_table.deinit();
     var d_service = QueryService.init(allocator, &d, &d_table, &d_book, .server);
+    defer d_service.deinit();
     try d_service.register();
     var d_addr = try Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/22113");
     defer d_addr.deinit();
@@ -862,6 +1103,7 @@ test "kad iterative find node converges and learns discovered peers" {
     var e_table = try routing_table_mod.RoutingTable.init(allocator, e.identity.peer_id.toString());
     defer e_table.deinit();
     var e_service = QueryService.init(allocator, &e, &e_table, &e_book, .server);
+    defer e_service.deinit();
     try e_service.register();
     var e_addr = try Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/22114");
     defer e_addr.deinit();
@@ -891,6 +1133,7 @@ test "kad iterative find node converges and learns discovered peers" {
     _ = try client_table.insertOrUpdate(c.identity.peer_id.toString(), &[_][]const u8{"/ip4/127.0.0.1/tcp/22112"}, .server, .can_connect, 1000);
 
     var client_service = QueryService.init(allocator, &client, &client_table, &client_book, .client);
+    defer client_service.deinit();
     var result = try client_service.iterativeFindNode(io, e.identity.peer_id.getBytes());
     defer freeLookupResult(allocator, &result);
 
@@ -928,6 +1171,7 @@ test "kad iterative find node terminates when known peers are exhausted" {
     var server_table = try routing_table_mod.RoutingTable.init(allocator, server.identity.peer_id.toString());
     defer server_table.deinit();
     var server_service = QueryService.init(allocator, &server, &server_table, &server_book, .server);
+    defer server_service.deinit();
     try server_service.register();
 
     var listen_addr = try Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/22210");
@@ -950,9 +1194,111 @@ test "kad iterative find node terminates when known peers are exhausted" {
     _ = try client_table.insertOrUpdate(server.identity.peer_id.toString(), &[_][]const u8{"/ip4/127.0.0.1/tcp/22210"}, .server, .can_connect, 1000);
 
     var client_service = QueryService.init(allocator, &client, &client_table, &client_book, .client);
+    defer client_service.deinit();
     var result = try client_service.iterativeFindNode(io, "unreachable-target");
     defer freeLookupResult(allocator, &result);
 
     try std.testing.expectEqual(@as(usize, 1), result.peers.items.len);
     try std.testing.expectEqualStrings(server.identity.peer_id.toString(), result.peers.items[0].peer_id);
+}
+
+test "kad query service stores and returns local value records" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host = Host.init(allocator, try libp2p.IdentityKey.generate(allocator, io));
+    defer host.deinit();
+    var book = try AddressBook.init(allocator, host.identity.peer_id.toString());
+    defer book.deinit();
+    var table = try routing_table_mod.RoutingTable.init(allocator, host.identity.peer_id.toString());
+    defer table.deinit();
+
+    _ = try table.insertOrUpdate("peer-a", &[_][]const u8{"/ip4/127.0.0.1/tcp/24111"}, .server, .connected, 1000);
+
+    var service = QueryService.init(allocator, &host, &table, &book, .server);
+    defer service.deinit();
+
+    var put_request = kad.Message.init(allocator);
+    defer put_request.deinit(allocator);
+    put_request.type = .PUT_VALUE;
+    put_request.key = try allocator.dupe(u8, "value-key");
+    put_request.record = kad.Record.init();
+    put_request.record.?.key = try allocator.dupe(u8, "value-key");
+    put_request.record.?.value = try allocator.dupe(u8, "value-1");
+
+    var put_response = (try service.handleRequest(&put_request, .{})).?;
+    defer put_response.deinit(allocator);
+    try std.testing.expectEqual(kad.MessageType.PUT_VALUE, put_response.type);
+    try std.testing.expect(put_response.record != null);
+    try std.testing.expectEqualStrings("value-1", put_response.record.?.value);
+
+    var get_request = kad.Message.init(allocator);
+    defer get_request.deinit(allocator);
+    get_request.type = .GET_VALUE;
+    get_request.key = try allocator.dupe(u8, "value-key");
+
+    var get_response = (try service.handleRequest(&get_request, .{})).?;
+    defer get_response.deinit(allocator);
+    try std.testing.expectEqual(kad.MessageType.GET_VALUE, get_response.type);
+    try std.testing.expect(get_response.record != null);
+    try std.testing.expectEqualStrings("value-1", get_response.record.?.value);
+    try std.testing.expectEqual(@as(usize, 1), get_response.closer_peers.items.len);
+}
+
+test "kad add provider accepts only the sender peer id" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host = Host.init(allocator, try libp2p.IdentityKey.generate(allocator, io));
+    defer host.deinit();
+    var book = try AddressBook.init(allocator, host.identity.peer_id.toString());
+    defer book.deinit();
+    var table = try routing_table_mod.RoutingTable.init(allocator, host.identity.peer_id.toString());
+    defer table.deinit();
+
+    _ = try table.insertOrUpdate("peer-a", &[_][]const u8{"/ip4/127.0.0.1/tcp/24211"}, .server, .connected, 1000);
+
+    var service = QueryService.init(allocator, &host, &table, &book, .server);
+    defer service.deinit();
+
+    var invalid = kad.Message.init(allocator);
+    defer invalid.deinit(allocator);
+    invalid.type = .ADD_PROVIDER;
+    invalid.key = try allocator.dupe(u8, "provider-key");
+    var wrong_peer = kad.Peer.init(allocator);
+    errdefer wrong_peer.deinit(allocator);
+    wrong_peer.id = try allocator.dupe(u8, "different-peer");
+    wrong_peer.connection = .CONNECTED;
+    try wrong_peer.addrs.append(try allocator.dupe(u8, "/ip4/127.0.0.1/tcp/24212"));
+    try invalid.provider_peers.append(wrong_peer);
+
+    try std.testing.expectError(error.NoValidKadProvider, service.handleRequest(&invalid, .{
+        .remote_peer_id = "sender-peer",
+    }));
+
+    var valid = kad.Message.init(allocator);
+    defer valid.deinit(allocator);
+    valid.type = .ADD_PROVIDER;
+    valid.key = try allocator.dupe(u8, "provider-key");
+    var good_peer = kad.Peer.init(allocator);
+    errdefer good_peer.deinit(allocator);
+    good_peer.id = try allocator.dupe(u8, "sender-peer");
+    good_peer.connection = .CONNECTED;
+    try good_peer.addrs.append(try allocator.dupe(u8, "/ip4/127.0.0.1/tcp/24213"));
+    try valid.provider_peers.append(good_peer);
+
+    try std.testing.expect((try service.handleRequest(&valid, .{
+        .remote_peer_id = "sender-peer",
+    })) == null);
+
+    var get_request = kad.Message.init(allocator);
+    defer get_request.deinit(allocator);
+    get_request.type = .GET_PROVIDERS;
+    get_request.key = try allocator.dupe(u8, "provider-key");
+
+    var response = (try service.handleRequest(&get_request, .{})).?;
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), response.provider_peers.items.len);
+    try std.testing.expectEqualStrings("sender-peer", response.provider_peers.items[0].id);
+    try std.testing.expectEqual(@as(usize, 1), response.closer_peers.items.len);
 }

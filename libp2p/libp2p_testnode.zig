@@ -85,6 +85,7 @@ fn runKadNode(
     try host.listen(io, &listen_addr);
 
     var service = QueryService.init(allocator, &host, &routing_table, &address_book, .server);
+    defer service.deinit();
     service.refresh_interval_ms = kad_refresh_interval_ms;
     service.query_timeout_ms = kad_query_timeout_ms;
     try service.register();

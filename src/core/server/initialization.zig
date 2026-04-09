@@ -186,7 +186,7 @@ pub fn initializeNode(allocator: std.mem.Allocator, io: std.Io, config: command_
 
     // Initialize network
     var network_manager = try allocator.create(network.NetworkManager);
-    network_manager.* = network.NetworkManager.init(allocator, io, handler_result.handler, identity);
+    network_manager.* = try network.NetworkManager.init(allocator, io, handler_result.handler, identity);
     // Note: network_manager ownership is transferred to blockchain.network_coordinator
     // No errdefer needed - NodeComponents.deinit() handles cleanup
     

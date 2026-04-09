@@ -687,7 +687,7 @@ pub const PeerManager = struct {
         }
     }
 
-    fn extractMappedIpv4(ip6_bytes: [16]u8) ?[4]u8 {
+    pub fn extractMappedIpv4(ip6_bytes: [16]u8) ?[4]u8 {
         // IPv4-mapped IPv6: ::ffff:a.b.c.d
         if (!std.mem.eql(u8, ip6_bytes[0..10], &[_]u8{0} ** 10)) return null;
         if (ip6_bytes[10] != 0xff or ip6_bytes[11] != 0xff) return null;
@@ -848,7 +848,7 @@ pub const PeerManager = struct {
 
         // Check if already known
         for (self.known_addresses.items) |known| {
-            if (known.eql(address)) {
+            if (known.eql(&address)) {
                 return;
             }
         }
@@ -871,6 +871,25 @@ pub const PeerManager = struct {
         const rand_val = std.mem.readInt(usize, &rand_bytes, .little);
         const index = rand_val % self.known_addresses.items.len;
         return self.known_addresses.items[index];
+    }
+
+    pub fn snapshotDiscoveryAddresses(self: *Self, allocator: std.mem.Allocator) ![]message_types.PeerAddress {
+        var list = std.array_list.Managed(message_types.PeerAddress).init(allocator);
+        errdefer list.deinit();
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (self.peers.items) |peer| {
+            if (peer.state != .connected) continue;
+            try appendDiscoveryAddress(&list, peer.address);
+        }
+
+        for (self.known_addresses.items) |addr| {
+            try appendDiscoveryAddress(&list, addr);
+        }
+
+        return list.toOwnedSlice();
     }
 
     /// Clean up timed out peers
@@ -950,3 +969,37 @@ pub const PeerManager = struct {
         };
     }
 };
+
+fn appendDiscoveryAddress(
+    list: *std.array_list.Managed(message_types.PeerAddress),
+    address: net.IpAddress,
+) !void {
+    const encoded = encodeDiscoveryIp(address);
+    for (list.items) |existing| {
+        if (std.mem.eql(u8, &existing.ip, &encoded.ip) and existing.port == encoded.port) return;
+    }
+    try list.append(encoded);
+}
+
+fn encodeDiscoveryIp(address: net.IpAddress) message_types.PeerAddress {
+    return switch (address) {
+        .ip4 => |a| blk: {
+            var ip: [16]u8 = [_]u8{0} ** 16;
+            ip[10] = 0xff;
+            ip[11] = 0xff;
+            @memcpy(ip[12..16], &a.bytes);
+            break :blk .{
+                .ip = ip,
+                .port = a.port,
+                .services = 0,
+                .last_seen = util.getTime(),
+            };
+        },
+        .ip6 => |a| .{
+            .ip = a.bytes,
+            .port = a.port,
+            .services = 0,
+            .last_seen = util.getTime(),
+        },
+    };
+}
