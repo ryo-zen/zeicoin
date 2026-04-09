@@ -256,7 +256,12 @@ pub const AddressBook = struct {
         defer self.mutex.unlock();
 
         const local_transport = transportSlice(local_listen_ma);
-        var best: ?struct { peer_idx: usize, addr_idx: usize, score: i32 } = null;
+        var best: ?struct {
+            peer_idx: usize,
+            addr_idx: usize,
+            score: i32,
+            source_rank: u8,
+        } = null;
 
         for (self.peers.items, 0..) |peer, peer_idx| {
             for (peer.addresses.items, 0..) |entry, addr_idx| {
@@ -266,8 +271,17 @@ pub const AddressBook = struct {
                     if (std.mem.eql(u8, peer_id, self.self_peer_id)) continue;
                 }
                 if (!isLikelyDialable(entry.addr)) continue;
-                if (best == null or entry.score > best.?.score) {
-                    best = .{ .peer_idx = peer_idx, .addr_idx = addr_idx, .score = entry.score };
+                const source_rank = dialSourceRank(entry.source);
+                if (best == null or
+                    source_rank > best.?.source_rank or
+                    (source_rank == best.?.source_rank and entry.score > best.?.score))
+                {
+                    best = .{
+                        .peer_idx = peer_idx,
+                        .addr_idx = addr_idx,
+                        .score = entry.score,
+                        .source_rank = source_rank,
+                    };
                 }
             }
         }
@@ -602,6 +616,14 @@ fn isWildcardHost(host: HostComponent) bool {
     return false;
 }
 
+fn dialSourceRank(source: AddressSource) u8 {
+    if (source.identify) return 4;
+    if (source.kad) return 3;
+    if (source.peer_exchange) return 2;
+    if (source.bootstrap) return 1;
+    return 0;
+}
+
 pub fn extractListenPort(multiaddr: []const u8) ?u16 {
     var it = std.mem.tokenizeScalar(u8, multiaddr, '/');
     while (it.next()) |part| {
@@ -821,6 +843,30 @@ test "address book tags bootstrap and peer exchange sources" {
     try std.testing.expectEqual(@as(usize, 1), snap.items.len);
     try std.testing.expect(snap.items[0].source.bootstrap);
     try std.testing.expect(snap.items[0].source.peer_exchange);
+}
+
+test "address book prefers stable advertised addresses over observed session addresses" {
+    const allocator = std.testing.allocator;
+    const local_peer_id = try makeTestPeerId(allocator);
+    defer allocator.free(local_peer_id);
+    const remote_peer_id = try makeTestPeerId(allocator);
+    defer allocator.free(remote_peer_id);
+
+    var book = try AddressBook.init(allocator, local_peer_id);
+    defer book.deinit();
+
+    try book.learnWithPeer("/ip4/172.33.0.11/tcp/48708", remote_peer_id, 1000);
+    try book.learnIdentifyAddr("/ip4/172.33.0.11/tcp/10801", remote_peer_id, 2000);
+
+    const candidate = (try book.chooseDialCandidate(
+        allocator,
+        3000,
+        "/ip4/172.33.0.12/tcp/10801",
+    )).?;
+    defer allocator.free(candidate);
+
+    try std.testing.expect(std.mem.indexOf(u8, candidate, "/tcp/10801") != null);
+    try std.testing.expect(std.mem.indexOf(u8, candidate, "/tcp/48708") == null);
 }
 
 test "address book prunes stale peers" {

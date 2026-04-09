@@ -726,6 +726,31 @@ pub const PeerManager = struct {
         return false;
     }
 
+    /// Return true if we already have an active peer matching the given peer ID
+    /// or, when no peer ID is available, the given address.
+    pub fn hasActivePeerForCandidate(self: *Self, peer_id_text: ?[]const u8, address: net.IpAddress) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (self.peers.items) |peer| {
+            switch (peer.state) {
+                .connected, .connecting, .handshaking => {},
+                else => continue,
+            }
+
+            if (peer_id_text) |candidate_peer_id| {
+                if (peer.peer_id) |*peer_id| {
+                    if (std.mem.eql(u8, peer_id.toString(), candidate_peer_id)) return true;
+                }
+                continue;
+            }
+
+            if (sameIpIgnoringPort(peer.address, address)) return true;
+        }
+
+        return false;
+    }
+
     /// Add a new peer connection.
     /// peer_id is an owned PeerId (moved into the Peer); pass null if not yet known.
     /// Duplicate detection: by PeerId if both sides have one, else by IP address.

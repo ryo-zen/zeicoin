@@ -148,10 +148,15 @@ const UpgradedConn = struct {
     secure: noise.SecureTransport,
     session: yamux.Session,
     remote_peer_id: PeerId,
+    dispatcher_thread: ?std.Thread = null,
 
     const Self = @This();
 
     fn deinit(self: *Self) void {
+        if (self.dispatcher_thread) |thread| {
+            self.session.shutdown();
+            thread.join();
+        }
         self.session.deinit();
         self.secure.deinit();
         self.tcp_conn.deinit();
@@ -221,6 +226,7 @@ fn upgradeOutbound(
     errdefer alloc.destroy(uc);
 
     uc.allocator = alloc;
+    uc.dispatcher_thread = null;
     uc.tcp_conn = local_conn;
     errdefer uc.tcp_conn.deinit();
 
@@ -267,6 +273,7 @@ fn upgradeInbound(
     errdefer alloc.destroy(uc);
 
     uc.allocator = alloc;
+    uc.dispatcher_thread = null;
     uc.tcp_conn = local_conn;
     errdefer uc.tcp_conn.deinit();
 
@@ -308,6 +315,35 @@ fn dispatchStream(stream: yamux.Stream, registry: *HandlerRegistry, conn_info: C
     };
 }
 
+fn connInfoForUpgradedConn(uc: *const UpgradedConn) ConnInfo {
+    const remote_addr: ?std.Io.net.IpAddress = if (uc.tcp_conn.remote_multiaddr) |*ma|
+        ma.getTcpAddress()
+    else
+        null;
+
+    return .{
+        .remote_peer_id = &uc.remote_peer_id,
+        .remote_addr = remote_addr,
+    };
+}
+
+fn driveSessionStreams(uc: *UpgradedConn, registry: *HandlerRegistry) void {
+    const io = uc.session.session_io;
+    const conn_info = connInfoForUpgradedConn(uc);
+
+    var stream_group: std.Io.Group = .init;
+    defer {
+        stream_group.await(io) catch {};
+    }
+
+    while (true) {
+        var stream = uc.session.acceptStream() catch break;
+        stream_group.concurrent(io, dispatchStream, .{ stream, registry, conn_info }) catch {
+            stream.deinit();
+        };
+    }
+}
+
 // ── handleInbound ─────────────────────────────────────────────────────────────
 // Concurrent target: upgrades one inbound TCP connection and drives the Yamux
 // accept loop, dispatching each stream to the handler registry.
@@ -331,28 +367,7 @@ fn handleInbound(
         uc.deinit();
         alloc.destroy(uc);
     }
-
-    // Build per-connection info from the upgrade result.
-    const remote_addr: ?std.Io.net.IpAddress = if (uc.tcp_conn.remote_multiaddr) |*ma|
-        ma.getTcpAddress()
-    else
-        null;
-    const conn_info = ConnInfo{
-        .remote_peer_id = &uc.remote_peer_id,
-        .remote_addr = remote_addr,
-    };
-
-    var stream_group: std.Io.Group = .init;
-    defer {
-        stream_group.await(io) catch {};
-    }
-
-    while (true) {
-        var stream = uc.session.acceptStream() catch break;
-        stream_group.concurrent(io, dispatchStream, .{ stream, registry, conn_info }) catch {
-            stream.deinit();
-        };
-    }
+    driveSessionStreams(uc, registry);
 }
 
 // ── Host ──────────────────────────────────────────────────────────────────────
@@ -484,6 +499,12 @@ pub const Host = struct {
         }
 
         try self.sessions.append(uc);
+        uc.dispatcher_thread = std.Thread.spawn(.{}, driveSessionStreams, .{ uc, &self.registry }) catch |err| {
+            _ = self.sessions.pop();
+            uc.deinit();
+            self.allocator.destroy(uc);
+            return err;
+        };
         return &uc.session;
     }
 
@@ -1038,6 +1059,90 @@ test "host: identify round-trip" {
         }
     }
     try std.testing.expect(found_identify);
+}
+
+test "host: outbound sessions dispatch inbound identify streams" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var server = Host.init(alloc, try IdentityKey.generate(alloc, io));
+    defer server.deinit();
+    var server_listen_addr = try Multiaddr.create(alloc, "/ip4/127.0.0.1/tcp/19808");
+    defer server_listen_addr.deinit();
+    try server.listen(io, &server_listen_addr);
+
+    var serve_future = try io.concurrent(Host.serve, .{ &server, io });
+    defer {
+        _ = serve_future.cancel(io) catch {};
+        serve_future.await(io) catch {};
+    }
+
+    var client = Host.init(alloc, try IdentityKey.generate(alloc, io));
+    defer client.deinit();
+    var client_listen_addr = try Multiaddr.create(alloc, "/ip4/127.0.0.1/tcp/19809");
+    defer client_listen_addr.deinit();
+    try client.listen(io, &client_listen_addr);
+
+    const IdentifyCtx = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: *Host,
+        mutex: std.Thread.Mutex = .{},
+        listen_addr: ?[]u8 = null,
+
+        fn handle(stream: *yamux.Stream, _: ConnInfo, userdata: ?*anyopaque) anyerror!void {
+            const ctx = @as(*@This(), @ptrCast(@alignCast(userdata.?)));
+            var info = try ctx.host.identifyPeer(ctx.io, stream.session);
+            defer info.deinit(ctx.allocator);
+
+            ctx.mutex.lock();
+            defer ctx.mutex.unlock();
+            if (info.listen_addrs.items.len > 0) {
+                ctx.listen_addr = try ctx.allocator.dupe(u8, info.listen_addrs.items[0]);
+            }
+
+            try stream.writeAll("ok");
+            try stream.close();
+        }
+    };
+
+    var identify_ctx = IdentifyCtx{
+        .allocator = alloc,
+        .io = io,
+        .host = &server,
+    };
+    defer {
+        identify_ctx.mutex.lock();
+        defer identify_ctx.mutex.unlock();
+        if (identify_ctx.listen_addr) |addr| alloc.free(addr);
+    }
+
+    try server.setStreamHandler("/test/identify-back/1.0.0", .{
+        .func = IdentifyCtx.handle,
+        .userdata = &identify_ctx,
+    });
+
+    var dial_addr = try Multiaddr.create(alloc, "/ip4/127.0.0.1/tcp/19808");
+    defer dial_addr.deinit();
+    const session = try client.dial(io, &dial_addr);
+
+    var stream = try client.newStream(io, session, "/test/identify-back/1.0.0");
+    defer stream.deinit();
+
+    var ack: [2]u8 = undefined;
+    var received: usize = 0;
+    while (received < ack.len) {
+        const n = try stream.readSome(ack[received..]);
+        if (n == 0) break;
+        received += n;
+    }
+
+    try std.testing.expectEqualStrings("ok", ack[0..received]);
+
+    identify_ctx.mutex.lock();
+    defer identify_ctx.mutex.unlock();
+    try std.testing.expect(identify_ctx.listen_addr != null);
+    try std.testing.expectEqualStrings("/ip4/127.0.0.1/tcp/19809", identify_ctx.listen_addr.?);
 }
 
 test "host: requestStop wakes serve accept loop" {

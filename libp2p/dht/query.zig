@@ -16,6 +16,8 @@ pub const alpha_default: usize = 10;
 pub const bucket_size: usize = routing_table_mod.bucket_size;
 pub const refresh_interval_default_ms: u64 = 10 * 60 * 1000;
 pub const query_timeout_default_ms: u64 = 10 * 1000;
+pub const max_inbound_streams_per_peer_default: usize = 4;
+pub const max_inbound_streams_global_default: usize = 32;
 const provider_key_max_len: usize = 80;
 
 pub const BootstrapRunResult = struct {
@@ -91,6 +93,11 @@ pub const QueryService = struct {
     lookup_override_userdata: ?*anyopaque,
     clock_ms_fn: *const fn (userdata: ?*anyopaque) u64,
     clock_userdata: ?*anyopaque,
+    inbound_limits_mutex: std.Thread.Mutex,
+    inbound_streams_global: usize,
+    inbound_streams_per_peer: std.StringHashMap(usize),
+    max_inbound_streams_per_peer: usize,
+    max_inbound_streams_global: usize,
 
     const Self = @This();
     const RequestContext = struct {
@@ -119,10 +126,16 @@ pub const QueryService = struct {
             .lookup_override_userdata = null,
             .clock_ms_fn = defaultClockMs,
             .clock_userdata = null,
+            .inbound_limits_mutex = .{},
+            .inbound_streams_global = 0,
+            .inbound_streams_per_peer = std.StringHashMap(usize).init(allocator),
+            .max_inbound_streams_per_peer = max_inbound_streams_per_peer_default,
+            .max_inbound_streams_global = max_inbound_streams_global_default,
         };
     }
 
     pub fn deinit(self: *Self) void {
+        self.inbound_streams_per_peer.deinit();
         self.store.deinit();
     }
 
@@ -345,18 +358,24 @@ pub const QueryService = struct {
 
         defer stream.close() catch {};
 
-        if (conn_info.remote_peer_id) |remote_peer_id| {
-            if (conn_info.remote_addr) |remote_addr| {
-                const observed = try formatIpAddressAsMultiaddr(self.allocator, remote_addr);
-                defer self.allocator.free(observed);
-                try self.address_book.learnKadPeer(remote_peer_id.toString(), &[_][]const u8{observed}, nowMs());
-                try self.upsertRoutingPeer(remote_peer_id.toString(), &[_][]const u8{observed}, .connected);
-            }
+        const remote_peer_id = if (conn_info.remote_peer_id) |peer_id| peer_id.toString() else null;
+        if (!try self.tryAcquireInboundStream(remote_peer_id)) {
+            self.penalizeInboundPeer(conn_info);
+            return error.KadInboundStreamLimitExceeded;
         }
+        defer self.releaseInboundStream(remote_peer_id);
 
         while (true) {
             var request = kad.readMessageFrame(self.allocator, stream.session.session_io, stream) catch |err| switch (err) {
                 error.EndOfStream => return,
+                error.MessageTooLarge,
+                error.InvalidWireType,
+                error.InvalidFieldLength,
+                error.TruncatedFrame,
+                => {
+                    self.penalizeInboundPeer(conn_info);
+                    return err;
+                },
                 else => return err,
             };
             defer request.deinit(self.allocator);
@@ -368,9 +387,52 @@ pub const QueryService = struct {
             defer if (response) |*msg| msg.deinit(self.allocator);
 
             if (response) |*msg| {
-                try kad.writeMessageFrame(self.allocator, stream.session.session_io, stream, msg);
+                kad.writeMessageFrame(self.allocator, stream.session.session_io, stream, msg) catch |err| switch (err) {
+                    error.MessageTooLarge => {
+                        self.penalizeInboundPeer(conn_info);
+                        return err;
+                    },
+                    else => return err,
+                };
             }
         }
+    }
+
+    fn tryAcquireInboundStream(self: *Self, remote_peer_id: ?[]const u8) !bool {
+        self.inbound_limits_mutex.lock();
+        defer self.inbound_limits_mutex.unlock();
+
+        if (self.inbound_streams_global >= self.max_inbound_streams_global) return false;
+        if (remote_peer_id) |peer_id| {
+            const current = self.inbound_streams_per_peer.get(peer_id) orelse 0;
+            if (current >= self.max_inbound_streams_per_peer) return false;
+            try self.inbound_streams_per_peer.put(peer_id, current + 1);
+        }
+        self.inbound_streams_global += 1;
+        return true;
+    }
+
+    fn releaseInboundStream(self: *Self, remote_peer_id: ?[]const u8) void {
+        self.inbound_limits_mutex.lock();
+        defer self.inbound_limits_mutex.unlock();
+
+        if (self.inbound_streams_global > 0) self.inbound_streams_global -= 1;
+        if (remote_peer_id) |peer_id| {
+            if (self.inbound_streams_per_peer.get(peer_id)) |current| {
+                if (current <= 1) {
+                    _ = self.inbound_streams_per_peer.remove(peer_id);
+                } else {
+                    self.inbound_streams_per_peer.put(peer_id, current - 1) catch {};
+                }
+            }
+        }
+    }
+
+    fn penalizeInboundPeer(self: *Self, conn_info: ConnInfo) void {
+        const remote_addr = conn_info.remote_addr orelse return;
+        const observed = formatIpAddressAsMultiaddr(self.allocator, remote_addr) catch return;
+        defer self.allocator.free(observed);
+        self.address_book.markDialFailure(observed, nowMs());
     }
 
     fn handleRequest(self: *Self, request: *const kad.Message, ctx: RequestContext) !?kad.Message {
@@ -1064,6 +1126,206 @@ test "kad query service handles repeated find node requests on one stream" {
     try stream.close();
 }
 
+test "kad inbound requests do not learn remote observed socket addresses" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var server = Host.init(allocator, try libp2p.IdentityKey.generate(allocator, io));
+    defer server.deinit();
+    var server_book = try AddressBook.init(allocator, server.identity.peer_id.toString());
+    defer server_book.deinit();
+    var server_table = try routing_table_mod.RoutingTable.init(allocator, server.identity.peer_id.toString());
+    defer server_table.deinit();
+
+    _ = try server_table.insertOrUpdate("peer-a", &[_][]const u8{"/ip4/127.0.0.1/tcp/22016"}, .server, .connected, 1000);
+
+    var service = QueryService.init(allocator, &server, &server_table, &server_book, .server);
+    defer service.deinit();
+    try service.register();
+
+    var listen_addr = try Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/22015");
+    defer listen_addr.deinit();
+    try server.listen(io, &listen_addr);
+
+    var serve_future = try io.concurrent(Host.serve, .{ &server, io });
+    defer {
+        _ = serve_future.cancel(io) catch {};
+        serve_future.await(io) catch {};
+    }
+
+    var client = Host.init(allocator, try libp2p.IdentityKey.generate(allocator, io));
+    defer client.deinit();
+    var client_addr = try Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/22015");
+    defer client_addr.deinit();
+
+    const session = try client.dial(io, &client_addr);
+    var stream = try client.newStream(io, session, kad.PROTOCOL_ID);
+    defer stream.deinit();
+
+    var request = kad.Message.init(allocator);
+    defer request.deinit(allocator);
+    request.type = .FIND_NODE;
+    request.key = try allocator.dupe(u8, "no-observed-learning");
+
+    try kad.writeMessageFrame(allocator, io, &stream, &request);
+    var response = try kad.readMessageFrame(allocator, io, &stream);
+    defer response.deinit(allocator);
+
+    try std.testing.expectEqual(kad.MessageType.FIND_NODE, response.type);
+    try std.testing.expect(response.closer_peers.items.len > 0);
+
+    var snapshot = try server_book.snapshot(allocator);
+    defer {
+        for (snapshot.items) |entry| {
+            allocator.free(entry.addr);
+            if (entry.peer_id) |peer_id| allocator.free(peer_id);
+        }
+        snapshot.deinit();
+    }
+    try std.testing.expectEqual(@as(usize, 0), snapshot.items.len);
+
+    try stream.close();
+}
+
+test "kad inbound stream limits enforce per-peer and global budgets" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var server = Host.init(allocator, try libp2p.IdentityKey.generate(allocator, io));
+    defer server.deinit();
+    var server_book = try AddressBook.init(allocator, server.identity.peer_id.toString());
+    defer server_book.deinit();
+    var server_table = try routing_table_mod.RoutingTable.init(allocator, server.identity.peer_id.toString());
+    defer server_table.deinit();
+
+    _ = try server_table.insertOrUpdate("peer-a", &[_][]const u8{"/ip4/127.0.0.1/tcp/22021"}, .server, .connected, 1000);
+
+    var service = QueryService.init(allocator, &server, &server_table, &server_book, .server);
+    defer service.deinit();
+    service.max_inbound_streams_per_peer = 1;
+    service.max_inbound_streams_global = 2;
+    try service.register();
+
+    var listen_addr = try Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/22020");
+    defer listen_addr.deinit();
+    try server.listen(io, &listen_addr);
+
+    var serve_future = try io.concurrent(Host.serve, .{ &server, io });
+    defer {
+        _ = serve_future.cancel(io) catch {};
+        serve_future.await(io) catch {};
+    }
+
+    var client_a = Host.init(allocator, try libp2p.IdentityKey.generate(allocator, io));
+    defer client_a.deinit();
+    var client_b = Host.init(allocator, try libp2p.IdentityKey.generate(allocator, io));
+    defer client_b.deinit();
+    var client_c = Host.init(allocator, try libp2p.IdentityKey.generate(allocator, io));
+    defer client_c.deinit();
+
+    var dial_addr = try Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/22020");
+    defer dial_addr.deinit();
+
+    const session_a = try client_a.dial(io, &dial_addr);
+    const session_b = try client_b.dial(io, &dial_addr);
+    const session_c = try client_c.dial(io, &dial_addr);
+
+    var stream_a = try client_a.newStream(io, session_a, kad.PROTOCOL_ID);
+    defer stream_a.deinit();
+    var req_a = kad.Message.init(allocator);
+    defer req_a.deinit(allocator);
+    req_a.type = .FIND_NODE;
+    req_a.key = try allocator.dupe(u8, "limit-a");
+    try kad.writeMessageFrame(allocator, io, &stream_a, &req_a);
+    var resp_a = try kad.readMessageFrame(allocator, io, &stream_a);
+    defer resp_a.deinit(allocator);
+
+    var stream_b = try client_b.newStream(io, session_b, kad.PROTOCOL_ID);
+    defer stream_b.deinit();
+    var req_b = kad.Message.init(allocator);
+    defer req_b.deinit(allocator);
+    req_b.type = .FIND_NODE;
+    req_b.key = try allocator.dupe(u8, "limit-b");
+    try kad.writeMessageFrame(allocator, io, &stream_b, &req_b);
+    var resp_b = try kad.readMessageFrame(allocator, io, &stream_b);
+    defer resp_b.deinit(allocator);
+
+    var extra_peer_stream = try client_a.newStream(io, session_a, kad.PROTOCOL_ID);
+    defer extra_peer_stream.deinit();
+    var extra_peer_req = kad.Message.init(allocator);
+    defer extra_peer_req.deinit(allocator);
+    extra_peer_req.type = .FIND_NODE;
+    extra_peer_req.key = try allocator.dupe(u8, "limit-peer");
+    try kad.writeMessageFrame(allocator, io, &extra_peer_stream, &extra_peer_req);
+    try std.testing.expectError(error.EndOfStream, kad.readMessageFrame(allocator, io, &extra_peer_stream));
+
+    var extra_global_stream = try client_c.newStream(io, session_c, kad.PROTOCOL_ID);
+    defer extra_global_stream.deinit();
+    var extra_global_req = kad.Message.init(allocator);
+    defer extra_global_req.deinit(allocator);
+    extra_global_req.type = .FIND_NODE;
+    extra_global_req.key = try allocator.dupe(u8, "limit-global");
+    try kad.writeMessageFrame(allocator, io, &extra_global_stream, &extra_global_req);
+    try std.testing.expectError(error.EndOfStream, kad.readMessageFrame(allocator, io, &extra_global_stream));
+
+    try stream_a.close();
+    try stream_b.close();
+}
+
+test "kad malformed inbound frame closes only the bad stream" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var server = Host.init(allocator, try libp2p.IdentityKey.generate(allocator, io));
+    defer server.deinit();
+    var server_book = try AddressBook.init(allocator, server.identity.peer_id.toString());
+    defer server_book.deinit();
+    var server_table = try routing_table_mod.RoutingTable.init(allocator, server.identity.peer_id.toString());
+    defer server_table.deinit();
+
+    _ = try server_table.insertOrUpdate("peer-a", &[_][]const u8{"/ip4/127.0.0.1/tcp/22031"}, .server, .connected, 1000);
+
+    var service = QueryService.init(allocator, &server, &server_table, &server_book, .server);
+    defer service.deinit();
+    try service.register();
+
+    var listen_addr = try Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/22030");
+    defer listen_addr.deinit();
+    try server.listen(io, &listen_addr);
+
+    var serve_future = try io.concurrent(Host.serve, .{ &server, io });
+    defer {
+        _ = serve_future.cancel(io) catch {};
+        serve_future.await(io) catch {};
+    }
+
+    var client = Host.init(allocator, try libp2p.IdentityKey.generate(allocator, io));
+    defer client.deinit();
+    var client_addr = try Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/22030");
+    defer client_addr.deinit();
+
+    const session = try client.dial(io, &client_addr);
+
+    var bad_stream = try client.newStream(io, session, kad.PROTOCOL_ID);
+    defer bad_stream.deinit();
+    try bad_stream.writeByte(0x01); // frame length
+    try bad_stream.writeByte(0x0B); // field 1 with invalid wire type 3
+    try std.testing.expectError(error.EndOfStream, kad.readMessageFrame(allocator, io, &bad_stream));
+
+    var good_stream = try client.newStream(io, session, kad.PROTOCOL_ID);
+    defer good_stream.deinit();
+    var good_req = kad.Message.init(allocator);
+    defer good_req.deinit(allocator);
+    good_req.type = .FIND_NODE;
+    good_req.key = try allocator.dupe(u8, "after-malformed");
+    try kad.writeMessageFrame(allocator, io, &good_stream, &good_req);
+
+    var good_resp = try kad.readMessageFrame(allocator, io, &good_stream);
+    defer good_resp.deinit(allocator);
+    try std.testing.expectEqual(kad.MessageType.FIND_NODE, good_resp.type);
+    try std.testing.expect(good_resp.closer_peers.items.len > 0);
+}
+
 test "kad iterative find node converges and learns discovered peers" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -1247,27 +1509,27 @@ test "kad query service stores and returns local value records" {
     var put_request = kad.Message.init(allocator);
     defer put_request.deinit(allocator);
     put_request.type = .PUT_VALUE;
-    put_request.key = try allocator.dupe(u8, "value-key");
+    put_request.key = try allocator.dupe(u8, "/zei/value-key");
     put_request.record = kad.Record.init();
-    put_request.record.?.key = try allocator.dupe(u8, "value-key");
-    put_request.record.?.value = try allocator.dupe(u8, "value-1");
+    put_request.record.?.key = try allocator.dupe(u8, "/zei/value-key");
+    put_request.record.?.value = try allocator.dupe(u8, "seq:1:value-1");
 
     var put_response = (try service.handleRequest(&put_request, .{})).?;
     defer put_response.deinit(allocator);
     try std.testing.expectEqual(kad.MessageType.PUT_VALUE, put_response.type);
     try std.testing.expect(put_response.record != null);
-    try std.testing.expectEqualStrings("value-1", put_response.record.?.value);
+    try std.testing.expectEqualStrings("seq:1:value-1", put_response.record.?.value);
 
     var get_request = kad.Message.init(allocator);
     defer get_request.deinit(allocator);
     get_request.type = .GET_VALUE;
-    get_request.key = try allocator.dupe(u8, "value-key");
+    get_request.key = try allocator.dupe(u8, "/zei/value-key");
 
     var get_response = (try service.handleRequest(&get_request, .{})).?;
     defer get_response.deinit(allocator);
     try std.testing.expectEqual(kad.MessageType.GET_VALUE, get_response.type);
     try std.testing.expect(get_response.record != null);
-    try std.testing.expectEqualStrings("value-1", get_response.record.?.value);
+    try std.testing.expectEqualStrings("seq:1:value-1", get_response.record.?.value);
     try std.testing.expectEqual(@as(usize, 1), get_response.closer_peers.items.len);
 }
 

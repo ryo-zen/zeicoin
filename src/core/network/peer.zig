@@ -64,6 +64,11 @@ fn zeicoinInboundHandler(
         if (err == error.AlreadyConnected) return;
         return err;
     };
+    const observed_ma = try formatIpAsMultiaddr(ctx.allocator, remote_addr);
+    defer ctx.allocator.free(observed_ma);
+    nm.learnKnownSessionPeer(conn_info.remote_peer_id.?.toString(), stream.session, observed_ma, remote_addr) catch |err| {
+        std.log.debug("Inbound identify/session learning failed: {}", .{err});
+    };
     peer.addRef();
     _ = nm.active_connections.fetchAdd(1, .acq_rel);
     defer {
@@ -107,6 +112,8 @@ pub const NetworkManager = struct {
     last_reconnect_attempt: i64,
     active_connections: std.atomic.Value(u32),
     last_kad_refresh_ms: u64,
+    kad_refresh_interval_ms: u64,
+    kad_query_timeout_ms: u64,
 
     // Inbound handler context — lives for the lifetime of NetworkManager.
     inbound_ctx: InboundCtx,
@@ -153,6 +160,8 @@ pub const NetworkManager = struct {
             .last_reconnect_attempt = 0,
             .active_connections = std.atomic.Value(u32).init(0),
             .last_kad_refresh_ms = 0,
+            .kad_refresh_interval_ms = kad_refresh_interval_default_ms,
+            .kad_query_timeout_ms = libp2p.kad_query.query_timeout_default_ms,
             .reconnect_backoff_seconds = 5,
             .reconnect_consecutive_failures = 0,
             .last_successful_connection = 0,
@@ -205,6 +214,10 @@ pub const NetworkManager = struct {
 
         try self.host.listen(self.io, &ma);
 
+        const kad_settings = loadKadRuntimeSettings(self.allocator);
+        self.kad_refresh_interval_ms = kad_settings.refresh_interval_ms;
+        self.kad_query_timeout_ms = kad_settings.query_timeout_ms;
+
         self.kad_service = libp2p.kad_query.QueryService.init(
             self.allocator,
             &self.host,
@@ -212,7 +225,15 @@ pub const NetworkManager = struct {
             &self.address_book,
             .server,
         );
-        if (self.kad_service) |*kad_service| try kad_service.register();
+        if (self.kad_service) |*kad_service| {
+            kad_service.refresh_interval_ms = self.kad_refresh_interval_ms;
+            kad_service.query_timeout_ms = self.kad_query_timeout_ms;
+            try kad_service.register();
+            log.info(
+                "Kad runtime enabled: refresh_interval_ms={} query_timeout_ms={}",
+                .{ self.kad_refresh_interval_ms, self.kad_query_timeout_ms },
+            );
+        }
 
         self.setRunning(true);
         log.info("Listening on {s}:{}", .{ address_str, port });
@@ -263,7 +284,8 @@ pub const NetworkManager = struct {
 
         // Deduplicate and register peer
         const peer = try self.peer_manager.addPeer(peer_addr, owned_pid);
-        try self.learnSessionPeer(session, ma.getStringAddress(), peer_addr);
+        const remote_peer_id = self.host.peerIdForSession(session) orelse return error.MissingRemotePeerId;
+        try self.learnKnownSessionPeer(remote_peer_id.toString(), session, ma.getStringAddress(), peer_addr);
         log.info("Dialed peer {}", .{peer.id});
 
         // Add ref for the connection thread
@@ -462,6 +484,52 @@ pub const NetworkManager = struct {
         }
     }
 
+    fn logKadStatus(self: *Self, reason: []const u8, lookups_started: usize, timed_out: bool) !void {
+        const metrics = try self.collectKadMetrics();
+        log.info(
+            "kad_status: reason={s} peer_id={s} lookups_started={} timed_out={} routing_peers={} non_empty_buckets={} book_entries={} kad_addrs={} live_sessions={} connected_peers={}",
+            .{
+                reason,
+                self.host.identity.peer_id.toString(),
+                lookups_started,
+                timed_out,
+                metrics.routing_peers,
+                metrics.non_empty_buckets,
+                metrics.book_entries,
+                metrics.kad_addrs,
+                metrics.live_sessions,
+                self.getConnectedPeerCount(),
+            },
+        );
+    }
+
+    fn collectKadMetrics(self: *Self) !KadMetrics {
+        var snapshot = try self.address_book.snapshot(self.allocator);
+        defer {
+            for (snapshot.items) |entry| {
+                self.allocator.free(entry.addr);
+                if (entry.peer_id) |peer_id| self.allocator.free(peer_id);
+            }
+            snapshot.deinit();
+        }
+
+        var kad_addrs: usize = 0;
+        for (snapshot.items) |entry| {
+            if (entry.source.kad) kad_addrs += 1;
+        }
+
+        var non_empty = try self.routing_table.nonEmptyBucketIndices(self.allocator);
+        defer non_empty.deinit();
+
+        return .{
+            .routing_peers = self.routing_table.peerCount(),
+            .non_empty_buckets = non_empty.items.len,
+            .book_entries = snapshot.items.len,
+            .kad_addrs = kad_addrs,
+            .live_sessions = self.host.liveSessionCount(),
+        };
+    }
+
     /// Calculate exponential backoff delay
     fn calculateBackoff(consecutive_failures: u32) u32 {
         const base: u32 = 5;
@@ -542,39 +610,55 @@ pub const NetworkManager = struct {
 
         if (self.host.listen_addr) |listen_addr| {
             const local_ma = listen_addr.getStringAddress();
-            const maybe_candidate = self.address_book.chooseDialCandidate(self.allocator, nowMs(), local_ma) catch null;
-            if (maybe_candidate) |candidate| {
+            var attempts: usize = 0;
+            while (attempts < 8) : (attempts += 1) {
+                const maybe_candidate = self.address_book.chooseDialCandidate(self.allocator, nowMs(), local_ma) catch null;
+                const candidate = maybe_candidate orelse break;
                 defer self.allocator.free(candidate);
-                var ma = Multiaddr.create(self.allocator, candidate) catch return;
+
+                var ma = Multiaddr.create(self.allocator, candidate) catch continue;
                 defer ma.deinit();
+
+                if (ma.getTcpAddress()) |candidate_addr| {
+                    if (self.peer_manager.hasActivePeerForCandidate(ma.getPeerId(), candidate_addr)) {
+                        continue;
+                    }
+                }
+
                 self.connectToMultiaddr(&ma) catch |err| {
                     self.address_book.markDialFailure(candidate, nowMs());
                     log.debug("Address-book dial failed for {s}: {}", .{ candidate, err });
-                    return;
+                    continue;
                 };
                 self.address_book.markDialSuccess(candidate, nowMs());
+                break;
             }
         }
 
         if (self.kad_service) |*kad_service| {
             const now_ms = nowMs();
-            if (connected_peers > 0 and (self.last_kad_refresh_ms == 0 or now_ms - self.last_kad_refresh_ms >= kad_refresh_interval_ms)) {
-                _ = kad_service.bootstrapOnce(self.io) catch |err| {
+            if (connected_peers > 0 and (self.last_kad_refresh_ms == 0 or now_ms - self.last_kad_refresh_ms >= self.kad_refresh_interval_ms)) {
+                const result = kad_service.bootstrapOnce(self.io) catch |err| {
                     log.debug("Kad bootstrap/refresh failed: {}", .{err});
                     return;
                 };
                 self.last_kad_refresh_ms = now_ms;
+                self.logKadStatus("refresh", result.lookups_started, result.timed_out) catch |err| {
+                    log.debug("Kad status logging failed: {}", .{err});
+                };
             }
         }
     }
 
-    fn learnSessionPeer(self: *Self, session: *yamux.Session, dialed_addr: []const u8, peer_addr: net.IpAddress) !void {
-        const remote_peer_id = self.host.peerIdForSession(session) orelse return;
-
+    fn learnKnownSessionPeer(
+        self: *Self,
+        remote_peer_id_text: []const u8,
+        session: *yamux.Session,
+        dialed_addr: []const u8,
+        peer_addr: net.IpAddress,
+    ) !void {
         const observed_ma = try formatIpAsMultiaddr(self.allocator, peer_addr);
         defer self.allocator.free(observed_ma);
-        try self.address_book.learnWithPeer(observed_ma, remote_peer_id.toString(), nowMs());
-        try self.upsertRoutingPeer(remote_peer_id.toString(), &[_][]const u8{observed_ma}, .connected);
 
         var identify_info = self.host.identifyPeer(self.io, session) catch return;
         defer identify_info.deinit(self.allocator);
@@ -584,7 +668,7 @@ pub const NetworkManager = struct {
                 if (libp2p.address_book.extractListenPort(listen_addr.getStringAddress())) |listen_port| {
                     try self.address_book.observeSelfFromIdentify(
                         identify_info.observed_addr,
-                        remote_peer_id.toString(),
+                        remote_peer_id_text,
                         listen_port,
                         nowMs(),
                     );
@@ -594,12 +678,12 @@ pub const NetworkManager = struct {
 
         if (identify_info.listen_addrs.items.len > 0) {
             for (identify_info.listen_addrs.items) |addr| {
-                try self.address_book.learnIdentifyAddr(addr, remote_peer_id.toString(), nowMs());
+                try self.address_book.learnIdentifyAddr(addr, remote_peer_id_text, nowMs());
             }
-            try self.upsertRoutingPeer(remote_peer_id.toString(), identify_info.listen_addrs.items, .connected);
+            try self.upsertRoutingPeer(remote_peer_id_text, identify_info.listen_addrs.items, .connected);
         } else {
-            try self.address_book.learnIdentifyAddr(dialed_addr, remote_peer_id.toString(), nowMs());
-            try self.upsertRoutingPeer(remote_peer_id.toString(), &[_][]const u8{dialed_addr}, .connected);
+            try self.address_book.learnIdentifyAddr(dialed_addr, remote_peer_id_text, nowMs());
+            try self.upsertRoutingPeer(remote_peer_id_text, &[_][]const u8{dialed_addr}, .connected);
         }
     }
 
@@ -623,7 +707,57 @@ pub const NetworkManager = struct {
     }
 };
 
-const kad_refresh_interval_ms: u64 = 10 * 60 * 1000;
+const KadMetrics = struct {
+    routing_peers: usize,
+    non_empty_buckets: usize,
+    book_entries: usize,
+    kad_addrs: usize,
+    live_sessions: usize,
+};
+
+const KadRuntimeSettings = struct {
+    refresh_interval_ms: u64 = kad_refresh_interval_default_ms,
+    query_timeout_ms: u64 = libp2p.kad_query.query_timeout_default_ms,
+};
+
+const kad_refresh_interval_default_ms: u64 = 10 * 60 * 1000;
+
+fn loadKadRuntimeSettings(allocator: std.mem.Allocator) KadRuntimeSettings {
+    var settings = KadRuntimeSettings{};
+    settings.refresh_interval_ms = loadKadDurationMs(
+        allocator,
+        "ZEICOIN_KAD_REFRESH_INTERVAL_MS",
+        settings.refresh_interval_ms,
+    );
+    settings.query_timeout_ms = loadKadDurationMs(
+        allocator,
+        "ZEICOIN_KAD_QUERY_TIMEOUT_MS",
+        settings.query_timeout_ms,
+    );
+    return settings;
+}
+
+fn loadKadDurationMs(
+    allocator: std.mem.Allocator,
+    env_key: []const u8,
+    default_value: u64,
+) u64 {
+    const raw = util.getEnvVarOwned(allocator, env_key) catch return default_value;
+    defer allocator.free(raw);
+
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (trimmed.len == 0) return default_value;
+
+    const parsed = std.fmt.parseInt(u64, trimmed, 10) catch {
+        log.warn("Ignoring {s}={s}: expected a positive millisecond integer", .{ env_key, trimmed });
+        return default_value;
+    };
+    if (parsed == 0) {
+        log.warn("Ignoring {s}=0: refresh and timeout settings must be positive", .{env_key});
+        return default_value;
+    }
+    return parsed;
+}
 
 fn nowMs() u64 {
     const seconds = util.getTime();
