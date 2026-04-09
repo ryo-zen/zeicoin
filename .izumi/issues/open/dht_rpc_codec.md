@@ -17,7 +17,7 @@ parent_id: kademlia_dht
 rank: null
 comments: []
 created_at: 2026-04-09T00:00:00+00:00
-updated_at: 2026-04-09T00:00:00+00:00
+updated_at: 2026-04-09T11:01:53+10:00
 ---
 
 ## Summary
@@ -32,6 +32,7 @@ Implement the Kademlia wire protocol codec in `libp2p/dht/message.zig`. Messages
 - [ ] Stream-per-RPC: open stream, send request, read response, close stream. Reset stream on error.
 - [ ] Stream reuse: must handle additional RPC requests on an incoming stream (spec requirement)
 - [ ] Peer info serialization: PeerId bytes + repeated multiaddr bytes + ConnectionType
+- [ ] Record serialization includes `key`, `value`, and `timeReceived`, with unknown protobuf fields ignored safely on decode
 - [ ] PING is deprecated — handle incoming PING for backward compat but never actively send
 - [ ] Unit tests for round-trip encode/decode of all message types
 
@@ -41,3 +42,4 @@ Implement the Kademlia wire protocol codec in `libp2p/dht/message.zig`. Messages
 - Spec reference: `reference/libp2p-specs/kad-dht/README.md` (protobuf schema at line 403)
 - This is step 2 in the implementation order from ZEI-20
 - `clusterLevelRaw` (field 10) is NOT USED but must be handled in the codec for compat
+- Keep the codec suitable for external interop, not just ZeiCoin-to-ZeiCoin round-trips

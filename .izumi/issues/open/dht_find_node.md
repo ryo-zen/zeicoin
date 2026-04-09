@@ -17,7 +17,7 @@ parent_id: kademlia_dht
 rank: null
 comments: []
 created_at: 2026-04-09T00:00:00+00:00
-updated_at: 2026-04-09T00:00:00+00:00
+updated_at: 2026-04-09T11:01:53+10:00
 ---
 
 ## Summary
@@ -35,6 +35,7 @@ Implement FIND_NODE server handler and iterative lookup client in `libp2p/dht/qu
 - [ ] On response: add returned peers to `Pn` (excluding already-queried), discard errors/timeouts
 - [ ] Store multiaddrs from encountered Peer records in peerbook
 - [ ] Responses update the routing table with newly discovered peers
+- [ ] Query engine is reusable by later `GET_VALUE` and `GET_PROVIDERS` lookups instead of being hard-coded to `FIND_NODE` only
 - [ ] Unit tests for server handler, iterative convergence, and early termination
 
 ## Notes

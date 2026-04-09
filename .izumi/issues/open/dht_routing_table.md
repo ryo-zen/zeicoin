@@ -17,7 +17,7 @@ parent_id: kademlia_dht
 rank: null
 comments: []
 created_at: 2026-04-09T00:00:00+00:00
-updated_at: 2026-04-09T00:00:00+00:00
+updated_at: 2026-04-09T11:01:53+10:00
 ---
 
 ## Summary
@@ -31,6 +31,7 @@ Implement the core Kademlia routing table in `libp2p/dht/routing_table.zig`. Thi
 - [ ] Maintain k peers with shared key prefix of length L for every L
 - [ ] Insertion follows Kademlia rules: least-recently-seen eviction, ping-and-replace for full buckets
 - [ ] Server/client mode admission: only server-mode peers are added to the routing table (both client and server nodes enforce this)
+- [ ] Routing-table entries retain enough peer metadata to serialize valid Kad `Peer` responses (peer ID, multiaddrs, connection state / mode classification inputs)
 - [ ] `closestPeers(target, count)` returns the `count` closest peers by XOR distance
 - [ ] Unit tests covering insertion, eviction, sha256+XOR distance, and closest-peer queries
 
@@ -40,4 +41,5 @@ Implement the core Kademlia routing table in `libp2p/dht/routing_table.zig`. Thi
 - PeerId is already available from the libp2p host layer
 - Distance spec: "the distance between two keys is `XOR(sha256(key1), sha256(key2))`" — do NOT skip the sha256 step
 - This is step 1 in the implementation order from ZEI-20
+- The routing table should be reusable by `FIND_NODE`, `GET_VALUE`, and `GET_PROVIDERS` lookups, not just peer discovery
 - Spec reference: `reference/libp2p-specs/kad-dht/README.md`

@@ -6,13 +6,13 @@
 
 ## Current State
 
-**Date:** 2026-04-08
+**Date:** 2026-04-09
 **Branch:** `libp2p-integration`
 **Active initiative:** Post-rollout testnet validation and hardening
 
-**Last worked on:** 2026-04-08 — Updated `ZEI-20` so it explicitly respects the real libp2p Kademlia spec instead of implying a narrower `FIND_NODE`-only implementation. The branch remains deployed on testnet and the current phase is still live-network validation plus follow-up hardening.
-**Next step:** Monitor the live testnet deployment on `209.38.84.23`, verify peer discovery/sync/mining stability under real network conditions, and decide whether to first finish the existing `/zeicoin/peers/1.0.0` discovery path or intentionally start the broader spec-shaped `ZEI-20` Kademlia work.
-**In flight:** Post-deploy observation and stabilization on testnet; `ZEI-20` is now documented as real-spec Kademlia rather than a lightweight discovery MVP.
+**Last worked on:** 2026-04-09 — Added Kad prerequisite tracking: new subtasks `ZEI-91` peerbook reshape, `ZEI-92` DNS/IPv6 multiaddr support, and `ZEI-93` identify interop hardening, and updated `ZEI-20` to place them before routing-table / codec / FIND_NODE work.
+**Next step:** Choose the first prerequisite implementation slice, with `ZEI-91` peerbook reshaping the clear starting point before `ZEI-92` address-family support and the existing DHT subtasks.
+**In flight:** Planning/ticketing only this session. The current `ZEI-20` order now reflects the prerequisite-first Kad path; existing unrelated `.izumi/issues/open/*` worktree changes were left untouched.
 
 ---
 
@@ -40,6 +40,10 @@
 - Backward compatibility and mixed-version coexistence are intentionally out of scope for this rollout.
 - `ZEI-20` Kademlia DHT is not a blocker for the first testnet; current peer exchange is sufficient.
 - `ZEI-20` should respect the real libp2p Kademlia spec if implemented under `/kad/1.0.0`; a narrower discovery-only subset must be split or renamed rather than silently reusing the canonical protocol ID.
+- The current DHT subtask split (`ZEI-81`..`ZEI-87`) covers routing table, RPC codec, lookup, refresh, address-book integration, scope choice, and Docker validation, but resource-limiting, explicit mode-classification policy, and external interoperability validation are still only implicit and should be tracked clearly before coding starts.
+- Full `/kad/1.0.0` work should not start on top of the current extracted address book shape: `ZEI-85` assumes a real peerbook that stores repeated multiaddrs per peer, but `libp2p/peer/address_book.zig` still stores one flat address per entry and drops non-IPv4 addresses, so those prerequisites should be tracked and landed before `ZEI-81` / `ZEI-83`.
+- The missing Kad prerequisites are now tracked explicitly as `ZEI-91` (peerbook reshape), `ZEI-92` (DNS/IPv6 multiaddr support), and `ZEI-93` (identify decode hardening); `ZEI-89` already covers stream/resource controls and remains part of the prerequisite path before broad rollout.
+- `ZEI-20` Notes still mention `zen_server` integration as unfinished, but archived `ZEI-11` and `ZEI-33` show that prerequisite is already complete; future DHT planning should treat libp2p host integration as done and focus on Kademlia-specific gaps.
 - Open libp2p integration tickets that conflict with the current branch status should be audited separately, but the only explicit libp2p rollout gate in the current blocker set is `ZEI-54`.
 - `account_count` metadata is currently used for observability/status only; it is not part of consensus or recovery gating.
 - Height is not a valid standalone reorg winner criterion; the cumulative-work decision in `fork_detector.shouldReorganize()` remains authoritative.

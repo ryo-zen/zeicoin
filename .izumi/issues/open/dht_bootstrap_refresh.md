@@ -17,7 +17,7 @@ parent_id: kademlia_dht
 rank: null
 comments: []
 created_at: 2026-04-09T00:00:00+00:00
-updated_at: 2026-04-09T00:00:00+00:00
+updated_at: 2026-04-09T11:01:53+10:00
 ---
 
 ## Summary
@@ -32,6 +32,7 @@ Implement the DHT bootstrap procedure and periodic routing table maintenance. On
 - [ ] Peers encountered during lookups are inserted into routing table as per normal rules
 - [ ] Each run is subject to QueryTimeout (default: 10 seconds) — abort run on timeout
 - [ ] Refresh interval configurable
+- [ ] Bootstrap process is usable by the full Kad node before value/provider traffic starts
 - [ ] Unit tests for bootstrap sequence, refresh scheduling, and timeout abort
 
 ## Notes

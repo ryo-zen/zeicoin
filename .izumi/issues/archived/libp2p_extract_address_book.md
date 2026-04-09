@@ -3,7 +3,7 @@ id: libp2p_extract_address_book
 key: ZEI-88
 title: Extract SharedAddressBook from libp2p_testnode into reusable module
 type: Task
-status: Backlog
+status: Done
 priority: High
 assignee: null
 labels:
@@ -14,10 +14,11 @@ sprint: null
 story_points: null
 due_date: null
 parent_id: kademlia_dht
-rank: null
+rank: 1775694560502.0
 comments: []
 created_at: 2026-04-09T00:00:00+00:00
-updated_at: 2026-04-09T00:00:00+00:00
+updated_at: 2026-04-09T00:46:27.967140037+00:00
+closed_at: null
 ---
 
 ## Summary
@@ -26,13 +27,13 @@ updated_at: 2026-04-09T00:00:00+00:00
 
 ## Acceptance Criteria
 
-- [ ] Extract `SharedAddressBook` to `libp2p/peer/address_book.zig`
-- [ ] Export via `libp2p/api.zig` as `pub const AddressBook = ...`
-- [ ] `libp2p_testnode.zig` imports from the new module instead of defining inline
-- [ ] All existing address book functionality preserved (learn, dial success/failure, scoring, backoff, pruning, snapshots, self-observations)
-- [ ] Interface supports adding peers by PeerId + multiaddrs (what the DHT will provide)
-- [ ] `zig build test` passes
-- [ ] `zig build check` passes
+- [x] Extract `SharedAddressBook` to `libp2p/peer/address_book.zig`
+- [x] Export via `libp2p/api.zig` as `pub const AddressBook = ...`
+- [x] `libp2p_testnode.zig` imports from the new module instead of defining inline
+- [x] All existing address book functionality preserved (learn, dial success/failure, scoring, backoff, pruning, snapshots, self-observations)
+- [x] Interface supports adding peers by PeerId + multiaddrs (what the DHT will provide)
+- [x] `zig build test` passes
+- [x] `zig build check` passes
 
 ## Notes
 

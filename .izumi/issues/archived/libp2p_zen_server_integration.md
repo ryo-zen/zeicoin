@@ -3,7 +3,7 @@ id: libp2p_zen_server_integration
 key: ZEI-33
 title: Wire libp2p transport into zen_server and peer_manager
 type: Story
-status: Backlog
+status: Done
 priority: High
 assignee: null
 labels:
@@ -26,12 +26,12 @@ Replace the raw TCP stack in `peer_manager.zig` with the libp2p transport (TCP â
 
 ## Acceptance Criteria
 
-- [ ] `peer_manager.zig` dials and accepts peers via the libp2p stack
-- [ ] Zeicoin wire protocol runs over a Yamux stream (not raw TCP)
-- [ ] Peer addressing uses Multiaddr + PeerId (not bare `ip:port`)
-- [ ] Node identity (Ed25519 keypair) is loaded/created at startup and persisted
-- [ ] Existing block sync, mempool, and fork detection continue to work
-- [ ] No plaintext peer connections remain
+- [x] `peer_manager.zig` dials and accepts peers via the libp2p stack
+- [x] Zeicoin wire protocol runs over a Yamux stream (not raw TCP)
+- [x] Peer addressing uses Multiaddr + PeerId (not bare `ip:port`)
+- [x] Node identity (Ed25519 keypair) is loaded/created at startup and persisted
+- [x] Existing block sync, mempool, and fork detection continue to work
+- [x] No plaintext peer connections remain
 
 ## Notes
 
