@@ -135,6 +135,8 @@ pub const QueryService = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        var inbound_it = self.inbound_streams_per_peer.iterator();
+        while (inbound_it.next()) |entry| self.allocator.free(entry.key_ptr.*);
         self.inbound_streams_per_peer.deinit();
         self.store.deinit();
     }
@@ -404,9 +406,14 @@ pub const QueryService = struct {
 
         if (self.inbound_streams_global >= self.max_inbound_streams_global) return false;
         if (remote_peer_id) |peer_id| {
-            const current = self.inbound_streams_per_peer.get(peer_id) orelse 0;
-            if (current >= self.max_inbound_streams_per_peer) return false;
-            try self.inbound_streams_per_peer.put(peer_id, current + 1);
+            if (self.inbound_streams_per_peer.getPtr(peer_id)) |current| {
+                if (current.* >= self.max_inbound_streams_per_peer) return false;
+                current.* += 1;
+            } else {
+                const owned_key = try self.allocator.dupe(u8, peer_id);
+                errdefer self.allocator.free(owned_key);
+                try self.inbound_streams_per_peer.putNoClobber(owned_key, 1);
+            }
         }
         self.inbound_streams_global += 1;
         return true;
@@ -418,21 +425,21 @@ pub const QueryService = struct {
 
         if (self.inbound_streams_global > 0) self.inbound_streams_global -= 1;
         if (remote_peer_id) |peer_id| {
-            if (self.inbound_streams_per_peer.get(peer_id)) |current| {
-                if (current <= 1) {
-                    _ = self.inbound_streams_per_peer.remove(peer_id);
+            if (self.inbound_streams_per_peer.getPtr(peer_id)) |current| {
+                if (current.* <= 1) {
+                    if (self.inbound_streams_per_peer.fetchRemove(peer_id)) |removed| {
+                        self.allocator.free(removed.key);
+                    }
                 } else {
-                    self.inbound_streams_per_peer.put(peer_id, current - 1) catch {};
+                    current.* -= 1;
                 }
             }
         }
     }
 
     fn penalizeInboundPeer(self: *Self, conn_info: ConnInfo) void {
-        const remote_addr = conn_info.remote_addr orelse return;
-        const observed = formatIpAddressAsMultiaddr(self.allocator, remote_addr) catch return;
-        defer self.allocator.free(observed);
-        self.address_book.markDialFailure(observed, nowMs());
+        const remote_peer_id = conn_info.remote_peer_id orelse return;
+        self.address_book.markPeerFailure(remote_peer_id.toString(), nowMs());
     }
 
     fn handleRequest(self: *Self, request: *const kad.Message, ctx: RequestContext) !?kad.Message {
@@ -1270,6 +1277,74 @@ test "kad inbound stream limits enforce per-peer and global budgets" {
 
     try stream_a.close();
     try stream_b.close();
+}
+
+test "kad inbound stream counters own copied peer-id keys" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host = Host.init(allocator, try libp2p.IdentityKey.generate(allocator, io));
+    defer host.deinit();
+    var book = try AddressBook.init(allocator, host.identity.peer_id.toString());
+    defer book.deinit();
+    var table = try routing_table_mod.RoutingTable.init(allocator, host.identity.peer_id.toString());
+    defer table.deinit();
+
+    var service = QueryService.init(allocator, &host, &table, &book, .server);
+    defer service.deinit();
+
+    var peer_id_buf = [_]u8{ 'p', 'e', 'e', 'r', '-', '1' };
+    try std.testing.expect(try service.tryAcquireInboundStream(peer_id_buf[0..]));
+    try std.testing.expectEqual(@as(usize, 1), service.inbound_streams_per_peer.count());
+
+    peer_id_buf[0] = 'x';
+    try std.testing.expect(service.inbound_streams_per_peer.get("peer-1") != null);
+
+    service.releaseInboundStream("peer-1");
+    try std.testing.expectEqual(@as(usize, 0), service.inbound_streams_global);
+    try std.testing.expectEqual(@as(usize, 0), service.inbound_streams_per_peer.count());
+}
+
+test "kad inbound penalties target stable peer addresses by peer id" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host = Host.init(allocator, try libp2p.IdentityKey.generate(allocator, io));
+    defer host.deinit();
+    var book = try AddressBook.init(allocator, host.identity.peer_id.toString());
+    defer book.deinit();
+    var table = try routing_table_mod.RoutingTable.init(allocator, host.identity.peer_id.toString());
+    defer table.deinit();
+
+    var service = QueryService.init(allocator, &host, &table, &book, .server);
+    defer service.deinit();
+
+    var remote_identity = try libp2p.IdentityKey.generate(allocator, io);
+    defer remote_identity.deinit();
+
+    const remote_addr = try std.fmt.allocPrint(
+        allocator,
+        "/ip4/127.0.0.1/tcp/24001/p2p/{s}",
+        .{remote_identity.peer_id.toString()},
+    );
+    defer allocator.free(remote_addr);
+    try book.learnIdentifyAddr(remote_addr, remote_identity.peer_id.toString(), 1000);
+
+    service.penalizeInboundPeer(.{
+        .remote_peer_id = &remote_identity.peer_id,
+        .remote_addr = std.Io.net.IpAddress{
+            .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 48708 },
+        },
+    });
+
+    var snap = try book.snapshot(allocator);
+    defer freeBookSnapshot(allocator, &snap);
+
+    try std.testing.expectEqual(@as(usize, 1), snap.items.len);
+    try std.testing.expectEqualStrings(remote_identity.peer_id.toString(), snap.items[0].peer_id.?);
+    try std.testing.expectEqual(@as(i32, -20), snap.items[0].score);
+    try std.testing.expectEqual(@as(u32, 1), snap.items[0].fail_count);
+    try std.testing.expect(std.mem.indexOf(u8, snap.items[0].addr, "/tcp/24001") != null);
 }
 
 test "kad malformed inbound frame closes only the bad stream" {

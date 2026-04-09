@@ -64,11 +64,13 @@ fn zeicoinInboundHandler(
         if (err == error.AlreadyConnected) return;
         return err;
     };
-    const observed_ma = try formatIpAsMultiaddr(ctx.allocator, remote_addr);
-    defer ctx.allocator.free(observed_ma);
-    nm.learnKnownSessionPeer(conn_info.remote_peer_id.?.toString(), stream.session, observed_ma, remote_addr) catch |err| {
-        std.log.debug("Inbound identify/session learning failed: {}", .{err});
-    };
+    if (conn_info.remote_peer_id) |remote_peer_id| {
+        const observed_ma = try formatIpAsMultiaddr(ctx.allocator, remote_addr);
+        defer ctx.allocator.free(observed_ma);
+        nm.learnKnownSessionPeer(remote_peer_id.toString(), stream.session, observed_ma, remote_addr) catch |err| {
+            std.log.debug("Inbound identify/session learning failed: {}", .{err});
+        };
+    }
     peer.addRef();
     _ = nm.active_connections.fetchAdd(1, .acq_rel);
     defer {

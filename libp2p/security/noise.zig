@@ -995,63 +995,37 @@ test "noise XX matches official flynn vector through responder message 2" {
 
 test "noise concurrent handshake helpers" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.ioBasic();
-
-    var transport = tcp.TcpTransport.init(allocator);
-    defer transport.deinit();
+    var threaded = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer threaded.deinit();
+    const io = threaded.io();
 
     var initiator_identity = try IdentityKey.generate(allocator, io);
     defer initiator_identity.deinit();
     var responder_identity = try IdentityKey.generate(allocator, io);
     defer responder_identity.deinit();
 
-    var listen_ma = try Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/0");
-    defer listen_ma.deinit();
-
-    var listen_future = transport.listenConcurrent(io, &listen_ma) catch |err| switch (err) {
-        error.ConcurrencyUnavailable => return error.SkipZigTest,
-    };
-    const listener = listen_future.await(io) catch |err| switch (err) {
-        error.NetworkDown => return error.SkipZigTest,
-        else => return err,
-    };
-
-    var dial_ma = try Multiaddr.create(allocator, listener.multiaddr.toString());
-    defer dial_ma.deinit();
-
-    var accept_future = listener.acceptConcurrent(io) catch |err| switch (err) {
-        error.ConcurrencyUnavailable => return error.SkipZigTest,
-    };
-    defer _ = accept_future.cancel(io) catch {};
-    var dial_future = transport.dialConcurrent(io, &dial_ma) catch |err| switch (err) {
-        error.ConcurrencyUnavailable => return error.SkipZigTest,
-    };
-
-    var responder_conn = try accept_future.await(io);
-    defer responder_conn.deinit();
-    var initiator_conn = try dial_future.await(io);
+    var conn_pair = try inproc.InProcConnection.initPair(allocator, io);
+    var initiator_conn = conn_pair.initiator;
     defer initiator_conn.deinit();
+    var responder_conn = conn_pair.responder;
+    defer responder_conn.deinit();
 
-    var responder_future = performResponderConcurrent(
+    var responder_future = try performResponderConcurrent(
         allocator,
         io,
         responder_conn.connection(),
         &responder_identity,
         initiator_identity.peer_id.toString(),
-    ) catch |err| switch (err) {
-        error.ConcurrencyUnavailable => return error.SkipZigTest,
-    };
+    );
     defer _ = responder_future.cancel(io) catch {};
 
-    var initiator_future = performInitiatorConcurrent(
+    var initiator_future = try performInitiatorConcurrent(
         allocator,
         io,
         initiator_conn.connection(),
         &initiator_identity,
         responder_identity.peer_id.toString(),
-    ) catch |err| switch (err) {
-        error.ConcurrencyUnavailable => return error.SkipZigTest,
-    };
+    );
     defer _ = initiator_future.cancel(io) catch {};
 
     var initiator_result = try initiator_future.await(io);

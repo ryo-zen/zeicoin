@@ -234,16 +234,32 @@ pub const AddressBook = struct {
         for (self.peers.items) |*peer| {
             for (peer.addresses.items) |*entry| {
                 if (!samePeerAddress(entry.addr, addr, peer.peer_id, peerIdSlice(addr))) continue;
-                entry.score -= 20;
-                entry.fail_count +|= 1;
-                entry.last_failure_ms = now_ms;
-                const exp = @min(entry.fail_count, 8);
-                var backoff_ms: u64 = (@as(u64, 1) << @intCast(exp)) * 1000;
-                if (backoff_ms > max_backoff_ms) backoff_ms = max_backoff_ms;
-                entry.next_dial_ms = now_ms + backoff_ms;
+                applyDialFailure(entry, now_ms);
                 return;
             }
         }
+    }
+
+    pub fn markPeerFailure(self: *Self, peer_id_text: []const u8, now_ms: u64) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.peers.items) |*peer| {
+            if (peer.peer_id == null or !std.mem.eql(u8, peer.peer_id.?, peer_id_text)) continue;
+            for (peer.addresses.items) |*entry| {
+                applyDialFailure(entry, now_ms);
+            }
+            return;
+        }
+    }
+
+    fn applyDialFailure(entry: *PeerAddrEntry, now_ms: u64) void {
+        entry.score -= 20;
+        entry.fail_count +|= 1;
+        entry.last_failure_ms = now_ms;
+        const exp = @min(entry.fail_count, 8);
+        var backoff_ms: u64 = (@as(u64, 1) << @intCast(exp)) * 1000;
+        if (backoff_ms > max_backoff_ms) backoff_ms = max_backoff_ms;
+        entry.next_dial_ms = now_ms + backoff_ms;
     }
 
     pub fn chooseDialCandidate(
@@ -816,6 +832,35 @@ test "address book scoring on success and failure" {
         }
         try std.testing.expectEqual(@as(i32, -10), snap.items[0].score);
     }
+}
+
+test "address book can penalize stable addresses by peer id" {
+    const allocator = std.testing.allocator;
+    const local_peer_id = try makeTestPeerId(allocator);
+    defer allocator.free(local_peer_id);
+    const remote_peer_id = try makeTestPeerId(allocator);
+    defer allocator.free(remote_peer_id);
+
+    var book = try AddressBook.init(allocator, local_peer_id);
+    defer book.deinit();
+
+    try book.learnIdentifyAddr("/ip4/10.0.0.1/tcp/10801", remote_peer_id, 1000);
+    book.markPeerFailure(remote_peer_id, 2000);
+
+    var snap = try book.snapshot(allocator);
+    defer {
+        for (snap.items) |entry| {
+            allocator.free(entry.addr);
+            if (entry.peer_id) |peer_id| allocator.free(peer_id);
+        }
+        snap.deinit();
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), snap.items.len);
+    try std.testing.expectEqualStrings(remote_peer_id, snap.items[0].peer_id.?);
+    try std.testing.expectEqual(@as(i32, -20), snap.items[0].score);
+    try std.testing.expectEqual(@as(u32, 1), snap.items[0].fail_count);
+    try std.testing.expect(snap.items[0].source.identify);
 }
 
 test "address book tags bootstrap and peer exchange sources" {
