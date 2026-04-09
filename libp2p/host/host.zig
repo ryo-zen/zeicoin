@@ -191,13 +191,16 @@ fn acceptProtocol(
     defer alloc.free(header);
     if (!std.mem.eql(u8, header, ms.PROTOCOL_ID)) return error.ProtocolMismatch;
     try ms.writeMessage(io, writer, ms.PROTOCOL_ID);
-    const proposal = try ms.readMessage(io, reader, alloc);
-    defer alloc.free(proposal);
-    if (!std.mem.eql(u8, proposal, expected)) {
-        try ms.writeMessage(io, writer, ms.NA);
-        return error.ProtocolNegotiationFailed;
+    while (true) {
+        const proposal = try ms.readMessage(io, reader, alloc);
+        defer alloc.free(proposal);
+        if (!std.mem.eql(u8, proposal, expected)) {
+            try ms.writeMessage(io, writer, ms.NA);
+            continue;
+        }
+        try ms.writeMessage(io, writer, expected);
+        return;
     }
-    try ms.writeMessage(io, writer, expected);
 }
 
 // ── upgradeOutbound ───────────────────────────────────────────────────────────
@@ -234,9 +237,11 @@ fn upgradeOutbound(
     errdefer uc.secure.deinit();
     errdefer uc.remote_peer_id.deinit();
 
-    var sr: SecureReader = .{ .conn = &uc.secure, .io = io };
-    var sw: SecureWriter = .{ .conn = &uc.secure, .io = io };
-    try proposeProtocol(alloc, io, &sr, &sw, yamux.PROTOCOL_ID);
+    if (!noise_result.used_early_yamux) {
+        var sr: SecureReader = .{ .conn = &uc.secure, .io = io };
+        var sw: SecureWriter = .{ .conn = &uc.secure, .io = io };
+        try proposeProtocol(alloc, io, &sr, &sw, yamux.PROTOCOL_ID);
+    }
 
     uc.session = yamux.Session.init(alloc, &uc.secure, true);
     errdefer uc.session.deinit();
@@ -278,9 +283,11 @@ fn upgradeInbound(
     errdefer uc.secure.deinit();
     errdefer uc.remote_peer_id.deinit();
 
-    var sr: SecureReader = .{ .conn = &uc.secure, .io = io };
-    var sw: SecureWriter = .{ .conn = &uc.secure, .io = io };
-    try acceptProtocol(alloc, io, &sr, &sw, yamux.PROTOCOL_ID);
+    if (!noise_result.used_early_yamux) {
+        var sr: SecureReader = .{ .conn = &uc.secure, .io = io };
+        var sw: SecureWriter = .{ .conn = &uc.secure, .io = io };
+        try acceptProtocol(alloc, io, &sr, &sw, yamux.PROTOCOL_ID);
+    }
 
     uc.session = yamux.Session.init(alloc, &uc.secure, false);
     errdefer uc.session.deinit();
@@ -539,18 +546,18 @@ pub const Host = struct {
         }
         const observed_bytes = if (observed_ma) |*ma| ma.getBytesAddress() else &[_]u8{};
 
-        const encoded = try identify_mod.encodeIdentify(
+        const encoded_pubkey = identify_mod.encodeIdentityPublicKey(host.identity.public_key);
+        try identify_mod.writeDelimitedIdentify(
             host.allocator,
+            std.Io.Threaded.global_single_threaded.ioBasic(),
+            stream,
             "/zeicoin/testnet/1.0.0",
             "zeicoin/0.1.0",
-            host.identity.peer_id.getBytes(),
+            &encoded_pubkey,
             la_slice,
             observed_bytes,
             host.registry.protocol_ids.items,
         );
-        defer host.allocator.free(encoded);
-
-        try stream.writeAll(encoded);
         try stream.close();
     }
 
@@ -560,17 +567,7 @@ pub const Host = struct {
         var stream = try self.newStream(io, session, identify_mod.PROTOCOL_ID);
         defer stream.deinit();
 
-        var buf = std.array_list.Managed(u8).init(self.allocator);
-        defer buf.deinit();
-
-        var tmp: [4096]u8 = undefined;
-        while (true) {
-            const n = stream.readSome(&tmp) catch break;
-            if (n == 0) break;
-            try buf.appendSlice(tmp[0..n]);
-        }
-
-        return identify_mod.decodeIdentify(self.allocator, buf.items);
+        return identify_mod.readDelimitedIdentify(self.allocator, io, &stream);
     }
 
     // Accept and upgrade inbound connections, dispatching streams to registered
@@ -1028,8 +1025,8 @@ test "host: identify round-trip" {
 
     try std.testing.expectEqualStrings("/zeicoin/testnet/1.0.0", info.protocol_version);
     try std.testing.expectEqualStrings("zeicoin/0.1.0", info.agent_version);
-    // server's peer ID bytes are encoded as the public_key field
-    try std.testing.expectEqualSlices(u8, server.identity.peer_id.getBytes(), info.public_key);
+    const encoded_pubkey = identify_mod.encodeIdentityPublicKey(server.identity.public_key);
+    try std.testing.expectEqualSlices(u8, &encoded_pubkey, info.public_key);
     // server reported its listen address
     try std.testing.expectEqual(@as(usize, 1), info.listen_addrs.items.len);
     // identify protocol itself is in the registered protocols list

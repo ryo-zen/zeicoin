@@ -549,9 +549,17 @@ pub const QueryService = struct {
 
         var accepted: usize = 0;
         for (request.provider_peers.items) |*provider| {
-            if (!std.mem.eql(u8, provider.id, remote_peer_id)) continue;
+            const normalized_provider_id = normalizeProviderPeerId(self.allocator, provider.id) catch continue;
+            defer self.allocator.free(normalized_provider_id);
+            if (!std.mem.eql(u8, normalized_provider_id, remote_peer_id)) continue;
             if (provider.addrs.items.len == 0) continue;
-            try self.store.addProvider(request.key, provider, nowMs(), .remote);
+
+            var normalized_provider = try cloneKadPeer(self.allocator, provider);
+            defer normalized_provider.deinit(self.allocator);
+            self.allocator.free(normalized_provider.id);
+            normalized_provider.id = try self.allocator.dupe(u8, normalized_provider_id);
+
+            try self.store.addProvider(request.key, &normalized_provider, nowMs(), .remote);
             accepted += 1;
         }
         if (accepted == 0) return error.NoValidKadProvider;
@@ -761,6 +769,24 @@ fn cloneKadPeer(allocator: std.mem.Allocator, peer: *const kad.Peer) !kad.Peer {
         try out.addrs.append(try allocator.dupe(u8, addr));
     }
     return out;
+}
+
+fn normalizeProviderPeerId(allocator: std.mem.Allocator, peer_id: []const u8) ![]u8 {
+    if (peer_id.len == 0) return error.EmptyKadProviderPeerId;
+
+    if (PeerId.fromString(allocator, peer_id)) |parsed_text| {
+        var parsed = parsed_text;
+        defer parsed.deinit();
+        return allocator.dupe(u8, parsed.toString());
+    } else |_| {}
+
+    if (PeerId.fromBytes(allocator, peer_id)) |parsed_bytes| {
+        var parsed = parsed_bytes;
+        defer parsed.deinit();
+        return allocator.dupe(u8, parsed.toString());
+    } else |_| {}
+
+    return error.InvalidKadProviderPeerId;
 }
 
 fn connectionToWire(connection: routing_table_mod.ConnectionType) kad.ConnectionType {
@@ -1261,19 +1287,21 @@ test "kad add provider accepts only the sender peer id" {
     var service = QueryService.init(allocator, &host, &table, &book, .server);
     defer service.deinit();
 
+    var sender_identity = try libp2p.IdentityKey.generate(allocator, io);
+    defer sender_identity.deinit();
+
     var invalid = kad.Message.init(allocator);
     defer invalid.deinit(allocator);
     invalid.type = .ADD_PROVIDER;
     invalid.key = try allocator.dupe(u8, "provider-key");
     var wrong_peer = kad.Peer.init(allocator);
-    errdefer wrong_peer.deinit(allocator);
     wrong_peer.id = try allocator.dupe(u8, "different-peer");
     wrong_peer.connection = .CONNECTED;
     try wrong_peer.addrs.append(try allocator.dupe(u8, "/ip4/127.0.0.1/tcp/24212"));
     try invalid.provider_peers.append(wrong_peer);
 
     try std.testing.expectError(error.NoValidKadProvider, service.handleRequest(&invalid, .{
-        .remote_peer_id = "sender-peer",
+        .remote_peer_id = sender_identity.peer_id.toString(),
     }));
 
     var valid = kad.Message.init(allocator);
@@ -1281,14 +1309,13 @@ test "kad add provider accepts only the sender peer id" {
     valid.type = .ADD_PROVIDER;
     valid.key = try allocator.dupe(u8, "provider-key");
     var good_peer = kad.Peer.init(allocator);
-    errdefer good_peer.deinit(allocator);
-    good_peer.id = try allocator.dupe(u8, "sender-peer");
+    good_peer.id = try allocator.dupe(u8, sender_identity.peer_id.toString());
     good_peer.connection = .CONNECTED;
     try good_peer.addrs.append(try allocator.dupe(u8, "/ip4/127.0.0.1/tcp/24213"));
     try valid.provider_peers.append(good_peer);
 
     try std.testing.expect((try service.handleRequest(&valid, .{
-        .remote_peer_id = "sender-peer",
+        .remote_peer_id = sender_identity.peer_id.toString(),
     })) == null);
 
     var get_request = kad.Message.init(allocator);
@@ -1299,6 +1326,49 @@ test "kad add provider accepts only the sender peer id" {
     var response = (try service.handleRequest(&get_request, .{})).?;
     defer response.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), response.provider_peers.items.len);
-    try std.testing.expectEqualStrings("sender-peer", response.provider_peers.items[0].id);
+    try std.testing.expectEqualStrings(sender_identity.peer_id.toString(), response.provider_peers.items[0].id);
     try std.testing.expectEqual(@as(usize, 1), response.closer_peers.items.len);
+}
+
+test "kad add provider accepts raw peer id bytes from remote provider record" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var host = Host.init(allocator, try libp2p.IdentityKey.generate(allocator, io));
+    defer host.deinit();
+    var book = try AddressBook.init(allocator, host.identity.peer_id.toString());
+    defer book.deinit();
+    var table = try routing_table_mod.RoutingTable.init(allocator, host.identity.peer_id.toString());
+    defer table.deinit();
+
+    var sender_identity = try libp2p.IdentityKey.generate(allocator, io);
+    defer sender_identity.deinit();
+
+    var service = QueryService.init(allocator, &host, &table, &book, .server);
+    defer service.deinit();
+
+    var request = kad.Message.init(allocator);
+    defer request.deinit(allocator);
+    request.type = .ADD_PROVIDER;
+    request.key = try allocator.dupe(u8, "provider-key-raw");
+
+    var raw_peer = kad.Peer.init(allocator);
+    raw_peer.id = try allocator.dupe(u8, sender_identity.peer_id.getBytes());
+    raw_peer.connection = .CONNECTED;
+    try raw_peer.addrs.append(try allocator.dupe(u8, "/ip4/127.0.0.1/tcp/24214"));
+    try request.provider_peers.append(raw_peer);
+
+    try std.testing.expect((try service.handleRequest(&request, .{
+        .remote_peer_id = sender_identity.peer_id.toString(),
+    })) == null);
+
+    var get_request = kad.Message.init(allocator);
+    defer get_request.deinit(allocator);
+    get_request.type = .GET_PROVIDERS;
+    get_request.key = try allocator.dupe(u8, "provider-key-raw");
+
+    var response = (try service.handleRequest(&get_request, .{})).?;
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), response.provider_peers.items.len);
+    try std.testing.expectEqualStrings(sender_identity.peer_id.toString(), response.provider_peers.items[0].id);
 }

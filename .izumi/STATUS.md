@@ -10,9 +10,9 @@
 **Branch:** `libp2p-integration`
 **Active initiative:** Post-rollout testnet validation and hardening
 
-**Last worked on:** 2026-04-09 — Fixed the flaky Yamux keepalive coverage by hardening `yamux keepalive ping pong keeps session alive` to use an exact request/reply exchange instead of EOF-dependent half-close timing; `zig build test-libp2p` is now green again after the recent Kad runtime work.
-**Next step:** Decide whether to strengthen `ZEI-87` into a full `zen_server` runtime proof or move to external interoperability validation now that the Kad runtime path and libp2p regression suite are both green.
-**In flight:** No uncommitted product work; the recent Kad runtime and record-layer commits are landed, and the full local regression set now includes `zig build check`, `zig build test`, `zig build test-libp2p`, and `./docker/scripts/test_libp2p_kad_smoke.sh`.
+**Last worked on:** 2026-04-09 — Finished the local Go Kad interop unblocker: Noise XX now matches the official vector and negotiates go-libp2p successfully, identify uses delimited protobuf framing plus real public-key bytes, inbound multistream accepts fallback security proposals, yamux now accepts Go-opened `WINDOW_UPDATE|SYN` streams, and Kad provider validation normalizes raw peer IDs. The scratch Go probe now passes `PING`, `FIND_NODE`, `PUT/GET_VALUE`, and `ADD/GET_PROVIDERS` against a real go-libp2p host, and `zig build test-libp2p` is green again.
+**Next step:** Decide whether to commit the interop fix set now or keep extending `ZEI-90` beyond the local scratch harness into a stronger retained regression tool / broader external validation pass.
+**In flight:** Uncommitted `ZEI-90`/`ZEI-94` work touches `libp2p/security/noise.zig`, `libp2p/protocol/identify.zig`, `libp2p/muxer/yamux.zig`, `libp2p/host/host.zig`, and `libp2p/dht/query.zig`; the temporary Go harness lives under ignored `tmp/go_kad_interop/`, and the latest passing run is `./tmp/go_kad_interop/test_kad_go_interop.sh`.
 
 ---
 
@@ -58,6 +58,9 @@
 - The dedicated Kad Docker compose must use concrete per-container listen multiaddrs instead of `0.0.0.0`, otherwise identify/Kad replies advertise wildcard addresses that other nodes correctly refuse to dial.
 - The dedicated Kad Docker image is built with `ReleaseSafe` because the current Zig threaded-I/O debug build hits a `BADF` assertion during peer shutdown in this smoke even though the release-safe run completes and preserves the intended proof.
 - The old late-suite Yamux keepalive flake was test-structure noise rather than a transport bug: the deterministic fix was to remove EOF/half-close dependence from `yamux keepalive ping pong keeps session alive` and assert the post-idle request/reply exchange directly instead.
+- The temporary Go interop harness is intentionally scratch-only and ignored for now: it lives under `tmp/go_kad_interop/` with logs under `tmp/kad-go-interop-*`, not under tracked `tools/` or `docker/scripts/`.
+- The full local Go interop unblock required multiple protocol-layer fixes, not just one Noise tweak: explicit empty-prologue / empty-payload transcript hashing in Noise XX, Noise `extensions.stream_muxers` handling for early yamux, identify protobuf-delimited framing and real `public_key` bytes, responder-side multistream fallback for `/tls/1.0.0` → `/noise`, yamux acceptance of Go-opened `WINDOW_UPDATE|SYN` streams, and normalization of raw provider peer IDs in inbound `ADD_PROVIDER`.
+- `ZEI-90` now has a passing local proof against `github.com/libp2p/go-libp2p v0.48.0` plus the checked-out `reference/go-libp2p-kad-dht`: the scratch probe successfully exercises `PING`, `FIND_NODE`, `PUT_VALUE` / `GET_VALUE`, and `ADD_PROVIDER` / `GET_PROVIDERS` against the ZeiCoin Kad node.
 - `ZEI-20` Notes still mention `zen_server` integration as unfinished, but archived `ZEI-11` and `ZEI-33` show that prerequisite is already complete; future DHT planning should treat libp2p host integration as done and focus on Kademlia-specific gaps.
 - Open libp2p integration tickets that conflict with the current branch status should be audited separately, but the only explicit libp2p rollout gate in the current blocker set is `ZEI-54`.
 - `account_count` metadata is currently used for observability/status only; it is not part of consensus or recovery gating.
