@@ -6,13 +6,13 @@
 
 ## Current State
 
-**Date:** 2026-04-09
-**Branch:** `libp2p-integration`
-**Active initiative:** Post-rollout testnet validation and hardening
+**Date:** 2026-04-10
+**Branch:** `kademlia-dht`
+**Active initiative:** Testnet hardening and post-rollout cleanup after the Kad/libp2p sprint
 
-**Last worked on:** 2026-04-09 — Finished the local Go Kad interop unblocker: Noise XX now matches the official vector and negotiates go-libp2p successfully, identify uses delimited protobuf framing plus real public-key bytes, inbound multistream accepts fallback security proposals, yamux now accepts Go-opened `WINDOW_UPDATE|SYN` streams, and Kad provider validation normalizes raw peer IDs. The scratch Go probe now passes `PING`, `FIND_NODE`, `PUT/GET_VALUE`, and `ADD/GET_PROVIDERS` against a real go-libp2p host, and `zig build test-libp2p` is green again.
-**Next step:** Decide whether to commit the interop fix set now or keep extending `ZEI-90` beyond the local scratch harness into a stronger retained regression tool / broader external validation pass.
-**In flight:** Uncommitted `ZEI-90`/`ZEI-94` work touches `libp2p/security/noise.zig`, `libp2p/protocol/identify.zig`, `libp2p/muxer/yamux.zig`, `libp2p/host/host.zig`, and `libp2p/dht/query.zig`; the temporary Go harness lives under ignored `tmp/go_kad_interop/`, and the latest passing run is `./tmp/go_kad_interop/test_kad_go_interop.sh`.
+**Last worked on:** 2026-04-10 — Landed `ZEI-103` startup reachability/Kad mode selection in `src/core/network/peer.zig`, added Docker/runtime validation coverage including the Kad partition-heal harness, confirmed outbound bootstrap from a NATed local node, and rewrote `ZEI-104` to track the official AutoNAT v2 flow (per-address probing, `/libp2p/autonat/2/*`, nonce dial-backs, and amplification defense).
+**Next step:** Start `ZEI-104` as an AutoNAT v2 client/server wire implementation that records per-address evidence, then follow with host handler unregister/runtime mode switching before relay / DCUtR work.
+**In flight:** No uncommitted product changes should remain after this handoff. Branch `kademlia-dht` now contains the committed `ZEI-103` reachability/Kad-mode work, Docker reachability overrides, the Kad partition-heal validation script, and the related ticket/status updates (`ZEI-54` archived, `ZEI-103` closed, `ZEI-104` opened). Validation artifacts under `tmp/zen-server-docker-20260410-104231` and `tmp/nat-kad-client-probe-*` are disposable.
 
 ---
 
@@ -20,6 +20,7 @@
 
 | State | Summary |
 |-------|---------|
+| Done | The Kad/libp2p sprint (`ZEI-81`..`ZEI-99`) is complete on this branch, including remote bootstrap validation against `209.38.84.23`. |
 | Done | Core libp2p integration is in place: protocol adapter, bootstrap multiaddr handling, peer-manager host wiring, identify handler, connection-pool dedup, and Docker validation. |
 | Done | Reorg hardening landed through `ZEI-68`, including early competing-branch validation before work comparison and before canonical-state mutation. |
 | Done | Current validation is green across Zig tests, isolated libp2p tests, Docker libp2p smoke, and Docker deep reorg recovery. |
@@ -29,12 +30,19 @@
 | Done | `ZEI-71` landed: `account_count` now tracks unique persisted accounts across direct writes, batch commits, rollback/reset, and explicit restore metadata; impact was classified as observability-only. |
 | Done | `ZEI-64` landed: `executeReorg()` no longer rejects shorter competing branches solely on height, and a regression test now covers the shorter-but-heavier winner case. |
 | Done | All first-testnet blockers complete: `ZEI-71`, `ZEI-64`, `ZEI-21`, `ZEI-66`, `ZEI-52`, `ZEI-54`. Epic `ZEI-72` is closed. |
-| Deferred | `ZEI-20` Kademlia DHT and mainnet-only compatibility/infrastructure work are explicitly out of scope for the first testnet rollout. |
+| Backlog | `ZEI-20` remains as an umbrella/mainnet follow-up item even though the current testnet Kad implementation work is complete on this branch. |
 
 ---
 
 ## Decisions Made
 
+- `zeicoin-mining.service` is now the only long-running systemd server unit; `zeicoin-server.service` was removed to avoid split ownership and restart conflicts.
+- Systemd-managed nodes now use `.env.testnet` for config plus `.env.local` for secrets; bootstrap clients must use multiaddr format and the bootstrap seed must set `ZEICOIN_BOOTSTRAP=` explicitly empty.
+- `ZEI-103` is intentionally startup-fixed for local Kad mode: ZeiCoin now maps `public -> server` and `private/unknown -> client`, defers runtime switching until AutoNAT plus a host handler-unregister path exist, and admits remote peers to the Kad routing table only when identify advertises `/kad/1.0.0`.
+- `ZEICOIN_REACHABILITY=public|private|unknown` is a temporary manual override for environments like the isolated Docker bridge where RFC1918 addresses are still mutually reachable and should behave as Kad servers.
+- `ZEI-104` is now scoped to the official AutoNAT v2 spec rather than a generic AutoNAT-style dial-back: per-address requests, `/libp2p/autonat/2/dial-request` plus `/libp2p/autonat/2/dial-back`, nonce verification, and the `DialDataRequest` amplification-defense path are all part of the card.
+- A block containing a transaction that already exists in the chain is invalid and must be rejected during block application; silently skipping duplicates is not allowed.
+- Batch sync must validate proof-of-work on every received block, not just structural continuity.
 - The first testnet rollout is treated as resettable because there are currently zero users and zero historical testnet transactions.
 - The first resettable testnet rollout has now happened; the current phase is operational validation rather than deployment prep.
 - Backward compatibility and mixed-version coexistence are intentionally out of scope for this rollout.
@@ -61,6 +69,9 @@
 - The temporary Go interop harness is intentionally scratch-only and ignored for now: it lives under `tmp/go_kad_interop/` with logs under `tmp/kad-go-interop-*`, not under tracked `tools/` or `docker/scripts/`.
 - The full local Go interop unblock required multiple protocol-layer fixes, not just one Noise tweak: explicit empty-prologue / empty-payload transcript hashing in Noise XX, Noise `extensions.stream_muxers` handling for early yamux, identify protobuf-delimited framing and real `public_key` bytes, responder-side multistream fallback for `/tls/1.0.0` → `/noise`, yamux acceptance of Go-opened `WINDOW_UPDATE|SYN` streams, and normalization of raw provider peer IDs in inbound `ADD_PROVIDER`.
 - `ZEI-90` now has a passing local proof against `github.com/libp2p/go-libp2p v0.48.0` plus the checked-out `reference/go-libp2p-kad-dht`: the scratch probe successfully exercises `PING`, `FIND_NODE`, `PUT_VALUE` / `GET_VALUE`, and `ADD_PROVIDER` / `GET_PROVIDERS` against the ZeiCoin Kad node.
+- The current automated validation already covers isolated Kad discovery convergence (`docker/scripts/test_libp2p_kad_smoke.sh`), real-runtime `zen_server` Kad refresh + block sync (`docker/scripts/test_libp2p_zen_server.sh`), and in-process transport/muxer churn (`libp2p/libp2p_stress.zig`); the biggest remaining robustness gaps are topology-heal after partition, rolling restart/churn, formalized Go interop in CI, and longer-duration soak/resource-bound coverage.
+- The real-runtime Kad partition-heal proof now lives in `docker/scripts/verify_kad_partition_heal.sh`; to keep the signal focused on recovery rather than fork policy, the harness restarts `miner-2` in passive mode before isolating `node-1`, waits for the old peer sessions to drain fully, then verifies post-heal hash agreement at a fixed target height instead of chasing a moving mined tip.
+- A real local `zen_server` client-only probe against the public bootstrap now exists as an operational data point: with `ZEICOIN_BIND_IP=127.0.0.1`, isolated temp data, `ZEICOIN_P2P_PORT=11901`, `ZEICOIN_API_PORT=10802`, and `ZEICOIN_BOOTSTRAP=/ip4/209.38.84.23/tcp/10801`, the node explicitly logged "node is behind NAT", connected outbound, synced to height 2, and maintained one live peer session. This supports the current claim that NATed nodes work well as outbound clients even before relay/hole-punch support lands.
 - `ZEI-20` Notes still mention `zen_server` integration as unfinished, but archived `ZEI-11` and `ZEI-33` show that prerequisite is already complete; future DHT planning should treat libp2p host integration as done and focus on Kademlia-specific gaps.
 - Open libp2p integration tickets that conflict with the current branch status should be audited separately, but the only explicit libp2p rollout gate in the current blocker set is `ZEI-54`.
 - `account_count` metadata is currently used for observability/status only; it is not part of consensus or recovery gating.
@@ -93,6 +104,7 @@
 - `zig build test`
 - `zig build test-libp2p`
 - `./docker/scripts/test_libp2p_zen_server.sh`
+- `./docker/scripts/verify_kad_partition_heal.sh`
 - `./docker/scripts/verify_deep_reorg.sh`
 - `./docker/scripts/verify_reorg_depth_rejection.sh`
 - `bash tests/test_cli_smoke.sh`

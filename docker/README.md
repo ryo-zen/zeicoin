@@ -27,7 +27,7 @@ zeicoin-network (Docker bridge - ISOLATED from live network)
 
 **Important**: This Docker setup is completely isolated from the live ZeiCoin testnet. The nodes will NOT connect to the public bootstrap nodes. This creates a private testing network for safe experimentation.
 
-For Kad runtime validation, the compose file also binds each node to its concrete Docker bridge IP so Identify/Kad advertise dialable listen addresses instead of `0.0.0.0`. It also sets `ZEICOIN_KAD_REFRESH_INTERVAL_MS=5000` so the real `zen_server` nodes emit repeatable refresh logs during the short smoke run instead of waiting for the default 10-minute interval.
+For Kad runtime validation, the compose file also binds each node to its concrete Docker bridge IP so Identify/Kad advertise dialable listen addresses instead of `0.0.0.0`. It sets `ZEICOIN_REACHABILITY=public` because those bridge addresses are mutually reachable inside the isolated test network even though they are RFC1918, and it sets `ZEICOIN_KAD_REFRESH_INTERVAL_MS=5000` so the real `zen_server` nodes emit repeatable refresh logs during the short smoke run instead of waiting for the default 10-minute interval.
 
 ## Prerequisites
 

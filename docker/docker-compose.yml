@@ -20,6 +20,7 @@ x-common-env: &common-env
   ZEICOIN_P2P_PORT: 10801
   ZEICOIN_API_PORT: 10802
   ZEICOIN_KAD_REFRESH_INTERVAL_MS: "5000"
+  ZEICOIN_REACHABILITY: "public"
 
 services:
   miner-1:

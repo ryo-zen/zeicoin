@@ -5,6 +5,12 @@ const std = @import("std");
 const net = std.Io.net;
 const posix = std.posix;
 
+pub const Reachability = enum {
+    unknown,
+    private,
+    public,
+};
+
 /// Detect our public IP address by checking which interface routes to the internet
 /// NOTE: Requires io parameter in Zig 0.16
 pub fn detectPublicIP(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
@@ -45,13 +51,35 @@ pub fn detectPublicIP(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
     return ip_str;
 }
 
+pub fn detectOutboundReachability(allocator: std.mem.Allocator, io: std.Io) !Reachability {
+    const ip = try detectPublicIP(allocator, io);
+    defer allocator.free(ip);
+    return reachabilityFromIpString(ip);
+}
+
+pub fn classifyLocalReachability(allocator: std.mem.Allocator, io: std.Io, bind_addr: net.IpAddress) Reachability {
+    return switch (explicitBindReachability(bind_addr)) {
+        .unknown => detectOutboundReachability(allocator, io) catch .unknown,
+        .private => .private,
+        .public => .public,
+    };
+}
+
+pub fn explicitBindReachability(bind_addr: net.IpAddress) Reachability {
+    return switch (bind_addr) {
+        .ip4 => |ip4| reachabilityFromIpv4Bytes(ip4.bytes),
+        .ip6 => |ip6| reachabilityFromIpv6Bytes(ip6.bytes),
+    };
+}
+
+pub fn reachabilityFromIpString(ip_str: []const u8) Reachability {
+    return if (isPrivateIP(ip_str)) .private else .public;
+}
+
 /// Check if an IP address is in private address ranges
 fn isPrivateIP(ip_str: []const u8) bool {
-    // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8
-    return std.mem.startsWith(u8, ip_str, "10.") or
-           std.mem.startsWith(u8, ip_str, "192.168.") or
-           std.mem.startsWith(u8, ip_str, "172.16.") or  // This is simplified - should check 172.16-31
-           std.mem.startsWith(u8, ip_str, "127.");
+    const octets = parseIpv4Octets(ip_str) orelse return false;
+    return reachabilityFromIpv4Bytes(octets) == .private;
 }
 
 /// Check if an address is a self-connection by comparing with our public IP
@@ -86,4 +114,70 @@ pub fn isSelfConnection(allocator: std.mem.Allocator, io: std.Io, address: net.I
         std.log.info("🔍 Self-connection detected: {} matches our public IP {s}", .{ address, public_ip });
     }
     return is_self;
+}
+
+fn parseIpv4Octets(ip_str: []const u8) ?[4]u8 {
+    var octets: [4]u8 = undefined;
+    var it = std.mem.tokenizeScalar(u8, ip_str, '.');
+    var index: usize = 0;
+    while (it.next()) |part| {
+        if (index >= octets.len) return null;
+        octets[index] = std.fmt.parseInt(u8, part, 10) catch return null;
+        index += 1;
+    }
+    if (index != octets.len) return null;
+    return octets;
+}
+
+fn reachabilityFromIpv4Bytes(bytes: [4]u8) Reachability {
+    if (bytes[0] == 0 and bytes[1] == 0 and bytes[2] == 0 and bytes[3] == 0) return .unknown;
+    if (bytes[0] == 127) return .private;
+    if (bytes[0] == 10) return .private;
+    if (bytes[0] == 172 and bytes[1] >= 16 and bytes[1] <= 31) return .private;
+    if (bytes[0] == 192 and bytes[1] == 168) return .private;
+    if (bytes[0] == 169 and bytes[1] == 254) return .private;
+    return .public;
+}
+
+fn reachabilityFromIpv6Bytes(bytes: [16]u8) Reachability {
+    const all_zero = blk: {
+        for (bytes) |b| {
+            if (b != 0) break :blk false;
+        }
+        break :blk true;
+    };
+    if (all_zero) return .unknown;
+
+    const is_loopback = blk: {
+        for (bytes[0..15]) |b| {
+            if (b != 0) break :blk false;
+        }
+        break :blk bytes[15] == 1;
+    };
+    if (is_loopback) return .private;
+
+    if ((bytes[0] & 0xfe) == 0xfc) return .private; // fc00::/7 unique-local
+    if (bytes[0] == 0xfe and (bytes[1] & 0xc0) == 0x80) return .private; // fe80::/10 link-local
+
+    return .public;
+}
+
+test "explicit bind reachability classifies ipv4 loopback private and public" {
+    const loopback = try net.IpAddress.parse("127.0.0.1", 10801);
+    const private = try net.IpAddress.parse("10.1.2.3", 10801);
+    const wildcard = try net.IpAddress.parse("0.0.0.0", 10801);
+    const public = try net.IpAddress.parse("209.38.84.23", 10801);
+
+    try std.testing.expectEqual(Reachability.private, explicitBindReachability(loopback));
+    try std.testing.expectEqual(Reachability.private, explicitBindReachability(private));
+    try std.testing.expectEqual(Reachability.unknown, explicitBindReachability(wildcard));
+    try std.testing.expectEqual(Reachability.public, explicitBindReachability(public));
+}
+
+test "reachability from ip string treats rfc1918 and loopback as private" {
+    try std.testing.expectEqual(Reachability.private, reachabilityFromIpString("10.2.0.2"));
+    try std.testing.expectEqual(Reachability.private, reachabilityFromIpString("172.20.0.4"));
+    try std.testing.expectEqual(Reachability.private, reachabilityFromIpString("192.168.1.99"));
+    try std.testing.expectEqual(Reachability.private, reachabilityFromIpString("127.0.0.1"));
+    try std.testing.expectEqual(Reachability.public, reachabilityFromIpString("209.38.84.23"));
 }

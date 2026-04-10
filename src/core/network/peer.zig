@@ -116,6 +116,8 @@ pub const NetworkManager = struct {
     last_kad_refresh_ms: u64,
     kad_refresh_interval_ms: u64,
     kad_query_timeout_ms: u64,
+    local_reachability: ip_detection.Reachability,
+    local_kad_mode: libp2p.kad_routing.KadMode,
 
     // Inbound handler context — lives for the lifetime of NetworkManager.
     inbound_ctx: InboundCtx,
@@ -164,6 +166,8 @@ pub const NetworkManager = struct {
             .last_kad_refresh_ms = 0,
             .kad_refresh_interval_ms = kad_refresh_interval_default_ms,
             .kad_query_timeout_ms = libp2p.kad_query.query_timeout_default_ms,
+            .local_reachability = .unknown,
+            .local_kad_mode = .client,
             .reconnect_backoff_seconds = 5,
             .reconnect_consecutive_failures = 0,
             .last_successful_connection = 0,
@@ -219,21 +223,28 @@ pub const NetworkManager = struct {
         const kad_settings = loadKadRuntimeSettings(self.allocator);
         self.kad_refresh_interval_ms = kad_settings.refresh_interval_ms;
         self.kad_query_timeout_ms = kad_settings.query_timeout_ms;
+        self.local_reachability = determineLocalReachability(self.allocator, self.io, parsed);
+        self.local_kad_mode = kadModeForReachability(self.local_reachability);
 
         self.kad_service = libp2p.kad_query.QueryService.init(
             self.allocator,
             &self.host,
             &self.routing_table,
             &self.address_book,
-            .server,
+            self.local_kad_mode,
         );
         if (self.kad_service) |*kad_service| {
             kad_service.refresh_interval_ms = self.kad_refresh_interval_ms;
             kad_service.query_timeout_ms = self.kad_query_timeout_ms;
             try kad_service.register();
             log.info(
-                "Kad runtime enabled: refresh_interval_ms={} query_timeout_ms={}",
-                .{ self.kad_refresh_interval_ms, self.kad_query_timeout_ms },
+                "Kad runtime enabled: mode={s} reachability={s} refresh_interval_ms={} query_timeout_ms={}",
+                .{
+                    kadModeLabel(self.local_kad_mode),
+                    reachabilityLabel(self.local_reachability),
+                    self.kad_refresh_interval_ms,
+                    self.kad_query_timeout_ms,
+                },
             );
         }
 
@@ -489,10 +500,12 @@ pub const NetworkManager = struct {
     fn logKadStatus(self: *Self, reason: []const u8, lookups_started: usize, timed_out: bool) !void {
         const metrics = try self.collectKadMetrics();
         log.info(
-            "kad_status: reason={s} peer_id={s} lookups_started={} timed_out={} routing_peers={} non_empty_buckets={} book_entries={} kad_addrs={} live_sessions={} connected_peers={}",
+            "kad_status: reason={s} peer_id={s} mode={s} reachability={s} lookups_started={} timed_out={} routing_peers={} non_empty_buckets={} book_entries={} kad_addrs={} live_sessions={} connected_peers={}",
             .{
                 reason,
                 self.host.identity.peer_id.toString(),
+                kadModeLabel(self.local_kad_mode),
+                reachabilityLabel(self.local_reachability),
                 lookups_started,
                 timed_out,
                 metrics.routing_peers,
@@ -664,6 +677,7 @@ pub const NetworkManager = struct {
 
         var identify_info = self.host.identifyPeer(self.io, session) catch return;
         defer identify_info.deinit(self.allocator);
+        const remote_kad_mode = remoteKadModeFromIdentify(&identify_info);
 
         if (identify_info.observed_addr.len > 0) {
             if (self.host.listen_addr) |listen_addr| {
@@ -682,10 +696,10 @@ pub const NetworkManager = struct {
             for (identify_info.listen_addrs.items) |addr| {
                 try self.address_book.learnIdentifyAddr(addr, remote_peer_id_text, nowMs());
             }
-            try self.upsertRoutingPeer(remote_peer_id_text, identify_info.listen_addrs.items, .connected);
+            try self.upsertRoutingPeer(remote_peer_id_text, identify_info.listen_addrs.items, remote_kad_mode, .connected);
         } else {
             try self.address_book.learnIdentifyAddr(dialed_addr, remote_peer_id_text, nowMs());
-            try self.upsertRoutingPeer(remote_peer_id_text, &[_][]const u8{dialed_addr}, .connected);
+            try self.upsertRoutingPeer(remote_peer_id_text, &[_][]const u8{dialed_addr}, remote_kad_mode, .connected);
         }
     }
 
@@ -693,12 +707,18 @@ pub const NetworkManager = struct {
         self: *Self,
         peer_id_text: []const u8,
         addrs: []const []const u8,
+        mode: libp2p.kad_routing.KadMode,
         connection: libp2p.kad_routing.ConnectionType,
     ) !void {
+        if (mode != .server) {
+            _ = self.routing_table.removePeer(peer_id_text);
+            return;
+        }
+
         const result = try self.routing_table.insertOrUpdate(
             peer_id_text,
             addrs,
-            .server,
+            mode,
             connection,
             nowMs(),
         );
@@ -759,6 +779,62 @@ fn loadKadDurationMs(
         return default_value;
     }
     return parsed;
+}
+
+fn determineLocalReachability(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    bind_addr: net.IpAddress,
+) ip_detection.Reachability {
+    if (loadKadReachabilityOverride(allocator)) |override| return override;
+    return ip_detection.classifyLocalReachability(allocator, io, bind_addr);
+}
+
+fn loadKadReachabilityOverride(allocator: std.mem.Allocator) ?ip_detection.Reachability {
+    const raw = util.getEnvVarOwned(allocator, "ZEICOIN_REACHABILITY") catch return null;
+    defer allocator.free(raw);
+
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (trimmed.len == 0) return null;
+
+    if (std.ascii.eqlIgnoreCase(trimmed, "unknown")) return .unknown;
+    if (std.ascii.eqlIgnoreCase(trimmed, "private")) return .private;
+    if (std.ascii.eqlIgnoreCase(trimmed, "public")) return .public;
+
+    log.warn(
+        "Ignoring ZEICOIN_REACHABILITY={s}: expected one of unknown|private|public",
+        .{trimmed},
+    );
+    return null;
+}
+
+fn kadModeForReachability(reachability: ip_detection.Reachability) libp2p.kad_routing.KadMode {
+    return switch (reachability) {
+        .public => .server,
+        .private, .unknown => .client,
+    };
+}
+
+fn remoteKadModeFromIdentify(identify_info: *const libp2p.identify.IdentifyInfo) libp2p.kad_routing.KadMode {
+    for (identify_info.protocols.items) |proto| {
+        if (std.mem.eql(u8, proto, libp2p.kad.PROTOCOL_ID)) return .server;
+    }
+    return .client;
+}
+
+fn reachabilityLabel(reachability: ip_detection.Reachability) []const u8 {
+    return switch (reachability) {
+        .unknown => "unknown",
+        .private => "private",
+        .public => "public",
+    };
+}
+
+fn kadModeLabel(mode: libp2p.kad_routing.KadMode) []const u8 {
+    return switch (mode) {
+        .client => "client",
+        .server => "server",
+    };
 }
 
 fn nowMs() u64 {
@@ -846,4 +922,36 @@ fn getDnsResolveInfo(ma: *const Multiaddr) !DnsResolveInfo {
         error.ProtocolNotFound => return error.NoTcpAddress,
         else => return err,
     }
+}
+
+test "kad mode follows local reachability" {
+    try std.testing.expectEqual(
+        libp2p.kad_routing.KadMode.server,
+        kadModeForReachability(.public),
+    );
+    try std.testing.expectEqual(
+        libp2p.kad_routing.KadMode.client,
+        kadModeForReachability(.private),
+    );
+    try std.testing.expectEqual(
+        libp2p.kad_routing.KadMode.client,
+        kadModeForReachability(.unknown),
+    );
+}
+
+test "remote identify protocols decide kad server eligibility" {
+    var identify_info = libp2p.identify.IdentifyInfo.init(std.testing.allocator);
+    defer identify_info.deinit(std.testing.allocator);
+
+    try identify_info.protocols.append(try std.testing.allocator.dupe(u8, libp2p.identify.PROTOCOL_ID));
+    try std.testing.expectEqual(
+        libp2p.kad_routing.KadMode.client,
+        remoteKadModeFromIdentify(&identify_info),
+    );
+
+    try identify_info.protocols.append(try std.testing.allocator.dupe(u8, libp2p.kad.PROTOCOL_ID));
+    try std.testing.expectEqual(
+        libp2p.kad_routing.KadMode.server,
+        remoteKadModeFromIdentify(&identify_info),
+    );
 }
