@@ -19,7 +19,6 @@ zeicoin_data_mainnet/
 .env.testnet
 .env.example
 /config
-.gitignore
 
 # === IDEs, Tools & Logs ===
 .vscode
@@ -98,6 +97,8 @@ fuzz/network_message_fuzz.zig
 /test_zeicoin_data_tx
 /test_zeicoin_data_mempool
 /test_coinbase_maturity
+/tmp/go_kad_interop/
+/tmp/kad-go-interop-*
 
 # === libp2p runtime artifacts ===
 .libp2p_identity_*.key

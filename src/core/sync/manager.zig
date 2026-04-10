@@ -28,6 +28,7 @@ const sequential = protocol.sequential;
 
 // Blockchain integration
 const ZeiCoin = @import("../node.zig").ZeiCoin;
+const miner_mod = @import("../miner/miner.zig");
 
 // Type aliases for clarity
 const Block = types.Block;
@@ -1223,7 +1224,6 @@ pub const SyncManager = struct {
                 }
 
                 log.info("✅ [SYNC VALIDATION] Block 1 hash chain validation passed", .{});
-                return true;
             }
 
             // For height > 1, validate against previous block
@@ -1242,7 +1242,24 @@ pub const SyncManager = struct {
                 }
 
                 log.info("✅ [SYNC VALIDATION] Block {} hash chain validation passed", .{height});
-                return true;
+            }
+
+            // 3. Validate proof-of-work for all non-genesis blocks
+            if (height > 0) {
+                const mining_context = miner_mod.MiningContext{
+                    .allocator = blockchain.allocator,
+                    .io = io,
+                    .database = blockchain.database,
+                    .mempool_manager = undefined,
+                    .mining_state = undefined,
+                    .network = null,
+                    .blockchain = undefined,
+                };
+                if (!try miner_mod.validateBlockPoW(mining_context, block)) {
+                    log.warn("❌ [SYNC VALIDATION] Block {} failed proof-of-work validation", .{height});
+                    return false;
+                }
+                log.info("✅ [SYNC VALIDATION] Block {} proof-of-work validated", .{height});
             }
         } else {
             log.info("❌ [SYNC VALIDATION] No blockchain reference available for validation", .{});

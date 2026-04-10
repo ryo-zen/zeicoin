@@ -250,6 +250,10 @@ pub const Peer = struct {
 
     /// Check if peer timed out
     pub fn isTimedOut(self: Self) bool {
+        if (self.yamux_session) |session| {
+            return session.isClosed();
+        }
+
         const now = util.getTime();
         const timeout_result = (now - self.last_recv) > protocol.CONNECTION_TIMEOUT_SECONDS;
         return timeout_result;
@@ -687,7 +691,7 @@ pub const PeerManager = struct {
         }
     }
 
-    fn extractMappedIpv4(ip6_bytes: [16]u8) ?[4]u8 {
+    pub fn extractMappedIpv4(ip6_bytes: [16]u8) ?[4]u8 {
         // IPv4-mapped IPv6: ::ffff:a.b.c.d
         if (!std.mem.eql(u8, ip6_bytes[0..10], &[_]u8{0} ** 10)) return null;
         if (ip6_bytes[10] != 0xff or ip6_bytes[11] != 0xff) return null;
@@ -721,6 +725,31 @@ pub const PeerManager = struct {
                 .connected, .connecting, .handshaking => return true,
                 else => {},
             }
+        }
+
+        return false;
+    }
+
+    /// Return true if we already have an active peer matching the given peer ID
+    /// or, when no peer ID is available, the given address.
+    pub fn hasActivePeerForCandidate(self: *Self, peer_id_text: ?[]const u8, address: net.IpAddress) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (self.peers.items) |peer| {
+            switch (peer.state) {
+                .connected, .connecting, .handshaking => {},
+                else => continue,
+            }
+
+            if (peer_id_text) |candidate_peer_id| {
+                if (peer.peer_id) |*peer_id| {
+                    if (std.mem.eql(u8, peer_id.toString(), candidate_peer_id)) return true;
+                }
+                continue;
+            }
+
+            if (sameIpIgnoringPort(peer.address, address)) return true;
         }
 
         return false;
@@ -848,7 +877,7 @@ pub const PeerManager = struct {
 
         // Check if already known
         for (self.known_addresses.items) |known| {
-            if (known.eql(address)) {
+            if (known.eql(&address)) {
                 return;
             }
         }
@@ -871,6 +900,25 @@ pub const PeerManager = struct {
         const rand_val = std.mem.readInt(usize, &rand_bytes, .little);
         const index = rand_val % self.known_addresses.items.len;
         return self.known_addresses.items[index];
+    }
+
+    pub fn snapshotDiscoveryAddresses(self: *Self, allocator: std.mem.Allocator) ![]message_types.PeerAddress {
+        var list = std.array_list.Managed(message_types.PeerAddress).init(allocator);
+        errdefer list.deinit();
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (self.peers.items) |peer| {
+            if (peer.state != .connected) continue;
+            try appendDiscoveryAddress(&list, peer.address);
+        }
+
+        for (self.known_addresses.items) |addr| {
+            try appendDiscoveryAddress(&list, addr);
+        }
+
+        return list.toOwnedSlice();
     }
 
     /// Clean up timed out peers
@@ -950,3 +998,72 @@ pub const PeerManager = struct {
         };
     }
 };
+
+test "peer timeout ignores idle live yamux sessions" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var conn_pair = try libp2p.InProcConnection.initPair(allocator, io);
+    var initiator_conn = conn_pair.initiator;
+    defer initiator_conn.deinit();
+    var responder_conn = conn_pair.responder;
+    defer responder_conn.deinit();
+
+    var secure = libp2p.noise.SecureTransport.init(
+        allocator,
+        initiator_conn.connection(),
+        [_]u8{0x11} ** 32,
+        [_]u8{0x22} ** 32,
+    );
+    defer secure.deinit();
+
+    var session = yamux.Session.init(allocator, &secure, true);
+    defer session.deinit();
+
+    var peer = Peer.init(allocator, io, 1, .{
+        .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 10801 },
+    });
+    defer peer.deinit();
+
+    peer.last_recv = util.getTime() - @as(i64, @intCast(protocol.CONNECTION_TIMEOUT_SECONDS + 10));
+    peer.yamux_session = &session;
+
+    try std.testing.expect(!peer.isTimedOut());
+
+    session.shutdown();
+    try std.testing.expect(peer.isTimedOut());
+}
+
+fn appendDiscoveryAddress(
+    list: *std.array_list.Managed(message_types.PeerAddress),
+    address: net.IpAddress,
+) !void {
+    const encoded = encodeDiscoveryIp(address);
+    for (list.items) |existing| {
+        if (std.mem.eql(u8, &existing.ip, &encoded.ip) and existing.port == encoded.port) return;
+    }
+    try list.append(encoded);
+}
+
+fn encodeDiscoveryIp(address: net.IpAddress) message_types.PeerAddress {
+    return switch (address) {
+        .ip4 => |a| blk: {
+            var ip: [16]u8 = [_]u8{0} ** 16;
+            ip[10] = 0xff;
+            ip[11] = 0xff;
+            @memcpy(ip[12..16], &a.bytes);
+            break :blk .{
+                .ip = ip,
+                .port = a.port,
+                .services = 0,
+                .last_seen = util.getTime(),
+            };
+        },
+        .ip6 => |a| .{
+            .ip = a.bytes,
+            .port = a.port,
+            .services = 0,
+            .last_seen = util.getTime(),
+        },
+    };
+}

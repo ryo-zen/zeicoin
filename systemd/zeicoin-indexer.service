@@ -1,7 +1,8 @@
 [Unit]
 Description=ZeiCoin Blockchain Indexer
-After=postgresql.service zeicoin-server.service
+After=postgresql.service zeicoin-mining.service
 Requires=postgresql.service
+Wants=zeicoin-mining.service
 
 [Service]
 Type=oneshot

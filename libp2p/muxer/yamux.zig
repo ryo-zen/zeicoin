@@ -191,7 +191,7 @@ pub const Session = struct {
             self.shutdown_started = true;
             self.shutdownLocked();
         }
-        self.cancelFuturesLocked();
+        self.cancelAndAwaitFuturesLocked();
 
         mutexLock(&self.streams_mu);
         var it = self.streams.iterator();
@@ -210,12 +210,16 @@ pub const Session = struct {
         self.transport.conn.close() catch {};
     }
 
-    fn cancelFuturesLocked(self: *Self) void {
+    fn cancelAndAwaitFuturesLocked(self: *Self) void {
         if (self.demux_future) |*future| {
             _ = future.cancel(self.transport.conn.io) catch {};
+            future.await(self.transport.conn.io) catch {};
+            self.demux_future = null;
         }
         if (self.keepalive_future) |*future| {
             _ = future.cancel(self.transport.conn.io) catch {};
+            future.await(self.transport.conn.io) catch {};
+            self.keepalive_future = null;
         }
     }
 
@@ -445,38 +449,71 @@ pub const Session = struct {
     fn handleWindowUpdate(self: *Self, frame: Frame) !void {
         if (frame.header.stream_id == 0) return YamuxError.ProtocolError;
 
-        const core = self.lookupStream(frame.header.stream_id) orelse {
-            try self.writeFrame(.window_update, FLAG_RST, frame.header.stream_id, 0, "");
-            return;
-        };
+        var core = self.lookupStream(frame.header.stream_id);
+        if (core == null) {
+            if ((frame.header.flags & FLAG_SYN) == 0) {
+                try self.writeFrame(.window_update, FLAG_RST, frame.header.stream_id, 0, "");
+                return;
+            }
+            if ((frame.header.flags & FLAG_ACK) != 0) return YamuxError.ProtocolError;
+            if (!self.isValidInboundStreamId(frame.header.stream_id)) {
+                try self.writeFrame(.window_update, FLAG_RST, frame.header.stream_id, 0, "");
+                return;
+            }
+            if (!self.canAcceptNewStreams()) {
+                try self.writeFrame(.window_update, FLAG_RST, frame.header.stream_id, 0, "");
+                return;
+            }
+
+            mutexLock(&self.pending_accept_mu);
+            const backlog_full = self.pending_accept.items.len >= MAX_PENDING_ACCEPT;
+            mutexUnlock(&self.pending_accept_mu);
+            if (backlog_full) {
+                try self.writeFrame(.window_update, FLAG_RST, frame.header.stream_id, 0, "");
+                return;
+            }
+
+            core = try self.createStreamCore(frame.header.stream_id, .syn_received);
+            try self.writeFrame(.window_update, FLAG_ACK, frame.header.stream_id, 0, "");
+
+            mutexLock(&core.?.mutex);
+            if ((frame.header.flags & FLAG_FIN) != 0) {
+                core.?.state = .remote_half_closed;
+            } else {
+                core.?.state = .open;
+            }
+            mutexUnlock(&core.?.mutex);
+
+            self.pendingAccept(frame.header.stream_id);
+        }
 
         var should_signal = false;
-        mutexLock(&core.mutex);
-        defer mutexUnlock(&core.mutex);
+        mutexLock(&core.?.mutex);
+        defer mutexUnlock(&core.?.mutex);
 
-        if ((frame.header.flags & FLAG_ACK) != 0 and core.state == .syn_sent) {
-            core.state = .open;
+        if ((frame.header.flags & FLAG_ACK) != 0 and core.?.state == .syn_sent) {
+            core.?.state = .open;
             self.decrementAckBacklog();
             should_signal = true;
         }
         if (frame.header.length > 0) {
-            core.send_window +|= frame.header.length;
+            core.?.send_window +|= frame.header.length;
             should_signal = true;
         }
         if ((frame.header.flags & FLAG_RST) != 0) {
-            core.state = .reset;
+            core.?.state = .reset;
             should_signal = true;
         } else if ((frame.header.flags & FLAG_FIN) != 0) {
-            core.state = switch (core.state) {
+            core.?.state = switch (core.?.state) {
                 .local_half_closed => .closed,
-                .closed, .reset => core.state,
+                .closed, .reset => core.?.state,
                 else => .remote_half_closed,
             };
             should_signal = true;
         }
 
         if (should_signal) {
-            core.cond.broadcast(self.transport.conn.io);
+            core.?.cond.broadcast(self.transport.conn.io);
         }
     }
 

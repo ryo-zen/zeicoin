@@ -2,6 +2,7 @@ const std = @import("std");
 const tcp = @import("../transport/tcp.zig");
 const inproc = @import("../transport/inproc.zig");
 const peer = @import("../peer/peer_id.zig");
+const yamux = @import("../muxer/yamux.zig");
 const Multiaddr = @import("../multiaddr/multiaddr.zig").Multiaddr;
 
 pub const PROTOCOL_ID = "/noise";
@@ -29,6 +30,10 @@ pub const HandshakeError = error{
     InvalidIdentitySignature,
     UnexpectedPeerId,
     AuthenticationFailed,
+    AuthenticationFailedMessage2Static,
+    AuthenticationFailedMessage2Payload,
+    AuthenticationFailedMessage3Static,
+    AuthenticationFailedMessage3Payload,
     NonceExhausted,
 };
 
@@ -38,6 +43,7 @@ pub const HandshakeResult = struct {
     tx_key: [32]u8,
     rx_key: [32]u8,
     session_key_material: [32]u8,
+    used_early_yamux: bool,
 
     pub fn deinit(self: *HandshakeResult) void {
         self.remote_peer_id.deinit();
@@ -272,7 +278,12 @@ const SymmetricState = struct {
 
     fn init() SymmetricState {
         var initial: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(PROTOCOL_NAME, &initial, .{});
+        @memset(&initial, 0);
+        if (PROTOCOL_NAME.len <= initial.len) {
+            @memcpy(initial[0..PROTOCOL_NAME.len], PROTOCOL_NAME);
+        } else {
+            std.crypto.hash.sha2.Sha256.hash(PROTOCOL_NAME, &initial, .{});
+        }
         return .{
             .ck = initial,
             .h = initial,
@@ -363,6 +374,7 @@ pub fn performInitiator(
     expected_remote_peer_id: ?[]const u8,
 ) !HandshakeResult {
     var ss = SymmetricState.init();
+    ss.mixHash("");
 
     const ei = std.crypto.dh.X25519.KeyPair.generate(io);
     const si = std.crypto.dh.X25519.KeyPair.generate(io);
@@ -371,6 +383,7 @@ pub fn performInitiator(
 
     // XX msg1: -> e
     ss.mixHash(&ei.public_key);
+    ss.mixHash("");
     try writeNoiseFrame(conn, &ei.public_key);
 
     // XX msg2: <- e, ee, s, es, payload
@@ -386,7 +399,10 @@ pub fn performInitiator(
     ss.mixKey(&dh_ee);
 
     const enc_rs = m2[32 .. 32 + 48];
-    const rs_plain = try ss.decryptAndHash(allocator, enc_rs);
+    const rs_plain = ss.decryptAndHash(allocator, enc_rs) catch |err| switch (err) {
+        HandshakeError.AuthenticationFailed => return HandshakeError.AuthenticationFailedMessage2Static,
+        else => return err,
+    };
     defer allocator.free(rs_plain);
     if (rs_plain.len != 32) return HandshakeError.InvalidMessage;
 
@@ -397,15 +413,19 @@ pub fn performInitiator(
     ss.mixKey(&dh_es);
 
     const payload2_ct = m2[32 + 48 ..];
-    const payload2 = try ss.decryptAndHash(allocator, payload2_ct);
+    const payload2 = ss.decryptAndHash(allocator, payload2_ct) catch |err| switch (err) {
+        HandshakeError.AuthenticationFailed => return HandshakeError.AuthenticationFailedMessage2Payload,
+        else => return err,
+    };
     defer allocator.free(payload2);
 
-    var remote_peer_id = try validateRemotePayload(
+    const remote_payload = try validateRemotePayload(
         allocator,
         payload2,
         rs_pub,
         expected_remote_peer_id,
     );
+    var remote_peer_id = remote_payload.peer_id;
     errdefer remote_peer_id.deinit();
 
     // XX msg3: -> s, se, payload
@@ -438,6 +458,7 @@ pub fn performInitiator(
         .tx_key = keys.k1,
         .rx_key = keys.k2,
         .session_key_material = session_material,
+        .used_early_yamux = remote_payload.supports_yamux,
     };
 }
 
@@ -465,6 +486,7 @@ pub fn performResponder(
     expected_remote_peer_id: ?[]const u8,
 ) !HandshakeResult {
     var ss = SymmetricState.init();
+    ss.mixHash("");
 
     // XX msg1: <- e
     const m1 = try readNoiseFrame(allocator, conn);
@@ -474,6 +496,7 @@ pub fn performResponder(
     var ei_pub: [32]u8 = undefined;
     @memcpy(&ei_pub, m1[0..32]);
     ss.mixHash(&ei_pub);
+    ss.mixHash("");
 
     const er = std.crypto.dh.X25519.KeyPair.generate(io);
     const sr = std.crypto.dh.X25519.KeyPair.generate(io);
@@ -508,7 +531,10 @@ pub fn performResponder(
     if (m3.len < 48 + 16) return HandshakeError.InvalidMessage;
 
     const enc_si = m3[0..48];
-    const si_plain = try ss.decryptAndHash(allocator, enc_si);
+    const si_plain = ss.decryptAndHash(allocator, enc_si) catch |err| switch (err) {
+        HandshakeError.AuthenticationFailed => return HandshakeError.AuthenticationFailedMessage3Static,
+        else => return err,
+    };
     defer allocator.free(si_plain);
     if (si_plain.len != 32) return HandshakeError.InvalidMessage;
 
@@ -519,15 +545,19 @@ pub fn performResponder(
     ss.mixKey(&dh_se);
 
     const payload3_ct = m3[48..];
-    const payload3 = try ss.decryptAndHash(allocator, payload3_ct);
+    const payload3 = ss.decryptAndHash(allocator, payload3_ct) catch |err| switch (err) {
+        HandshakeError.AuthenticationFailed => return HandshakeError.AuthenticationFailedMessage3Payload,
+        else => return err,
+    };
     defer allocator.free(payload3);
 
-    var remote_peer_id = try validateRemotePayload(
+    const remote_payload = try validateRemotePayload(
         allocator,
         payload3,
         si_pub,
         expected_remote_peer_id,
     );
+    var remote_peer_id = remote_payload.peer_id;
     errdefer remote_peer_id.deinit();
 
     const keys = ss.split();
@@ -544,6 +574,7 @@ pub fn performResponder(
         .tx_key = keys.k2,
         .rx_key = keys.k1,
         .session_key_material = session_material,
+        .used_early_yamux = remote_payload.supports_yamux,
     };
 }
 
@@ -609,10 +640,12 @@ fn buildHandshakePayload(
 ) ![]u8 {
     const identity_key = encodeIdentityPublicKey(identity.public_key);
     const identity_sig = try signNoiseStaticKey(identity.private_key, local_noise_static_pub);
+    const stream_muxer = yamux.PROTOCOL_ID;
 
     const len1 = varintLen(identity_key.len);
     const len2 = varintLen(identity_sig.len);
-    const total = 1 + len1 + identity_key.len + 1 + len2 + identity_sig.len;
+    const ext_payload_len = 1 + varintLen(stream_muxer.len) + stream_muxer.len;
+    const total = 1 + len1 + identity_key.len + 1 + len2 + identity_sig.len + 1 + varintLen(ext_payload_len) + ext_payload_len;
     const out = try allocator.alloc(u8, total);
 
     var off: usize = 0;
@@ -626,16 +659,30 @@ fn buildHandshakePayload(
     off += 1;
     off += writeVarint(out[off..], identity_sig.len);
     @memcpy(out[off .. off + identity_sig.len], &identity_sig);
+    off += identity_sig.len;
+
+    out[off] = 0x22; // field 4, bytes (extensions)
+    off += 1;
+    off += writeVarint(out[off..], ext_payload_len);
+    out[off] = 0x12; // extensions field 2, bytes (stream_muxers)
+    off += 1;
+    off += writeVarint(out[off..], stream_muxer.len);
+    @memcpy(out[off .. off + stream_muxer.len], stream_muxer);
 
     return out;
 }
+
+const ValidatedRemotePayload = struct {
+    peer_id: PeerId,
+    supports_yamux: bool,
+};
 
 fn validateRemotePayload(
     allocator: std.mem.Allocator,
     payload: []const u8,
     remote_noise_static_pub: [32]u8,
     expected_remote_peer_id: ?[]const u8,
-) !PeerId {
+) !ValidatedRemotePayload {
     const decoded = try decodeHandshakePayload(payload);
     const key_type = decoded.identity_key[1];
     if (decoded.identity_key.len != 36 or decoded.identity_key[0] != 0x08 or key_type != 1) {
@@ -657,12 +704,16 @@ fn validateRemotePayload(
             return HandshakeError.UnexpectedPeerId;
         }
     }
-    return remote_peer_id;
+    return .{
+        .peer_id = remote_peer_id,
+        .supports_yamux = decoded.supports_yamux,
+    };
 }
 
 const DecodedPayload = struct {
     identity_key: []const u8,
     identity_sig: []const u8,
+    supports_yamux: bool,
 };
 
 fn decodeHandshakePayload(payload: []const u8) !DecodedPayload {
@@ -670,6 +721,7 @@ fn decodeHandshakePayload(payload: []const u8) !DecodedPayload {
     var out: DecodedPayload = .{
         .identity_key = "",
         .identity_sig = "",
+        .supports_yamux = false,
     };
 
     while (off < payload.len) {
@@ -683,6 +735,7 @@ fn decodeHandshakePayload(payload: []const u8) !DecodedPayload {
         switch (tag) {
             0x0A => out.identity_key = value,
             0x12 => out.identity_sig = value,
+            0x22 => out.supports_yamux = try decodeNoiseExtensions(value),
             else => {}, // ignore unknown fields
         }
     }
@@ -691,6 +744,26 @@ fn decodeHandshakePayload(payload: []const u8) !DecodedPayload {
         return HandshakeError.InvalidPayload;
     }
     return out;
+}
+
+fn decodeNoiseExtensions(payload: []const u8) !bool {
+    var off: usize = 0;
+    var supports_yamux = false;
+
+    while (off < payload.len) {
+        const tag = payload[off];
+        off += 1;
+        const field_len = try readVarint(payload, &off);
+        if (off + field_len > payload.len) return HandshakeError.InvalidPayload;
+        const value = payload[off .. off + field_len];
+        off += field_len;
+
+        if (tag == 0x12 and std.mem.eql(u8, value, yamux.PROTOCOL_ID)) {
+            supports_yamux = true;
+        }
+    }
+
+    return supports_yamux;
 }
 
 fn encodeIdentityPublicKey(public_key: [32]u8) [36]u8 {
@@ -819,9 +892,10 @@ test "noise handshake payload encode/decode and signature validation" {
     try std.testing.expect(decoded.identity_key.len == 36);
     try std.testing.expect(decoded.identity_sig.len == 64);
 
-    var remote_peer_id = try validateRemotePayload(allocator, encoded, static_noise.public_key, null);
-    defer remote_peer_id.deinit();
-    try std.testing.expectEqualStrings(identity.peer_id.toString(), remote_peer_id.toString());
+    var remote_payload = try validateRemotePayload(allocator, encoded, static_noise.public_key, null);
+    defer remote_payload.peer_id.deinit();
+    try std.testing.expect(remote_payload.supports_yamux);
+    try std.testing.expectEqualStrings(identity.peer_id.toString(), remote_payload.peer_id.toString());
 }
 
 test "symmetricstate encrypt/decrypt roundtrip" {
@@ -844,65 +918,114 @@ test "symmetricstate encrypt/decrypt roundtrip" {
     try std.testing.expectEqualSlices(u8, &a.h, &b.h);
 }
 
+test "noise XX matches official flynn vector through responder message 2" {
+    const fmt = std.fmt;
+
+    var init_seed: [32]u8 = undefined;
+    var resp_seed: [32]u8 = undefined;
+    var init_e_seed: [32]u8 = undefined;
+    var resp_e_seed: [32]u8 = undefined;
+    _ = try fmt.hexToBytes(&init_seed, "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+    _ = try fmt.hexToBytes(&resp_seed, "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20");
+    _ = try fmt.hexToBytes(&init_e_seed, "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f");
+    _ = try fmt.hexToBytes(&resp_e_seed, "4142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f60");
+
+    _ = try std.crypto.dh.X25519.KeyPair.generateDeterministic(init_seed);
+    const resp_static = try std.crypto.dh.X25519.KeyPair.generateDeterministic(resp_seed);
+    const init_e = try std.crypto.dh.X25519.KeyPair.generateDeterministic(init_e_seed);
+    const resp_e = try std.crypto.dh.X25519.KeyPair.generateDeterministic(resp_e_seed);
+
+    var responder_ss = SymmetricState.init();
+    responder_ss.mixHash("");
+    responder_ss.mixHash(&init_e.public_key);
+    responder_ss.mixHash("");
+
+    var msg0_hex: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "358072d6365880d1aeea329adf9121383851ed21a28e3b75e965d0d2cd166254",
+        try fmt.bufPrint(&msg0_hex, "{x}", .{init_e.public_key}),
+    );
+
+    responder_ss.mixHash(&resp_e.public_key);
+
+    const dh_ee = try std.crypto.dh.X25519.scalarmult(resp_e.secret_key, init_e.public_key);
+    responder_ss.mixKey(&dh_ee);
+
+    const allocator = std.testing.allocator;
+    const enc_rs = try responder_ss.encryptAndHash(allocator, &resp_static.public_key);
+    defer allocator.free(enc_rs);
+
+    const dh_es = try std.crypto.dh.X25519.scalarmult(resp_static.secret_key, init_e.public_key);
+    responder_ss.mixKey(&dh_es);
+
+    const payload2 = try responder_ss.encryptAndHash(allocator, "");
+    defer allocator.free(payload2);
+
+    const msg2 = try allocator.alloc(u8, 32 + enc_rs.len + payload2.len);
+    defer allocator.free(msg2);
+    @memcpy(msg2[0..32], &resp_e.public_key);
+    @memcpy(msg2[32 .. 32 + enc_rs.len], enc_rs);
+    @memcpy(msg2[32 + enc_rs.len ..], payload2);
+
+    var msg2_hex: [192]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "64b101b1d0be5a8704bd078f9895001fc03e8e9f9522f188dd128d9846d484663414af878d3e46a2f58911a816d6e8346d4ea17a6f2a0bb4ef4ed56c133cff4560a34e36ea82109f26cf2e5a5caf992b608d55c747f615e5a3425a7a19eefb8f",
+        try fmt.bufPrint(&msg2_hex, "{x}", .{msg2}),
+    );
+
+    var initiator_ss = SymmetricState.init();
+    initiator_ss.mixHash("");
+    initiator_ss.mixHash(&init_e.public_key);
+    initiator_ss.mixHash("");
+    initiator_ss.mixHash(&resp_e.public_key);
+    const init_dh_ee = try std.crypto.dh.X25519.scalarmult(init_e.secret_key, resp_e.public_key);
+    initiator_ss.mixKey(&init_dh_ee);
+
+    const dec_rs = try initiator_ss.decryptAndHash(allocator, msg2[32 .. 32 + 48]);
+    defer allocator.free(dec_rs);
+    try std.testing.expectEqualSlices(u8, &resp_static.public_key, dec_rs);
+
+    const init_dh_es = try std.crypto.dh.X25519.scalarmult(init_e.secret_key, resp_static.public_key);
+    initiator_ss.mixKey(&init_dh_es);
+
+    const dec_payload2 = try initiator_ss.decryptAndHash(allocator, msg2[32 + 48 ..]);
+    defer allocator.free(dec_payload2);
+    try std.testing.expectEqual(@as(usize, 0), dec_payload2.len);
+}
+
 test "noise concurrent handshake helpers" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.ioBasic();
-
-    var transport = tcp.TcpTransport.init(allocator);
-    defer transport.deinit();
+    var threaded = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer threaded.deinit();
+    const io = threaded.io();
 
     var initiator_identity = try IdentityKey.generate(allocator, io);
     defer initiator_identity.deinit();
     var responder_identity = try IdentityKey.generate(allocator, io);
     defer responder_identity.deinit();
 
-    var listen_ma = try Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/0");
-    defer listen_ma.deinit();
-
-    var listen_future = transport.listenConcurrent(io, &listen_ma) catch |err| switch (err) {
-        error.ConcurrencyUnavailable => return error.SkipZigTest,
-    };
-    const listener = listen_future.await(io) catch |err| switch (err) {
-        error.NetworkDown => return error.SkipZigTest,
-        else => return err,
-    };
-
-    var dial_ma = try Multiaddr.create(allocator, listener.multiaddr.toString());
-    defer dial_ma.deinit();
-
-    var accept_future = listener.acceptConcurrent(io) catch |err| switch (err) {
-        error.ConcurrencyUnavailable => return error.SkipZigTest,
-    };
-    defer _ = accept_future.cancel(io) catch {};
-    var dial_future = transport.dialConcurrent(io, &dial_ma) catch |err| switch (err) {
-        error.ConcurrencyUnavailable => return error.SkipZigTest,
-    };
-
-    var responder_conn = try accept_future.await(io);
-    defer responder_conn.deinit();
-    var initiator_conn = try dial_future.await(io);
+    var conn_pair = try inproc.InProcConnection.initPair(allocator, io);
+    var initiator_conn = conn_pair.initiator;
     defer initiator_conn.deinit();
+    var responder_conn = conn_pair.responder;
+    defer responder_conn.deinit();
 
-    var responder_future = performResponderConcurrent(
+    var responder_future = try performResponderConcurrent(
         allocator,
         io,
         responder_conn.connection(),
         &responder_identity,
         initiator_identity.peer_id.toString(),
-    ) catch |err| switch (err) {
-        error.ConcurrencyUnavailable => return error.SkipZigTest,
-    };
+    );
     defer _ = responder_future.cancel(io) catch {};
 
-    var initiator_future = performInitiatorConcurrent(
+    var initiator_future = try performInitiatorConcurrent(
         allocator,
         io,
         initiator_conn.connection(),
         &initiator_identity,
         responder_identity.peer_id.toString(),
-    ) catch |err| switch (err) {
-        error.ConcurrencyUnavailable => return error.SkipZigTest,
-    };
+    );
     defer _ = initiator_future.cancel(io) catch {};
 
     var initiator_result = try initiator_future.await(io);

@@ -3,7 +3,7 @@ id: libp2p_implementation
 key: ZEI-11
 title: Wire libp2p isolated transport into zen_server and complete MVP spec gaps
 type: Epic
-status: InProgress
+status: Done
 priority: Low
 assignee: null
 labels:
@@ -29,8 +29,8 @@ Integrate the libp2p transport stack into `zen_server` and close the remaining M
 
 - [x] Reachable address advertisement: promote self-observations from `identify_info.observed_addr` and self-echoed peer-exchange entries; only advertise non-wildcard dialable addresses confirmed by ≥2 distinct peers or self-echoed with `/p2p/<self-peer-id>`
 - [x] Yamux MVP completion: per-stream flow control + WINDOW_UPDATE, ping/pong, go-away session semantics, bounded ACK backlog (256) and inbound accept backlog (64)
-- [ ] Bootstrap config migrated to multiaddr format with hardcoded fallback list and env var override
-- [ ] Wire isolated libp2p path into `zen_server` / `peer_manager.zig`
+- [x] Bootstrap config migrated to multiaddr format with hardcoded fallback list and env var override
+- [x] Wire isolated libp2p path into `zen_server` / `peer_manager.zig`
 - [x] `zig build test-libp2p` passes
 - [x] Docker harness (`./scripts/test_libp2p_docker.sh`) shows organic peer discovery
 

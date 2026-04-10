@@ -149,6 +149,7 @@ run_passive_miner() {
       -e ZEICOIN_API_PORT=10802 \
       -e ZEICOIN_SERVER=127.0.0.1 \
       -e ZEICOIN_BOOTSTRAP="$bootstrap" \
+      -e ZEICOIN_REACHABILITY=public \
       -e ZEICOIN_MINE_ENABLED=false \
       "$image_id" \
       ./zig-out/bin/zen_server >/dev/null
@@ -170,6 +171,7 @@ run_passive_attacker() {
       -e ZEICOIN_API_PORT=10802 \
       -e ZEICOIN_SERVER=127.0.0.1 \
       -e ZEICOIN_BOOTSTRAP="" \
+      -e ZEICOIN_REACHABILITY=public \
       -e ZEICOIN_MINE_ENABLED=false \
       "$image_id" \
       ./zig-out/bin/zen_server >/dev/null

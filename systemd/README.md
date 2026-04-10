@@ -13,9 +13,9 @@ verification fails.
 ZEICOIN_HOME=/root/zeicoin
 ZEICOIN_DB_PASSWORD=your_secure_password   # change this
 ZEICOIN_BIND_IP=0.0.0.0                    # 0.0.0.0 for mining/bootstrap, 127.0.0.1 for local dev
-ZEICOIN_BOOTSTRAP=209.38.84.23:10801
-ZEICOIN_MINE_ENABLED=true                  # false for non-mining nodes
-ZEICOIN_MINER_WALLET=miner                 # ignored when MINE_ENABLED=false
+ZEICOIN_BOOTSTRAP=                         # empty on the bootstrap seed; clients use /ip4/209.38.84.23/tcp/10801
+ZEICOIN_MINE_ENABLED=true
+ZEICOIN_MINER_WALLET=miner
 ```
 
 ---
@@ -83,13 +83,13 @@ echo "Database OK"
 ### Phase 4 — Environment configuration
 
 ```bash
-# Create .env if it doesn't exist
-if [ ! -f "$ZEICOIN_HOME/.env" ]; then
-    cp "$ZEICOIN_HOME/.env.example" "$ZEICOIN_HOME/.env"
+# Create .env.testnet if it doesn't exist
+if [ ! -f "$ZEICOIN_HOME/.env.testnet" ]; then
+    cp "$ZEICOIN_HOME/.env.example" "$ZEICOIN_HOME/.env.testnet"
 fi
 
 # Write config values
-cat > "$ZEICOIN_HOME/.env" <<EOF
+cat > "$ZEICOIN_HOME/.env.testnet" <<EOF
 ZEICOIN_NETWORK=testnet
 ZEICOIN_DATA_DIR=zeicoin_data_testnet
 ZEICOIN_P2P_PORT=10801
@@ -106,7 +106,7 @@ echo "ZEICOIN_DB_PASSWORD=${ZEICOIN_DB_PASSWORD}" > "$ZEICOIN_HOME/.env.local"
 chmod 600 "$ZEICOIN_HOME/.env.local"
 
 # Verify
-grep -q "ZEICOIN_BIND_IP" "$ZEICOIN_HOME/.env" || { echo "ERROR: .env not written"; exit 1; }
+grep -q "ZEICOIN_BIND_IP" "$ZEICOIN_HOME/.env.testnet" || { echo "ERROR: .env.testnet not written"; exit 1; }
 echo "Config OK"
 ```
 
@@ -131,7 +131,6 @@ echo "PostgreSQL unit: $PG_UNIT"
 if [ "$PG_UNIT" != "postgresql.service" ]; then
     for f in /etc/systemd/system/zeicoin-indexer.service \
               /etc/systemd/system/zeicoin-transaction-api.service \
-              /etc/systemd/system/zeicoin-error-monitor.service \
               /etc/systemd/system/zeicoin.target; do
         sudo sed -i "s/postgresql\.service/${PG_UNIT}/g" "$f"
     done
@@ -208,7 +207,6 @@ netstat -tlnp | grep -E "10801|10802" || ss -tlnp | grep -E "10801|10802"
 ## Service Files
 
 - **zeicoin-mining.service** - Main mining server with crash recovery
-- **zeicoin-server.service** - Blockchain server (non-mining mode) with crash recovery
 - **zeicoin-indexer.service** - Blockchain indexer (one-shot execution)
 - **zeicoin-indexer.timer** - Auto-indexer timer (runs every 30 seconds)
 - **zeicoin-transaction-api.service** - Transaction API for RPC operations
@@ -255,7 +253,7 @@ netstat -tlnp | grep -E "10801|10802" || ss -tlnp | grep -E "10801|10802"
 
 5. Configure environment and secrets:
    ```bash
-   cp .env.example .env
+   cp .env.example .env.testnet
    # Secrets go in .env.local (which is ignored by git)
    echo "ZEICOIN_DB_PASSWORD=your_secure_password" > .env.local
    chmod 600 .env.local
@@ -290,8 +288,8 @@ scp systemd/zeicoin-services root@<server-ip>:/root/zeicoin/systemd/zeicoin-serv
 On the server:
 
 ```bash
-chmod +x /root/zeicoin/systemd/zeicoin-services
-ln -sf /root/zeicoin/systemd/zeicoin-services /usr/local/bin/zeicoin-services
+chmod +x /root/zeicoin/systemd/zeicoin-services.sh
+ln -sf /root/zeicoin/systemd/zeicoin-services.sh /usr/local/bin/zeicoin-services
 ```
 
 ### Usage
@@ -299,7 +297,7 @@ ln -sf /root/zeicoin/systemd/zeicoin-services /usr/local/bin/zeicoin-services
 ```bash
 zeicoin-services status
 zeicoin-services restart
-zeicoin-services logs monitor
+zeicoin-services logs mining
 ```
 
 ### Notes
@@ -309,7 +307,6 @@ zeicoin-services logs monitor
   - `zeicoin-mining.service`
   - `zeicoin-transaction-api.service`
   - `zeicoin-indexer.timer`
-  - `zeicoin-error-monitor.service`
 
 ## Crash Recovery (Unlocking)
 
@@ -401,16 +398,16 @@ sudo systemctl stop zeicoin.target
 
 ### Environment Variables
 
-The services load variables from **`/root/zeicoin/.env`** and overrides from **`/root/zeicoin/.env.local`**.
+The services load variables from **`/root/zeicoin/.env.testnet`** and overrides from **`/root/zeicoin/.env.local`**.
 
 ```bash
 # .env.local (Secrets)
 ZEICOIN_DB_PASSWORD=your_secure_password_here
 
-# .env (Config)
+# .env.testnet (Config)
 ZEICOIN_SERVER=127.0.0.1
 ZEICOIN_BIND_IP=0.0.0.0
-ZEICOIN_BOOTSTRAP=209.38.84.23:10801
+ZEICOIN_BOOTSTRAP=
 ```
 
 ### Service Dependencies
@@ -465,7 +462,6 @@ echo "Detected PostgreSQL unit: $PG_UNIT"
 
 for f in /etc/systemd/system/zeicoin-indexer.service \
           /etc/systemd/system/zeicoin-transaction-api.service \
-          /etc/systemd/system/zeicoin-error-monitor.service \
           /etc/systemd/system/zeicoin.target; do
     sudo sed -i "s/postgresql.service/$PG_UNIT/g" "$f"
 done
@@ -510,7 +506,7 @@ ZEICOIN_SERVER=127.0.0.1 ./zig-out/bin/zeicoin status
 
 ```
 zeicoin.target
-├── zeicoin-mining.service (Exclusive with zeicoin-server)
+├── zeicoin-mining.service
 │   └── zen_server --mine miner
 ├── zeicoin-transaction-api.service
 │   └── transaction_api (port 10803)

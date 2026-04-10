@@ -8,6 +8,8 @@ echo "==================================="
 # Wait a moment for the file system to be ready
 sleep 2
 
+SERVER_HOST="${ZEICOIN_BIND_IP:-127.0.0.1}"
+
 # Determine data directory based on network
 DATA_DIR="zeicoin_data_testnet"
 
@@ -25,7 +27,7 @@ if [ ! -f "$WALLET_FILE" ]; then
     # Wait for server to be ready (check Client API port)
     echo "Waiting for server startup..."
     for i in {1..30}; do
-        if nc -z 127.0.0.1 10802 2>/dev/null; then
+        if nc -z "$SERVER_HOST" 10802 2>/dev/null; then
             echo "Server is ready!"
             break
         fi

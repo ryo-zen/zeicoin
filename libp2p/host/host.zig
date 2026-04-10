@@ -148,10 +148,15 @@ const UpgradedConn = struct {
     secure: noise.SecureTransport,
     session: yamux.Session,
     remote_peer_id: PeerId,
+    dispatcher_thread: ?std.Thread = null,
 
     const Self = @This();
 
     fn deinit(self: *Self) void {
+        if (self.dispatcher_thread) |thread| {
+            self.session.shutdown();
+            thread.join();
+        }
         self.session.deinit();
         self.secure.deinit();
         self.tcp_conn.deinit();
@@ -191,13 +196,16 @@ fn acceptProtocol(
     defer alloc.free(header);
     if (!std.mem.eql(u8, header, ms.PROTOCOL_ID)) return error.ProtocolMismatch;
     try ms.writeMessage(io, writer, ms.PROTOCOL_ID);
-    const proposal = try ms.readMessage(io, reader, alloc);
-    defer alloc.free(proposal);
-    if (!std.mem.eql(u8, proposal, expected)) {
-        try ms.writeMessage(io, writer, ms.NA);
-        return error.ProtocolNegotiationFailed;
+    while (true) {
+        const proposal = try ms.readMessage(io, reader, alloc);
+        defer alloc.free(proposal);
+        if (!std.mem.eql(u8, proposal, expected)) {
+            try ms.writeMessage(io, writer, ms.NA);
+            continue;
+        }
+        try ms.writeMessage(io, writer, expected);
+        return;
     }
-    try ms.writeMessage(io, writer, expected);
 }
 
 // ── upgradeOutbound ───────────────────────────────────────────────────────────
@@ -218,6 +226,7 @@ fn upgradeOutbound(
     errdefer alloc.destroy(uc);
 
     uc.allocator = alloc;
+    uc.dispatcher_thread = null;
     uc.tcp_conn = local_conn;
     errdefer uc.tcp_conn.deinit();
 
@@ -234,9 +243,11 @@ fn upgradeOutbound(
     errdefer uc.secure.deinit();
     errdefer uc.remote_peer_id.deinit();
 
-    var sr: SecureReader = .{ .conn = &uc.secure, .io = io };
-    var sw: SecureWriter = .{ .conn = &uc.secure, .io = io };
-    try proposeProtocol(alloc, io, &sr, &sw, yamux.PROTOCOL_ID);
+    if (!noise_result.used_early_yamux) {
+        var sr: SecureReader = .{ .conn = &uc.secure, .io = io };
+        var sw: SecureWriter = .{ .conn = &uc.secure, .io = io };
+        try proposeProtocol(alloc, io, &sr, &sw, yamux.PROTOCOL_ID);
+    }
 
     uc.session = yamux.Session.init(alloc, &uc.secure, true);
     errdefer uc.session.deinit();
@@ -262,6 +273,7 @@ fn upgradeInbound(
     errdefer alloc.destroy(uc);
 
     uc.allocator = alloc;
+    uc.dispatcher_thread = null;
     uc.tcp_conn = local_conn;
     errdefer uc.tcp_conn.deinit();
 
@@ -278,9 +290,11 @@ fn upgradeInbound(
     errdefer uc.secure.deinit();
     errdefer uc.remote_peer_id.deinit();
 
-    var sr: SecureReader = .{ .conn = &uc.secure, .io = io };
-    var sw: SecureWriter = .{ .conn = &uc.secure, .io = io };
-    try acceptProtocol(alloc, io, &sr, &sw, yamux.PROTOCOL_ID);
+    if (!noise_result.used_early_yamux) {
+        var sr: SecureReader = .{ .conn = &uc.secure, .io = io };
+        var sw: SecureWriter = .{ .conn = &uc.secure, .io = io };
+        try acceptProtocol(alloc, io, &sr, &sw, yamux.PROTOCOL_ID);
+    }
 
     uc.session = yamux.Session.init(alloc, &uc.secure, false);
     errdefer uc.session.deinit();
@@ -301,36 +315,21 @@ fn dispatchStream(stream: yamux.Stream, registry: *HandlerRegistry, conn_info: C
     };
 }
 
-// ── handleInbound ─────────────────────────────────────────────────────────────
-// Concurrent target: upgrades one inbound TCP connection and drives the Yamux
-// accept loop, dispatching each stream to the handler registry.
-
-fn handleInbound(
-    conn: tcp.TcpConnection,
-    registry: *HandlerRegistry,
-    io: std.Io,
-    alloc: std.mem.Allocator,
-    identity: *const IdentityKey,
-) void {
-    const log = std.log.scoped(.host);
-    const uc = upgradeInbound(alloc, io, conn, identity) catch |err| {
-        log.warn("inbound upgrade failed: {s}", .{@errorName(err)});
-        return;
-    };
-    defer {
-        uc.deinit();
-        alloc.destroy(uc);
-    }
-
-    // Build per-connection info from the upgrade result.
+fn connInfoForUpgradedConn(uc: *const UpgradedConn) ConnInfo {
     const remote_addr: ?std.Io.net.IpAddress = if (uc.tcp_conn.remote_multiaddr) |*ma|
         ma.getTcpAddress()
     else
         null;
-    const conn_info = ConnInfo{
+
+    return .{
         .remote_peer_id = &uc.remote_peer_id,
         .remote_addr = remote_addr,
     };
+}
+
+fn driveSessionStreams(uc: *UpgradedConn, registry: *HandlerRegistry) void {
+    const io = uc.session.session_io;
+    const conn_info = connInfoForUpgradedConn(uc);
 
     var stream_group: std.Io.Group = .init;
     defer {
@@ -343,6 +342,32 @@ fn handleInbound(
             stream.deinit();
         };
     }
+}
+
+// ── handleInbound ─────────────────────────────────────────────────────────────
+// Concurrent target: upgrades one inbound TCP connection and drives the Yamux
+// accept loop, dispatching each stream to the handler registry.
+
+fn handleInbound(
+    conn: tcp.TcpConnection,
+    registry: *HandlerRegistry,
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    identity: *const IdentityKey,
+    inbound_sessions: *std.atomic.Value(usize),
+) void {
+    const log = std.log.scoped(.host);
+    const uc = upgradeInbound(alloc, io, conn, identity) catch |err| {
+        log.warn("inbound upgrade failed: {s}", .{@errorName(err)});
+        return;
+    };
+    _ = inbound_sessions.fetchAdd(1, .acq_rel);
+    defer {
+        _ = inbound_sessions.fetchSub(1, .acq_rel);
+        uc.deinit();
+        alloc.destroy(uc);
+    }
+    driveSessionStreams(uc, registry);
 }
 
 // ── Host ──────────────────────────────────────────────────────────────────────
@@ -358,6 +383,7 @@ pub const Host = struct {
     sessions: std.array_list.Managed(*UpgradedConn),
     // Protects sessions list for concurrent dial() calls.
     sessions_mutex: std.Thread.Mutex,
+    inbound_sessions: std.atomic.Value(usize),
     // Our listen address — set in listen(), used in identify responses.
     listen_addr: ?Multiaddr,
     // Set during shutdown so serve() exits after the next accepted connection.
@@ -375,6 +401,7 @@ pub const Host = struct {
             .listener = null,
             .sessions = std.array_list.Managed(*UpgradedConn).init(allocator),
             .sessions_mutex = .{},
+            .inbound_sessions = std.atomic.Value(usize).init(0),
             .listen_addr = null,
             .stopping = std.atomic.Value(bool).init(false),
         };
@@ -472,6 +499,12 @@ pub const Host = struct {
         }
 
         try self.sessions.append(uc);
+        uc.dispatcher_thread = std.Thread.spawn(.{}, driveSessionStreams, .{ uc, &self.registry }) catch |err| {
+            _ = self.sessions.pop();
+            uc.deinit();
+            self.allocator.destroy(uc);
+            return err;
+        };
         return &uc.session;
     }
 
@@ -485,6 +518,16 @@ pub const Host = struct {
             if (&uc.session == session) return &uc.remote_peer_id;
         }
         return null;
+    }
+
+    pub fn liveSessionCount(self: *Self) usize {
+        var total = self.inbound_sessions.load(.acquire);
+        self.sessions_mutex.lock();
+        defer self.sessions_mutex.unlock();
+        for (self.sessions.items) |uc| {
+            if (!uc.session.isClosed()) total += 1;
+        }
+        return total;
     }
 
     // Open a Yamux stream on session and negotiate protocol via Multistream.
@@ -518,35 +561,24 @@ pub const Host = struct {
         var observed_ma: ?Multiaddr = null;
         defer if (observed_ma) |*ma| ma.deinit();
         if (conn_info.remote_addr) |ra| {
-            observed_ma = blk: {
-                const ma_str = switch (ra) {
-                    .ip4 => |a| try std.fmt.allocPrint(
-                        host.allocator,
-                        "/ip4/{}.{}.{}.{}/tcp/{}",
-                        .{
-                            a.bytes[0], a.bytes[1], a.bytes[2], a.bytes[3], a.port,
-                        },
-                    ),
-                    .ip6 => null,
-                };
-                defer if (ma_str) |s| host.allocator.free(s);
-                break :blk if (ma_str) |s| try Multiaddr.create(host.allocator, s) else null;
-            };
+            const ma_str = try formatIpAddressAsMultiaddr(host.allocator, ra);
+            defer host.allocator.free(ma_str);
+            observed_ma = try Multiaddr.create(host.allocator, ma_str);
         }
         const observed_bytes = if (observed_ma) |*ma| ma.getBytesAddress() else &[_]u8{};
 
-        const encoded = try identify_mod.encodeIdentify(
+        const encoded_pubkey = identify_mod.encodeIdentityPublicKey(host.identity.public_key);
+        try identify_mod.writeDelimitedIdentify(
             host.allocator,
+            std.Io.Threaded.global_single_threaded.ioBasic(),
+            stream,
             "/zeicoin/testnet/1.0.0",
             "zeicoin/0.1.0",
-            host.identity.peer_id.getBytes(),
+            &encoded_pubkey,
             la_slice,
             observed_bytes,
             host.registry.protocol_ids.items,
         );
-        defer host.allocator.free(encoded);
-
-        try stream.writeAll(encoded);
         try stream.close();
     }
 
@@ -556,17 +588,7 @@ pub const Host = struct {
         var stream = try self.newStream(io, session, identify_mod.PROTOCOL_ID);
         defer stream.deinit();
 
-        var buf = std.array_list.Managed(u8).init(self.allocator);
-        defer buf.deinit();
-
-        var tmp: [4096]u8 = undefined;
-        while (true) {
-            const n = stream.readSome(&tmp) catch break;
-            if (n == 0) break;
-            try buf.appendSlice(tmp[0..n]);
-        }
-
-        return identify_mod.decodeIdentify(self.allocator, buf.items);
+        return identify_mod.readDelimitedIdentify(self.allocator, io, &stream);
     }
 
     // Accept and upgrade inbound connections, dispatching streams to registered
@@ -599,6 +621,7 @@ pub const Host = struct {
                 io,
                 self.allocator,
                 &self.identity,
+                &self.inbound_sessions,
             }) catch {
                 conn.deinit();
             };
@@ -616,6 +639,23 @@ pub const Host = struct {
         };
     }
 };
+
+fn formatIpAddressAsMultiaddr(allocator: std.mem.Allocator, addr: std.Io.net.IpAddress) ![]u8 {
+    return switch (addr) {
+        .ip4 => |a| std.fmt.allocPrint(
+            allocator,
+            "/ip4/{}.{}.{}.{}/tcp/{}",
+            .{ a.bytes[0], a.bytes[1], a.bytes[2], a.bytes[3], a.port },
+        ),
+        .ip6 => |a| blk: {
+            const unresolved: std.Io.net.Ip6Address.Unresolved = .{
+                .bytes = a.bytes,
+                .interface_name = null,
+            };
+            break :blk try std.fmt.allocPrint(allocator, "/ip6/{f}/tcp/{}", .{ unresolved, a.port });
+        },
+    };
+}
 
 // ── tests ──────────────────────────────────────────────────────────────────────
 
@@ -1006,8 +1046,8 @@ test "host: identify round-trip" {
 
     try std.testing.expectEqualStrings("/zeicoin/testnet/1.0.0", info.protocol_version);
     try std.testing.expectEqualStrings("zeicoin/0.1.0", info.agent_version);
-    // server's peer ID bytes are encoded as the public_key field
-    try std.testing.expectEqualSlices(u8, server.identity.peer_id.getBytes(), info.public_key);
+    const encoded_pubkey = identify_mod.encodeIdentityPublicKey(server.identity.public_key);
+    try std.testing.expectEqualSlices(u8, &encoded_pubkey, info.public_key);
     // server reported its listen address
     try std.testing.expectEqual(@as(usize, 1), info.listen_addrs.items.len);
     // identify protocol itself is in the registered protocols list
@@ -1019,6 +1059,90 @@ test "host: identify round-trip" {
         }
     }
     try std.testing.expect(found_identify);
+}
+
+test "host: outbound sessions dispatch inbound identify streams" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var server = Host.init(alloc, try IdentityKey.generate(alloc, io));
+    defer server.deinit();
+    var server_listen_addr = try Multiaddr.create(alloc, "/ip4/127.0.0.1/tcp/19808");
+    defer server_listen_addr.deinit();
+    try server.listen(io, &server_listen_addr);
+
+    var serve_future = try io.concurrent(Host.serve, .{ &server, io });
+    defer {
+        _ = serve_future.cancel(io) catch {};
+        serve_future.await(io) catch {};
+    }
+
+    var client = Host.init(alloc, try IdentityKey.generate(alloc, io));
+    defer client.deinit();
+    var client_listen_addr = try Multiaddr.create(alloc, "/ip4/127.0.0.1/tcp/19809");
+    defer client_listen_addr.deinit();
+    try client.listen(io, &client_listen_addr);
+
+    const IdentifyCtx = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: *Host,
+        mutex: std.Thread.Mutex = .{},
+        listen_addr: ?[]u8 = null,
+
+        fn handle(stream: *yamux.Stream, _: ConnInfo, userdata: ?*anyopaque) anyerror!void {
+            const ctx = @as(*@This(), @ptrCast(@alignCast(userdata.?)));
+            var info = try ctx.host.identifyPeer(ctx.io, stream.session);
+            defer info.deinit(ctx.allocator);
+
+            ctx.mutex.lock();
+            defer ctx.mutex.unlock();
+            if (info.listen_addrs.items.len > 0) {
+                ctx.listen_addr = try ctx.allocator.dupe(u8, info.listen_addrs.items[0]);
+            }
+
+            try stream.writeAll("ok");
+            try stream.close();
+        }
+    };
+
+    var identify_ctx = IdentifyCtx{
+        .allocator = alloc,
+        .io = io,
+        .host = &server,
+    };
+    defer {
+        identify_ctx.mutex.lock();
+        defer identify_ctx.mutex.unlock();
+        if (identify_ctx.listen_addr) |addr| alloc.free(addr);
+    }
+
+    try server.setStreamHandler("/test/identify-back/1.0.0", .{
+        .func = IdentifyCtx.handle,
+        .userdata = &identify_ctx,
+    });
+
+    var dial_addr = try Multiaddr.create(alloc, "/ip4/127.0.0.1/tcp/19808");
+    defer dial_addr.deinit();
+    const session = try client.dial(io, &dial_addr);
+
+    var stream = try client.newStream(io, session, "/test/identify-back/1.0.0");
+    defer stream.deinit();
+
+    var ack: [2]u8 = undefined;
+    var received: usize = 0;
+    while (received < ack.len) {
+        const n = try stream.readSome(ack[received..]);
+        if (n == 0) break;
+        received += n;
+    }
+
+    try std.testing.expectEqualStrings("ok", ack[0..received]);
+
+    identify_ctx.mutex.lock();
+    defer identify_ctx.mutex.unlock();
+    try std.testing.expect(identify_ctx.listen_addr != null);
+    try std.testing.expectEqualStrings("/ip4/127.0.0.1/tcp/19809", identify_ctx.listen_addr.?);
 }
 
 test "host: requestStop wakes serve accept loop" {
@@ -1044,4 +1168,15 @@ test "host: requestStop wakes serve accept loop" {
     try server.requestStop(io);
     try serve_future.await(io);
     serve_done = true;
+}
+
+test "host helper preserves ipv6 observed address formatting" {
+    const alloc = std.testing.allocator;
+    const addr = try std.Io.net.IpAddress.resolve(std.testing.io, "2001:db8::1", 4011);
+
+    const ma = try formatIpAddressAsMultiaddr(alloc, addr);
+    defer alloc.free(ma);
+
+    try std.testing.expect(std.mem.startsWith(u8, ma, "/ip6/"));
+    try std.testing.expect(std.mem.endsWith(u8, ma, "/tcp/4011"));
 }

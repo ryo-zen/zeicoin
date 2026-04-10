@@ -9,335 +9,24 @@ const noise = libp2p.noise;
 const yamux = libp2p.yamux;
 const identify = libp2p.identify;
 const ms = libp2p.ms;
+const Host = libp2p.Host;
+
+const address_book_mod = libp2p.address_book;
+const kad_query_mod = libp2p.kad_query;
+const routing_table_mod = libp2p.kad_routing;
+const SharedAddressBook = address_book_mod.AddressBook;
+const RoutingTable = routing_table_mod.RoutingTable;
+const QueryService = kad_query_mod.QueryService;
 
 const print = std.debug.print;
 const test_protocol = "/zeicoin/peers/1.0.0";
 const max_line_len: usize = 512;
 const max_peers_response: usize = 1024;
 const dial_loop_seconds: u64 = 5;
-const min_redial_ms: u64 = 30_000;
-const max_backoff_ms: u64 = 300_000;
-const peer_ttl_ms: u64 = 24 * 60 * 60 * 1000;
-
-const SharedAddressBook = struct {
-    allocator: std.mem.Allocator,
-    self_peer_id: []u8,
-    mutex: std.Thread.Mutex = .{},
-    peers: std.array_list.Managed(PeerEntry),
-    self_observed: std.array_list.Managed(SelfObservedAddr),
-
-    const Self = @This();
-    const PeerEntry = struct {
-        addr: []u8,
-        peer_id: ?[]u8,
-        score: i32,
-        fail_count: u32,
-        next_dial_ms: u64,
-        last_seen_ms: u64,
-        last_success_ms: u64,
-        last_failure_ms: u64,
-    };
-
-    const PeerSnapshot = struct {
-        addr: []u8,
-        peer_id: ?[]u8,
-        score: i32,
-        fail_count: u32,
-        next_dial_ms: u64,
-    };
-
-    const SelfObservedAddr = struct {
-        addr: []u8,
-        source_peers: std.array_list.Managed([]u8),
-        via_identify: bool,
-        via_peer_exchange: bool,
-        last_seen_ms: u64,
-    };
-
-    const SelfObservedSnapshot = struct {
-        addr: []u8,
-        source_count: usize,
-        via_identify: bool,
-        via_peer_exchange: bool,
-        promoted: bool,
-    };
-
-    fn init(allocator: std.mem.Allocator, self_peer_id: []const u8) !Self {
-        return .{
-            .allocator = allocator,
-            .self_peer_id = try allocator.dupe(u8, self_peer_id),
-            .peers = std.array_list.Managed(PeerEntry).init(allocator),
-            .self_observed = std.array_list.Managed(SelfObservedAddr).init(allocator),
-        };
-    }
-
-    fn deinit(self: *Self) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        self.allocator.free(self.self_peer_id);
-        for (self.peers.items) |entry| {
-            self.allocator.free(entry.addr);
-            if (entry.peer_id) |peer_id| self.allocator.free(peer_id);
-        }
-        self.peers.deinit();
-        for (self.self_observed.items) |*entry| {
-            self.allocator.free(entry.addr);
-            for (entry.source_peers.items) |peer_id| self.allocator.free(peer_id);
-            entry.source_peers.deinit();
-        }
-        self.self_observed.deinit();
-    }
-
-    fn learn(self: *Self, addr: []const u8, now_ms: u64) !void {
-        try self.learnWithPeer(addr, null, now_ms);
-    }
-
-    fn learnWithPeer(self: *Self, addr: []const u8, peer_id_text: ?[]const u8, now_ms: u64) !void {
-        const canonical_addr = try canonicalPeerAddr(self.allocator, addr, peer_id_text);
-        defer self.allocator.free(canonical_addr);
-        if (!isLikelyDialable(canonical_addr)) return;
-
-        const canonical_peer_id = peerIdSlice(canonical_addr);
-        if (canonical_peer_id) |peer_id| {
-            if (std.mem.eql(u8, peer_id, self.self_peer_id)) {
-                try self.recordSelfObservation(canonical_addr, peer_id_text, false, true, now_ms);
-                return;
-            }
-        }
-
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        for (self.peers.items) |*existing| {
-            if (!samePeerAddress(existing.addr, canonical_addr, existing.peer_id, canonical_peer_id)) continue;
-
-            existing.last_seen_ms = now_ms;
-            if (!std.mem.eql(u8, existing.addr, canonical_addr)) {
-                self.allocator.free(existing.addr);
-                existing.addr = try self.allocator.dupe(u8, canonical_addr);
-            }
-            if (canonical_peer_id) |peer_id| {
-                if (existing.peer_id) |current| {
-                    if (!std.mem.eql(u8, current, peer_id)) {
-                        self.allocator.free(current);
-                        existing.peer_id = try self.allocator.dupe(u8, peer_id);
-                    }
-                } else {
-                    existing.peer_id = try self.allocator.dupe(u8, peer_id);
-                }
-            }
-            return;
-        }
-
-        try self.peers.append(.{
-            .addr = try self.allocator.dupe(u8, canonical_addr),
-            .peer_id = if (canonical_peer_id) |peer_id| try self.allocator.dupe(u8, peer_id) else null,
-            .score = 0,
-            .fail_count = 0,
-            .next_dial_ms = 0,
-            .last_seen_ms = now_ms,
-            .last_success_ms = 0,
-            .last_failure_ms = 0,
-        });
-    }
-
-    fn learnAdvertised(self: *Self, addr: []const u8, source_peer_id: ?[]const u8, now_ms: u64) !void {
-        try self.learnWithPeer(addr, source_peer_id, now_ms);
-    }
-
-    fn observeSelfFromIdentify(
-        self: *Self,
-        observed_addr: []const u8,
-        source_peer_id: []const u8,
-        listen_port: u16,
-        now_ms: u64,
-    ) !void {
-        const ip = extractIp(observed_addr) orelse return;
-        const candidate = try std.fmt.allocPrint(
-            self.allocator,
-            "/ip4/{s}/tcp/{}/p2p/{s}",
-            .{ ip, listen_port, self.self_peer_id },
-        );
-        defer self.allocator.free(candidate);
-        try self.recordSelfObservation(candidate, source_peer_id, true, false, now_ms);
-    }
-
-    fn markDialSuccess(self: *Self, addr: []const u8, now_ms: u64) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        for (self.peers.items) |*entry| {
-            if (!samePeerAddress(entry.addr, addr, entry.peer_id, peerIdSlice(addr))) continue;
-            entry.score += 10;
-            entry.fail_count = 0;
-            entry.last_success_ms = now_ms;
-            entry.next_dial_ms = now_ms + min_redial_ms;
-            return;
-        }
-    }
-
-    fn markDialFailure(self: *Self, addr: []const u8, now_ms: u64) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        for (self.peers.items) |*entry| {
-            if (!samePeerAddress(entry.addr, addr, entry.peer_id, peerIdSlice(addr))) continue;
-            entry.score -= 20;
-            entry.fail_count +|= 1;
-            entry.last_failure_ms = now_ms;
-            const exp = @min(entry.fail_count, 8);
-            var backoff_ms: u64 = (@as(u64, 1) << @intCast(exp)) * 1000;
-            if (backoff_ms > max_backoff_ms) backoff_ms = max_backoff_ms;
-            entry.next_dial_ms = now_ms + backoff_ms;
-            return;
-        }
-    }
-
-    fn chooseDialCandidate(
-        self: *Self,
-        allocator: std.mem.Allocator,
-        now_ms: u64,
-        local_listen_ma: []const u8,
-    ) !?[]u8 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        var best_idx: ?usize = null;
-        const local_transport = transportSlice(local_listen_ma);
-        for (self.peers.items, 0..) |entry, idx| {
-            if (entry.next_dial_ms > now_ms) continue;
-            if (std.mem.eql(u8, transportSlice(entry.addr), local_transport)) continue;
-            if (entry.peer_id) |peer_id| {
-                if (std.mem.eql(u8, peer_id, self.self_peer_id)) continue;
-            }
-            if (!isLikelyDialable(entry.addr)) continue;
-            if (best_idx == null or entry.score > self.peers.items[best_idx.?].score) {
-                best_idx = idx;
-            }
-        }
-        if (best_idx == null) return null;
-
-        self.peers.items[best_idx.?].next_dial_ms = now_ms + min_redial_ms;
-        return try allocator.dupe(u8, self.peers.items[best_idx.?].addr);
-    }
-
-    fn pruneStale(self: *Self, now_ms: u64) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        var i: usize = 0;
-        while (i < self.peers.items.len) {
-            const entry = self.peers.items[i];
-            if (now_ms -| entry.last_seen_ms <= peer_ttl_ms) {
-                i += 1;
-                continue;
-            }
-            self.allocator.free(entry.addr);
-            if (entry.peer_id) |peer_id| self.allocator.free(peer_id);
-            _ = self.peers.swapRemove(i);
-        }
-    }
-
-    fn snapshot(self: *Self, allocator: std.mem.Allocator) !std.array_list.Managed(PeerSnapshot) {
-        var out = std.array_list.Managed(PeerSnapshot).init(allocator);
-        errdefer {
-            for (out.items) |entry| {
-                allocator.free(entry.addr);
-                if (entry.peer_id) |peer_id| allocator.free(peer_id);
-            }
-            out.deinit();
-        }
-
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        for (self.peers.items) |entry| {
-            try out.append(.{
-                .addr = try allocator.dupe(u8, entry.addr),
-                .peer_id = if (entry.peer_id) |peer_id| try allocator.dupe(u8, peer_id) else null,
-                .score = entry.score,
-                .fail_count = entry.fail_count,
-                .next_dial_ms = entry.next_dial_ms,
-            });
-        }
-        return out;
-    }
-
-    fn snapshotSelfObservations(self: *Self, allocator: std.mem.Allocator) !std.array_list.Managed(SelfObservedSnapshot) {
-        var out = std.array_list.Managed(SelfObservedSnapshot).init(allocator);
-        errdefer {
-            for (out.items) |entry| allocator.free(entry.addr);
-            out.deinit();
-        }
-
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        for (self.self_observed.items) |entry| {
-            try out.append(.{
-                .addr = try allocator.dupe(u8, entry.addr),
-                .source_count = entry.source_peers.items.len,
-                .via_identify = entry.via_identify,
-                .via_peer_exchange = entry.via_peer_exchange,
-                .promoted = entry.via_peer_exchange or entry.source_peers.items.len >= 2,
-            });
-        }
-        return out;
-    }
-
-    fn snapshotPromotedSelfAddrs(self: *Self, allocator: std.mem.Allocator) !std.array_list.Managed([]u8) {
-        var out = std.array_list.Managed([]u8).init(allocator);
-        errdefer freeOwnedSlices(allocator, &out);
-
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        for (self.self_observed.items) |entry| {
-            if (!entry.via_peer_exchange and entry.source_peers.items.len < 2) continue;
-            try out.append(try allocator.dupe(u8, entry.addr));
-        }
-        return out;
-    }
-
-    fn recordSelfObservation(
-        self: *Self,
-        canonical_addr: []const u8,
-        source_peer_id: ?[]const u8,
-        via_identify: bool,
-        via_peer_exchange: bool,
-        now_ms: u64,
-    ) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        for (self.self_observed.items) |*existing| {
-            if (!std.mem.eql(u8, existing.addr, canonical_addr)) continue;
-            existing.last_seen_ms = now_ms;
-            existing.via_identify = existing.via_identify or via_identify;
-            existing.via_peer_exchange = existing.via_peer_exchange or via_peer_exchange;
-            try self.addObservationSource(existing, source_peer_id);
-            return;
-        }
-
-        var sources = std.array_list.Managed([]u8).init(self.allocator);
-        errdefer {
-            for (sources.items) |peer_id| self.allocator.free(peer_id);
-            sources.deinit();
-        }
-        if (source_peer_id) |peer_id| {
-            try sources.append(try self.allocator.dupe(u8, peer_id));
-        }
-
-        try self.self_observed.append(.{
-            .addr = try self.allocator.dupe(u8, canonical_addr),
-            .source_peers = sources,
-            .via_identify = via_identify,
-            .via_peer_exchange = via_peer_exchange,
-            .last_seen_ms = now_ms,
-        });
-    }
-
-    fn addObservationSource(self: *Self, entry: *SelfObservedAddr, source_peer_id: ?[]const u8) !void {
-        const peer_id = source_peer_id orelse return;
-        for (entry.source_peers.items) |existing| {
-            if (std.mem.eql(u8, existing, peer_id)) return;
-        }
-        try entry.source_peers.append(try self.allocator.dupe(u8, peer_id));
-    }
-};
+const kad_refresh_interval_ms: u64 = 2_000;
+const kad_query_timeout_ms: u64 = 15_000;
+const kad_bootstrap_retry_ms: u64 = 30_000;
+const kad_status_loop_seconds: u64 = 3;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -354,7 +43,87 @@ pub fn main(init: std.process.Init) !void {
     defer args_it.deinit();
     _ = args_it.next(); // executable name
 
+    if (args_it.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--kad")) {
+            return try runKadNode(allocator, io, &args_it);
+        }
+
+        return try runPeerExchangeNode(allocator, io, arg, &args_it);
+    }
+
+    return try runPeerExchangeNode(allocator, io, "/ip4/0.0.0.0/tcp/10811", &args_it);
+}
+
+fn runKadNode(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    args_it: *std.process.Args.Iterator,
+) !void {
     const listen_ma = if (args_it.next()) |arg| arg else "/ip4/0.0.0.0/tcp/10811";
+    const bootstrap_ma = args_it.next();
+    const identity_path_arg = args_it.next();
+
+    const listen_port = extractListenPort(listen_ma) orelse return error.InvalidListenMultiaddr;
+    const identity_path = if (identity_path_arg) |path| path else try std.fmt.allocPrint(
+        allocator,
+        ".libp2p_kad_identity_{}.key",
+        .{listen_port},
+    );
+    defer if (identity_path_arg == null) allocator.free(identity_path);
+
+    var host = Host.init(allocator, try IdentityKey.loadOrCreate(allocator, io, identity_path));
+    defer host.deinit();
+
+    var address_book = try SharedAddressBook.init(allocator, host.identity.peer_id.toString());
+    defer address_book.deinit();
+
+    var routing_table = try RoutingTable.init(allocator, host.identity.peer_id.toString());
+    defer routing_table.deinit();
+
+    var listen_addr = try Multiaddr.create(allocator, listen_ma);
+    defer listen_addr.deinit();
+    try host.listen(io, &listen_addr);
+
+    var service = QueryService.init(allocator, &host, &routing_table, &address_book, .server);
+    defer service.deinit();
+    service.refresh_interval_ms = kad_refresh_interval_ms;
+    service.query_timeout_ms = kad_query_timeout_ms;
+    try service.register();
+
+    print("libp2p_testnode kad listening on {s}\n", .{listen_ma});
+    print("libp2p kad identity peer_id={s} key_file={s}\n", .{ host.identity.peer_id.toString(), identity_path });
+
+    var serve_future = try io.concurrent(Host.serve, .{ &host, io });
+    defer {
+        _ = serve_future.cancel(io) catch {};
+        serve_future.await(io) catch {};
+    }
+
+    if (bootstrap_ma) |bootstrap| {
+        try seedKadBootstrap(allocator, io, &host, &address_book, &routing_table, bootstrap, listen_port);
+    }
+
+    var stop_refresh = std.atomic.Value(bool).init(false);
+    var refresh_future = try io.concurrent(QueryService.refreshLoop, .{ &service, io, &stop_refresh });
+    defer {
+        stop_refresh.store(true, .release);
+        _ = refresh_future.cancel(io) catch {};
+        refresh_future.await(io) catch {};
+    }
+
+    while (true) {
+        io.sleep(std.Io.Duration.fromSeconds(kad_status_loop_seconds), std.Io.Clock.awake) catch {};
+        try maintainKadSessions(allocator, io, &host, &routing_table);
+        try printKadStatus(allocator, &host, &address_book, &routing_table);
+    }
+}
+
+fn runPeerExchangeNode(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    listen_ma: []const u8,
+    args_it: *std.process.Args.Iterator,
+) !void {
     const bootstrap_ma = args_it.next();
     const identity_path_arg = args_it.next();
 
@@ -387,7 +156,7 @@ pub fn main(init: std.process.Init) !void {
     defer _ = accept_future.cancel(io) catch {};
 
     if (bootstrap_ma) |addr_text| {
-        try address_book.learn(addr_text, nowMs());
+        try address_book.learnBootstrap(addr_text, nowMs());
         var dial_addr = try Multiaddr.create(allocator, addr_text);
         defer dial_addr.deinit();
 
@@ -460,6 +229,173 @@ pub fn main(init: std.process.Init) !void {
             });
         }
     }
+}
+
+fn seedKadBootstrap(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    host: *Host,
+    address_book: *SharedAddressBook,
+    routing_table: *RoutingTable,
+    bootstrap_addr_text: []const u8,
+    listen_port: u16,
+) !void {
+    try address_book.learnBootstrap(bootstrap_addr_text, nowMs());
+
+    const deadline_ms = nowMs() + kad_bootstrap_retry_ms;
+    while (true) {
+        seedKadBootstrapOnce(allocator, io, host, address_book, routing_table, bootstrap_addr_text, listen_port) catch |err| {
+            if (nowMs() >= deadline_ms) return err;
+            print("kad bootstrap dial retry: {s} ({s})\n", .{ bootstrap_addr_text, @errorName(err) });
+            io.sleep(std.Io.Duration.fromSeconds(2), std.Io.Clock.awake) catch {};
+            continue;
+        };
+        return;
+    }
+}
+
+fn seedKadBootstrapOnce(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    host: *Host,
+    address_book: *SharedAddressBook,
+    routing_table: *RoutingTable,
+    bootstrap_addr_text: []const u8,
+    listen_port: u16,
+) !void {
+    var bootstrap_addr = try Multiaddr.create(allocator, bootstrap_addr_text);
+    defer bootstrap_addr.deinit();
+
+    const session = try host.dial(io, &bootstrap_addr);
+    const remote_peer_id = host.peerIdForSession(session) orelse return error.MissingRemotePeerId;
+    var identify_info = try host.identifyPeer(io, session);
+    defer identify_info.deinit(allocator);
+
+    if (identify_info.observed_addr.len > 0) {
+        try address_book.observeSelfFromIdentify(
+            identify_info.observed_addr,
+            remote_peer_id.toString(),
+            listen_port,
+            nowMs(),
+        );
+    }
+
+    var routing_addrs = std.array_list.Managed([]const u8).init(allocator);
+    defer routing_addrs.deinit();
+
+    if (identify_info.listen_addrs.items.len > 0) {
+        for (identify_info.listen_addrs.items) |addr| {
+            try address_book.learnIdentifyAddr(addr, remote_peer_id.toString(), nowMs());
+            try routing_addrs.append(addr);
+        }
+    } else {
+        try address_book.learnIdentifyAddr(bootstrap_addr_text, remote_peer_id.toString(), nowMs());
+        try routing_addrs.append(bootstrap_addr_text);
+    }
+
+    try upsertRoutingPeer(
+        routing_table,
+        remote_peer_id.toString(),
+        routing_addrs.items,
+        .connected,
+    );
+    address_book.markDialSuccess(bootstrap_addr_text, nowMs());
+    print("kad bootstrap connected: addr={s} peer_id={s} listen_addrs={d}\n", .{
+        bootstrap_addr_text,
+        remote_peer_id.toString(),
+        identify_info.listen_addrs.items.len,
+    });
+}
+
+fn upsertRoutingPeer(
+    routing_table: *RoutingTable,
+    peer_id: []const u8,
+    addrs: []const []const u8,
+    connection: routing_table_mod.ConnectionType,
+) !void {
+    const result = try routing_table.insertOrUpdate(
+        peer_id,
+        addrs,
+        .server,
+        connection,
+        nowMs(),
+    );
+    switch (result) {
+        .pending_eviction => |pending| try routing_table.keepIncumbent(pending.bucket_index, pending.incumbent_peer_id),
+        else => {},
+    }
+}
+
+fn printKadStatus(
+    allocator: std.mem.Allocator,
+    host: *Host,
+    address_book: *SharedAddressBook,
+    routing_table: *RoutingTable,
+) !void {
+    var snapshot = try address_book.snapshot(allocator);
+    defer {
+        for (snapshot.items) |entry| {
+            allocator.free(entry.addr);
+            if (entry.peer_id) |peer_id| allocator.free(peer_id);
+        }
+        snapshot.deinit();
+    }
+
+    var kad_addrs: usize = 0;
+    for (snapshot.items) |entry| {
+        if (entry.source.kad) kad_addrs += 1;
+    }
+
+    var non_empty = try routing_table.nonEmptyBucketIndices(allocator);
+    defer non_empty.deinit();
+
+    print(
+        "kad_status: peer_id={s} routing_peers={d} non_empty_buckets={d} book_entries={d} kad_addrs={d} outbound_sessions={d} live_sessions={d}\n",
+        .{
+            host.identity.peer_id.toString(),
+            routing_table.peerCount(),
+            non_empty.items.len,
+            snapshot.items.len,
+            kad_addrs,
+            hostLiveOutboundSessions(host),
+            host.liveSessionCount(),
+        },
+    );
+}
+
+fn maintainKadSessions(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    host: *Host,
+    routing_table: *RoutingTable,
+) !void {
+    var peers = try routing_table.closestPeers(allocator, host.identity.peer_id.getBytes(), routing_table_mod.bucket_size);
+    defer {
+        for (peers.items) |*peer| peer.deinit(allocator);
+        peers.deinit();
+    }
+
+    for (peers.items) |peer| {
+        if (std.mem.eql(u8, peer.peer_id, host.identity.peer_id.toString())) continue;
+        if (peer.connection == .cannot_connect) continue;
+        for (peer.addrs.items) |addr_text| {
+            var multiaddr = Multiaddr.create(allocator, address_book_mod.transportSlice(addr_text)) catch continue;
+            defer multiaddr.deinit();
+            _ = host.dial(io, &multiaddr) catch continue;
+            break;
+        }
+    }
+}
+
+fn hostLiveOutboundSessions(host: *Host) usize {
+    host.sessions_mutex.lock();
+    defer host.sessions_mutex.unlock();
+
+    var total: usize = 0;
+    for (host.sessions.items) |uc| {
+        if (!uc.session.isClosed()) total += 1;
+    }
+    return total;
 }
 
 fn acceptLoop(
@@ -685,7 +621,7 @@ fn runInitiatorHandshake(
         );
     }
     for (identify_info.listen_addrs.items) |addr| {
-        try address_book.learnAdvertised(addr, noise_result.remote_peer_id.toString(), nowMs());
+        try address_book.learnIdentifyAddr(addr, noise_result.remote_peer_id.toString(), nowMs());
     }
 
     var mux_stream = try mux_session.openStream();
@@ -890,8 +826,8 @@ fn handleResponderMuxStreamInner(
     const listen_port = parseGetPeersRequest(req_line) orelse return error.InvalidPeerRequest;
 
     if (conn.remoteMultiaddr()) |remote_ma| {
-        if (extractIp(remote_ma.toString())) |ip| {
-            const observed = try std.fmt.allocPrint(allocator, "/ip4/{s}/tcp/{}", .{ ip, listen_port });
+        if (extractHost(remote_ma.toString())) |host| {
+            const observed = try std.fmt.allocPrint(allocator, "/{s}/{s}/tcp/{}", .{ host.protocol, host.value, listen_port });
             defer allocator.free(observed);
             try address_book.learnWithPeer(observed, remote_peer_id, nowMs());
         }
@@ -1009,46 +945,14 @@ fn nowMs() u64 {
     return @as(u64, @intCast(seconds)) * 1000;
 }
 
-fn isLikelyDialable(addr: []const u8) bool {
-    if (addr.len == 0) return false;
-    if (!std.mem.startsWith(u8, addr, "/ip4/")) return false;
-    if (std.mem.startsWith(u8, addr, "/ip4/0.0.0.0/")) return false;
-    return std.mem.indexOf(u8, addr, "/tcp/") != null;
-}
-
-fn transportSlice(addr: []const u8) []const u8 {
-    const idx = std.mem.indexOf(u8, addr, "/p2p/") orelse return addr;
-    return addr[0..idx];
-}
-
-fn peerIdSlice(addr: []const u8) ?[]const u8 {
-    const idx = std.mem.indexOf(u8, addr, "/p2p/") orelse return null;
-    return addr[idx + "/p2p/".len ..];
-}
-
-fn samePeerAddress(a: []const u8, b: []const u8, a_peer: ?[]const u8, b_peer: ?[]const u8) bool {
-    if (!std.mem.eql(u8, transportSlice(a), transportSlice(b))) return false;
-    if (a_peer == null or b_peer == null) return true;
-    return std.mem.eql(u8, a_peer.?, b_peer.?);
-}
-
-fn canonicalPeerAddr(allocator: std.mem.Allocator, addr: []const u8, peer_id_text: ?[]const u8) ![]u8 {
-    var multiaddr = try Multiaddr.create(allocator, addr);
-    defer multiaddr.deinit();
-
-    if (multiaddr.getPeerId() == null) {
-        if (peer_id_text) |peer_id| {
-            const peer_component = try std.fmt.allocPrint(allocator, "/p2p/{s}", .{peer_id});
-            defer allocator.free(peer_component);
-
-            var peer_multiaddr = try Multiaddr.create(allocator, peer_component);
-            defer peer_multiaddr.deinit();
-            try multiaddr.encapsulate(&peer_multiaddr);
-        }
-    }
-
-    return allocator.dupe(u8, multiaddr.toString());
-}
+const isLikelyDialable = address_book_mod.isLikelyDialable;
+const peerIdSlice = address_book_mod.peerIdSlice;
+const canonicalPeerAddr = address_book_mod.canonicalPeerAddr;
+const extractIp = address_book_mod.extractIp;
+const extractHost = address_book_mod.extractHost;
+const extractListenPort = address_book_mod.extractListenPort;
+const freeOwnedSlices = address_book_mod.freeOwnedSlices;
+const isWildcardListenAddr = address_book_mod.isWildcardListenAddr;
 
 fn buildAdvertisedListenAddrs(
     allocator: std.mem.Allocator,
@@ -1070,7 +974,7 @@ fn buildAdvertisedListenAddrs(
         return out;
     }
 
-    if (std.mem.startsWith(u8, local_listen_ma, "/ip4/0.0.0.0/")) return out;
+    if (isWildcardListenAddr(local_listen_ma)) return out;
 
     const full_addr = try canonicalPeerAddr(allocator, local_listen_ma, peer_id_text);
     defer allocator.free(full_addr);
@@ -1079,11 +983,6 @@ fn buildAdvertisedListenAddrs(
     defer ma.deinit();
     try out.append(try allocator.dupe(u8, ma.getBytesAddress()));
     return out;
-}
-
-fn freeOwnedSlices(allocator: std.mem.Allocator, list: *std.array_list.Managed([]u8)) void {
-    for (list.items) |item| allocator.free(item);
-    list.deinit();
 }
 
 fn writePeerExchangeAddr(allocator: std.mem.Allocator, writer: *YamuxWriter, addr: []const u8) !void {
@@ -1139,33 +1038,8 @@ fn parseGetPeersRequest(line: []const u8) ?u16 {
     return std.fmt.parseInt(u16, port_text, 10) catch null;
 }
 
-fn extractIp(multiaddr: []const u8) ?[]const u8 {
-    var it = std.mem.tokenizeScalar(u8, multiaddr, '/');
-    while (it.next()) |part| {
-        if (!std.mem.eql(u8, part, "ip4")) continue;
-        return it.next();
-    }
-    return null;
-}
-
-fn extractListenPort(multiaddr: []const u8) ?u16 {
-    var it = std.mem.tokenizeScalar(u8, multiaddr, '/');
-    while (it.next()) |part| {
-        if (!std.mem.eql(u8, part, "tcp")) continue;
-        const port_text = it.next() orelse return null;
-        return std.fmt.parseInt(u16, port_text, 10) catch null;
-    }
-    return null;
-}
-
 test "parse GET_PEERS request" {
     try std.testing.expectEqual(@as(?u16, 10811), parseGetPeersRequest("GET_PEERS 10811"));
     try std.testing.expectEqual(@as(?u16, null), parseGetPeersRequest("GET_PEERS abc"));
     try std.testing.expectEqual(@as(?u16, null), parseGetPeersRequest("INVALID 10811"));
-}
-
-test "extract IP and listen port from multiaddr" {
-    try std.testing.expectEqualStrings("172.31.0.11", extractIp("/ip4/172.31.0.11/tcp/42001").?);
-    try std.testing.expectEqual(@as(?u16, 10811), extractListenPort("/ip4/0.0.0.0/tcp/10811"));
-    try std.testing.expectEqual(@as(?u16, null), extractListenPort("/ip4/0.0.0.0/udp/10811"));
 }

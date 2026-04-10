@@ -30,6 +30,14 @@ fn compareHashes(hash1: *const [32]u8, hash2: *const [32]u8) i32 {
     return 0; // Hashes are equal
 }
 
+fn decodePeerAddress(entry: network.message_types.PeerAddress) ?std.Io.net.IpAddress {
+    const mapped = network.PeerManager.extractMappedIpv4(entry.ip);
+    if (mapped) |ip4| {
+        return .{ .ip4 = .{ .bytes = ip4, .port = entry.port } };
+    }
+    return .{ .ip6 = .{ .bytes = entry.ip, .port = entry.port } };
+}
+
 /// Server-side network handlers that implement blockchain callbacks
 pub const ServerHandlers = struct {
     blockchain: *zen.ZeiCoin,
@@ -550,16 +558,30 @@ pub const ServerHandlers = struct {
     fn onGetPeers(self: *Self, io: std.Io, peer: *network.Peer, msg: network.message_types.GetPeersMessage) !void {
         std.log.info("👥 [GET_PEERS] Request from {any}", .{peer.address});
         _ = io;
-        _ = self;
         _ = msg;
-        // Handle peer list requests
+
+        const network_manager = self.blockchain.network_coordinator.getNetworkManager() orelse return;
+        const addresses = try network_manager.peer_manager.snapshotDiscoveryAddresses(self.blockchain.allocator);
+        defer self.blockchain.allocator.free(addresses);
+
+        var peers_msg = try network.message_types.PeersMessage.init(self.blockchain.allocator, addresses);
+        defer peers_msg.deinit(self.blockchain.allocator);
+        _ = try peer.sendMessage(.peers, peers_msg);
     }
 
     fn onPeers(self: *Self, io: std.Io, peer: *network.Peer, msg: network.message_types.PeersMessage) !void {
         std.log.info("📋 [PEERS] Received {} peer addresses from {any}", .{ msg.addresses.len, peer.address });
         _ = io;
-        _ = self;
-        // Process received peer list
+
+        const network_manager = self.blockchain.network_coordinator.getNetworkManager() orelse return;
+        for (msg.addresses) |entry| {
+            const address = decodePeerAddress(entry);
+            if (address == null) continue;
+            network_manager.addKnownAddress(address.?) catch |err| {
+                std.log.debug("Failed to add discovered peer address: {}", .{err});
+                continue;
+            };
+        }
     }
 
     fn onGetBlockHash(self: *Self, io: std.Io, peer: *network.Peer, msg: network.message_types.GetBlockHashMessage) !void {

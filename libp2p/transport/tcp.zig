@@ -18,6 +18,7 @@ pub const TcpConnection = struct {
     allocator: std.mem.Allocator,
     is_initiator: bool,
     is_closed: bool,
+    socket_closed: bool,
     bytes_read: u64,
     bytes_written: u64,
     rx_buf: [stream_buffer_size]u8 = undefined,
@@ -36,6 +37,7 @@ pub const TcpConnection = struct {
             .allocator = allocator,
             .is_initiator = is_initiator,
             .is_closed = false,
+            .socket_closed = false,
             .bytes_read = 0,
             .bytes_written = 0,
         };
@@ -55,6 +57,10 @@ pub const TcpConnection = struct {
         }
         if (!self.is_closed) {
             self.close(self.io) catch {};
+        }
+        if (!self.socket_closed) {
+            self.stream.close(self.io);
+            self.socket_closed = true;
         }
     }
 
@@ -129,7 +135,10 @@ pub const TcpConnection = struct {
         if (!self.is_closed) {
             self.flush(io) catch {};
             self.is_closed = true;
-            self.stream.close(io);
+            self.stream.shutdown(io, .both) catch |err| switch (err) {
+                error.SocketUnconnected => {},
+                else => return err,
+            };
         }
     }
 
@@ -157,14 +166,7 @@ pub const TcpConnection = struct {
 
     /// Save multiaddresses from socket (matches C++ saveMultiaddresses)
     fn saveMultiaddresses(self: *Self) !void {
-        const remote_str = switch (self.stream.socket.address) {
-            .ip4 => |ip4| try std.fmt.allocPrint(
-                self.allocator,
-                "/ip4/{d}.{d}.{d}.{d}/tcp/{d}",
-                .{ ip4.bytes[0], ip4.bytes[1], ip4.bytes[2], ip4.bytes[3], ip4.port },
-            ),
-            .ip6 => return error.IPv6NotSupported,
-        };
+        const remote_str = try formatIpAddressAsMultiaddr(self.allocator, self.stream.socket.address);
         defer self.allocator.free(remote_str);
         self.remote_multiaddr = try Multiaddr.create(self.allocator, remote_str);
 
@@ -274,13 +276,10 @@ pub const TcpTransport = struct {
             return error.UnsupportedMultiaddr;
         }
 
-        // Extract TCP address from multiaddr
-        const tcp_addr = addr.getTcpAddress() orelse {
-            return error.InvalidMultiaddr;
-        };
-
-        // Connect to the address
-        const stream = try tcp_addr.connect(io, .{ .mode = .stream });
+        const stream = if (addr.getTcpAddress()) |tcp_addr|
+            try tcp_addr.connect(io, .{ .mode = .stream })
+        else
+            try connectDnsMultiaddr(io, addr);
 
         // Create connection as initiator
         return TcpConnection.init(self.allocator, io, stream, true);
@@ -310,16 +309,7 @@ pub const TcpTransport = struct {
         errdefer self.allocator.destroy(listener);
 
         // Create multiaddr with actual port
-        const actual_str = blk: {
-            switch (actual_addr) {
-                .ip4 => |ip4| break :blk try std.fmt.allocPrint(
-                    self.allocator,
-                    "/ip4/{d}.{d}.{d}.{d}/tcp/{d}",
-                    .{ ip4.bytes[0], ip4.bytes[1], ip4.bytes[2], ip4.bytes[3], ip4.port },
-                ),
-                .ip6 => return error.IPv6NotSupported,
-            }
-        };
+        const actual_str = try formatIpAddressAsMultiaddr(self.allocator, actual_addr);
         defer self.allocator.free(actual_str);
 
         listener.* = .{
@@ -340,14 +330,20 @@ pub const TcpTransport = struct {
     /// Check if transport can dial a multiaddr (matches C++ canDial)
     pub fn canDial(self: *const Self, addr: *const Multiaddr) bool {
         _ = self;
-        // Must have TCP and either IP4 or IP6
+        // Must have TCP and a supported dial target family.
         if (!addr.hasProtocol(.tcp)) return false;
-        return addr.hasProtocol(.ip4) or addr.hasProtocol(.ip6);
+        return addr.hasProtocol(.ip4) or
+            addr.hasProtocol(.ip6) or
+            addr.hasProtocol(.dns) or
+            addr.hasProtocol(.dns4) or
+            addr.hasProtocol(.dns6) or
+            addr.hasProtocol(.dns_addr);
     }
 
     /// Check if transport can listen on a multiaddr
     pub fn canListen(self: *const Self, addr: *const Multiaddr) bool {
-        return self.canDial(addr); // Same requirements
+        _ = self;
+        return addr.hasProtocol(.tcp) and (addr.hasProtocol(.ip4) or addr.hasProtocol(.ip6));
     }
 
     /// Get protocol ID (matches C++ getProtocolId)
@@ -367,6 +363,92 @@ fn dialTaskMain(transport: *TcpTransport, io: std.Io, addr: *const Multiaddr) an
 
 fn listenTaskMain(transport: *TcpTransport, io: std.Io, addr: *const Multiaddr) anyerror!*TcpTransport.Listener {
     return transport.listen(io, addr);
+}
+
+fn formatIpAddressAsMultiaddr(allocator: std.mem.Allocator, addr: net.IpAddress) ![]u8 {
+    return switch (addr) {
+        .ip4 => |ip4| std.fmt.allocPrint(
+            allocator,
+            "/ip4/{d}.{d}.{d}.{d}/tcp/{d}",
+            .{ ip4.bytes[0], ip4.bytes[1], ip4.bytes[2], ip4.bytes[3], ip4.port },
+        ),
+        .ip6 => |ip6| blk: {
+            const unresolved: net.Ip6Address.Unresolved = .{
+                .bytes = ip6.bytes,
+                .interface_name = null,
+            };
+            break :blk try std.fmt.allocPrint(allocator, "/ip6/{f}/tcp/{d}", .{ unresolved, ip6.port });
+        },
+    };
+}
+
+fn connectDnsMultiaddr(io: std.Io, addr: *const Multiaddr) !net.Stream {
+    const dns_info = try getDnsHostInfo(addr);
+
+    const port_text = try addr.getFirstValueForProtocol(.tcp);
+    const port = try std.fmt.parseInt(u16, port_text, 10);
+    const host_name = try net.HostName.init(dns_info.host);
+
+    var canonical_name_buffer: [net.HostName.max_len]u8 = undefined;
+    var lookup_buffer: [16]net.HostName.LookupResult = undefined;
+    var lookup_queue: std.Io.Queue(net.HostName.LookupResult) = .init(&lookup_buffer);
+    var lookup_future = io.async(net.HostName.lookup, .{ host_name, io, &lookup_queue, .{
+        .port = port,
+        .canonical_name_buffer = &canonical_name_buffer,
+        .family = dns_info.family,
+    } });
+    defer lookup_future.cancel(io) catch {};
+
+    var last_connect_error: ?net.IpAddress.ConnectError = null;
+    while (lookup_queue.getOne(io)) |dns_result| switch (dns_result) {
+        .canonical_name => continue,
+        .address => |ip_address| {
+            return ip_address.connect(io, .{ .mode = .stream }) catch |err| {
+                last_connect_error = err;
+                continue;
+            };
+        },
+    } else |err| switch (err) {
+        error.Canceled => |e| return e,
+        error.Closed => {
+            lookup_future.await(io) catch |lookup_err| return lookup_err;
+            return last_connect_error orelse error.NoAddressReturned;
+        },
+    }
+
+    return error.NoAddressReturned;
+}
+
+const DnsHostInfo = struct {
+    host: []const u8,
+    family: ?net.IpAddress.Family,
+};
+
+fn getDnsHostInfo(addr: *const Multiaddr) !DnsHostInfo {
+    if (addr.getFirstValueForProtocol(.dns4)) |host| {
+        return .{ .host = host, .family = .ip4 };
+    } else |err| switch (err) {
+        error.ProtocolNotFound => {},
+        else => return err,
+    }
+    if (addr.getFirstValueForProtocol(.dns6)) |host| {
+        return .{ .host = host, .family = .ip6 };
+    } else |err| switch (err) {
+        error.ProtocolNotFound => {},
+        else => return err,
+    }
+    if (addr.getFirstValueForProtocol(.dns)) |host| {
+        return .{ .host = host, .family = null };
+    } else |err| switch (err) {
+        error.ProtocolNotFound => {},
+        else => return err,
+    }
+    if (addr.getFirstValueForProtocol(.dns_addr)) |host| {
+        return .{ .host = host, .family = null };
+    } else |err| switch (err) {
+        error.ProtocolNotFound => return error.InvalidMultiaddr,
+        else => return err,
+    }
 }
 
 // Tests
@@ -430,6 +512,62 @@ test "TCP transport dial and accept" {
     try std.testing.expectEqual(@as(u64, accepted_n), accepted.bytes_written);
 }
 
+test "TCP close wakes blocked read on the same connection" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var transport = TcpTransport.init(allocator);
+    defer transport.deinit();
+
+    var listen_addr = try Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/0");
+    defer listen_addr.deinit();
+
+    const listener = try transport.listen(io, &listen_addr);
+    const actual_port = listener.server.socket.address.getPort();
+
+    const dial_str = try std.fmt.allocPrint(allocator, "/ip4/127.0.0.1/tcp/{}", .{actual_port});
+    defer allocator.free(dial_str);
+
+    var dial_addr = try Multiaddr.create(allocator, dial_str);
+    defer dial_addr.deinit();
+
+    var accept_future = try listener.acceptConcurrent(io);
+    defer _ = accept_future.cancel(io) catch {};
+
+    var dialed = try transport.dial(io, &dial_addr);
+    defer dialed.deinit();
+
+    var accepted = try accept_future.await(io);
+    defer accepted.deinit();
+
+    const ReaderCtx = struct {
+        conn: *TcpConnection,
+        io: std.Io,
+
+        fn run(ctx: *@This()) anyerror!usize {
+            var buf: [16]u8 = undefined;
+            return ctx.conn.readSome(ctx.io, &buf);
+        }
+    };
+
+    var reader_ctx = ReaderCtx{ .conn = &accepted, .io = io };
+    var read_future = try io.concurrent(ReaderCtx.run, .{&reader_ctx});
+
+    try io.sleep(std.Io.Duration.fromMilliseconds(50), .awake);
+    try accepted.close(io);
+
+    const result = read_future.await(io) catch |err| switch (err) {
+        error.ConnectionClosed,
+        error.EndOfStream,
+        error.SocketUnconnected,
+        => return,
+        else => return err,
+    };
+    try std.testing.expectEqual(@as(usize, 0), result);
+}
+
 test "transport capabilities" {
     const allocator = std.testing.allocator;
 
@@ -446,12 +584,32 @@ test "transport capabilities" {
     var ws_addr = try Multiaddr.create(allocator, "/ip4/127.0.0.1/tcp/4001/ws");
     defer ws_addr.deinit();
 
+    var ip6_addr = try Multiaddr.create(allocator, "/ip6/::1/tcp/4001");
+    defer ip6_addr.deinit();
+
+    var dns_addr = try Multiaddr.create(allocator, "/dns4/bootstrap.example.com/tcp/4001");
+    defer dns_addr.deinit();
+
     // Can still dial/listen on TCP part even with ws
     try std.testing.expect(transport.canDial(&ws_addr));
+    try std.testing.expect(transport.canDial(&ip6_addr));
+    try std.testing.expect(transport.canListen(&ip6_addr));
+    try std.testing.expect(transport.canDial(&dns_addr));
+    try std.testing.expect(!transport.canListen(&dns_addr));
 
     // Test invalid multiaddr
     var invalid_addr = try Multiaddr.create(allocator, "/ip4/127.0.0.1/udp/4001");
     defer invalid_addr.deinit();
 
     try std.testing.expect(!transport.canDial(&invalid_addr));
+}
+
+test "format IP address as multiaddr supports ipv6" {
+    const allocator = std.testing.allocator;
+    const ip = try net.IpAddress.resolve(std.testing.io, "::1", 4001);
+    const formatted = try formatIpAddressAsMultiaddr(allocator, ip);
+    defer allocator.free(formatted);
+
+    try std.testing.expect(std.mem.startsWith(u8, formatted, "/ip6/"));
+    try std.testing.expect(std.mem.endsWith(u8, formatted, "/tcp/4001"));
 }

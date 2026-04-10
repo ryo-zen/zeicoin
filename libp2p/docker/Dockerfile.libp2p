@@ -24,7 +24,7 @@ COPY libp2p ./libp2p
 RUN printf 'pub const use_evented = false;\n' > build_options.zig
 
 RUN mkdir -p zig-out/bin && \
-    zig build-exe -ODebug \
+    zig build-exe -OReleaseSafe \
     --dep libp2p \
     --dep build_options \
     -Mroot=libp2p/libp2p_testnode.zig \

@@ -878,18 +878,24 @@ test "yamux keepalive ping pong keeps session alive" {
     var initiator_conn = conn_pair.initiator;
     defer initiator_conn.deinit();
 
-    // sleep(400ms) > first_ping(30ms) + timeout(300ms) = 330ms: session would die
-    // without keepalive.  300ms gives enough margin over scheduling jitter.
+    // Keep the sleep comfortably beyond the no-keepalive timeout budget so the
+    // assertion survives scheduler jitter during the full libp2p suite.
     const opts = SessionOptions{
-        .keepalive_interval_ms = 30,
-        .keepalive_timeout_ms = 300,
+        .keepalive_interval_ms = 50,
+        .keepalive_timeout_ms = 500,
     };
+
+    const Sync = struct {
+        done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    };
+    var sync = Sync{};
 
     const ResponderCtx = struct {
         conn: *inproc.InProcConnection,
         allocator: std.mem.Allocator,
         io: std.Io,
         options: SessionOptions,
+        sync: *Sync,
 
         fn run(ctx: *@This()) anyerror!void {
             const tx_key = [_]u8{0xA1} ** 32;
@@ -902,18 +908,23 @@ test "yamux keepalive ping pong keeps session alive" {
             defer session.deinit();
             try session.start();
 
-            try ctx.io.sleep(std.Io.Duration.fromMilliseconds(400), .awake);
+            try ctx.io.sleep(std.Io.Duration.fromMilliseconds(700), .awake);
 
             var accept_future = try session.acceptStreamConcurrent();
             var stream = try accept_future.await(ctx.io);
             defer stream.deinit();
 
-            const req = try readAllFromStream(ctx.allocator, &stream);
-            defer ctx.allocator.free(req);
-            if (!std.mem.eql(u8, req, "alive")) return error.TestExpectedEqual;
+            var req: [5]u8 = undefined;
+            try readExact(&stream, &req);
+            try std.testing.expectEqualStrings("alive", &req);
 
             try stream.writeAll("ok");
             try stream.close();
+
+            var spins: usize = 0;
+            while (!ctx.sync.done.load(.seq_cst) and spins < 200) : (spins += 1) {
+                try ctx.io.sleep(std.Io.Duration.fromMilliseconds(5), .awake);
+            }
         }
     };
 
@@ -922,6 +933,7 @@ test "yamux keepalive ping pong keeps session alive" {
         .allocator = allocator,
         .io = io,
         .options = opts,
+        .sync = &sync,
     };
     var responder_future = try io.concurrent(ResponderCtx.run, .{&responder_ctx});
     defer _ = responder_future.cancel(io) catch {};
@@ -932,15 +944,14 @@ test "yamux keepalive ping pong keeps session alive" {
     defer session.deinit();
     try session.start();
 
-    try io.sleep(std.Io.Duration.fromMilliseconds(400), .awake);
+    try io.sleep(std.Io.Duration.fromMilliseconds(700), .awake);
 
     var open_future = try session.openStreamConcurrent();
     var stream = try open_future.await(io);
     defer stream.deinit();
     try stream.writeAll("alive");
-    try stream.close();
-
     try readExpectedReply(&stream, "ok");
+    sync.done.store(true, .seq_cst);
     try responder_future.await(io);
 }
 

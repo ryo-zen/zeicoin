@@ -75,7 +75,7 @@ pub fn parseList(allocator: std.mem.Allocator, input: []const u8) ![]BootstrapAd
         };
         errdefer ma.deinit();
 
-        if (ma.getTcpAddress() == null) {
+        if (!isSupportedBootstrapMultiaddr(&ma)) {
             log.warn("Skipping bootstrap multiaddr '{s}': no TCP address component", .{token});
             ma.deinit();
             continue;
@@ -129,6 +129,16 @@ fn parseStrings(allocator: std.mem.Allocator, strs: []const []const u8) ![]Boots
     return list.toOwnedSlice();
 }
 
+fn isSupportedBootstrapMultiaddr(ma: *const libp2p.Multiaddr) bool {
+    if (!ma.hasProtocol(.tcp)) return false;
+    return ma.hasProtocol(.ip4) or
+        ma.hasProtocol(.ip6) or
+        ma.hasProtocol(.dns) or
+        ma.hasProtocol(.dns4) or
+        ma.hasProtocol(.dns6) or
+        ma.hasProtocol(.dns_addr);
+}
+
 /// Return an independent copy of a slice. Caller must call freeList on the result.
 pub fn cloneList(allocator: std.mem.Allocator, nodes: []const BootstrapAddr) ![]BootstrapAddr {
     var list = std.array_list.Managed(BootstrapAddr).init(allocator);
@@ -167,6 +177,17 @@ test "valid multiaddr with peer ID" {
 
     try std.testing.expectEqual(@as(usize, 1), nodes.len);
     try std.testing.expect(nodes[0].peerId() != null);
+}
+
+test "valid ipv6 and dns bootstrap multiaddrs" {
+    const allocator = std.testing.allocator;
+    const nodes = try parseList(
+        allocator,
+        "/ip6/2001:db8::1/tcp/10801,/dns4/bootstrap.example.com/tcp/10801",
+    );
+    defer freeList(allocator, nodes);
+
+    try std.testing.expectEqual(@as(usize, 2), nodes.len);
 }
 
 test "legacy ip:port format is skipped" {

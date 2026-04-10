@@ -718,8 +718,8 @@ pub const ChainState = struct {
             }
 
             if (!force_processing and self.database.hasTransaction(io, tx.hash())) {
-                log.info("🚫 [DUPLICATE TX] Transaction {x} already exists in blockchain - SKIPPING to prevent double-spend", .{tx.hash()[0..8]});
-                continue;
+                log.warn("❌ [DUPLICATE TX] Block contains transaction {x} already in chain - rejecting block", .{tx.hash()[0..8]});
+                return error.DuplicateTransaction;
             }
 
             log.info("🔍 [BLOCK TX] Processing regular transaction {} at height {}", .{ i, current_height });
