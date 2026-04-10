@@ -10,9 +10,9 @@
 **Branch:** `kademlia-dht`
 **Active initiative:** Testnet hardening and post-rollout cleanup after the Kad/libp2p sprint
 
-**Last worked on:** 2026-04-10 — Landed `ZEI-103` startup reachability/Kad mode selection in `src/core/network/peer.zig`, added Docker/runtime validation coverage including the Kad partition-heal harness, confirmed outbound bootstrap from a NATed local node, and rewrote `ZEI-104` to track the official AutoNAT v2 flow (per-address probing, `/libp2p/autonat/2/*`, nonce dial-backs, and amplification defense).
-**Next step:** Start `ZEI-104` as an AutoNAT v2 client/server wire implementation that records per-address evidence, then follow with host handler unregister/runtime mode switching before relay / DCUtR work.
-**In flight:** No uncommitted product changes should remain after this handoff. Branch `kademlia-dht` now contains the committed `ZEI-103` reachability/Kad-mode work, Docker reachability overrides, the Kad partition-heal validation script, and the related ticket/status updates (`ZEI-54` archived, `ZEI-103` closed, `ZEI-104` opened). Validation artifacts under `tmp/zen-server-docker-20260410-104231` and `tmp/nat-kad-client-probe-*` are disposable.
+**Last worked on:** 2026-04-10 — Confirmed `./docker/scripts/test_libp2p_zen_server.sh` passes on `kademlia-dht`, reviewed the remaining post-Kad technical debt, and opened `ZEI-105` to track cleanup of the legacy `/zeicoin/peers` discovery path, duplicate `PeerManager` discovery state, split bootstrap dialing, and any leftover mixed-version sync compatibility branches.
+**Next step:** Merge `kademlia-dht` into `main`, then start `ZEI-104` as an AutoNAT v2 client/server wire implementation that records per-address evidence; `ZEI-105` is the cleanup follow-up once the next protocol slice is underway or landed.
+**In flight:** Uncommitted tracking updates only: `.izumi/STATUS.md` plus new ticket `.izumi/issues/open/remove_legacy_discovery_and_bootstrap_paths_after_kad_rollout.md` (`ZEI-105`). Product code remains clean at commit `0c32cf7`; validation artifacts under `tmp/zen-server-docker-20260410-104231` and `tmp/nat-kad-client-probe-*` are disposable.
 
 ---
 
