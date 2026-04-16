@@ -1,4 +1,7 @@
-# ⚡ ZeiCoin ⚡
+
+<div align="center">
+<img width="704" height="257" alt="zeicoin-cli" src="https://github.com/user-attachments/assets/d8671775-fc7d-4315-8db3-cf7f142e0f7a" />
+</div>  
 
 A minimalist blockchain written in Zig with longest chain consensus, RandomX mining, and peer-to-peer networking.
 
