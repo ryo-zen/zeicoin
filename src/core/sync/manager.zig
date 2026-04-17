@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // manager.zig - ZSP-001 Sync Manager
 // High-level coordinator for ZeiCoin Synchronization Protocol implementation
 //

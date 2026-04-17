@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // hash.zig - Hash type for network protocol
 // Provides consistent hash handling across the protocol
 

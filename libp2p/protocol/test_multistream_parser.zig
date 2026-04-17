@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // test_multistream_parser.zig - Tests for streaming multistream parser
 
 const std = @import("std");

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // randomx_helper.c - Standalone RandomX mining helper
 // Compiled with gcc to avoid Zig C++ linking issues
 #include <stdio.h>

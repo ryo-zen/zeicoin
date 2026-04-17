@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+# SPDX-License-Identifier: MIT
+
 # start_zei_server.sh - Start ZeiCoin server for public deployment
 # Supports both local development and public server deployment
 

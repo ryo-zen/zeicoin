@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // validator.zig - Transaction Validator
 // Handles all transaction validation logic for the mempool
 // Validates transactions before they are added to the pool

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // ping.zig - Ping message for keepalive
 // Simple message with nonce for matching pong responses
 

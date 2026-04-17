@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // validation.zig - Mining Validation Logic
 // Handles proof-of-work validation for mined blocks
 // Security: Always uses RandomX for consistent validation across all networks

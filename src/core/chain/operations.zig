@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // operations.zig - Chain Operations Manager
 // Handles chain mechanics, difficulty adjustment, and block operations
 // Manages chain height, block storage, and chain progression

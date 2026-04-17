@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // wire.zig - Low-level wire protocol implementation
 // Handles message framing, serialization, and connection management
 

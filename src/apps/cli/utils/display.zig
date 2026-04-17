@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // Display utilities for ZeiCoin CLI
 // Formatting, banners, and user interface helpers
 

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // lib.zig - ZSP-001 Sync Protocol Library Exports
 // Central export module for ZeiCoin Synchronization Protocol implementation
 //

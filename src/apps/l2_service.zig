@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // l2_service.zig - Consolidated L2 Messaging Service and REST API for ZeiCoin
 // Provides transaction messages, messaging capabilities, and HTTP API endpoints
 

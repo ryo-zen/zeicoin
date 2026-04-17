@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // NetworkCoordinator - Manages network lifecycle and coordination
 // Handles high-level network operations for the Node
 

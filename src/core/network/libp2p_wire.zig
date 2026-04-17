@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // libp2p_wire.zig — ZeiCoin wire protocol adapter over libp2p yamux streams.
 //
 // Maps the existing ZeiCoin binary framing (WireConnection) onto a negotiated

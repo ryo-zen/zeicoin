@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // limits.zig - Mempool Limits Enforcer
 // Enforces mempool size and count constraints
 // Manages capacity limits and prevents spam

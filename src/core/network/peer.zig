@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // peer.zig - Network peer management
 // Clean modular implementation using libp2p Host for all connections.
 

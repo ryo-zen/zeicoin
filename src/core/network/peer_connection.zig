@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // peer_connection.zig - Individual peer connection handling
 // Manages the lifecycle of a single peer connection
 

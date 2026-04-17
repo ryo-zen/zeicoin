@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // tests.zig - ZeiCoin Integration Tests
 // This file contains integration tests moved from main.zig
 

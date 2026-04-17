@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // address_book.zig - Thread-safe peerbook with per-address scoring, backoff,
 // source tracking, and self-observation.
 

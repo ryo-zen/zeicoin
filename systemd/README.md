@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+SPDX-License-Identifier: MIT
+-->
+
 # ZeiCoin Systemd Service Setup
 
 This directory contains systemd service files for running ZeiCoin as a production service.

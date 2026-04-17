@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // randomx_wrapper.h - Header for RandomX C wrapper
 #ifndef RANDOMX_WRAPPER_H
 #define RANDOMX_WRAPPER_H

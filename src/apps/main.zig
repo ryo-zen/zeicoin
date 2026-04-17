@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // main.zig - ZeiCoin Node Entry Point
 // This is the main entry point for the zeicoin node executable
 

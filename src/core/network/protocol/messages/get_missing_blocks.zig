@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // get_missing_blocks.zig - Messages for requesting specific blocks by hash
 // Part of Fix 3: Missing Block Request Logic for orphan block resolution
 

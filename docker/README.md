@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+SPDX-License-Identifier: MIT
+-->
+
 # ZeiCoin Docker Multi-Node Testing Environment
 
 This Docker setup provides a complete 3-node ZeiCoin cluster for testing multi-node synchronization, P2P networking, blockchain consensus, and Kad behavior in the real `zen_server` runtime.

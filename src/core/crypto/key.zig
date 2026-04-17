@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // key.zig - ZeiCoin Cryptographic Key Management
 // Ed25519 signatures with secure memory clearing
 

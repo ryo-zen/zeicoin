@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // state_root.zig - Persistent state snapshots for rollback and recovery
 // Canonical state-root calculation lives in ChainState.calculateStateRoot().
 

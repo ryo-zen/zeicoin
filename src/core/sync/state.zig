@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // state.zig - Sync State Management and Progress Tracking
 // Manages synchronization state transitions and progress monitoring
 // Extracted from node.zig for modular sync architecture

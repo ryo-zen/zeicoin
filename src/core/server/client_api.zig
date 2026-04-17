@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // client_api.zig - Client API server for ZeiCoin
 // Handles transaction submission, balance queries, and other client operations
 

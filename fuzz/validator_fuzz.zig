@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // fuzz/validator_fuzz.zig - Fuzzing for transaction validation
 // Randomized mutation-based fuzzing with thousands of iterations
 // Finds edge cases and vulnerabilities through exhaustive random testing

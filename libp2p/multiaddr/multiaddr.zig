@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // multiaddr.zig - Multiaddr implementation for libp2p
 // Multiaddr is a self-describing network address format
 // Example: /ip4/127.0.0.1/tcp/4001/p2p/QmNodeId

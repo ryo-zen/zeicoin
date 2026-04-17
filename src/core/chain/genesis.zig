@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // genesis.zig - ZeiCoin Genesis Block Definitions
 // Hardcoded genesis blocks for network security and consistency
 

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // manager.zig - Mempool Manager Coordinator
 // Main coordinator for all mempool operations and components
 // Provides high-level API for mempool operations

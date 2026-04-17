@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // bip39_wordlist.zig - BIP39 English wordlist
 // Generated from https://github.com/bitcoin/bips/blob/master/bip-0039/english.txt
 

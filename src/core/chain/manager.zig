@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // manager.zig - Chain Manager Coordinator
 // Main coordinator for all chain operations and components
 // Provides high-level API for blockchain operations

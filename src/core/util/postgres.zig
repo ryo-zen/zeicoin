@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // postgres.zig - Minimal libpq wrapper for ZeiCoin
 // Provides simple PostgreSQL query interface using libpq C library
 

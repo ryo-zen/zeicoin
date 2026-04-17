@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // protocol.zig - Core protocol constants and types for ZeiCoin
 
 const std = @import("std");

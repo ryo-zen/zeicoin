@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // Wallet commands for ZeiCoin CLI
 // Handles wallet creation, restoration, listing, and address management
 

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // block_index.zig - O(1) Block Hash-to-Height Index Cache
 // Provides fast block lookups for chain reorganization and validation
 

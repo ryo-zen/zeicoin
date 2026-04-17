@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+# SPDX-License-Identifier: MIT
+
 # test_libp2p_kad_smoke.sh — Dedicated Docker smoke for the isolated Kad testnode
 #
 # Verifies that four libp2p testnodes running /kad/1.0.0 can:

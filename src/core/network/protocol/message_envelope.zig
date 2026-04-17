@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // message_envelope.zig - Message envelope and transport utilities
 // Provides serialization, pooling, and transport infrastructure for all message types
 

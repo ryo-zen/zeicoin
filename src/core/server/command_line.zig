@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // command_line.zig - Command line argument parsing for ZeiCoin server
 // Handles all CLI options and configuration
 

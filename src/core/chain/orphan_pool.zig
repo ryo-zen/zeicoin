@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // orphan_pool.zig - Storage for orphan blocks (blocks whose parent we don't have yet)
 
 const std = @import("std");

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // tcp.zig - TCP transport implementation for libp2p
 // Provides connection establishment and management over TCP
 // Based on the C++ libp2p TCP transport design

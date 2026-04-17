@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // network.zig - Network Integration for Mempool
 // Handles network-related mempool operations
 // Manages incoming transactions and broadcasting

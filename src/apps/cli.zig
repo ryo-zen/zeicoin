@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // cli_new.zig - Modular ZeiCoin Command Line Interface
 // Clean main entry point that delegates to specialized modules
 

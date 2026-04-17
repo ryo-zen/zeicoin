@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // cleaner.zig - Mempool Maintenance and Cleanup
 // Handles cleanup and maintenance operations for the mempool
 // Removes confirmed transactions and manages processed history

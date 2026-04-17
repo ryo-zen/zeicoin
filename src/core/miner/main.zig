@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // main.zig - ZeiCoin Mining Module Entry Point (Modular)
 // Public API that delegates to the modular mining system
 

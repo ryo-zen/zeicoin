@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // validator.zig - Chain Validator
 // Handles all blockchain validation logic and consensus rules
 // Validates blocks, transactions, and enforces protocol rules

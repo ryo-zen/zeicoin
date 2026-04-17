@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // randomx.zig - RandomX Mining Algorithm
 // Production RandomX proof-of-work implementation with ASIC resistance
 

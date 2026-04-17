@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // get_block_hash.zig - Request block hash at specific height
 // Used for consensus verification during sync
 

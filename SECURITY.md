@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+SPDX-License-Identifier: MIT
+-->
+
 # Security Policy
 
 ## Supported Versions
@@ -8,6 +13,15 @@ ZeiCoin is currently in testnet. Only the latest commit on `main` is actively ma
 |---------|-----------|
 | testnet (main) | Yes |
 | older commits | No |
+
+## Official Sources
+
+Only these GitHub repositories are official:
+
+- ZeiCoin: https://github.com/ryo-zen/zeicoin
+- Ocelot Wallet: https://github.com/ryo-zen/ocelot-wallet
+
+Do not download or run node, miner, or wallet binaries from similarly named GitHub accounts. Report suspicious repositories, releases, or binaries through the private vulnerability process below.
 
 ## Reporting a Vulnerability
 

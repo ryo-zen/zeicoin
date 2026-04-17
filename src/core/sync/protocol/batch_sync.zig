@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // batch_sync.zig - ZSP-001 Compliant Batch Synchronization Protocol
 // Primary synchronization implementation for ZeiCoin blockchain
 //

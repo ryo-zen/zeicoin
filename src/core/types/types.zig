@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // types.zig - Zeicoin Core Types
 // Minimal approach - only what we need, nothing more
 // Simple account model with nonce-based double-spend protection

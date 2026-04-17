@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+# SPDX-License-Identifier: MIT
+
 # test_libp2p_zen_server.sh — End-to-end Docker validation for ZEI-98
 #
 # Verifies that zen_server containers expose Kad behavior in the real runtime:

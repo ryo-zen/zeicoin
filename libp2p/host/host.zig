@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // host.zig — libp2p Host: orchestration layer for dial/listen/stream lifecycle.
 //
 // Wraps the five-step upgrade stack (TCP → Noise → Yamux → per-stream Multistream)

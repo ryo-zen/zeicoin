@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+# SPDX-License-Identifier: MIT
+
 # ZeiCoin Makefile - Simplified build process
 
 .PHONY: all clean build randomx test server cli help

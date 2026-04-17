@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+# SPDX-License-Identifier: MIT
+
 # verify_kad_partition_heal.sh — End-to-end Docker validation for Kad recovery
 #
 # Verifies that the real zen_server runtime can recover from a temporary network

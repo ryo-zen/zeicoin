@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // Isolated libp2p suite for incremental Zig 0.16 migration.
 // Keep this independent from src/lib.zig tests.
 

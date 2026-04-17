@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+# SPDX-License-Identifier: MIT
+
 # Dockerfile - Complete build (Base + App)
 # Combined from Dockerfile.base and Dockerfile.fast for single-step build
 

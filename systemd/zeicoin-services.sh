@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+# SPDX-License-Identifier: MIT
+
 
 # ZeiCoin Services Management Script
 # Usage: zeicoin-services [start|stop|restart|status|logs]

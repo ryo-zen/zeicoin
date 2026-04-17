@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // block_processor.zig - Block Processing Module
 // Handles all block-related processing logic including validation, chain operations, and reorganization
 

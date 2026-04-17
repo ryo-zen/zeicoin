@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // multistream.zig - Multistream-select protocol implementation
 // Protocol negotiation for libp2p connections
 

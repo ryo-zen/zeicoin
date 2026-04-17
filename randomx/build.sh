@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+# SPDX-License-Identifier: MIT
+
 
 # build_randomx.sh - Build RandomX library for Zeicoin integration
 # This script downloads, builds, and installs RandomX for the demo

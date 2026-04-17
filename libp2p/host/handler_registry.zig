@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // handler_registry.zig - Stream handler registry for libp2p protocol dispatch
 //
 // Stores a map of protocol_id -> Handler and drives Multistream-select

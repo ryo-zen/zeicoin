@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // sync/download/integration.zig - Integration layer for parallel downloads
 // Connects parallel download manager to existing sync infrastructure
 

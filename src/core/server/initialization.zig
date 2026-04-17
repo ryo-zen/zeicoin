@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // initialization.zig - Node initialization and setup
 // Handles blockchain, network, and miner initialization
 

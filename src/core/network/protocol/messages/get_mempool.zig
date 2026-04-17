@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // get_mempool.zig - Request mempool transaction inventory from a peer
 const std = @import("std");
 

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // pool.zig - Core Mempool Storage Manager
 // Manages the core mempool data structures and basic operations
 // Provides thread-safe access to transaction storage

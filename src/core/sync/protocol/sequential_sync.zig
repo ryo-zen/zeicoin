@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // sequential_sync.zig - Single Block Request Utilities
 // ZSP-001 compliant helper functions for requesting individual blocks
 // Used by batch sync for error recovery and specific block requests

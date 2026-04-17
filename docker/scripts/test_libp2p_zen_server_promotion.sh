@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+# SPDX-License-Identifier: MIT
+
 # test_libp2p_zen_server_promotion.sh — Focused regression harness for ZEI-99
 #
 # Verifies the specific zen_server runtime issue where non-seed nodes learn each

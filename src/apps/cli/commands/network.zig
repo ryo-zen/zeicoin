@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // Network commands for ZeiCoin CLI
 // Handles status, sync, and block inspection commands
 

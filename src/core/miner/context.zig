@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // context.zig - Mining Context and Dependencies
 // Defines the structure for dependency injection into mining components
 

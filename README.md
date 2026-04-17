@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+SPDX-License-Identifier: MIT
+-->
+
 
 <div align="center">
 <img width="704" height="257" alt="zeicoin-cli" src="https://github.com/user-attachments/assets/d8671775-fc7d-4315-8db3-cf7f142e0f7a" />
@@ -15,6 +20,9 @@
 </p>
 
 A minimalist blockchain written in Zig with longest chain consensus, RandomX mining, and peer-to-peer networking.
+
+> [!IMPORTANT]
+> **Official GitHub sources only:** ZeiCoin source releases are published from `https://github.com/ryo-zen/zeicoin`, and Ocelot Wallet releases are published from `https://github.com/ryo-zen/ocelot-wallet`. Do not download or run node, miner, or wallet binaries from similarly named GitHub accounts.
 
 > [!WARNING]
 > ZeiCoin is under active development for educational and research purposes. The software is in **TestNet phase** and breaking changes may occur between releases. Do not use for real value transfers.

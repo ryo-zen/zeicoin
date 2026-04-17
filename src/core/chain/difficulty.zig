@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // difficulty.zig - Blockchain Difficulty Calculation Module
 // Handles all difficulty adjustment calculations for the blockchain
 

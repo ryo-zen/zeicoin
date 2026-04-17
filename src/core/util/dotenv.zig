@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // dotenv.zig - Environment file loader for ZeiCoin
 // Loads .env files and applies variables to the environment using setenv()
 // Supports multiple .env files with proper precedence and memory management

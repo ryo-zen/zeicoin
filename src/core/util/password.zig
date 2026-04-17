@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // password.zig - Secure password handling for ZeiCoin wallets
 // Provides three modes: test (default passwords), environment (from env var), and interactive (secure prompt)
 // Handles password input with terminal echo disabled and memory clearing after use

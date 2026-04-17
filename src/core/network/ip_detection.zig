@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // ip_detection.zig - Public IP detection utilities
 // Provides methods to detect the node's public IP address using system interfaces
 

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // libp2p in-process stress harness
 //
 // Three scenarios targeting the inproc → noise → yamux stack:

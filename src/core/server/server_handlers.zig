@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // server_handlers.zig - Server-side network message handler implementations
 // Handles all incoming network messages for the server
 

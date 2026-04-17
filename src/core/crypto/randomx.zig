@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // randomx.zig - RandomX integration for ZeiCoin proof-of-work
 const std = @import("std");
 const Allocator = std.mem.Allocator;

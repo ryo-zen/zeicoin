@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
+// SPDX-License-Identifier: MIT
+
 // state.zig - Chain State Manager
 // Manages database ownership and account/balance operations
 // This is the single source of truth for blockchain state
