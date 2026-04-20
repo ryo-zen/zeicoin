@@ -8,6 +8,7 @@ const std = @import("std");
 const log = std.log.scoped(.server);
 const print = std.debug.print;
 const types = @import("../types/types.zig");
+const protocol = @import("../network/protocol/protocol.zig");
 const command_line = @import("command_line.zig");
 const initialization = @import("initialization.zig");
 const client_api = @import("client_api.zig");
@@ -55,6 +56,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Initialize test mode from environment (must be after .env loading)
     types.initTestMode();
+    protocol.initProtocolVersion();
 
     // Parse command line
     var config = command_line.parseArgs(allocator, args) catch |err| switch (err) {

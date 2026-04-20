@@ -538,7 +538,7 @@ pub const DifficultyTarget = struct {
                 // Production testnet - standard easy difficulty
                 DifficultyTarget{
                     .base_bytes = 1, // 1 leading zero byte required
-                    .threshold = 0xFFFFFFF0, // EXTREMELY easy - instant blocks
+                    .threshold = getTestnetThreshold(),
                 },
             .mainnet => DifficultyTarget{
                 .base_bytes = 2,
@@ -1204,6 +1204,15 @@ pub const CURRENT_NETWORK: NetworkType = .testnet; // Change to .mainnet for pro
 /// Test mode enables easier difficulty for Docker/local testing
 /// Set via ZEICOIN_TEST_MODE=true environment variable
 pub var TEST_MODE: bool = false;
+
+/// Read testnet difficulty threshold from ZEICOIN_DIFFICULTY_THRESHOLD env var.
+/// Defaults to 0xFFFFFFF0 (instant blocks) if not set.
+fn getTestnetThreshold() u32 {
+    const c = @cImport(@cInclude("stdlib.h"));
+    const val = c.getenv("ZEICOIN_DIFFICULTY_THRESHOLD") orelse return 0xFFFFFFF0;
+    const str = std.mem.span(val);
+    return std.fmt.parseInt(u32, str, 0) catch 0xFFFFFFF0;
+}
 
 /// Initialize test mode from environment (call at startup)
 pub fn initTestMode() void {
