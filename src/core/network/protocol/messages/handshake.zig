@@ -145,13 +145,9 @@ pub const HandshakeMessage = struct {
         // Check protocol version compatibility
         std.log.info("🔍 Protocol Version Check: Peer version={}, Our version={}", .{ self.version, protocol.PROTOCOL_VERSION });
         
-        if (self.version > protocol.PROTOCOL_VERSION) {
-            std.log.warn("❌ Protocol version mismatch: Peer version {} > our version {}", .{ self.version, protocol.PROTOCOL_VERSION });
+        if (self.version != protocol.PROTOCOL_VERSION) {
+            std.log.warn("❌ Protocol version mismatch: Peer version {} != our version {}", .{ self.version, protocol.PROTOCOL_VERSION });
             return error.IncompatibleProtocolVersion;
-        }
-        if (self.version == 0) {
-            std.log.warn("❌ Invalid protocol version: Peer version is 0", .{});
-            return error.InvalidProtocolVersion;
         }
         
         std.log.info("✅ Protocol version compatible: Peer={}, Ours={}", .{ self.version, protocol.PROTOCOL_VERSION });
