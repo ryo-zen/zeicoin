@@ -6,7 +6,7 @@
 const std = @import("std");
 
 // Protocol version - overridable at runtime via ZEICOIN_PROTOCOL_VERSION
-pub var PROTOCOL_VERSION: u16 = 100;
+pub var PROTOCOL_VERSION: u16 = 9297;
 
 const c = @cImport(@cInclude("stdlib.h"));
 
