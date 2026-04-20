@@ -5,8 +5,17 @@
 
 const std = @import("std");
 
-// Protocol version - increment due to deterministic difficulty consensus fixes
-pub const PROTOCOL_VERSION: u16 = 103; // 1.03 - deterministic difficulty consensus
+// Protocol version - overridable at runtime via ZEICOIN_PROTOCOL_VERSION
+pub var PROTOCOL_VERSION: u16 = 104;
+
+const c = @cImport(@cInclude("stdlib.h"));
+
+/// Call at startup to load protocol version from environment
+pub fn initProtocolVersion() void {
+    const val = c.getenv("ZEICOIN_PROTOCOL_VERSION") orelse return;
+    const str = std.mem.span(val);
+    PROTOCOL_VERSION = std.fmt.parseInt(u16, str, 10) catch return;
+}
 
 // Network magic bytes - "ZEIC"
 pub const MAGIC: u32 = 0x5A454943;
