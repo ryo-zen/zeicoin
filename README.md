@@ -16,7 +16,7 @@ SPDX-License-Identifier: MIT
 
 <p align="center">
   <a href="https://zeicoin.com">Website</a> ·
-  <a href="https://discord.gg/rUC4HyTk">Discord</a>
+  <a href="https://discord.gg/dj3644tF7A">Discord</a>
 </p>
 
 A minimalist blockchain written in Zig with longest chain consensus, RandomX mining, and peer-to-peer networking.
