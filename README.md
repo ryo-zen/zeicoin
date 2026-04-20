@@ -11,7 +11,7 @@ SPDX-License-Identifier: MIT
 <p align="center">
   <a href="https://zeicoin.com"><img alt="Website" src="https://img.shields.io/website?url=https%3A%2F%2Fzeicoin.com&label=website"></a>
   <a href="https://github.com/ryo-zen/zeicoin/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/ryo-zen/zeicoin?style=flat"></a>
-  <a href="https://discord.gg/rUC4HyTk"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white"></a>
+  <a href="https://discord.gg/dj3644tF7A"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white"></a>
 </p>
 
 <p align="center">
