@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 
 // hd.zig - Hierarchical Deterministic key derivation for ZeiCoin
 // Ed25519-based HD wallet using BLAKE3 instead of HMAC-SHA512

@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 
 // bech32.zig - Bech32 address encoding for ZeiCoin
 // Implements BIP 173 with allocator-based memory management

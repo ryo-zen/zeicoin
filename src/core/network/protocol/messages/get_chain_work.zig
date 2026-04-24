@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 
 // get_chain_work.zig - Request cumulative chain work from peer
 // Used for reorganization decisions - determines which chain has more proof-of-work

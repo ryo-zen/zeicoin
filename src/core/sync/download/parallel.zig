@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 
 // sync/download/parallel.zig - Parallel Block Download Manager
 // Implements 5-10x faster sync through parallel downloads from multiple peers

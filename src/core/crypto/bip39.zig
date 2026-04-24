@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 
 // bip39.zig - Modern mnemonic implementation using BLAKE3
 // Clean design with no legacy SHA256/SHA512 baggage
