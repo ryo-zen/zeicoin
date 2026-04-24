@@ -19,7 +19,7 @@ SPDX-License-Identifier: MIT
   <a href="https://discord.gg/dj3644tF7A">Discord</a>
 </p>
 
-A minimalist blockchain written in Zig with longest chain consensus, RandomX mining, and peer-to-peer networking.
+A minimalist blockchain written in Zig, with longest-chain consensus, RandomX mining, and peer-to-peer networking.
 
 > [!IMPORTANT]
 > **Official GitHub sources only:** ZeiCoin source releases are published from `https://github.com/ryo-zen/zeicoin`, and Ocelot Wallet releases are published from `https://github.com/ryo-zen/ocelot-wallet`. Do not download or run node, miner, or wallet binaries from similarly named GitHub accounts.
