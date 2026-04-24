@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 
 // sync/protocol/block_sync.zig - Traditional Block Sync Protocol Implementation
 // Extracted from node.zig for modular sync architecture

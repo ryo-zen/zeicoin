@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 
 // sequential_sync.zig - Single Block Request Utilities
 // ZSP-001 compliant helper functions for requesting individual blocks

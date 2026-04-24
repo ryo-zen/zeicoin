@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 
 // indexer.zig - PostgreSQL blockchain indexer for ZeiCoin
 const std = @import("std");

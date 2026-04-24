@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 
 // bootstrap.zig - Bootstrap node configuration using libp2p multiaddr
 // Replaces the legacy ip:port format with /ip4/x.x.x.x/tcp/port(/p2p/<peer-id>)

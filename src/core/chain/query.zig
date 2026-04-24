@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 
 // query.zig - Blockchain Query Module
 // Handles all read-only blockchain queries and calculations

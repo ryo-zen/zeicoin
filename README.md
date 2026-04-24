@@ -1,6 +1,6 @@
 <!--
 SPDX-FileCopyrightText: 2025-2026 Ryo Zen (https://github.com/ryo-zen)
-SPDX-License-Identifier: MIT
+SPDX-License-Identifier: Apache-2.0
 -->
 
 
@@ -23,6 +23,9 @@ A minimalist blockchain written in Zig, with longest-chain consensus, RandomX mi
 
 > [!IMPORTANT]
 > **Official GitHub sources only:** ZeiCoin source releases are published from `https://github.com/ryo-zen/zeicoin`, and Ocelot Wallet releases are published from `https://github.com/ryo-zen/ocelot-wallet`. Do not download or run node, miner, or wallet binaries from similarly named GitHub accounts.
+
+> [!NOTE]
+> Forks may use the code under the software license, but may not imply they are the official ZeiCoin project. See [`TRADEMARKS.md`](TRADEMARKS.md) for branding and naming rules.
 
 > [!WARNING]
 > ZeiCoin is under active development for educational and research purposes. The software is in **TestNet phase** and breaking changes may occur between releases. Do not use for real value transfers.
@@ -431,7 +434,7 @@ Contributions to ZeiCoin are welcome.
 
 ## License
 
-MIT License - See [LICENSE](LICENSE) file for details.
+Apache License 2.0 - See [LICENSE](LICENSE) and [NOTICE](NOTICE) for details.
 
 ---
 
