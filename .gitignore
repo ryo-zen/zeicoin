@@ -44,6 +44,7 @@ AGENTS.md
 DOCKER.md
 
 # === Docker ===
+/docker/
 Dockerfile.debug
 Dockerfile.randomx
 docker-compose.debug.yml
@@ -92,6 +93,11 @@ fuzz/network_message_fuzz.zig
 /monitoring
 /tests_dev
 /tmp
+/.izumi/STATUS.md
+/docker/scripts/test_*.sh
+/docker/scripts/verify_*.sh
+/tests
+/fuzz
 
 # === Test Outputs ===
 /test_broadcast_integration
@@ -121,3 +127,5 @@ node2.log
 STATUS.md
 libp2p/sync.zig
 src/core/util/sync.zig
+
+/.izumi/
